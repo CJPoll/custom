@@ -1,6 +1,6 @@
 ---
 name: athena:ticket-management
-description: The status ↔ assignee lifecycle for Notion tickets (Epics/Tickets DBs, DND-/PT-style IDs). Use whenever an orchestrator/athena-admiral takes scope of a ticket, or any status transition happens (In Progress / Needs Attention / Attention Given / Done / Ready for Release / Cancelled / Won't Fix / Parked / In Merge Queue). Defines who the ticket is assigned to at each status and how to resolve the Athena and Cody accounts for the ACTIVE Notion connection (notion-personal vs notion-work). Also the owner's priority tiers (promoted, exploitable vulnerabilities, blocking bugs, critical path, the rest), the ticket properties (Kind, Severity, Security, Path, Area, Found while), filing with dedupe, and promote/won't-fix (notify-only) — use when choosing which ticket to assign a captain next, or filing a ticket. Before filing a finding, run the finding-triage script for the Jev advisory (advisory only); when filing any ticket, run the ticket-classify script with your own Kind, Severity and Security and set the values it prints. To apply that classification to the open backlog, run the ticket-reclassify script (plan, apply, proof). Move a DND or work-tracker ticket to In Progress with the mark-in-progress script, which stamps its lead-time start.
+description: The status ↔ assignee lifecycle for Notion tickets (Epics/Tickets DBs, DND-/PT-style IDs). Use whenever an orchestrator/athena-admiral takes scope of a ticket, or any status transition happens (In Progress / Needs Attention / Attention Given / Done / Ready for Release / Cancelled / Won't Fix / Parked / In Merge Queue). Defines who the ticket is assigned to at each status and how to resolve the Athena and Cody accounts for the ACTIVE Notion connection (notion-personal vs notion-work). Also the owner's priority tiers (promoted, exploitable vulnerabilities and misreporting security controls, blocking bugs, critical path, the rest), the ticket properties (Kind, Severity, Security, Path, Area, Control, Found while), filing with dedupe, and promote/won't-fix (notify-only) — use when choosing which ticket to assign a captain next, or filing a ticket. Before filing a finding, run the finding-triage script for the Jev advisory (advisory only); when filing any ticket, run the ticket-classify script with your own Kind, Severity and Security and set the values it prints. To apply that classification to the open backlog, run the ticket-reclassify script (plan, apply, proof). Move a DND or work-tracker ticket to In Progress with the mark-in-progress script, which stamps its lead-time start.
 ---
 
 # athena:ticket-management
@@ -213,7 +213,7 @@ other documents cite it by name.
   | Tier | Selector (*Ticket properties*) | Order within the tier |
   |---|---|---|
   | 0 | `Path` = `Promoted`: the owner's explicit order, or an admiral's promotion (*Promote and won't-fix*) | the owner's order first, then admiral promotions, oldest first |
-  | 1 | `Kind` = `Vulnerability`, `Security` = `pre-existing`, `Severity` ∈ {`CRITICAL`, `HIGH`}: exploitable | Severity, then age |
+  | 1 | `Severity` ∈ {`CRITICAL`, `HIGH`}, and either `Kind` = `Vulnerability`, `Security` = `pre-existing` (exploitable), or `Control` ∈ {`fails-open`, `fails-closed`} (a security control that misreports, whatever its Kind) | Severity, then age |
   | 2 | `Kind` = `Bug` and `Path` = `Blocking` | just ahead of the ticket it blocks |
   | 3 | `Path` = `Critical` | the epic's dependency order |
   | 4 | everything else, once its epic's critical path is met | Severity (empty last), then the Kind order, then age (oldest first) |
@@ -221,11 +221,19 @@ other documents cite it by name.
   - **A blocker that is not a Bug** (`Path` = `Blocking`, another Kind, such
     as a gate flake that stops the path) sorts just ahead of the ticket it
     blocks, in that ticket's tier.
+  - **A security control that misreports is ranked as security, whatever
+    its Kind** (`Control` below). One that fails closed is a `Bug`, not
+    security, but at `CRITICAL`/`HIGH` it is tier 1, as one that fails open
+    is. At `MEDIUM`/`LOW` it is tier 4, in the Vulnerability place of the
+    Kind order. Owner, Cody, 2026-10-02: "For fail closed, I agree that's a
+    bug, but that's a high priority bug that is blocking legitimate work
+    from occurring. I'm fine with _classifying_ it differently, but it such
+    cases need to be prioritized at the same level as a fail open case."
   - **Tiers 1–3 are never capped.** No cap on tier 4 is decided yet.
   - **Findings get captains once the functional requirements are met.** A
     finding raised while working an epic is filed on that epic. Once the
     epic's Features, its critical path, are met, its findings get captains
-    in tier order. Exploitable vulnerabilities and true blockers go at once.
+    in tier order. Tier-1 tickets and true blockers go at once.
     Until then a tier-4 ticket is not ready, even for an idle slot; report
     the idle slot and what holds the path. An epic with no `Critical`
     ticket (a scope of raised issues) has met its path.
@@ -270,6 +278,9 @@ other documents cite it by name.
     it is worked with no owner wait. If an admiral thinks a `MEDIUM` one is
     urgent, it promotes it itself (*Promote and won't-fix* below) and keeps
     working.
+  - **A control that fails closed follows the same split** at the same
+    severities, though it is a `Bug` (*A security control that misreports*
+    above). One the ticket's own change introduces blocks that ticket.
   - `~/.claude/CLAUDE.md` → *Owner approval policy* governs **approval**, not
     **scheduling**. A security fix ships without waiting for the owner; when it
     is worked is decided here.
@@ -283,7 +294,8 @@ other documents cite it by name.
   or unset, that is not a `Feature`, belongs to the harness lane. A feature
   admiral files it and does not start it. It keeps a harness ticket with
   `Path` = `Promoted`, `Blocking` or `Critical`, a planned `Feature`, and a
-  tier-1 vulnerability. `ai/bin/next-mission` enforces this split. The lane
+  tier-1 ticket (a vulnerability or a security control that misreports).
+  `ai/bin/next-mission` enforces this split. The lane
   works its own queue in the same tier order. Its scope (`Harness lane: `
   epics) and its cap are in `~/dev/custom/ai/docs/ticket-lane-action-brief.md`
   → *The harness lane — the second instantiation*.
@@ -321,6 +333,7 @@ The DND Tickets data source carries these. The values are stated here once.
 | `Security` | select | `none` · `introduced` · `pre-existing` |
 | `Path` | select | `Critical` · `Blocking` · `Promoted` · `Off` |
 | `Area` | select | `Product` · `Harness` |
+| `Control` | select | `none` · `fails-open` · `fails-closed` |
 | `Found while` | relation → Tickets | the ticket being worked when it was found |
 
 - **`Kind`** names what the ticket is. How it was found is `Found while`;
@@ -328,9 +341,20 @@ The DND Tickets data source carries these. The values are stated here once.
   - **Feature:** a planned functional requirement the architect authored.
   - **Bug:** it does something other than its requirements or intended
     behaviour: a wrong result, a crash, a lost event, a miss that reads as
-    success.
+    success. A security control that fails closed (it blocks legitimate
+    work: a false positive, a misleading denial that grants no access) is a
+    Bug, with `Control` = `fails-closed`.
   - **Vulnerability:** a concrete security defect with a nameable path, or a
-    security control that misreports.
+    security control that fails open (it lets through what it should block),
+    with `Control` = `fails-open`.
+
+    **Later (2026-10-02, DND-1747):** this read "or a security control that
+    misreports", either way, so a guard's false positive was a
+    Vulnerability. Superseded by the owner's decision that day (*A security
+    control that misreports* above): a control that fails closed is a Bug,
+    prioritized as security through `Control`, not Kind. The
+    ticket-classification question sets still restate the old criterion
+    until their next version.
   - **Hardening:** makes an attack or a failure harder or less damaging, with
     no concrete defect shown.
   - **Refactor:** structure, not behaviour: architecture drift, dead code,
@@ -378,6 +402,15 @@ The DND Tickets data source carries these. The values are stated here once.
   reason in the body). `Off` is
   everything else.
 - **`Area`:** `Harness` when the fix lands in `~/dev/custom`; else `Product`.
+- **`Control`** (empty on a Feature): does a security control misreport, and
+  which way. `fails-open`: it lets through what it should block (Kind
+  `Vulnerability`). `fails-closed`: it blocks legitimate work, as a false
+  positive or a misleading denial that grants no access (Kind `Bug`).
+  `none`: anything else. It is the tier selector's security signal apart
+  from Kind (*A security control that misreports*). `ai/bin/next-mission`
+  names each open `CRITICAL`/`HIGH` ticket that is not a `Vulnerability`
+  and has `Control` unset, since its tier may be wrong; set it rather than
+  leave it empty.
 
 These definitions are the criteria the ticket-classification question sets
 restate (gen_saas `TicketKind`, `TicketSeverity`, `TicketSecurity`, DND-991).
@@ -385,16 +418,21 @@ Changing one needs a new question-set version there.
 
 ### Filing a ticket
 
-- **Set every property.** A new ticket sets `Kind`, `Severity` (not on a
-  Feature), `Security`, `Path`, `Area` and `Found while` (not on a planned
-  Feature). On a tracker
+- **Set every property.** A new ticket sets `Kind`, `Severity` and `Control`
+  (neither on a Feature), `Security`, `Path`, `Area` and `Found while` (not
+  on a planned Feature). On a tracker
   without them, write the values as the body's first line.
 - **Classify.** Write the draft body to a file, then run
-  `~/dev/custom/ai/skills/athena:ticket-management/scripts/ticket-classify --title "<TITLE>" --body-file <FILE> --project <athena|harness|walt_ui|dnd|lms|admiral> --kind <KIND> --severity <SEVERITY|none> --security <none|introduced|pre-existing> --lines-out <LINES>`
-  with the values you would file (`--severity none` only on a Feature).
+  `~/dev/custom/ai/skills/athena:ticket-management/scripts/ticket-classify --title "<TITLE>" --body-file <FILE> --project <athena|harness|walt_ui|dnd|lms|admiral> --kind <KIND> --severity <SEVERITY|none> --security <none|introduced|pre-existing> --control <none|fails-open|fails-closed> --lines-out <LINES>`
+  with the values you would file (`--severity none` only on a Feature; omit
+  `--control` on a Feature). `--control` is yours alone: it is checked
+  against your Kind and printed, never sent to the classification.
   Namespace `<LINES>` with your unit of work. It prints the decided `Kind`,
   `Severity` and `Security`, each with its source, then a
   `Jev classification:` line, and writes the `Jev` lines to `<LINES>`.
+  With `--control` it then prints `Control: <value> (filer)`; set `Control`
+  to it. If the decided Kind does not fit it (a `fails-closed` decided as a
+  Vulnerability), stderr says so: file the Kind or the Control that is true.
   - **State the impact now in the body.** A trailing `Source:`/`Context:`
     block is not sent (DND-1590), so the incident a finding came from never
     stands in for its own impact.
@@ -436,7 +474,7 @@ Changing one needs a new question-set version there.
     a finding* first: triage, then classify.
 - **File it with `ticket-file`, never a hand-built page** (DND-1669). Write
   the properties you decided to a JSON file of Notion property values
-  (`Kind`, `Severity`, `Security`, `Path`, `Area`, plus `Found while`,
+  (`Kind`, `Severity`, `Security`, `Path`, `Area`, `Control`, plus `Found while`,
   `Epic`, `Status` as they apply), then run
   `~/dev/custom/ai/skills/athena:ticket-management/scripts/ticket-file --title "<TITLE>" --body-file <FILE> --properties-file <PROPS> --lines-file <LINES> [--triage-file <TRIAGE>]`.
   It creates the page, writes the body, the advisory and the Jev lines,

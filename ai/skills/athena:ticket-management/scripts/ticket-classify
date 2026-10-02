@@ -49,7 +49,7 @@ EPICS_DATA_SOURCE = "f4231817-18f3-4c2d-ac5b-b1151a5bb020"
 USAGE = <<~EOF
   Usage: ticket-classify --title T --body-file F --project P
                          --kind K --severity S --security X
-                         [--ref DND-N] [--json] [--lines-out FILE]
+                         [--control C] [--ref DND-N] [--json] [--lines-out FILE]
          ticket-classify ... --epic EPIC_PAGE_ID [--found-while DND-N] [--blocks DND-N]
          ticket-classify --help
 
@@ -72,6 +72,15 @@ USAGE = <<~EOF
     --severity S     your Severity: LOW, MEDIUM, HIGH or CRITICAL; `none`
                      only with --kind Feature (a Feature has no Severity)
     --security X     your Security: none, introduced or pre-existing
+    --control C      your Control (DND-1747): none, or, for a security
+                     control that misreports, fails-open (it lets through
+                     what it should block; --kind Vulnerability) or
+                     fails-closed (it blocks legitimate work; --kind Bug).
+                     Never sent: the server has no Control input. Printed
+                     right after the classification lines as "Control: C
+                     (filer)" (on stderr with --json).
+                     Omitted, stdout is unchanged and stderr says so: set
+                     Control on the ticket anyway (ticket-file requires it).
     --ref DND-N      an existing ticket's id (a reclassification); omit it
                      for a new filing. Not with --epic.
     --json           on exit 0, print the classification server's result as
@@ -280,6 +289,7 @@ module Manager
     # them is a usage error with nothing sent.
     candidates = path_part ? read_candidates(opts) : nil
     code, decided = classification(opts, body, out)
+    control(opts, decided, out, err)
     return code unless path_part
 
     # The Path part runs after the classification and keys on the Kind that
@@ -291,6 +301,24 @@ module Manager
       return code
     end
     [code, path(opts, body, candidates, out)].max
+  end
+
+  # control(opts, decided, out, err) -- the filer's Control (DND-1747), after
+  # the classification part. Not given: stdout is unchanged and stderr names
+  # the gap, so it never reads as "none". A decided Kind the Control does
+  # not fit is named too: the filer files one or the other.
+  def control(opts, decided, out, err)
+    value = opts[:control]
+    if value.nil?
+      err.puts "#{PROG}: note: --control not given; this run did not record whether a security control " \
+               "misreports. Fix: set Control on the ticket anyway: fails-open (Vulnerability), fails-closed " \
+               "(Bug) or none (athena:ticket-management -> Ticket properties); ticket-file requires it"
+      return
+    end
+    (opts[:json] ? err : out).puts Classify.control_line(value)
+    kind = decided && decided.dig("properties", "kind", "decided")
+    problem = kind && Classify.control_error(value, kind)
+    err.puts "#{PROG}: note: the decided Kind is #{kind}, but #{problem.first}. Fix: #{problem.last}" if problem
   end
 
   def note_truncation(err, flag, text, max)
@@ -412,7 +440,7 @@ SPEC = {
   "--help" => :switch, "-h" => :switch, "--title" => :value, "--body-file" => :value,
   "--project" => :value, "--kind" => :value, "--severity" => :value, "--security" => :value,
   "--ref" => :value, "--json" => :switch, "--epic" => :value, "--found-while" => :value,
-  "--blocks" => :value, "--lines-out" => :value
+  "--blocks" => :value, "--lines-out" => :value, "--control" => :value
 }.freeze
 
 REQUIRED = [
@@ -434,11 +462,11 @@ def parse_options(argv)
   usage!("--project is not a project identifier", "pass one of athena, harness, walt_ui, dnd, lms, admiral") unless Classify::PROJECT.match?(raw["--project"])
   usage!("--ref #{raw['--ref']} is not a ticket id", "pass an id such as DND-991, or omit --ref for a new filing") if raw["--ref"] && !Classify::REF.match?(raw["--ref"])
   filer = { kind: raw["--kind"], severity: raw["--severity"], security: raw["--security"] }
-  problem = Classify.filer_error(filer)
+  problem = Classify.filer_error(filer) || Classify.control_error(raw["--control"], filer[:kind])
   usage!(*problem) if problem
   path = path_options(raw)
   { title: title, body_file: raw["--body-file"], project: raw["--project"], ref: raw["--ref"], json: raw["--json"] == true, filer: filer,
-    lines_out: lines_out_option(raw) }.merge(path)
+    lines_out: lines_out_option(raw), control: raw["--control"] }.merge(path)
 rescue StrictArgv::UsageError => e
   usage!(e.message, "run #{PROG} --help for the flags")
 rescue Failure
@@ -547,7 +575,10 @@ end
 
 # The filer's own values, after an unavailable line: the filer files these.
 def fallback(opts)
-  Classify.fallback_lines(opts[:filer]).each { |line| $stdout.puts line } if opts
+  return unless opts
+
+  Classify.fallback_lines(opts[:filer]).each { |line| $stdout.puts line }
+  $stdout.puts Classify.control_line(opts[:control]) if opts[:control]
 end
 
 exit(main(ARGV)) if $PROGRAM_NAME == __FILE__

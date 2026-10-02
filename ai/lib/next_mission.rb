@@ -11,10 +11,18 @@
 # as amended by DND-979).
 #
 #   tier 0  Path=Promoted                         (owner order; ID as proxy)
-#   tier 1  Kind=Vulnerability, Severity CRITICAL/HIGH   (exploitable)
+#   tier 1  Severity CRITICAL/HIGH, and Kind=Vulnerability (exploitable) or
+#           Control=fails-open/fails-closed (a security control misreports)
 #   tier 2  Kind=Bug, Path=Blocking               (blocks a functional requirement)
 #   tier 3  Path=Critical, in dependency order    (topological, ties by ID)
 #   tier 4  everything else: Severity, then Kind order, then age
+#
+# Control (DND-1747, owner decision 2026-10-02): a security control that fails
+# CLOSED is Kind=Bug, not security, but it is prioritized at the same level as
+# one that fails OPEN. Control carries that signal apart from Kind, so a
+# fail-closed Bug is tier 1 at CRITICAL/HIGH and ranks with Vulnerability in
+# tier 4's Kind order. An unset Control on an open CRITICAL/HIGH ticket whose
+# tier it could change is reported (control_unset), never read as "none".
 #
 # Functional-first (owner correction, 2026-09-27): a tier-4 ticket that is not a
 # Feature (and not a blocker) is held while any Path=Critical or Kind=Feature
@@ -23,7 +31,8 @@
 # The harness lane (DND-987, P7): an Area=Harness, Path=Off (or unset),
 # non-Feature ticket is the lane's (lane_ticket?). --harness-lane keeps only
 # those; without it they are dropped (not_lane) and listed in left_to_lane,
-# except at tier 1: an exploitable vulnerability is never deferred.
+# except at tier 1: an exploitable vulnerability, or a security control that
+# misreports at CRITICAL/HIGH, is never deferred.
 #
 # Inside every tier, a Parked ticket (progress exists, nobody on it) is resumed
 # before a fresh one is started; that key comes before severity, kind and age.
@@ -38,7 +47,7 @@ module NextMission
   class DataError < StandardError; end
 
   Ticket = Struct.new(:id, :page_id, :title, :status, :kind, :severity, :path, :area,
-                      :depends_on, :created, keyword_init: true)
+                      :depends_on, :created, :control, keyword_init: true)
 
   # Parked (owner, 2026-09-27): progress exists, the work is undelivered, and
   # nobody is on it. Not terminal, not started unless --started lists it.
@@ -53,6 +62,10 @@ module NextMission
   KIND_ORDER = %w[Vulnerability Bug Feature Hardening Test Refactor Ops Docs].freeze
   PATHS      = %w[Critical Blocking Promoted Off].freeze
   AREAS      = %w[Product Harness].freeze
+  # Control (DND-1747): does a security control misreport, and which way.
+  CONTROLS   = %w[none fails-open fails-closed].freeze
+  MISREPORTS = %w[fails-open fails-closed].freeze
+  TIER1_SEVERITIES = %w[CRITICAL HIGH].freeze
   ID_RE      = /\A[A-Z]+-\d+\z/.freeze
 
   # The funnel, in order. Each stage keeps the tickets that pass it.
@@ -71,15 +84,17 @@ module NextMission
   # stale_in_progress: in-scope In Progress ids missing from --started, or nil
   # when --started was not given (the check could not run; never an empty
   # list standing in for "not checked"). in_progress: the count checked.
+  # control_unset: open in-scope tickets whose unset Control could change
+  # their tier (control_unset?), named so the gap never reads as "none".
   Result = Struct.new(:pick, :tier, :rule, :funnel, :emptied_by, :held_back, :reason,
                       :started_not_in_scope, :stale_in_progress, :in_progress, :left_to_lane, :outside_lane,
-                      keyword_init: true) do
+                      :control_unset, keyword_init: true) do
     def to_h
       { ticket: pick&.id, page_id: pick&.page_id, title: pick&.title, tier: tier, rule: rule,
         funnel: funnel.map { |stage, n| { stage: stage.to_s, label: STAGES.fetch(stage), matched: n } },
         emptied_by: emptied_by&.to_s, held_back: held_back, reason: reason,
         started_not_in_scope: started_not_in_scope, left_to_lane: left_to_lane, outside_lane: outside_lane,
-        stale_in_progress: stale_in_progress, stale_check: stale_check }
+        stale_in_progress: stale_in_progress, stale_check: stale_check, control_unset: control_unset }
     end
 
     def stale_check
@@ -112,7 +127,8 @@ module NextMission
     # stale. A warning only: it stays excluded as started either way.
     in_progress = sorted_ids(scope.select { |x| x.status == "In Progress" })
     extra = { started_not_in_scope: stray, in_progress: in_progress.size, left_to_lane: [], outside_lane: [],
-              stale_in_progress: started && (in_progress - ids) }
+              stale_in_progress: started && (in_progress - ids),
+              control_unset: sorted_ids(scope.select { |x| control_unset?(x) }) }
     started = ids.to_set
 
     funnel = []
@@ -182,9 +198,34 @@ module NextMission
     ticket.kind == "Feature" || ticket.path == "Blocking"
   end
 
+  # A security control that misreports, either way (DND-1747). Not a Kind:
+  # a fail-closed control is a Bug, a fail-open one a Vulnerability.
+  def control_misreport?(ticket)
+    MISREPORTS.include?(ticket.control)
+  end
+
+  # Security-ranked: tier 1 at CRITICAL/HIGH, else Vulnerability's place in
+  # tier 4's Kind order. The owner's rule: a fail-closed control is
+  # prioritized at the same level as a fail-open one.
+  def security_ranked?(ticket)
+    ticket.kind == "Vulnerability" || control_misreport?(ticket)
+  end
+
+  def tier1?(ticket)
+    security_ranked?(ticket) && TIER1_SEVERITIES.include?(ticket.severity)
+  end
+
+  # An open ticket whose unset Control could move it to tier 1: CRITICAL or
+  # HIGH and not already security-ranked by Kind. A Feature or a Flake has no
+  # control to misreport. MEDIUM and LOW stay tier 4 either way.
+  def control_unset?(ticket)
+    ticket.control.nil? && !TERMINAL.include?(ticket.status) && TIER1_SEVERITIES.include?(ticket.severity) &&
+      !%w[Vulnerability Feature Flake].include?(ticket.kind)
+  end
+
   def tier_of(ticket)
     return 0 if ticket.path == "Promoted"
-    return 1 if ticket.kind == "Vulnerability" && %w[CRITICAL HIGH].include?(ticket.severity)
+    return 1 if tier1?(ticket)
     return 2 if ticket.kind == "Bug" && ticket.path == "Blocking"
     return 3 if ticket.path == "Critical"
 
@@ -211,6 +252,8 @@ module NextMission
   end
 
   def kind_rank(ticket)
+    return KIND_ORDER.index("Vulnerability") if security_ranked?(ticket)
+
     KIND_ORDER.index(ticket.kind) || KIND_ORDER.size
   end
 
@@ -247,7 +290,7 @@ module NextMission
     base =
       case tier
       when 0 then "tier 0: owner-promoted (Path=Promoted)"
-      when 1 then "tier 1: exploitable vulnerability (#{ticket.severity})"
+      when 1 then tier1_rule(ticket)
       when 2 then "tier 2: bug blocking functional requirements (Path=Blocking, #{ticket.severity || 'Severity unset'})"
       when 3
         "tier 3: critical path, dependency order ##{positions.fetch(ticket.id)} of #{positions.size} unfinished"
@@ -256,6 +299,14 @@ module NextMission
         "tier 4: #{what} (#{ticket.severity || 'Severity unset'}, #{ticket.kind || 'Kind unset'}, created #{ticket.created})"
       end
     ticket.status == "Parked" ? "#{base}; resume Parked" : base
+  end
+
+  # A Vulnerability keeps its rule text; a control misreport names its
+  # direction and Kind, so a fail-closed Bug never reads as a vulnerability.
+  def tier1_rule(ticket)
+    return "tier 1: exploitable vulnerability (#{ticket.severity})" if ticket.kind == "Vulnerability"
+
+    "tier 1: security control #{ticket.control.tr('-', ' ')} (#{ticket.kind || 'Kind unset'}, #{ticket.severity})"
   end
 
   def empty_result(funnel, emptied, held, unfinished, extra)
@@ -323,6 +374,7 @@ module NextMission
     check_value!(x, "Severity", x.severity, SEVERITIES)
     check_value!(x, "Path", x.path, PATHS)
     check_value!(x, "Area", x.area, AREAS)
+    check_value!(x, "Control", x.control, CONTROLS)
     unless x.created.is_a?(String) && !x.created.empty?
       raise DataError, "#{x.id} has no created time string (tiers 1, 2 and 4 order by age): #{x.created.inspect}"
     end

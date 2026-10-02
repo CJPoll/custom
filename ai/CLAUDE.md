@@ -332,17 +332,34 @@ run without sudo.
 ### Security fixes
 
 A security fix needs no approval, like any other change. Two rules from the
-earlier *Security fixes ship without owner approval* still stand:
+earlier *Security fixes ship without owner approval* still stand, the first
+as amended by the bullet after it:
 
 - **What counts.** A concrete defect that lets someone read, change or do what
   they should not (secret exposure, authn/authz bypass, injection, a
-  cross-tenant leak, privilege escalation); a security control that misreports
-  in either direction, false positives included; or general hardening that
+  cross-tenant leak, privilege escalation); a security control that fails
+  open, letting through what it should block; or general hardening that
   makes an attack or leak harder. The ticket and PR name the exposure path, the
-  control and its misreport, or the threat reduced. A label alone does not
+  control and how it fails open, or the threat reduced. A label alone does not
   qualify. Owner records: Cody, 2026-09-24, "fixing security issues does not
   require asking approval - just fix them"; 2026-09-27 06:58Z, "I would like
   to add general hardening."
+- **A control that fails closed is a bug, prioritized as security.** A
+  security control that blocks legitimate work (a false positive, or a
+  misleading denial that grants no access) is a Bug, not security. It is
+  scheduled at the same level as the fail-open case
+  ([[athena:ticket-management]] → *A security control that misreports*).
+
+  **Later (2026-10-02, DND-1747):** *What counts* read "a security control
+  that misreports in either direction, false positives included", so a
+  guard's false positive was security, and the ticket-security judgment
+  restated that criterion. Superseded by owner decision, Cody, terminal turn
+  2026-10-02T16:38:19Z: "For fail closed, I agree that's a bug, but that's a
+  high priority bug that is blocking legitimate work from occurring. I'm fine
+  with _classifying_ it differently, but it such cases need to be prioritized
+  at the same level as a fail open case." Fail-open stays security;
+  fail-closed is a Bug that keeps security's priority. *Find it, ticket it,
+  fix it, verify it live* → *Fixed after the critical path* says so too.
 - **Scheduling is separate.** When one is worked is [[athena:ticket-management]]
   → *Priority: critical path first*; a finished one merges first
   (`athena:merge-boarding` → *A finished security fix merges first*).
@@ -417,7 +434,9 @@ the issues." This section is its one home; other documents cite it by name.
 - **Fixed after the critical path.** A finding is filed on the epic being
   worked and gets a captain once that epic's functional requirements are met.
   It does not interrupt the work in hand. It goes first only if it is an
-  exploitable vulnerability or truly blocks a planned ticket; one the ticket's
+  exploitable vulnerability, a security control that fails closed at the same
+  severity (*Security fixes* → *What counts*), or truly blocks a planned
+  ticket; one the ticket's
   own change introduces blocks it. The tiers, the blocking test and the
   exceptions: [[athena:ticket-management]] → *Priority: critical path first*.
   Report findings to the owner as one batched summary, not a narration of each

@@ -8,7 +8,7 @@
 #   {"epics":   [{"page_id","name","status","project"}],
 #    "tickets": [{"id","page_id","title","status","kind","severity","security",
 #                 "path","area","epic_ids":[page ids],"depends_on":[page ids],
-#                 "blocks":[page ids],"created","body"}]}
+#                 "blocks":[page ids],"created","body","control"}]}
 #
 # A body of null reads as unread. Every miss raises
 # NextMissionNotion::ReadError, like the real adapter.
@@ -19,7 +19,7 @@ require_relative "epic_clustering_notion"
 class EpicClusteringFixture
   class FixtureError < StandardError; end
 
-  TICKET_FIELDS = %w[id page_id title status kind severity security path area created body].freeze
+  TICKET_FIELDS = %w[id page_id title status kind severity security path area created body control].freeze
 
   def initialize(path)
     data = JSON.parse(File.read(path))

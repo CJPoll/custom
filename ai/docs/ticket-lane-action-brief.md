@@ -509,7 +509,8 @@ The tier order is athena:ticket-management → *Priority: critical path first*.
   stderr: `left to the harness lane: …`.
 - The feature admiral keeps these, because they block or lead its path:
   `Path` = `Blocking`, `Critical` or `Promoted`, a planned `Feature`, and a
-  tier-1 exploitable vulnerability. A vulnerability is never deferred to
+  tier-1 ticket: an exploitable vulnerability, or a security control that
+  misreports (`Control` set, DND-1747). A tier-1 ticket is never deferred to
   another queue.
 - The lane works its queue in next-mission's tier order. So it never starts
   tier-4 work while a tier 1–3 ticket in its own queue is ready.
@@ -535,7 +536,7 @@ stderr (`left to the harness lane: …`).
   (ai/CLAUDE.md → *Owner approval policy*). The admiral then sends a drain
   request (*Senders*).
 
-A tier-1 vulnerability is in both queues when it sits on a lane epic that a
+A tier-1 ticket is in both queues when it sits on a lane epic that a
 feature admiral also scopes. Whichever admiral starts it first sets `In
 Progress`, and the other's next-mission then counts it as started.
 

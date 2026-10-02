@@ -99,7 +99,7 @@ TRIAGE = <<~T
 T
 PROPS = { "Kind" => { "select" => { "name" => "Bug" } }, "Severity" => { "select" => { "name" => "LOW" } },
           "Security" => { "select" => { "name" => "none" } }, "Path" => { "select" => { "name" => "Off" } },
-          "Area" => { "select" => { "name" => "Harness" } } }.freeze
+          "Area" => { "select" => { "name" => "Harness" } }, "Control" => { "select" => { "name" => "none" } } }.freeze
 
 BODY = file("body.txt", "Impact: a synthetic impact.\n\nCause: a synthetic cause.\n")
 LINES = file("lines.txt", "#{CL}\n#{PATHL}\n")

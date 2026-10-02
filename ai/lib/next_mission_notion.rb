@@ -275,6 +275,9 @@ class NextMissionNotion
       status: status,
       kind: select(page, "Kind"), severity: select(page, "Severity"),
       path: select(page, "Path"), area: select(page, "Area"),
+      # Control (DND-1747): a page without the property is a ReadError, so a
+      # schema that lost it never reads as "no control misreports".
+      control: select(page, "Control"),
       depends_on: [], created: page["created_time"]
     )
   rescue KeyError, NoMethodError, TypeError => e

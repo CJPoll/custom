@@ -47,6 +47,10 @@ module TicketFiling
   ADVISORY_HEADING = "Jev advisory (not a decision)"
   TITLE_PROPERTY = "Name"
   REQUIRED = %w[Kind Security Path Area].freeze
+  # Not on a Feature (authored, no Severity, no control misreport). Control
+  # (DND-1747) is required so an unset one never reads as "none": a
+  # fail-closed control Bug is tier 1 only when Control says so.
+  REQUIRED_UNLESS_FEATURE = %w[Severity Control].freeze
   RESERVED = [TITLE_PROPERTY, "ID"].freeze
 
   module_function
@@ -82,7 +86,7 @@ module TicketFiling
     raise Refused.new("the properties file sets #{reserved.join(', ')}", "drop it: the title comes from --title and the ID is Notion's") unless reserved.empty?
 
     kind = props.dig("Kind", "select", "name")
-    required = kind == "Feature" ? REQUIRED : REQUIRED + ["Severity"]
+    required = kind == "Feature" ? REQUIRED : REQUIRED + REQUIRED_UNLESS_FEATURE
     missing = required.reject { |k| props[k].is_a?(Hash) }
     unless missing.empty?
       raise Refused.new("the properties file has no #{missing.join(', ')} (athena:ticket-management -> Filing a ticket: set every property)",

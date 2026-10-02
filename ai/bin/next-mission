@@ -42,7 +42,7 @@ USAGE = <<~TXT
     --scope EPIC        an epic page id (32 hex, dashes optional) or its exact title
     --tickets IDS       comma-separated DND ticket ids, e.g. DND-12,DND-40
     --from-json FILE    offline: read the scope from a JSON fixture instead of Notion
-                        ({"tickets":[{id,status,kind,severity,path,area,depends_on,created}],
+                        ({"tickets":[{id,status,kind,severity,path,area,control,depends_on,created}],
                           "external":[{id,status}], "lane_epics":[{id,title}]}); not combinable
                         with --scope/--tickets. "lane_epics" stands in for the lane-epic read
                         and needs --harness-lane.
@@ -64,8 +64,11 @@ USAGE = <<~TXT
     --self-test         run the deterministic suite (no network)
     --help              this text
 
-  Tiers: 0 Path=Promoted; 1 Vulnerability CRITICAL/HIGH; 2 Bug + Path=Blocking;
-  3 Path=Critical in dependency order; 4 the rest by Severity, Kind, age.
+  Tiers: 0 Path=Promoted; 1 CRITICAL/HIGH and Vulnerability or Control=fails-open/
+  fails-closed; 2 Bug + Path=Blocking; 3 Path=Critical in dependency order; 4 the
+  rest by Severity, Kind (a Control misreport ranks as Vulnerability), age.
+  An open CRITICAL/HIGH ticket that is not a Vulnerability, Feature or Flake and
+  has Control unset is named on stderr ("Control unset"): its tier may be wrong.
   Tier-4 non-Features (except Path=Blocking) wait while a Critical/Feature ticket
   in scope is unfinished. Needs Attention tickets wait on the owner. Within a tier,
   a Parked ticket is resumed before a fresh one is started ("resume Parked").
@@ -130,7 +133,7 @@ def load_fixture(path)
 
     NextMission::Ticket.new(id: h["id"], page_id: h["page_id"], title: h["title"], status: h["status"],
                             kind: h["kind"], severity: h["severity"], path: h["path"], area: h["area"],
-                            depends_on: Array(h["depends_on"]), created: h["created"])
+                            depends_on: Array(h["depends_on"]), created: h["created"], control: h["control"])
   end
   lane = data["lane_epics"]
   unless lane.nil? || (lane.is_a?(Array) && lane.all? { |e| e.is_a?(Hash) && e["id"].is_a?(String) && e["title"].is_a?(String) })
@@ -260,6 +263,12 @@ def main(argv)
   end
 
   warn "#{PROG}: #{stale_line(result)}"
+  unless result.control_unset.empty?
+    warn "#{PROG}: Control unset on open CRITICAL/HIGH ticket(s): #{result.control_unset.join(', ')}. " \
+         "Each is ranked as Control=none. Fix: set Control on each (athena:ticket-management -> Ticket " \
+         "properties): fails-closed or fails-open if it is a security control that misreports (tier 1), " \
+         "else none."
+  end
   unless result.started_not_in_scope.empty?
     warn "#{PROG}: note: --started id(s) not in this scope: #{result.started_not_in_scope.join(', ')} " \
          "(a typo here would let a started ticket be dispatched twice)"

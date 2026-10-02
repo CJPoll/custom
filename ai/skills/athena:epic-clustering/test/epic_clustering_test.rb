@@ -39,12 +39,14 @@ FIX = File.join(HERE, "fixtures")
 # t("DND-5", kind: "Bug", ...) -> a Ticket with defaults; edges are ticket ids
 # here and are turned into page ids ("page-DND-5") the way the adapter stores them.
 def t(id, status: "Todo", kind: "Bug", severity: "LOW", security: "none", path: "Off", area: "Harness",
-      epics: ["E1"], deps: [], blocks: [], created: nil, title: nil, body: nil)
+      epics: ["E1"], deps: [], blocks: [], created: nil, title: nil, body: nil, control: nil)
   n = id.split("-").last.to_i
-  EC::Ticket.new(id: id, page_id: "page-#{id}", title: title || "title #{id}", status: status, kind: kind,
-                 severity: kind == "Feature" ? nil : severity, security: security, path: path, area: area,
-                 epic_ids: epics, depends_on: deps.map { |d| "page-#{d}" }, blocks: blocks.map { |d| "page-#{d}" },
-                 created: created || format("2026-09-%02dT00:00:00Z", (n % 28) + 1), body: body)
+  x = EC::Ticket.new(id: id, page_id: "page-#{id}", title: title || "title #{id}", status: status, kind: kind,
+                     severity: kind == "Feature" ? nil : severity, security: security, path: path, area: area,
+                     epic_ids: epics, depends_on: deps.map { |d| "page-#{d}" }, blocks: blocks.map { |d| "page-#{d}" },
+                     created: created || format("2026-09-%02dT00:00:00Z", (n % 28) + 1), body: body)
+  x[:control] = control if control
+  x
 end
 
 def epic(id, name = "Epic #{id}", project: "Proj", status: "In Progress")
@@ -58,6 +60,19 @@ check("never-movable: Feature, Critical, Blocking, Promoted and a tier-1 vulnera
         t("DND-4", path: "Promoted"), t("DND-5", kind: "Vulnerability", severity: "HIGH"),
         t("DND-6", kind: "Vulnerability", severity: "MEDIUM"), t("DND-7", kind: "Docs")]
   EC.never_movable(ts) == %w[DND-1 DND-2 DND-3 DND-4 DND-5]
+end
+
+check("never-movable: DND-1747 a CRITICAL/HIGH control misreport (fails-closed Bug) is core, as tier 1 is") do
+  ts = [t("DND-1", kind: "Bug", severity: "HIGH", control: "fails-closed"),
+        t("DND-2", kind: "Bug", severity: "CRITICAL", control: "fails-open"),
+        t("DND-3", kind: "Bug", severity: "MEDIUM", control: "fails-closed"),
+        t("DND-4", kind: "Bug", severity: "HIGH", control: "none"),
+        t("DND-5", kind: "Bug", severity: "HIGH")]
+  EC.never_movable(ts) == %w[DND-1 DND-2] && EC.tier(ts.first) == 1
+end
+
+check("validate: DND-1747 an unknown Control value is a DataError naming it") do
+  raises?(EC::DataError, /Control/) { EC.validate!([t("DND-1", kind: "Bug", severity: "HIGH", control: "sideways")]) }
 end
 
 check("never-movable: a Depends On or Blocks edge to a core ticket pins the ticket (one hop, either direction)") do
@@ -371,7 +386,7 @@ def tpage(n, kind: "Bug", path: "Off", status: "Todo", epics: [EPIC_ID], deps: [
       "Name" => { "type" => "title", "title" => [{ "plain_text" => "t#{n}" }] },
       "Status" => { "type" => "status", "status" => { "name" => status } },
       "Kind" => sel(kind), "Severity" => sel(kind == "Feature" ? nil : "LOW"), "Security" => sel("none"),
-      "Path" => sel(path), "Area" => sel("Harness"),
+      "Path" => sel(path), "Area" => sel("Harness"), "Control" => sel(nil),
       "Epic" => rel(epics), "Depends On" => rel(deps), "Blocks" => rel(blocks)
     } }
 end
@@ -707,7 +722,8 @@ check("c3: the Notion adapter maps ticket ids to page ids, and a missing ticket 
                         "Name" => { "type" => "title", "title" => [{ "plain_text" => "t" }] },
                         "Status" => { "type" => "status", "status" => { "name" => "Cancelled" } },
                         "Kind" => { "type" => "select", "select" => nil }, "Severity" => { "type" => "select", "select" => nil },
-                        "Path" => { "type" => "select", "select" => nil }, "Area" => { "type" => "select", "select" => nil } } }
+                        "Path" => { "type" => "select", "select" => nil }, "Area" => { "type" => "select", "select" => nil },
+                        "Control" => { "type" => "select", "select" => nil } } }
   end
   hit = FakeTransport.new([:post, "/v1/data_sources/#{TDS}/query"] => { "results" => [page.call(20)], "has_more" => false })
   miss = FakeTransport.new([:post, "/v1/data_sources/#{TDS}/query"] => { "results" => [], "has_more" => false })

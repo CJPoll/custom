@@ -413,6 +413,10 @@ front of the merge queue under the critical-path rule: "1. 'A finished fix'
 sure - that's fine. I'm not talking about the merge queue; I'm talking about
 the order in which an admiral assigns tickets to captains."
 
+A fix for a security control that fails closed (`Control` = `fails-closed`)
+goes first too. It is a Bug, not security, but it keeps security's priority
+(`~/.claude/CLAUDE.md` → *Owner approval policy* → *Security fixes*).
+
 It orders only your own ready set. The fix still meets *The merge bar*, and it
 still waits for the merge lock like any other merge (*Landing onto a moving
 main*). Which ticket a captain works next is [[athena:ticket-management]] →

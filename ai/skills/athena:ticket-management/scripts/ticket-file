@@ -56,8 +56,8 @@ USAGE = <<~EOF
                            NO "Jev classification:" or "Jev path:" line and no
                            pasted advisory: those come from the files below.
     --properties-file FILE a JSON object of Notion property values: Kind,
-                           Severity (not on a Feature), Security, Path, Area,
-                           and any others (Found while, Epic, Status), e.g.
+                           Severity and Control (neither on a Feature),
+                           Security, Path, Area, and any others (Found while, Epic, Status), e.g.
                            {"Kind": {"select": {"name": "Bug"}}, ...}.
                            Not Name (that is --title).
     --lines-file FILE      the file `ticket-classify --lines-out FILE` wrote.

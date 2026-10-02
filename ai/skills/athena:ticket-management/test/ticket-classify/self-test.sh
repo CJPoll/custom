@@ -178,6 +178,18 @@ ruby_eq "fallback: the filer's values under a heading that is not a decision" \
 ruby_eq "filer check: severity none only with Feature, Feature only with none" \
   "--severity none is only for --kind Feature|--kind Feature takes --severity none (a Feature has no Severity)|" \
   '[Classify.filer_error({kind: "Bug", severity: "none", security: "none"}).first, Classify.filer_error({kind: "Feature", severity: "LOW", security: "none"}).first, Classify.filer_error({kind: "Flake", severity: "LOW", security: "introduced"}).inspect.sub("nil", "")].join("|")'
+ruby_eq "control check [DND-1747]: none, a matching direction and no --control pass" \
+  "|||" \
+  '[Classify.control_error(nil, "Bug"), Classify.control_error("none", "Docs"), Classify.control_error("fails-closed", "Bug"), Classify.control_error("fails-open", "Vulnerability")].map(&:inspect).map { |s| s.sub("nil", "") }.join("|")'
+ruby_eq "control check [DND-1747]: an unknown value, and a direction whose Kind is wrong, are refused" \
+  "--control sideways is not a Control value|--control fails-closed is a Bug (it blocks legitimate work), not Vulnerability|--control fails-open is a Vulnerability (it lets through what it should block), not Bug" \
+  '[Classify.control_error("sideways", "Bug"), Classify.control_error("fails-closed", "Vulnerability"), Classify.control_error("fails-open", "Bug")].map(&:first).join("|")'
+ruby_eq "control check [DND-1747]: every refusal carries a fix" \
+  "true" \
+  '[Classify.control_error("sideways", "Bug"), Classify.control_error("fails-closed", "Vulnerability"), Classify.control_error("fails-open", "Bug")].all? { |w, f| f.is_a?(String) && !f.empty? }'
+ruby_eq "control line [DND-1747]: the filer's value, sourced" \
+  "Control: fails-closed (filer)" \
+  'Classify.control_line("fails-closed")'
 
 echo "== no tracker writer [qa manager 8]"
 
@@ -293,6 +305,30 @@ eq "no file was written under HOME [qa manager 8]" "$(find "${TMP}/home" -mindep
 
 run "${TICKET[@]}" "${FILER[@]}" --ref DND-42
 eq "--ref is sent as ticket.ref" "$(sent | jq -r '.ticket.ref')" "DND-42"
+
+# DND-1747: Control is the filer's, never sent (the server has no Control
+# input) and printed after the classification.
+run "${TICKET[@]}" "${FILER[@]}" --control fails-closed
+eq "--control fails-closed on a Bug exits 0 [DND-1747]" "${RC}" "0"
+eq "the Control line follows the provenance line [DND-1747]" "$(printf '%s\n' "${OUT}" | tail -n 1)" "Control: fails-closed (filer)"
+eq "Control is not sent to the server [DND-1747]" "$(sent)" "${FIRST}"
+lacks "a given --control prints no unset note [DND-1747]" "${ERR}" "--control not given"
+run "${TICKET[@]}" "${FILER[@]}"
+lacks "without --control stdout is unchanged: no Control line [DND-1747]" "${OUT}" "Control:"
+has "without --control stderr names the gap [DND-1747]" "${ERR}" "--control not given"
+has "the unset note carries a Fix: [DND-1747]" "${ERR}" "Fix: "
+: > "${TMP}/server.log"
+run "${TICKET[@]}" "${FILER[@]}" --control fails-open
+eq "--control fails-open on a Bug is usage (2) [DND-1747]" "${RC}" "2"
+has "it says fail-open is a Vulnerability, with Fix: [DND-1747]" "${ERR}" "--control fails-open is a Vulnerability (it lets through what it should block), not Bug. Fix: "
+run "${TICKET[@]}" "${FILER[@]}" --control maybe
+eq "an unknown --control is usage (2) [DND-1747]" "${RC}" "2"
+eq "no --control refusal sent a request [DND-1747]" "$(requests)" "0"
+spec classify.json "$(jq -cn '{status: 503, body: {error: "unavailable"}}')"
+run "${TICKET[@]}" "${FILER[@]}" --control fails-closed
+eq "an unavailable classification still exits 3 with --control [DND-1747]" "${RC}" "3"
+eq "the Control line follows the filer's fallback values [DND-1747]" "$(printf '%s\n' "${OUT}" | tail -n 2 | tr '\n' '|')" "Security: none|Control: fails-closed (filer)|"
+spec classify.json "$(jq -cn --argjson b "${OFF_BODY}" '{status: 200, body: $b}')"
 
 printf 'The gate exits 0. Source: DND-9 captain report, r.md. Context: the 16:00Z prod outage (DND-9).\n' > "${TMP}/prov-body.txt"
 run --title "T" --body-file "${TMP}/prov-body.txt" --project harness "${FILER[@]}"

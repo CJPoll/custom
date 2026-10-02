@@ -32,11 +32,10 @@ module EpicClustering
   # epic_ids, depends_on and blocks hold Notion page ids; body is nil when the
   # page body was not read.
   Ticket = Struct.new(:id, :page_id, :title, :status, :kind, :severity, :security, :path, :area,
-                      :epic_ids, :depends_on, :blocks, :created, :body, keyword_init: true)
+                      :epic_ids, :depends_on, :blocks, :created, :body, :control, keyword_init: true)
   Epic = Struct.new(:page_id, :name, :status, :project, keyword_init: true)
 
   ON_PATH       = %w[Critical Blocking Promoted].freeze
-  TIER1_SEV     = %w[CRITICAL HIGH].freeze
   TERMINAL      = NextMission::TERMINAL
   STARTED       = NextMission::STARTED
   SECURITIES    = %w[none introduced pre-existing].freeze
@@ -61,13 +60,13 @@ module EpicClustering
 
   def sort_ids(ids) = ids.sort_by { |i| id_number(i) }
 
-  # The core. For security: any CRITICAL/HIGH Vulnerability, whatever its
-  # Security value, a superset of next-mission's tier 1. "In the epic's own
+  # The core. For security: next-mission's tier-1 rule, whatever the
+  # Security value: a CRITICAL/HIGH Vulnerability or security control
+  # misreport (Control fails-open/fails-closed, DND-1747). "In the epic's own
   # code" cannot be read from a property, so every such ticket linked to the
   # epic counts: the restrictive reading.
   def core?(ticket)
-    ticket.kind == "Feature" || ON_PATH.include?(ticket.path) ||
-      (ticket.kind == "Vulnerability" && TIER1_SEV.include?(ticket.severity))
+    ticket.kind == "Feature" || ON_PATH.include?(ticket.path) || NextMission.tier1?(nm_ticket(ticket))
   end
 
   # epic_tickets: every ticket linked to ONE epic, any status. A closed ticket
@@ -268,13 +267,14 @@ module EpicClustering
 
   def nm_ticket(t)
     NextMission::Ticket.new(id: t.id, page_id: t.page_id, title: t.title, status: t.status, kind: t.kind,
-                            severity: t.severity, path: t.path, area: t.area, depends_on: [], created: t.created)
+                            severity: t.severity, path: t.path, area: t.area, depends_on: [], created: t.created,
+                            control: t.control)
   end
 
   def tier(t) = NextMission.tier_of(nm_ticket(t))
 
   # Every value outside next-mission's vocabularies (Status, Kind, Severity,
-  # Path, Area, created) and ours (Security) is an error, never "not a
+  # Path, Area, Control, created) and ours (Security) is an error, never "not a
   # candidate".
   def validate!(tickets)
     seen = Set.new

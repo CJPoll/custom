@@ -120,7 +120,7 @@ class EpicClusteringNotion < NextMissionNotion
       id: base.id, page_id: base.page_id, title: base.title, status: base.status, kind: base.kind,
       severity: base.severity, security: security, path: base.path, area: base.area,
       epic_ids: relation_ids(page, "Epic"), depends_on: relation_ids(page, "Depends On"),
-      blocks: relation_ids(page, "Blocks"), created: base.created, body: nil
+      blocks: relation_ids(page, "Blocks"), created: base.created, body: nil, control: base.control
     )
   end
 end

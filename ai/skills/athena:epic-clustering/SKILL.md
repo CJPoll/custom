@@ -92,8 +92,9 @@ A ticket stays in its epic when any of these holds:
 
 - `Kind` = `Feature`;
 - `Path` ∈ {`Critical`, `Blocking`, `Promoted`};
-- any `CRITICAL` or `HIGH` `Vulnerability`, whatever its `Security` (a
-  superset of tier 1). "In the epic's own code" is not a property, so every
+- any `CRITICAL` or `HIGH` `Vulnerability`, or security control that
+  misreports (`Control` = `fails-open` or `fails-closed`), whatever its
+  `Security` (a superset of tier 1). "In the epic's own code" is not a property, so every
   such ticket linked to the epic counts: the restrictive reading;
 - a `Depends On` or `Blocks` edge to one of the above in the same epic.
 

@@ -49,7 +49,7 @@ TRIAGE = <<~T
 T
 PROPS = { "Kind" => { "select" => { "name" => "Bug" } }, "Severity" => { "select" => { "name" => "LOW" } },
           "Security" => { "select" => { "name" => "none" } }, "Path" => { "select" => { "name" => "Off" } },
-          "Area" => { "select" => { "name" => "Harness" } } }.freeze
+          "Area" => { "select" => { "name" => "Harness" } }, "Control" => { "select" => { "name" => "none" } } }.freeze
 DEFAULTS = { title: "A synthetic finding", body: "Impact: a synthetic impact.\n\nCause: a synthetic cause.\n",
              lines_text: "#{CL}\n#{PATHL}\n", triage_text: TRIAGE, properties: PROPS, allow_no_lines: false }.freeze
 
@@ -110,6 +110,12 @@ r = refusal(properties: PROPS.reject { |k, _| k == "Severity" })
 check("Severity is required on a Bug") { r && r.message.include?("Severity") }
 check("Severity is not required on a Feature") do
   TF.plan(**DEFAULTS.merge(properties: PROPS.reject { |k, _| k == "Severity" }.merge("Kind" => { "select" => { "name" => "Feature" } })))
+end
+r = refusal(properties: PROPS.reject { |k, _| k == "Control" })
+check("DND-1747: Control is required on a Bug, so a missing one never reads as none") { r && r.message.include?("Control") }
+check("DND-1747: Control is not required on a Feature (a planned requirement is no control misreport)") do
+  TF.plan(**DEFAULTS.merge(properties: PROPS.reject { |k, _| %w[Severity Control].include?(k) }
+                                            .merge("Kind" => { "select" => { "name" => "Feature" } })))
 end
 r = refusal(properties: PROPS.merge("Name" => { "title" => [] }))
 check("a Name property is refused: the title comes from --title") { r && r.message.include?("Name") }

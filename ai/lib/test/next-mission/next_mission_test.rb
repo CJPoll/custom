@@ -32,12 +32,16 @@ end
 NM = NextMission
 
 # t("DND-5", kind: "Bug", ...) -> a Ticket with sensible defaults.
+# control: the Control select (DND-1747); set only when given, so a ticket
+# built without it reads as unset.
 def t(id, status: "Todo", kind: nil, severity: nil, path: "Off", area: "Product",
-      deps: [], created: nil)
+      deps: [], created: nil, control: nil)
   n = id.split("-").last.to_i
-  NM::Ticket.new(id: id, page_id: "page-#{id}", title: "title #{id}", status: status,
-                 kind: kind, severity: severity, path: path, area: area,
-                 depends_on: deps, created: created || format("2026-09-%02dT00:00:00Z", (n % 28) + 1))
+  x = NM::Ticket.new(id: id, page_id: "page-#{id}", title: "title #{id}", status: status,
+                     kind: kind, severity: severity, path: path, area: area,
+                     depends_on: deps, created: created || format("2026-09-%02dT00:00:00Z", (n % 28) + 1))
+  x[:control] = control if control
+  x
 end
 
 def pick(tickets, external: [], **kw)
@@ -126,6 +130,80 @@ end
 check("tier 4: an unset Severity sorts after LOW") do
   r = pick([t("DND-50", kind: "Feature", severity: nil), t("DND-51", kind: "Feature", severity: "LOW")])
   r.pick.id == "DND-51"
+end
+
+# ------------------------------------------- domain: control misreports (DND-1747)
+# Owner, 2026-10-02: a security control that fails CLOSED is a Bug, not
+# security, but it is prioritized at the same level as a fail-open case.
+# Control = fails-closed / fails-open is the signal; Kind is not overloaded.
+
+check("DND-1747: a fail-closed control Bug at HIGH is tier 1, ahead of a blocking bug") do
+  r = pick([t("DND-2", kind: "Bug", severity: "CRITICAL", path: "Blocking"),
+            t("DND-5", kind: "Bug", severity: "HIGH", control: "fails-closed")])
+  r.pick.id == "DND-5" && r.tier == 1 && r.rule == "tier 1: security control fails closed (Bug, HIGH)"
+end
+
+check("DND-1747: a fail-closed control Bug at CRITICAL is tier 1 and sorts before a HIGH vulnerability") do
+  r = pick([t("DND-3", kind: "Vulnerability", severity: "HIGH", created: "2026-09-01T00:00:00Z"),
+            t("DND-9", kind: "Bug", severity: "CRITICAL", control: "fails-closed", created: "2026-09-20T00:00:00Z")])
+  r.pick.id == "DND-9" && r.tier == 1 && r.rule == "tier 1: security control fails closed (Bug, CRITICAL)"
+end
+
+check("DND-1747: a fail-open control at HIGH is tier 1 whatever its Kind (the safe direction)") do
+  r = pick([t("DND-2", kind: "Bug", severity: "HIGH", path: "Blocking"),
+            t("DND-6", kind: "Bug", severity: "HIGH", control: "fails-open")])
+  r.pick.id == "DND-6" && r.tier == 1 && r.rule == "tier 1: security control fails open (Bug, HIGH)"
+end
+
+check("DND-1747: a fail-closed Bug at MEDIUM sorts in tier 4 where a fail-open MEDIUM would (age breaks the tie)") do
+  older_bug = pick([t("DND-30", kind: "Vulnerability", severity: "MEDIUM", created: "2026-09-10T00:00:00Z"),
+                    t("DND-31", kind: "Bug", severity: "MEDIUM", control: "fails-closed",
+                                created: "2026-09-01T00:00:00Z")])
+  older_vuln = pick([t("DND-30", kind: "Vulnerability", severity: "MEDIUM", created: "2026-09-01T00:00:00Z"),
+                     t("DND-31", kind: "Bug", severity: "MEDIUM", control: "fails-closed",
+                                 created: "2026-09-10T00:00:00Z")])
+  older_bug.pick.id == "DND-31" && older_bug.tier == 4 && older_vuln.pick.id == "DND-30"
+end
+
+check("DND-1747: a fail-closed Bug at LOW ranks with a LOW vulnerability, ahead of a plain LOW Bug") do
+  order = NM.tier4_order([t("DND-40", kind: "Bug", severity: "LOW", created: "2026-09-01T00:00:00Z"),
+                          t("DND-41", kind: "Bug", severity: "LOW", control: "fails-closed",
+                                      created: "2026-09-05T00:00:00Z")])
+  order.map(&:id) == %w[DND-41 DND-40]
+end
+
+check("DND-1747: a plain Bug at HIGH is unchanged: tier 4, with Control none or unset") do
+  done = t("DND-1", kind: "Feature", path: "Critical", status: "Done")
+  a = pick([done, t("DND-12", kind: "Bug", severity: "HIGH", control: "none")])
+  b = pick([done, t("DND-12", kind: "Bug", severity: "HIGH")])
+  a.tier == 4 && b.tier == 4 && a.rule.start_with?("tier 4: other improvements (HIGH, Bug")
+end
+
+check("DND-1747: a fail-closed Bug at HIGH is never held by functional-first and never left to the lane") do
+  r = pick([t("DND-1", kind: "Feature", path: "Critical", status: "In Progress"),
+            t("DND-8", kind: "Bug", severity: "HIGH", area: "Harness", control: "fails-closed")])
+  r.pick&.id == "DND-8" && r.tier == 1 && r.left_to_lane.empty?
+end
+
+check("DND-1747: an unknown Control value is a DataError naming it, never a silent tier 4") do
+  raises?(NM::DataError, /Control="fails-sideways"/) do
+    pick([t("DND-5", kind: "Bug", severity: "HIGH", control: "fails-sideways")])
+  end
+end
+
+check("DND-1747: an unset Control on an open CRITICAL/HIGH non-Vulnerability is reported, not silently tier 4") do
+  r = pick([t("DND-5", kind: "Bug", severity: "HIGH"),
+            t("DND-6", kind: "Bug", severity: "CRITICAL", control: "none"),
+            t("DND-7", kind: "Vulnerability", severity: "HIGH"),
+            t("DND-8", kind: "Bug", severity: "MEDIUM"),
+            t("DND-9", kind: "Hardening", severity: "CRITICAL", status: "Done"),
+            t("DND-10", kind: "Hardening", severity: "CRITICAL", status: "In Progress")])
+  r.control_unset == %w[DND-5 DND-10] && r.to_h[:control_unset] == %w[DND-5 DND-10]
+end
+
+check("DND-1747: the control-unset report runs on an empty result too") do
+  r = pick([t("DND-5", kind: "Bug", severity: "HIGH", status: "In Progress")])
+  r.pick.nil? && r.control_unset == ["DND-5"]
 end
 
 # ----------------------------------------------------- domain: functional-first
@@ -440,7 +518,7 @@ end
 # ------------------------------------------------- adapter: Notion (fake HTTP)
 
 def page(id_num, status: "Todo", kind: nil, severity: nil, path: "Off", area: "Harness",
-         deps: [], deps_more: false, created: "2026-09-27T21:15:00.000Z")
+         deps: [], deps_more: false, created: "2026-09-27T21:15:00.000Z", control: nil)
   sel = ->(v) { { "type" => "select", "select" => v && { "name" => v } } }
   { "object" => "page", "id" => "p#{id_num}", "created_time" => created,
     "properties" => {
@@ -448,7 +526,7 @@ def page(id_num, status: "Todo", kind: nil, severity: nil, path: "Off", area: "H
       "Name" => { "id" => "title", "type" => "title", "title" => [{ "plain_text" => "T#{id_num}" }] },
       "Status" => { "id" => "st", "type" => "status", "status" => { "name" => status } },
       "Kind" => sel.call(kind), "Severity" => sel.call(severity), "Path" => sel.call(path),
-      "Area" => sel.call(area),
+      "Area" => sel.call(area), "Control" => sel.call(control),
       "Depends On" => { "id" => "dep", "type" => "relation", "relation" => deps.map { |d| { "id" => d } },
                         "has_more" => deps_more }
     } }
@@ -590,6 +668,22 @@ check("adapter: a page missing a required property is a ReadError naming it") do
   bad["properties"].delete("Kind")
   tr = FakeTransport.new([:post, "/v1/data_sources/#{TDS}/query"] => { "results" => [bad], "has_more" => false })
   raises?(NextMissionNotion::ReadError, /Kind/) { NextMissionNotion.new(tr).load(epic: EPIC) }
+end
+
+check("adapter: DND-1747 the Control select is read into the ticket") do
+  tr = FakeTransport.new([:post, "/v1/data_sources/#{TDS}/query"] => {
+                           "results" => [page(1, kind: "Bug", severity: "HIGH", control: "fails-closed"), page(2)],
+                           "has_more" => false
+                         })
+  s = NextMissionNotion.new(tr).load(epic: EPIC)
+  s.scope.map(&:control) == ["fails-closed", nil]
+end
+
+check("adapter: DND-1747 a page with no Control property is a ReadError naming it, never an unset Control") do
+  bad = page(1, kind: "Bug", severity: "HIGH")
+  bad["properties"].delete("Control")
+  tr = FakeTransport.new([:post, "/v1/data_sources/#{TDS}/query"] => { "results" => [bad], "has_more" => false })
+  raises?(NextMissionNotion::ReadError, /"Control"/) { NextMissionNotion.new(tr).load(epic: EPIC) }
 end
 
 def epic_row(id, title)
@@ -889,6 +983,39 @@ check("cli: --harness-lane with no scope reads the lane epics from Notion (exit 
   Dir.mktmpdir("DND-987") do |home|
     _out, err, st = Open3.capture3({ "HOME" => home }, "/usr/bin/ruby", BIN, "--harness-lane")
     st.exitstatus == 3 && err.include?("notion-personal-token")
+  end
+end
+
+check("cli: DND-1747 regression: a fail-closed control Bug at HIGH is picked at tier 1, not tier 4") do
+  with_fixture("tickets" => [
+                 { "id" => "DND-2", "status" => "Todo", "kind" => "Bug", "severity" => "CRITICAL", "path" => "Blocking",
+                   "area" => "Product", "created" => "2026-09-01T00:00:00Z" },
+                 { "id" => "DND-5", "status" => "Todo", "kind" => "Bug", "severity" => "HIGH", "path" => "Off",
+                   "area" => "Product", "control" => "fails-closed", "created" => "2026-09-02T00:00:00Z" }
+               ]) do |f|
+    out, _err, code = cli("--from-json", f)
+    code.zero? && out == "DND-5\ttier 1: security control fails closed (Bug, HIGH)\n"
+  end
+end
+
+check("cli: DND-1747 an unset Control on a HIGH Bug is named on stderr with a Fix:, and the pick is unchanged") do
+  with_fixture("tickets" => [
+                 { "id" => "DND-5", "status" => "Todo", "kind" => "Bug", "severity" => "HIGH", "path" => "Off",
+                   "area" => "Product", "created" => "2026-09-02T00:00:00Z" }
+               ]) do |f|
+    out, err, code = cli("--from-json", f)
+    code.zero? && out.start_with?("DND-5\ttier 4") && err.include?("Control unset") && err.include?("DND-5") &&
+      err.include?("Fix:")
+  end
+end
+
+check("cli: DND-1747 an unknown Control value in a fixture is exit 3 naming it") do
+  with_fixture("tickets" => [
+                 { "id" => "DND-5", "status" => "Todo", "kind" => "Bug", "severity" => "HIGH", "path" => "Off",
+                   "area" => "Product", "control" => "maybe", "created" => "2026-09-02T00:00:00Z" }
+               ]) do |f|
+    _out, err, code = cli("--from-json", f)
+    code == 3 && err.include?("Control") && err.include?("Fix:")
   end
 end
 

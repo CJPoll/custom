@@ -47,6 +47,33 @@ module Classify
     nil
   end
 
+  # Control (DND-1747): does a security control misreport, and which way.
+  # The filer's alone: the classification server has no Control input, so it
+  # is checked and printed here, never sent.
+  CONTROLS = %w[none fails-open fails-closed].freeze
+  CONTROL_KIND = { "fails-open" => "Vulnerability", "fails-closed" => "Bug" }.freeze
+  CONTROL_WHY = { "fails-open" => "it lets through what it should block",
+                  "fails-closed" => "it blocks legitimate work" }.freeze
+
+  # control_error(control, kind) -> [what, fix] when the filer's --control
+  # cannot be filed with that Kind, or nil (nil control: not given).
+  # Owner, 2026-10-02: a control that fails open is a Vulnerability; one that
+  # fails closed is a Bug.
+  def control_error(control, kind)
+    return nil if control.nil? || control == "none"
+    return ["--control #{control} is not a Control value", "pass one of #{CONTROLS.join(', ')}"] unless CONTROLS.include?(control)
+
+    want = CONTROL_KIND.fetch(control)
+    return nil if kind == want
+
+    ["--control #{control} is a #{want} (#{CONTROL_WHY.fetch(control)}), not #{kind}",
+     "pass --kind #{want}, or --control none if it is not a security control that misreports"]
+  end
+
+  def control_line(control)
+    "Control: #{control} (filer)"
+  end
+
   # blank?(text) -> true for "" and Unicode whitespace only. The server trims
   # Unicode whitespace (String.trim), so an ASCII-only strip would send a
   # title it refuses. Zero-width characters are not whitespace to either side.
