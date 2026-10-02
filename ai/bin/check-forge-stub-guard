@@ -773,7 +773,7 @@ end
 
 RUBY_SHEBANG = %r{\A#!\s*\S*(?:/|\s)(?:env\s+)?ruby\b}.freeze
 RUBY_EXT = /\.rb\z/.freeze
-RUBY_PUT_PATH = /ENV\s*\[\s*["']PATH["']\s*\]\s*(?:\|\||\+)?=(?!=)|ENV\s*\.\s*(?:store|update|merge!)\b[^\n]*PATH|["']PATH["']\s*=>|["']PATH=/.freeze
+RUBY_PUT_PATH = /ENV\s*\[\s*["']PATH["']\s*\]\s*(?:\|\||\+)?=(?![=~])|ENV\s*\.\s*(?:store|update|merge!)\b[^\n]*PATH|["']PATH["']\s*=>|["'\s]PATH=/.freeze
 RUBY_WRITE = /\bFile\s*\.\s*(?:write|binwrite|open|symlink|chmod)\b|\bIO\s*\.\s*(?:write|binwrite)\b|\bFileUtils\s*\.\s*(?:cp|cp_r|ln|ln_s|ln_sf|mv|install|touch)\b|\.write\(/.freeze
 RUBY_TOOL_NAME = STUBBED_TOOLS.map { |t| Regexp.escape(t) }.join("|")
 RUBY_STUB_NAME = %r{File\s*\.\s*join\([^\n]*,\s*["'](#{RUBY_TOOL_NAME})["']\s*\)|/(#{RUBY_TOOL_NAME})["']}.freeze
@@ -781,8 +781,7 @@ RUBY_STUB_NAME = %r{File\s*\.\s*join\([^\n]*,\s*["'](#{RUBY_TOOL_NAME})["']\s*\)
 RUBY_FIX_TEXT = "Fix: a Ruby suite cannot source #{HELPER_REL}, so do not put a stub on PATH " \
                 "from Ruby. Name the stub by path instead: pass the stub's absolute path " \
                 "through a seam the code under test takes (`git: path`, `bin: path`), or stub " \
-                "the Ruby method that runs the tool (ai/test/telemetry/telemetry_test.rb " \
-                "wraps T::GitContext.read to call it with the hung git's path). With no PATH " \
+                "the Ruby method that runs the tool so it is called with the stub's path. With no PATH " \
                 "entry there is nothing to fall through to. If the PATH layout itself is " \
                 "under test, write the suite as a shell suite that sources the helper. " \
                 "There is no suppression marker."
@@ -821,8 +820,10 @@ def ruby_analyze(text)
   end
 end
 
+RUBY_PROBLEM_PREFIX = "a Ruby suite"
+
 def ruby_problem(tool)
-  "a Ruby suite that stubs #{tool} on PATH (it writes a #{tool} file and sets PATH); " \
+  "#{RUBY_PROBLEM_PREFIX} that stubs #{tool} on PATH (it writes a #{tool} file and sets PATH); " \
     "#{HELPER_BASENAME} is a shell library and cannot guard it"
 end
 
@@ -860,7 +861,11 @@ def scan(root)
     end
     if !shell_file?(rel, text) && ruby_file?(rel, text)
       ruby_suites += 1
-      ruby_analyze(text).each { |(ln, tool)| findings << [rel, ln.to_s, ruby_problem(tool)] }
+      begin
+        ruby_analyze(text).each { |(ln, tool)| findings << [rel, ln.to_s, ruby_problem(tool)] }
+      rescue StandardError => e
+        unreadable << [rel, "the Ruby scanner crashed (#{e.class}: #{e.message})"]
+      end
       next
     end
     next unless shell_file?(rel, text)
@@ -1125,8 +1130,8 @@ def run_check(root = REPO, landed: nil)
          "stub would fall through to the REAL tool (DND-1647/DND-1666/DND-1667; " \
          "#{skipped_note(r)}):"
     r[:findings].each { |(rel, lines, p)| warn "  #{rel}:#{lines}: #{p}" }
-    warn "  #{FIX_TEXT}" if r[:findings].any? { |(_rel, _l, p)| !p.start_with?("a Ruby suite") }
-    warn "  #{RUBY_FIX_TEXT}" if r[:findings].any? { |(_rel, _l, p)| p.start_with?("a Ruby suite") }
+    warn "  #{FIX_TEXT}" if r[:findings].any? { |(_rel, _l, p)| !p.start_with?(RUBY_PROBLEM_PREFIX) }
+    warn "  #{RUBY_FIX_TEXT}" if r[:findings].any? { |(_rel, _l, p)| p.start_with?(RUBY_PROBLEM_PREFIX) }
   end
   if unmeasured
     warn "check-forge-stub-guard: FAILED -- could not measure the landed bar (DND-1680):"
@@ -1327,6 +1332,10 @@ def run_self_test
     ["a stub file with no write call passes", "g = File.join(d, \"git\")\nENV[\"PATH\"] = d\n", []],
     ["a commented PATH put does not count", "# ENV[\"PATH\"] = d\nFile.write(File.join(d, \"git\"), \"x\")\n", []],
     ["a =begin block is not code", "=begin\nENV[\"PATH\"] = d\n=end\nFile.write(File.join(d, \"git\"), \"x\")\n", []],
+    ["=~ is not a PATH put", "File.write(File.join(d, \"git\"), \"x\")\nx if ENV[\"PATH\"] =~ /d/\n", []],
+    ["+= is a PATH put", "File.write(File.join(d, 'git'), 'x')\nENV['PATH'] += d\n", [[1, "git"]]],
+    ["a \"PATH= string is a PATH put", "FileUtils.cp(s, \"\#{b}/claude\")\nsystem(\"env PATH=\#{b} x\")\n", [[1, "claude"]]],
+    ["ENV.update naming PATH is a PATH put", "IO.write(\"\#{b}/gh\", \"x\")\nENV.update(\"PATH\" => b)\n", [[1, "gh"]]],
     ["== is not a PATH put", "File.write(File.join(d, \"git\"), \"x\")\nx if ENV[\"PATH\"] == d\n", []],
   ]
   ruby_cases.each do |(name, text, want)|
@@ -1338,6 +1347,28 @@ def run_self_test
   unless ruby_file?("ai/test/x/y_test.rb", "") && ruby_file?("ai/test/x/run", "#!/usr/bin/env ruby\n") &&
          !ruby_file?("ai/test/x/run", "#!/bin/sh\n")
     fail_case.call("ruby_file? reads .rb and a ruby shebang", "misclassified")
+  end
+
+  # The failure output of a Ruby-only finding carries the Ruby Fix:, not the shell one.
+  count += 1
+  rdir = Dir.mktmpdir("check-forge-stub-guard-ruby-")
+  begin
+    {
+      "ai/test/a/self-test.sh" => "#!/bin/bash\necho x > \"$B/gh\"\nPATH=\"$B:$PATH\"\n#{guarded_tail}",
+      "ai/test/rubybad/bad_test.rb" => RUBY_BAD_FIXTURE,
+    }.each do |rel, body|
+      FileUtils.mkdir_p(File.dirname(File.join(rdir, rel)))
+      File.write(File.join(rdir, rel), body)
+    end
+    stage_fixture(rdir)
+    rscan = scan(rdir)
+    code, err = run_check_captured(rdir, landed: -> { [] })
+    unless rscan[:ruby_suites] == 1 && rscan[:findings].map(&:first) == ["ai/test/rubybad/bad_test.rb"] &&
+           code == 1 && err.include?(RUBY_FIX_TEXT) && !err.include?(FIX_TEXT)
+      fail_case.call("a Ruby finding prints the Ruby Fix:", "exit #{code}, findings #{rscan[:findings].inspect}, #{err}")
+    end
+  ensure
+    FileUtils.rm_rf(rdir)
   end
 
   open_cases = [
