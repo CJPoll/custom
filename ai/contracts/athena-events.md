@@ -6955,7 +6955,7 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
 | `active` → `done` | the re-sync, when the item left its subscription's scope, or its page read answers not found | `closed_by: source_out_of_scope` |
 | `done` → `active` (reopen) | ingest, for `closed_by` `source_status` or `source_out_of_scope`, on an event whose revision is later than the row's and whose status is non-terminal | |
 | `done` → `active` (reopen) | ingest, for `closed_by: source_deleted`, on `notion.ticket.undeleted` only | |
-| `done` → `active` (reopen) | ingest, for `closed_by: owner` on a `forge_review` item, on a `forge.review.commented` whose revision is strictly later than the row's and whose status class is `open` (declared and not terminal, DND-995) (DND-1351) | |
+| `done` → `active` (reopen) | ingest, for `closed_by: owner` on a `forge_review` item, on a `forge.review.commented` whose revision is strictly later than the row's and whose status class is `open` (declared and not terminal, DND-995; DND-1351) | |
 | `dismissed` → `active` (reopen) | ingest, for a `forge_review` item, on a `forge.review.commented` with `trigger: mentioned` whose revision is strictly later than the row's and whose status class is `open` (DND-1351) | |
 
 - **Ingest never undoes a completed lease, and undoes an owner's decision
@@ -7021,9 +7021,9 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
   `forge.review.commented` (DND-1337); neither ever reopens a
   `lease_complete` close, and only a `forge.review.commented` also reopens an
   owner decision, at a strictly newer revision (*Ingest never undoes a
-  completed lease*, above; a `requested` never does). GitLab's `updated_at` has one-second
-  precision, so a removal and a re-request in the same second tie: the
-  re-request does not reopen, and the item shows again on the merge
+  completed lease*, above; a `requested` never does). GitLab's `updated_at`
+  has one-second precision, so a removal and a re-request in the same second
+  tie: the re-request does not reopen, and the item shows again on the merge
   request's next change. That is the safe direction of *A close needs an
   event no older than the row*, accepted.
   A create or reopen above also sets `forge_trigger` and a close leaves it as
