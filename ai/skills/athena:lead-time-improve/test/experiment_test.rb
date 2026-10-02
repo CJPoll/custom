@@ -602,6 +602,53 @@ check("deletes_tests_fields: could not look stores _na with the reason, never []
   f == { "revert_deletes_tests_na" => "git show failed" }
 end
 
+# DND-1634: a test-like layout with no test word is named as unclassified,
+# never read as "no tests"; a test and a plain source file are not.
+UNCLASSIFIED = %w[
+  features/x.feature features/step_definitions/login_steps.rb src/__mocks__/api.js testing/helpers.go
+  fixtures/user.json app/__snapshots__/button.js.snap cypress/integration/login.js docs/login.feature
+].freeze
+
+check("unclassified_additions: features/, __mocks__/, testing/, fixtures/, *.feature and *.snap are named") do
+  X.unclassified_additions(UNCLASSIFIED.map { |p| [2, 0, p] }) == UNCLASSIFIED.sort
+end
+
+check("unclassified_additions: a plain source change is not named") do
+  X.unclassified_additions(PLAIN_SOURCE.map { |p| [2, 0, p] }) == []
+end
+
+check("unclassified_additions: a test is classified (a test), so not named") do
+  X.unclassified_additions((TEST_LAYOUTS + %w[spec/fixtures/user.json test/features/x.rb]).map { |p| [2, 0, p] }) == []
+end
+
+check("unclassified_additions: a word only in the file name is source (lib/fixtures.rb), deletions only are not named") do
+  X.unclassified_additions([[2, 0, "lib/fixtures.rb"], [0, 3, "features/x.feature"]]) == []
+end
+
+check("layout_fields: a commit adding features/x.feature names it as unclassified, holding nothing") do
+  f = X.layout_fields(Source.ok([[3, 0, "features/x.feature"], [4, 1, "lib/d.rb"]]))
+  f == { "revert_deletes_tests" => [], "revert_unclassified" => ["features/x.feature"] } &&
+    X.hold("revert", f).nil?
+end
+
+check("layout_fields: a plain source change names nothing") do
+  X.layout_fields(Source.ok([[4, 1, "lib/d.rb"]])) == { "revert_deletes_tests" => [], "revert_unclassified" => [] }
+end
+
+check("layout_fields: could not look stores both _na fields, never []") do
+  X.layout_fields(Source.could_not_look("git show failed")) ==
+    { "revert_deletes_tests_na" => "git show failed", "revert_unclassified_na" => "git show failed" }
+end
+
+check("unclassified_text: names the paths; nil for none; n/a for unknown or a missing field") do
+  s = X.unclassified_text({ "revert_unclassified" => ["features/x.feature", "fixtures/u.json"] })
+  s.include?("unclassified additions in features/x.feature, fixtures/u.json") &&
+    s.include?("a revert is not held on them") &&
+    X.unclassified_text({ "revert_unclassified" => [] }).nil? &&
+    X.unclassified_text({ "revert_unclassified_na" => "no repo" }) == "unclassified additions n/a (no repo)" &&
+    X.unclassified_text({}).include?("n/a (the record carries no revert_unclassified list)")
+end
+
 check("hold: revert with revert_deletes_tests non-empty is held, naming the tests") do
   X.hold("revert", { "revert_deletes_tests" => ["a/test/t.sh"] }) == { "tests" => ["a/test/t.sh"] }
 end

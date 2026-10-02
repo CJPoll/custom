@@ -68,8 +68,12 @@ HELP = <<~TXT
            on main (after any rebase); it is refused when git does not show
            it on the repo's main. It also stores the test paths the commit
            added lines to (revert_deletes_tests), or why git could not
-           tell. The baseline is the last K=10 comparable landings before
-           that landing. Refused (exit 2, naming the
+           tell, and the added paths it could classify as neither source
+           nor test (revert_unclassified, DND-1634: a test-like layout
+           with no test word, such as features/, __mocks__/, fixtures/
+           or a *.feature file); record and every revert line name them.
+           They hold nothing. The baseline is the last K=10 comparable
+           landings before that landing. Refused (exit 2, naming the
            blocking experiment) while a `change` on the same phase is
            pending or owes a revert; `instrumentation` is exempt.
            --change-repo C (DND-1528): the commit landed in repo C, not in
@@ -460,7 +464,7 @@ module Record
     on_main!(change, change_path, commit)
     trailer!(change, change_path, commit, repo, metric)
     cross = change == repo.name ? {} : { "change_repo" => change }.merge(Live.resolve(state, change, change_path, commit, live_at!(change, change_path, commit)))
-    tests = X.deletes_tests_fields(XG.numstat(change_path, commit))
+    tests = X.layout_fields(XG.numstat(change_path, commit))
     row = build(repo, metric, opts["--kind"], commit, hypothesis, now, rows, cross).merge(tests)
     Setup.append(Setup.store(state)) { |existing| admit!(X.fold(existing), row) }
     xtext = X.cross_text(row)
@@ -599,9 +603,9 @@ module Record
     if tests["revert_deletes_tests_na"]
       return "; revert_deletes_tests n/a (#{tests['revert_deletes_tests_na']}): a revert verdict on it is held"
     end
-    return "" if tests["revert_deletes_tests"].empty?
-
-    "; a plain revert would delete test additions in #{tests['revert_deletes_tests'].join(', ')}"
+    out = tests["revert_deletes_tests"].empty? ? "" : "; a plain revert would delete test additions in #{tests['revert_deletes_tests'].join(', ')}"
+    note = X.unclassified_text(tests)
+    note ? "#{out}; #{note}" : out
   end
 
   def describe_baseline(b)
@@ -708,7 +712,7 @@ module Judge
     harness = harness_name
     results = results.map { |e, v, ctx| held(e, v, ctx, repo, res, harness: harness) }
     appended = Setup.append(store) { |existing| fresh_rows(existing, results, now) }
-    results.each { |e, v, ctx, why| puts line(e, v, ctx, why, route: X.revert_route(e, harness: harness)) }
+    results.each { |e, v, ctx, why, note| puts line(e, v, ctx, why, route: X.revert_route(e, harness: harness), note: note) }
     judged = results.map { |_, v| v["status"] }
     tally = (X::JUDGED - %w[confounded]).map { |s| "#{judged.count(s)} #{s}" }.join(", ")
     declined = mine.count { |e| e["status"] == "declined" }
@@ -721,19 +725,22 @@ module Judge
     0
   end
 
-  # -> [exp, verdict, ctx, why]. A revert verdict (fresh or owed) whose
+  # -> [exp, verdict, ctx, why, note]. A revert verdict (fresh or owed) whose
   # commit added test lines, or whose answer is unknown, is held: the
   # verdict gains a `held` field and stays revert; why is the line's text.
+  # note (DND-1634): a revert verdict's unclassified additions, named
+  # whether or not it is held; it never holds anything.
   def held(exp, v, ctx, repo, res, harness: nil)
-    return [exp, v, ctx, nil] unless v["status"] == "revert"
+    return [exp, v, ctx, nil, nil] unless v["status"] == "revert"
 
+    note = X.unclassified_text(unclassified_fields(exp, repo, res))
     hold = X.hold(v["status"], tests_fields(exp, repo, res))
-    return [exp, v, ctx, nil] unless hold
+    return [exp, v, ctx, nil, note] unless hold
 
     refusal, = X.decline_error(exp.merge("status" => "revert", "last" => v))
     change = X.cross_repo?(exp) ? exp["change_repo"] : nil
     [exp, v.merge("held" => hold), ctx, X.hold_text(repo.name, exp["id"], exp["commit"], hold, refusal, change_repo: change, trailer: trailer_line(exp),
-                                             route: X.revert_route(exp, harness: harness))]
+                                             route: X.revert_route(exp, harness: harness)), note]
   end
 
   # The harness repo's name (the runner's own repo), which tells a product
@@ -780,6 +787,15 @@ module Judge
     return exp if exp["revert_deletes_tests"].is_a?(Array)
 
     X.deletes_tests_fields(in_change_repo(exp, repo, res) { |path| XG.numstat(path, exp["commit"]) })
+  end
+
+  # The record's revert_unclassified list (DND-1634), else the same answer
+  # computed now: for a record written before the field, or one whose git
+  # could not look at record time. It feeds only the line's text.
+  def unclassified_fields(exp, repo, res)
+    return exp if exp["revert_unclassified"].is_a?(Array)
+
+    X.unclassified_fields(in_change_repo(exp, repo, res) { |path| XG.numstat(path, exp["commit"]) })
   end
 
   # Under the lock: only experiments whose status is still the one judged
@@ -865,7 +881,8 @@ module Judge
 
   # A held revert reads REVERT HELD instead of REVERT / REVERT OWED.
   # route: X.revert_route's text for a product revert (DND-1613), else nil.
-  def line(exp, v, ctx = nil, held_why = nil, route: nil)
+  # note: X.unclassified_text for a revert verdict (DND-1634), else nil.
+  def line(exp, v, ctx = nil, held_why = nil, route: nil, note: nil)
     g = v["guards"]&.map { |name, d| "#{name} #{d['before'].nil? ? 'n/a' : d['before']}->#{d['after'].nil? ? 'n/a' : d['after']} #{d['state']}" }
     phase = ctx ? " | phase (context, not judged): before #{side(ctx['before'])} | after #{side(ctx['after'])}" : ""
     status = held_why ? "REVERT HELD" : v["status"].upcase
@@ -880,6 +897,7 @@ module Judge
     reason = "#{reason} | #{ex}" if ex
     fx = X.foreign_text(v["foreign_excluded"])
     reason = "#{reason} | #{fx}" if fx
+    reason = "#{reason} | #{note}" if note
     xtext = X.cross_text(exp)
     "experiment: #{exp['id']} #{status} kind=#{exp['kind']} metric=#{exp['metric']}#{xtext ? " #{xtext}" : ''} | " \
       "before #{side(v['before'])} | after #{side(v['after'])} | guards #{g ? g.join(', ') : 'n/a'} | #{reason}#{phase}"

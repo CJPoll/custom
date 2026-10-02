@@ -117,6 +117,12 @@ experiment it prints `keep`, `revert`, `pending`, `inconclusive` or
   with no commit-message parsing. A test the rule cannot see, such as an
   inline `--self-test` inside a tool or a new check, is still judged by the
   hard-constraint test in the **revert** bullet above.
+- **unclassified additions** (DND-1634): a revert line, and `record`'s
+  output, name added paths in a test-like layout with no test word
+  (`features/`, `__mocks__/`, `testing/`, `fixtures/`, a `*.feature` file;
+  `FirstParty.unclassified_layout?`). Nothing is held on them. Before a
+  plain revert, check each by hand; if it holds tests, treat it as **REVERT
+  HELD** (partial revert or decline).
 - **declined** is never a gain. It no longer blocks its phase. Judge never
   writes it; only the `decline` verb does.
 - **keep, inconclusive:** journal them. An inconclusive experiment no longer

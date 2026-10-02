@@ -28,8 +28,10 @@
 #     Judge never writes `declined`, and a worse guard is never declined.
 #   * a revert whose commit added test lines, or where git could not tell,
 #     is HELD (DND-1549): still `revert`, but a plain git revert is ruled
-#     out. Only FirstParty.test_file_any_layout? (a pure function) is used from
-#     ai/lib/first_party.rb; its git readers are not called here.
+#     out. Only FirstParty.test_file_any_layout? and unclassified_layout?
+#     (pure functions) are used from ai/lib/first_party.rb; its git readers
+#     are not called here. Added paths in a test-like layout with no test
+#     word are named as unclassified (DND-1634) and never held.
 #   * a change on the same phase from ANOTHER experiment (any machine), seen
 #     as a `Lead-time-experiment:` commit trailer (ai/lib/lead_time_trailer.rb)
 #     landed inside the window (the before-set's first landing to the
@@ -745,6 +747,43 @@ module LeadTimeExperiment
     return { "revert_deletes_tests_na" => src.reason } if src.could_not_look?
 
     { "revert_deletes_tests" => test_additions(src.items) }
+  end
+
+  # ── unclassified additions (DND-1634) ───────────────────────────────────
+  # Observability only: these fields never reach `hold`, so they hold
+  # nothing and move no guard. An added path is a TEST when
+  # FirstParty.test_file_any_layout? holds (it feeds the hold), UNCLASSIFIED
+  # when FirstParty.unclassified_layout? holds (a test-like layout with no
+  # test word: features/, __mocks__/, fixtures/, a *.feature file), and
+  # SOURCE otherwise. The same added-lines filter as test_additions.
+  def unclassified_additions(entries)
+    entries.select { |added, _, path| FirstParty.unclassified_layout?(path) && (added.nil? || added.positive?) }
+           .map(&:last).uniq.sort
+  end
+
+  # revert_unclassified (possibly []), or revert_unclassified_na with the
+  # reason when git could not answer. Never [] for unknown.
+  def unclassified_fields(src)
+    return { "revert_unclassified_na" => src.reason } if src.could_not_look?
+
+    { "revert_unclassified" => unclassified_additions(src.items) }
+  end
+
+  # The record's fields from one numstat Source: tests and unclassified.
+  def layout_fields(src) = deletes_tests_fields(src).merge(unclassified_fields(src))
+
+  # The text naming unclassified additions, or nil when there are none.
+  # `fields` with neither key (a record from before DND-1634 that judge could
+  # not read again) says so, never nothing.
+  def unclassified_text(fields)
+    na = fields["revert_unclassified_na"]
+    list = fields["revert_unclassified"]
+    return "unclassified additions n/a (#{na})" if na
+    return "unclassified additions n/a (the record carries no revert_unclassified list)" unless list.is_a?(Array)
+    return nil if list.empty?
+
+    "unclassified additions in #{list.join(', ')}: a test-like layout with no test word, " \
+      "so a revert is not held on them; check by hand whether a plain revert would delete tests"
   end
 
   # nil, or why a revert verdict is held: {"tests" => paths} or

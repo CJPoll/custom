@@ -438,6 +438,40 @@ has "the git adapter reads a bad repo path as could not look, never as no tests"
   "$(/usr/bin/ruby -e 'require ARGV[0]; s = LeadTimeExperimentGit.numstat(ARGV[1], ARGV[2]); puts s.could_not_look? ? "could_not_look: #{s.reason}" : "ok: #{s.items.inspect}"' \
      "${HERE}/../lib/experiment_git.rb" "${TMP}/no-such-repo" "${TADD}")" "could_not_look:"
 
+# ── unclassified additions: named, never read as no tests (DND-1634) ───────
+echo "== unclassified additions"
+# Dated mid-August, so no other fixture's window holds its trailer.
+mkdir -p "${REPO}/features" "${REPO}/ai/z"
+printf 'Feature: login\n  Scenario: ok\n' >"${REPO}/features/x.feature"
+printf 'echo fixed\n' >"${REPO}/ai/z/fix.sh"
+TFEAT="$(commit_files 2026-08-15T11:00:00Z "fixture: a fix with a Cucumber feature" "$(tr "custom verify phase")")"
+printf 'echo plain\n' >"${REPO}/ai/z/plain.sh"
+TSRC="$(commit_files 2026-08-15T11:01:00Z "fixture: a plain source change" "$(tr "custom implement phase")")"
+STATE11="${TMP}/state11"
+mkdir -p "${STATE11}"
+/usr/bin/ruby "${HERE}/make_ledger.rb" "${STATE11}/ledger.jsonl" "${TFEAT}" 700 2026-08-15T00:00:00Z
+s11() { LEAD_TIME_STATE_DIR="${STATE11}" LEAD_TIME_EXPERIMENT_NOW=2026-08-16T12:00:00Z "$@"; }
+FID="custom:verify:${TFEAT:0:12}"
+eq "record a change adding features/x.feature: exit 0" "$(s11 rec verify phase "${TFEAT}" change)" "0"
+has "regression: the record output names features/x.feature as unclassified" "$(out)" "unclassified additions in features/x.feature"
+has "... the record row lists it" "$(recrow "${STATE11}/experiments.jsonl" "${FID}")" '"revert_unclassified":["features/x.feature"]'
+has "... and no test (no guard moves)" "$(recrow "${STATE11}/experiments.jsonl" "${FID}")" '"revert_deletes_tests":[]'
+eq "record a plain source change: exit 0" "$(s11 rec implement phase "${TSRC}" change)" "0"
+lacks "... its record output names nothing unclassified" "$(out)" "unclassified"
+has "... its record row lists none" "$(recrow "${STATE11}/experiments.jsonl" "custom:implement:${TSRC:0:12}")" '"revert_unclassified":[]'
+eq "judge: exit 0" "$(s11 run judge --repo custom)" "0"
+has "the revert is not held on an unclassified path" "$(out)" "${FID} REVERT kind=change"
+lacks "... never REVERT HELD" "$(out)" "REVERT HELD"
+has "regression: the judge line names features/x.feature as unclassified" "$(out)" "unclassified additions in features/x.feature"
+has "... 0 held" "$(out)" "0 held"
+STATE12="${TMP}/state12"
+mkdir -p "${STATE12}"
+cp "${STATE11}/ledger.jsonl" "${STATE12}/"
+recrow "${STATE11}/experiments.jsonl" "${FID}" | sed 's/,"revert_unclassified":\[[^]]*\]//' >"${STATE12}/experiments.jsonl"
+lacks "a record from before DND-1634 has no field" "$(cat "${STATE12}/experiments.jsonl")" "revert_unclassified"
+eq "judge it: exit 0" "$(LEAD_TIME_STATE_DIR="${STATE12}" LEAD_TIME_EXPERIMENT_NOW=2026-08-16T12:00:00Z run judge --repo custom)" "0"
+has "... the field is computed on the fly" "$(out)" "unclassified additions in features/x.feature"
+
 # ── cross-repo: a custom change measured on gen_saas (DND-1528) ─────────────
 echo "== cross-repo"
 XGS="${TMP}/xr/gen_saas"

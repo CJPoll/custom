@@ -349,6 +349,15 @@ p90 over the last K comparable landings), and a status.
   gains a `held` field, and judge's tally counts held on its own. No threshold or
   guard moved, and nothing becomes keep.
 
+  **Later (2026-10-01, DND-1634):** a test layout with no test word
+  (`features/`, `__mocks__/`, `fixtures/`) read as "no tests", silently.
+  `record` now also stores `revert_unclassified` (or `_na`): the added
+  paths `FirstParty.unclassified_layout?` names, a directory holding a
+  `features mocks snapshots testing fixtures stubs fakes cypress playwright`
+  word, or a `*.feature`/`*.snap` file, when not already a test. Record
+  and every revert line name them. They never reach the hold: when REVERT
+  HELD fires is unchanged.
+
   **Later (2026-10-01, DND-1613):** `experiment` accepted only the five
   harness phases, so a product change on `tail` (DND-1532's lever product)
   could not be recorded or judged. It now takes `--phase tail` with

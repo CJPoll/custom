@@ -12,7 +12,8 @@
 # directory, and prints OK anyway.
 # athena:lead-time-improve's experiment (DND-1549) reuses only
 # `test_file_any_layout?` (DND-1630), to tell which of a commit's additions a
-# plain revert would delete, in any repo's layout. The narrower `test_path?`
+# plain revert would delete, in any repo's layout, and `unclassified_layout?`
+# (DND-1634), to name the ones it cannot classify. The narrower `test_path?`
 # stays this repo's own rule.
 # ai/bin/check-pipefail-grep (DND-509) reuses only `git_ls`: it scans every
 # TRACKED shell file, and its shell test is by content, not by this rule.
@@ -78,13 +79,39 @@ module FirstParty
   # direction); `test_path?` stays narrow because discovery of this repo's
   # executables needs it (`ai/bin/test-slot` is a tool here and stays one).
   # Residual: a layout with none of these words (a `features/` directory) is
-  # not seen.
+  # not a test here; `unclassified_layout?` names the common ones (DND-1634).
   def test_file_any_layout?(rel)
     return true if test_path?(rel)
 
-    segments(rel).any? do |seg|
-      seg.gsub(/([a-z0-9])([A-Z])/, '\1 \2').gsub(/([A-Z]+)([A-Z][a-z])/, '\1 \2').downcase.split(/[^a-z0-9]+/).any? { |w| TEST_WORDS.include?(w) }
-    end
+    segments(rel).any? { |seg| (words(seg) & TEST_WORDS).any? }
+  end
+
+  # Directory words of layouts that often hold tests but name no test word:
+  # Cucumber features/, Jest __mocks__/ and __snapshots__/, Go testing/,
+  # fixtures/, stubs/, fakes/, cypress/, playwright/.
+  LAYOUT_WORDS = %w[features mocks snapshots testing fixtures stubs fakes cypress playwright].freeze
+
+  # File extensions that are test material in every layout (Gherkin, Jest
+  # snapshots), never product source.
+  LAYOUT_EXTENSIONS = %w[.feature .snap].freeze
+
+  # A path neither source nor test by name (DND-1634): not a test by
+  # `test_file_any_layout?`, but a DIRECTORY name holds a LAYOUT_WORDS word
+  # (whole word, the same split), or the file has a LAYOUT_EXTENSIONS
+  # extension. Every other non-test path reads as source. Nothing is held on
+  # it: it exists so a caller can NAME what it could not classify instead of
+  # reading it as "no tests".
+  def unclassified_layout?(rel)
+    return false if test_file_any_layout?(rel)
+
+    segments(rel)[0..-2].any? { |seg| (words(seg) & LAYOUT_WORDS).any? } ||
+      LAYOUT_EXTENSIONS.include?(File.extname(rel).downcase)
+  end
+
+  # A path segment's words: split at every non-alphanumeric and at camelCase
+  # (all-caps runs included), lower-cased. `HTTPTest` -> http, test.
+  def words(seg)
+    seg.gsub(/([a-z0-9])([A-Z])/, '\1 \2').gsub(/([A-Z]+)([A-Z][a-z])/, '\1 \2').downcase.split(/[^a-z0-9]+/)
   end
 
   def lib_path?(rel)
