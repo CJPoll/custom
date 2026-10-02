@@ -29,7 +29,7 @@
 #
 # --reroute-of <event_id> marks the reply as the note a session posts when it
 # FORWARDS a misrouted conversation to the session that owns it (DND-1605).
-# <event_id> is the one it passed to session_send as reroute_of_event_id. It
+# <event_id> is the one it passed to `send-mail --routed --reroute-of`. It
 # implies --no-claim and prints claim=skipped: a forwarder that claimed the
 # thread would get the owner's follow-ups instead of the session it forwarded
 # to. The <event_id> is required but not sent anywhere: it makes the command
@@ -52,7 +52,7 @@ usage() {
 
 reroute_usage() {
   printf 'reply: --reroute-of needs the event_id of the forwarded conversation (nothing was sent)\n' >&2
-  printf 'Fix: pass the event_id you gave session_send as reroute_of_event_id: reply <channel> <thread_ts> <text> --reroute-of <event_id>\n' >&2
+  printf 'Fix: pass the event_id you passed to send-mail --routed --reroute-of: reply <channel> <thread_ts> <text> --reroute-of <event_id>\n' >&2
   exit 2
 }
 

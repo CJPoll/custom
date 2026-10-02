@@ -144,8 +144,8 @@ After the `ts=... channel=...` line, exactly one of:
 
 **A claim moves only with its holder's forward.** `slack_thread_claim` is
 claim-only and first claim wins. A thread claimed by the wrong inbox moves
-when the holding session forwards the conversation with `session_send` and
-`reroute_of_event_id` (*Forwarding a misroute*, DND-1617). No other release
+when the holding session forwards the conversation with `send-mail --routed
+--reroute-of <event_id>` (*Forwarding a misroute*, DND-1617, DND-1620). No other release
 exists.
 
 **Later (2026-10-01, DND-1617):** this read "A claim cannot be released or
@@ -232,9 +232,7 @@ depends on remembering a no-claim flag (DND-1620).
    `session_send`, and its receipt carries the server's `feedback` and
    `claim_transfer` words, or `null` for a word the server did not send:
    read `null` as nothing recorded and nothing moved. A missing, empty or
-   flag-shaped `event_id` is exit 2, and nothing is sent. Calling the athena
-   MCP `session_send` with `reroute_of_event_id: <event_id>` is the same
-   forward.
+   flag-shaped `event_id` is exit 2, and nothing is sent.
 2. If you post a note in the owner's thread to say where it went, post it
    with `reply <channel> <thread_ts> <text> --reroute-of <event_id>`, the same
    `event_id`. `--reroute-of` implies `--no-claim` and prints

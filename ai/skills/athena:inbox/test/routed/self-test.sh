@@ -1088,6 +1088,13 @@ assert_eq "acc-2 routes: machine_reachable was asked, THEN session_send was call
 assert_eq "acc-2 routes: machine_reachable was asked for THIS machine (no machine_id)" "{}" "$(cat "${SHIM}/args.machine_reachable.json" 2>/dev/null)"
 assert_eq "acc-2 routes: no maildir was written" "" "$(maildir_files)"
 
+echo "== DND-1620: --reroute-of with no flag and a server address routes, and passes the id =="
+shim_reset; reach_answer "${REACH_TRUE}"
+send --to m-lap/walt_ui-session.jsonl --subject s --re /x --reroute-of EVFAKE00005
+assert_eq "reroute, no flag: exit 0, routed" "0|routed" "${RC}|$(printf '%s' "${PATHLINE}" | sed -n 's/^athena:inbox: path: \([a-z]*\) .*/\1/p')"
+assert_eq "reroute, no flag: reroute_of_event_id reached session_send" "EVFAKE00005" \
+  "$(jq -r '.reroute_of_event_id // "absent"' "${SHIM}/args.session_send.json" 2>/dev/null)"
+
 echo "== DND-378: an IDLE machine (reachable unknown, no recent signal) routes, and says so =="
 shim_reset; reach_answer "${REACH_UNKNOWN}"
 send --to m-lap/walt_ui-session.jsonl --subject s --re /x

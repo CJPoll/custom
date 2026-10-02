@@ -800,7 +800,9 @@ send-mail --routed --to-project <project>[@<machine-id-or-name>] --subject <line
 ```
 
 - It calls the `athena` MCP `session_send` tool and prints one JSON receipt:
-  `{path: "routed", event_id, delivery_id, status: "pending", to, from_inbox}`.
+  `{path: "routed", event_id, delivery_id, status: "pending", to, from_inbox}`,
+  plus `feedback` and `claim_transfer` on a `--reroute-of` send (each `null`
+  when the server sent none; `athena:slack` → *Forwarding a misroute*).
   `pending` is literal: the delivery is `delivered` only when the recipient's
   client acks it. The receipt is the LAST stdout line; the first is the path
   line (*Two send paths*). It never prints the body and **never writes a local

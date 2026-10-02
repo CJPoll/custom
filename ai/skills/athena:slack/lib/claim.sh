@@ -157,7 +157,7 @@ claim_reason_fix() {
     refused)
       printf 'the server refused the claim; its own words are on the server: line above. The usual cause is an inbox that is not one of this machine'"'"'s live Slack inboxes (check it with the athena MCP lookup_inbox).' ;;
     already-claimed)
-      printf 'another inbox already holds this thread, so its replies go there. A thread belongs to whoever claimed it first, and only the holding session can move it, by forwarding the conversation to this session with session_send and reroute_of_event_id (athena:slack SKILL.md -> Forwarding a misroute); ask it to, or start a new thread with bin/post or bin/dm if this session needs the replies.' ;;
+      printf 'another inbox already holds this thread, so its replies go there. A thread belongs to whoever claimed it first, and only the holding session can move it, by forwarding the conversation to this session with athena:inbox send-mail --routed --reroute-of <event_id>, which passes reroute_of_event_id to session_send (athena:slack SKILL.md -> Forwarding a misroute); ask it to, or start a new thread with bin/post or bin/dm if this session needs the replies.' ;;
     invalid)
       printf 'the channel must be a Slack conversation id ([CDG] followed by capitals and digits) and the ts a Slack ts (digits.digits) -- the ts of the thread'"'"'s PARENT message, as bin/post and bin/dm print it.' ;;
     cwd-project-mismatch)
