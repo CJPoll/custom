@@ -481,7 +481,13 @@ across sessions — it is not a one-shot queue drain.
   local (gitignored) file. The committed installer is the canonical source, so
   the loop is always restorable even without the snapshot. The entry names the
   main checkout's runner; `--install` and `--remove` refuse from a linked
-  worktree (exit 4), whose runner vanishes on cleanup (DND-1639).
+  worktree (exit 5), whose runner vanishes on cleanup (DND-1639).
+
+  **Later (2026-10-02, DND-1643):** this refusal was exit 4 here and exit 3 in
+  `setup-leadtime-cron`. Superseded by one code, 5, in both installers: 4 and 3
+  each already meant something else in the other one (COULD NOT LOOK, need
+  root). `setup-clustering-cron` and `setup-athena-inbox-client` have no
+  worktree refusal.
 - **A dirty main checkout yields the tick; STALE dirt escalates once
   (DND-692).** The yield is exit 0 and never feeds the wedge counter, so on
   2026-09-22..25 one machine skipped 84 consecutive ticks on days-old leftovers
@@ -653,8 +659,8 @@ time. The design record is `ai/docs/lead-time-improver.md`.
 - **Install / restore / verify:** `scripts/setup-leadtime-cron` (`--install`,
   `--dry-run`, `--check`, `--remove`, `--backup <file>`). The entry always
   names the main checkout's runner, and `--install` and `--remove` refuse to
-  run from a linked worktree (exit 5, the same code in every cron installer
-  that refuses it). `--check` is red on a missing, duplicated or
+  run from a linked worktree (exit 5, the same code as `setup-shipwright-cron`'s
+  refusal). `--check` is red on a missing, duplicated or
   stale entry, and on any precondition that would make a tick exit 78: the
   skill, the repo list, or the runner's own MCP preflight
   (`scripts/lib/mcp-preflight.sh` in the main checkout, DND-1571), which
