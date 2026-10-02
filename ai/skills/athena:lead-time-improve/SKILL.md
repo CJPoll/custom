@@ -487,7 +487,8 @@ plainly in the body.
 
 The runner reserves R's lane, exports `LEADTIME_PRODUCT_MANIFEST`, and puts
 the product repos and its sweep's summary (`product_prs=<n> landed=<R#n,...>`,
-plus any stopped line) in your brief (DND-1540). A run opens the PR; a
+plus `unreadable_branches=<n>` when it kept a landing branch git could not
+read, and any stopped line) in your brief (DND-1540). A run opens the PR; a
 later run lands it. Never wait on CI or a deploy inside a run, and never
 merge.
 

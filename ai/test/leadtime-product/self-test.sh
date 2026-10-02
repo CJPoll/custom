@@ -628,8 +628,9 @@ rc="$(lp sweep)"
 if [ "$rc" = 0 ] && head -1 "${TMP}/out" | grep -qx 'product_prs=0 landed=prod#7 unreadable_branches=1' \
    && grep -q "pr=#7 landed .*; landing branch $BR7 KEPT: COULD NOT TELL (cannot read branch $BR7" "${TMP}/out" \
    && grep -q "Fix: .*show-ref --exists refs/heads/$BR7.*logs/refs/heads/$BR7" "${TMP}/out" \
+   && grep -q "pr=#7 landing branch $BR7 KEPT: COULD NOT TELL" "$S/journal.md" \
    && [ "$(cat "$REF7")" = not-a-sha ] && [ ! -e "$LANES/$RUN_ID-land" ] && [ ! -e "$LANES/$RUN_ID-land.meta" ]; then
-  ok "an unreadable landing branch after a landing: KEPT, named with a Fix: (ref, reflog), counted unreadable_branches=1; never skipped silently"
+  ok "an unreadable landing branch after a landing: KEPT, named with a Fix: (ref, reflog), journaled, counted unreadable_branches=1; never skipped silently"
 else bad "landing branch unreadable" "rc=$rc ref=$(cat "$REF7" 2>/dev/null) out=$(cat "${TMP}/out") err=$(cat "${TMP}/err")"; fi
 rm -f "$FAKE/locked-merge-hook"
 

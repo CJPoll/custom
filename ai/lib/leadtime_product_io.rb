@@ -631,10 +631,18 @@ module LeadTimeProductIO
     lock = "#{dir}.lock"
     result = nil
     kept = nil
-    held = Locks.with(lock) do
-      result = land_in(m, rl, s, dir, gate_timeout, budget, idle)
-    ensure
-      kept = retire_land_lane(m, rl, dir, merged: result ? result[1] == true : false, keep_branch: result ? result[2] == true : false)
+    held = begin
+      Locks.with(lock) do
+        result = land_in(m, rl, s, dir, gate_timeout, budget, idle)
+      ensure
+        kept = retire_land_lane(m, rl, dir, merged: result ? result[1] == true : false, keep_branch: result ? result[2] == true : false)
+      end
+    rescue P::Error => e
+      raise unless kept
+
+      # The landing failed, but the branch it kept is still named and counted.
+      journal_kept(m, s, kept)
+      return ["could not act: #{e.message} Fix: #{e.fix}; #{kept}", false, 1]
     end
     # Never delete a lock a live process holds. Removing it after the unlock
     # is safe here only because the runner's single-run lock serialises every
@@ -642,13 +650,20 @@ module LeadTimeProductIO
     return ["open: the landing lane lock #{lock} is held by a live process; the next run retries", false, 0] if held == :held
 
     FileUtils.rm_f(lock)
-    line, ok, _, unreadable = result
-    unreadable = unreadable.to_i
+    line, ok = result
+    unreadable = result[3] || 0
     if kept
+      journal_kept(m, s, kept)
       line = "#{line}; #{kept}"
       unreadable += 1
     end
     [line, ok, unreadable]
+  end
+
+  # A kept landing branch is journaled as well as printed: after a landing
+  # nothing revisits it, so the .run line alone would be its only record.
+  def journal_kept(m, s, kept)
+    Store.journal(m.state_dir, now, "repo=#{s.repo} pr=##{s.pr} #{kept}")
   end
 
   # -> [detail, landed?, keep_branch?, unreadable branches (0 or 1; omitted is 0)]
@@ -833,7 +848,7 @@ module LeadTimeProductIO
       "product_lane: repo=#{rl.name} #{detail}"
     rescue P::Error => e
       stranded = true
-      "product_lane: repo=#{rl.name} COULD NOT TELL (#{e.message}); lane and branch kept. Fix: #{e.fix}"
+      "product_lane: repo=#{rl.name} COULD NOT TELL (#{e.message}); branch kept. Fix: #{e.fix}"
     end
     [lines, stranded]
   end
@@ -879,6 +894,6 @@ module LeadTimeProductIO
     _, _, detail = retire_lane(m, rl, dir, why)
     [detail, true]
   rescue P::Error => e
-    ["COULD NOT TELL (#{e.message}); lane and branch kept. Fix: #{e.fix}", false]
+    ["COULD NOT TELL (#{e.message}); branch kept. Fix: #{e.fix}", false]
   end
 end
