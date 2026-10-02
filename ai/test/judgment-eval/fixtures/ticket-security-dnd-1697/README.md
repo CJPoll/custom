@@ -160,9 +160,10 @@ Reading the items against the tools:
   most 31/291 of the `none` cases measured in both runs.
 - n/a keeps the rules above. A case with no measured verdict in either run
   is named and left out of both versions' counts. When it could hide a lost
-  case (v1 did not measure a miss there and v3 did not match), the result is
-  "could not measure": re-run that set once; a second one is reported,
-  never scored.
+  case (v1 did not measure a miss there and v3 did not match), or when
+  counting each `none` n/a case as a false call would fail item 3, the
+  result is "could not measure": re-run that set once; a second one is
+  reported, never scored.
 
 `score-v3.rb` scores items 2 and 3 on H from two `--repeat 3` run files.
 It exits 0 on PASS, 1 on FAIL and 3 on COULD NOT MEASURE. It refuses

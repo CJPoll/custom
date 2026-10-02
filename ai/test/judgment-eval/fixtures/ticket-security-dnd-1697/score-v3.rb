@@ -30,7 +30,11 @@ rescue SystemCallError, JSON::ParserError => e
   refuse("cannot read labels #{path}: #{e.message}. Fix: pass the labels JSONL the runs were made from")
 end
 
-labels = read_json_lines(labels_path).to_h { |j| [j["id"], j["label"]] }
+label_rows = read_json_lines(labels_path)
+label_ids = label_rows.map { |j| j["id"] }
+dup_labels = label_ids.select { |id| label_ids.count(id) > 1 }.uniq
+refuse("#{labels_path} labels #{dup_labels.join(', ')} more than once. Fix: pass a labels file with one row per case") unless dup_labels.empty?
+labels = label_rows.to_h { |j| [j["id"], j["label"]] }
 
 def load_run(path, want_version, labels)
   run =
@@ -81,10 +85,18 @@ lost = ids.select { |id| v1[id] == "match" && v3[id] != "match" }
 item2 = lost.empty?
 puts "item 2: cases v1 matches that v3 does not: #{lost.size}#{lost.empty? ? '' : " (#{lost.join(', ')})"} -> #{item2 ? 'PASS' : 'FAIL'}"
 
+within_item3 = ->(false_calls, cases) { false_calls <= FALSE_SECURITY_MAX && false_calls * FALSE_SECURITY_BASE <= FALSE_SECURITY_MAX * cases }
 f1 = non.count { |id| v1[id] != "match" }
 f3 = non.count { |id| v3[id] != "match" }
-item3 = f3 <= FALSE_SECURITY_MAX && f3 * FALSE_SECURITY_BASE <= FALSE_SECURITY_MAX * non.size
+item3 = within_item3.call(f3, non.size)
 puts "item 3 (held-out): none cases not matched: v1 #{f1}/#{non.size}, v3 #{f3}/#{non.size} -> #{item3 ? 'PASS' : 'FAIL'}"
+# A `none` case v3 left n/a may be one more false call. When counting every
+# such case as one would fail item 3, item 3 is undecided, not a pass.
+na_none = na.select { |id| labels[id] == "none" && v3[id] != "match" }
+if item3 && !within_item3.call(f3 + na_none.size, non.size + na_none.size)
+  undecided |= na_none
+  puts "item 3 undecided: #{na_none.size} none case(s) v3 left n/a could each be a false call (#{na_none.join(', ')})"
+end
 
 s1 = sec.count { |id| v1[id] == "match" }
 s3 = sec.count { |id| v3[id] == "match" }
