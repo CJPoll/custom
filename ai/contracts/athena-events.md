@@ -7300,9 +7300,10 @@ a one-line reason, so an empty section never reads as a missing one. Section
 1. **Needs your attention.** The **owner queue**: `proposed` items and
    `active` `owner_only` items, in rank order, at most 10, then "and N more".
    The section header links `/priorities`. Empty reason: "Nothing needs you."
-   A ticket moved to `Needs Attention` is `owner_only` (see that rule in
-   *Item states*' classification), so it lands here through the existing
-   Notion ingest.
+   A `Needs Attention` ticket lands here when the index classifies it
+   `owner_only` (the owner is among its assignees, or the owner's person id is
+   not configured; see the `owner_only` list above), through the existing
+   Notion ingest. One assigned only to someone else does not.
    Won't-fix notices are not part of the digest: each stays its own DM, sent
    only when a candidate exists.
 2. **Overnight.** What was completed in the window, as a status report.
@@ -7334,7 +7335,8 @@ a one-line reason, so an empty section never reads as a missing one. Section
      declaration and an owner amendment (DND-1743). The event description is
      read at digest time and passed to the judgment. It is never stored; the
      judgment record keeps its input hash and output only. Until the owner
-     amends OQ-5, the prep line is "No prep found.". An
+     amends OQ-5, the prep line reads "prep: not judged (pending OQ-5,
+     DND-1743)", never "No prep found.". An
      unavailable judgment renders "prep: not judged
      (<cause>)", never a blank.
    - **RSVP, Phase A (links):** each meeting links to
