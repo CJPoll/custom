@@ -23,6 +23,8 @@
 #      no target alive it returns the waiting shell, so the tail blocks its
 #      whole timeout on itself; with a sibling alive it returns the sibling's
 #      process (measured 2026-09-30, DND-1330).
+#   5. pkill -f self-kill  — a `pkill -f <pattern>` whose pattern matches the
+#                            command's own text kills the agent's tool shell.
 # (Rule #3, the foreground-`sleep`-returns-immediately gotcha, is surfaced inside
 #  the messages above rather than as a standalone block, because every sanctioned
 #  poll uses a foreground `sleep` — blocking on it would nuke the good pattern.)
@@ -239,6 +241,42 @@ if [ "$HAS_LOOP_KW" = true ] && [ "$HAS_DO_DONE" = true ] \
   && has 'done[[:space:];)}]*&([^&]|$)' \
   && ! has_word 'p?kill|trap'; then
   deny 'SAFE-WAIT (unreaped background loop): this loop is backgrounded (`done &` / `( … ) &`) with no reaper, so a crashed or rate-limited parent orphans it to PID 1 (measured: pinned load ~290 for an hour, flaked ExUnit into Postgres 57014 timeouts). Fix: install a reaper — `child=$!; trap '"'"'kill "$child" 2>/dev/null'"'"' EXIT INT TERM` — or do not background it: block in the foreground with `timeout N tail --pid=<pid> -f /dev/null`, or let the harness wake you.'
+fi
+
+# ---- Shape 5: pkill -f kills the shell that runs it -------------------------
+# The Bash tool runs `zsh -c '<command>'`, so the whole command text is in that
+# shell's argv. pkill excludes only itself, so a `pkill -f <pattern>` whose
+# pattern matches the command text kills the agent's own tool shell (measured:
+# DND-541 architect, 2026-09-24; the jev admiral killing its own re-armed
+# watcher, 2026-10-02). The test is exact, not a keyword: the pattern is run
+# against the command text, so `pkill -f "[x]yz"` (which cannot match its own
+# text) passes. A pattern built from `$VAR` or a backtick is unknown here and
+# passes. pkill must be in command position, so a mention in a quoted message
+# is text. A pattern grep rejects passes (fail-open).
+pkill_self_match() {
+  printf '%s' "$FLAT" \
+    | grep -oE '(^|[;&|(`]|(^|[[:space:]])(then|do|else|exec|command|sudo|xargs|timeout[[:space:]]+[0-9.]+[smhd]?))[[:space:]]*pkill[[:space:]][^;&|()`]*' 2>/dev/null \
+    | while IFS= read -r _seg; do
+        printf '%s' "$_seg" | grep -Eq '[[:space:]](-[[:alnum:]]*f[[:alnum:]]*|--full)([[:space:]]|$)' || continue
+        _tok=$(printf '%s' "$_seg" | sed -E 's/[[:space:]]+$//')
+        case $_tok in
+          *\") _tok=${_tok%\"}; _tok=${_tok##*\"} ;;
+          *\') _tok=${_tok%\'}; _tok=${_tok##*\'} ;;
+          *) _tok=${_tok##* } ;;
+        esac
+        case $_tok in
+          ''|-*) continue ;;
+          *'$'[A-Za-z_\{\(]*|*'`'*) continue ;;
+        esac
+        if printf '%s\n' "$CMD" | grep -Eq -e "$_tok" 2>/dev/null; then
+          printf '%s\n' "$_tok"
+          break
+        fi
+      done
+}
+PKILL_HIT=$(pkill_self_match)
+if [ -n "$PKILL_HIT" ]; then
+  deny 'SAFE-WAIT (pkill -f self-match): the pattern `'"$PKILL_HIT"'` matches this command'"'"'s own text. The Bash tool runs your command as `zsh -c '"'"'<command>'"'"'`, and pkill excludes only itself, so it kills your own tool shell (and anything that shell started) before the target. Fix: kill the PID you captured when you started the process (`cmd & pid=$!`, later `kill "$pid"`), or match by process name (`pkill -x <comm>`), or write the pattern so it cannot match its own text, e.g. a bracket class: `pkill -f "[m]y-pattern"`.'
 fi
 
 # No dangerous construct detected -> allow silently.

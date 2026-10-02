@@ -168,6 +168,36 @@ check "M14. tail --pid resolved by pgrep -x (comm match)" allow
 run "$(bash_json 'pgrep -f mypattern; tail -n 5 /tmp/gate.log')"
 check "M15. pgrep -f next to a tail with no --pid" allow
 
+# Shape 5: the Bash tool runs `zsh -c '<command>'`, so a `pkill -f` pattern that
+# matches the command text kills the tool shell (measured 2026-10-02 in a
+# zsh -c repro: exit 143 with a literal pattern, survives with `[z]z…`).
+run "$(bash_json 'pkill -f inbox-wait')"
+check "5a. pkill -f with a literal pattern (matches its own text)" deny
+
+run "$(bash_json 'pkill -TERM -f "critic-review --base origin/main"; echo done')"
+check "5b. pkill -TERM -f with a quoted pattern after a signal" deny
+
+run "$(bash_json 'cd /tmp && timeout 5 pkill --full up-critic')"
+check "5c. pkill --full after timeout N, in a && list" deny
+
+run "$(bash_json 'echo x; pkill -f -u cjpoll '"'"'jev-wait.*run'"'"'')"
+check "5d. pkill -f single-quoted regex that matches its text" deny
+
+run "$(bash_json 'pkill -f "[i]nbox-wait"')"
+check "M16. pkill -f bracket class (cannot match its own text)" allow
+
+run "$(bash_json 'pkill -x inbox-wait')"
+check "M17. pkill -x (comm match)" allow
+
+run "$(bash_json 'pkill -f "$PATTERN"')"
+check "M18. pkill -f on a variable (pattern unknown)" allow
+
+run "$(bash_json 'git commit -m "never pkill -f the gate"')"
+check "M19. pkill -f mentioned inside a quoted message" allow
+
+run "$(bash_json 'kill "$pid"')"
+check "M20. kill on a captured pid" allow
+
 echo
 echo "--- HEREDOC cases (only a one-line send-mail shape is exempt) ---"
 
