@@ -165,6 +165,8 @@ case "$(cat "$d/mode" 2>/dev/null || echo ok)" in
              f="$(git rev-parse --git-path logs/HEAD)"; awk -v b="$b" '$2 != b' "$f" >"$f.t" && mv "$f.t" "$f"
              summary; exit 0 ;;
   noreflog-land) : >"$LEADTIME_RECEIPT"; own_land own.txt; rm -f "$(git rev-parse --git-path logs/HEAD)"; summary; exit 0 ;;
+  own-branch-gone) : >"$LEADTIME_RECEIPT"; b="$(git symbolic-ref --short HEAD)"
+             git checkout -q --detach; git branch -q -D "$b"; summary; exit 0 ;;
   delete-refused) : >"$LEADTIME_RECEIPT"; b="$(git symbolic-ref --short HEAD)"; echo "$b" >"$d/refused-branch"
              # a held ref lock: teardown's `git branch -D` is refused (DND-1715)
              : >"$(git rev-parse --path-format=absolute --git-common-dir)/refs/heads/$b.lock"; summary; exit 0 ;;
@@ -780,6 +782,24 @@ if [ "$rc" = 7 ] && [ "$(fails "$c")" = 2 ] && [ ! -e "$(lanes "$c")/run-heldref
   ok "reap: a refused delete of a dead lane's branch is named with a Fix: in stderr, .branch-kept and .run; counted exactly as any reap (2 with the failing tick)"
 else
   bad "reap delete refused" "rc=$rc fails=$(fails "$c") run=$(cat "$run" 2>/dev/null) kept=$(cat "$kept" 2>/dev/null) err=$(cat "$c/runner.err")"
+fi
+
+# A refusal from an earlier lane never speaks for this run's own: the lockless
+# reap (in the runner's own shell) is refused, then the run's own branch is
+# already gone at teardown, so its delete is never tried. The lane= line must
+# not claim the run's branch was KEPT.
+c="$(new_case)"; echo own-branch-gone >"$c/mode"
+mkdir -p "$(lanes "$c")"
+git -C "$c/repo" worktree add -q -b leadtime/run-lockheld "$(lanes "$c")/run-lockheld" origin/main
+: >"$c/repo/.git/refs/heads/leadtime/run-lockheld.lock"
+rc="$(run_runner "$c")"
+run="$(newest "$c" run)"
+if grep -q 'reaped lockless lane run-lockheld' "$c/runner.err" \
+   && grep -q '^branch_delete: reaped lockless lane: branch leadtime/run-lockheld KEPT' "$run" \
+   && grep -q '^lane=.* (removed)$' "$run" && ! grep -q 'delete REFUSED' "$run"; then
+  ok "an earlier lane's refused delete is named for that lane only; the run's own lane= line is not marked KEPT"
+else
+  bad "stale refusal flag" "rc=$rc run=$(cat "$run" 2>/dev/null) err=$(cat "$c/runner.err")"
 fi
 
 # ---------------------------------------------------------------------------------

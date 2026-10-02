@@ -99,15 +99,15 @@
 #       Every tick that DID reach the model leaves <ts>.receipt in the state
 #       dir's runs/ and it is kept, so `ls runs/*.receipt` answers "which past
 #       ticks reported for duty?" directly — do not infer it from a log's size.
+#       A lane branch whose work is safe but whose `git branch -D` is refused
+#       (a held ref lock, or any other refusal) is KEPT and named, with the
+#       delete to run, in stderr and runs/<ts>.branch-kept (DND-1715). That is
+#       hygiene, never an outcome: it never changes the exit code and never
+#       feeds the wedge counter.
 #   *   whatever the headless session exited with (124 if the 55m timeout fired);
 #       a session that exits non-zero, or one whose commits could not be landed
 #       on main (a "stranded" branch), or one whose lane branch ref git cannot
 #       read (COULD NOT TELL, kept as found), counts as an unsuccessful outcome
-#
-# A lane branch whose work is safe but whose `git branch -D` is refused (a held
-# ref lock, a corrupt ref) is KEPT and named, with the delete to run, in stderr
-# and runs/<ts>.branch-kept (DND-1715). That is hygiene, never an outcome: it
-# never changes the exit and never feeds the wedge counter.
 
 set -euo pipefail
 
@@ -470,24 +470,27 @@ commit_published() { # commit-ish
 }
 
 # delete_lane_branch <branch> <context> — `git branch -D` a lane branch whose
-# work is safe (landed or published). A refused delete (a held ref lock, a
-# corrupt ref) used to be dropped (`|| true`), so the branch stayed with nothing
+# work is safe: landed or published (retire_lane), or a lane just cut from its
+# base that the session never ran in (the lane-lock-held exit). A ref git cannot
+# read never gets here (retire_lane's COULD NOT TELL comes first). A refused
+# delete (a held ref lock, or any other refusal) used to be dropped (`|| true`), so the branch stayed with nothing
 # past the tick log and lane branches piled up unseen (DND-1715). Now the branch
 # is KEPT and named, with the delete to run, in stderr and in this tick's own
 # record runs/<ts>.branch-kept. The record is written at once, so it survives a
 # reap in a subshell and every exit path. A refused delete is hygiene, never an
 # outcome: it returns 0, never changes the exit and never feeds the wedge.
 delete_lane_branch() {
-  local br="$1" ctx="$2" rc=0 fix
+  local br="$1" ctx="$2" rc=0 fix reflock
   git -C "${MAIN_CHECKOUT}" branch -D "${br}" >>"${log}" 2>&1 || rc=$?
   [ "${rc}" -eq 0 ] && return 0
   fix="git -C ${MAIN_CHECKOUT} branch -D ${br}"
+  reflock="$(git -C "${MAIN_CHECKOUT}" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || echo "<git common dir>")/refs/heads/${br}.lock"
   if ! printf '%s: branch %s KEPT: git branch -D exit %s; the reason is in %s. Fix: %s\n' \
       "${ctx}" "${br}" "${rc}" "${log}" "${fix}" >>"${LOG_DIR}/${ts}.branch-kept" 2>/dev/null; then
     echo "athena-shipwright: could not write ${LOG_DIR}/${ts}.branch-kept; this stderr is the only record of the kept branch." >&2
   fi
   echo "athena-shipwright: could not delete branch ${br} (${ctx}): git branch -D exit ${rc}. Its work is safe (landed or on origin), so nothing is lost; the branch is KEPT. Not counted as a failure. Record: ${LOG_DIR}/${ts}.branch-kept" >&2
-  echo "  Fix: read ${log} for the reason (for a held ref lock, confirm nothing is writing to ${MAIN_CHECKOUT} and remove the stale refs/heads/${br}.lock), then run '${fix}'." >&2
+  echo "  Fix: read ${log} for the reason (for a held ref lock, confirm nothing is writing to ${MAIN_CHECKOUT} and remove the stale ${reflock}), then run '${fix}'." >&2
   return 0
 }
 

@@ -87,7 +87,7 @@
 #                       result, branch_delete=ok or one branch_delete: line
 #                       per kept branch (below), and the summary
 #   runs/<ts>.branch-kept  one line per landed lane branch whose `git branch -D`
-#                       was refused this tick (a held ref lock, a corrupt ref),
+#                       was refused this tick (a held ref lock, or any other refusal),
 #                       with git's exit and the Fix: delete to run. Written at
 #                       the refusal, on any exit path. Never counted, never
 #                       changes the exit (DND-1715)
@@ -669,29 +669,31 @@ commit_landed() { # commit-ish
 }
 
 # delete_lane_branch <branch> <context> — `git branch -D` a lane branch whose
-# work is on origin/main. A refused delete (a held ref lock, a corrupt ref) used
-# to be dropped (`|| true`), so the branch stayed with nothing past the git log
+# work is on origin/main. A ref git cannot read never gets here (retire_lane's
+# COULD NOT TELL comes first). A refused delete (a held ref lock, or any other
+# refusal) used to be dropped (`|| true`), so the branch stayed with nothing past the git log
 # and lane branches piled up unseen (DND-1715). Now the branch is KEPT and named,
 # with the delete to run, in stderr and in this tick's runs/<ts>.branch-kept,
 # which finish copies into the .run. The record is written at once, so it
 # survives a reap in a subshell and every early exit. A refused delete is
 # hygiene, never an outcome: it returns 0, never changes the exit and never
 # feeds the wedge (owner rule: never pause the lead-time cron).
-# LAST_DELETE_REFUSED says whether the last call was refused.
+# LAST_DELETE_REFUSED says whether the last retire_lane's delete was refused;
+# retire_lane resets it first, so a branch it never tried to delete reads 0.
 LAST_DELETE_REFUSED=0
 delete_lane_branch() {
-  local br="$1" ctx="$2" rc=0 fix
-  LAST_DELETE_REFUSED=0
+  local br="$1" ctx="$2" rc=0 fix reflock
   git -C "${MAIN_CHECKOUT}" branch -D "${br}" >>"${GIT_LOG}" 2>&1 || rc=$?
   [ "${rc}" -eq 0 ] && return 0
   LAST_DELETE_REFUSED=1
   fix="git -C ${MAIN_CHECKOUT} branch -D ${br}"
+  reflock="$(git -C "${MAIN_CHECKOUT}" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || echo "<git common dir>")/refs/heads/${br}.lock"
   if ! printf '%s: branch %s KEPT: git branch -D exit %s; the reason is in %s. Fix: %s\n' \
       "${ctx}" "${br}" "${rc}" "${GIT_LOG}" "${fix}" >>"${LOG_DIR}/${ts}.branch-kept" 2>/dev/null; then
     echo "${ME}: could not write ${LOG_DIR}/${ts}.branch-kept; this stderr is the only record of the kept branch." >&2
   fi
   echo "${ME}: could not delete branch ${br} (${ctx}): git branch -D exit ${rc}. Its commits are on origin/main, so nothing is lost; the branch is KEPT. Not counted as a failure. Record: ${LOG_DIR}/${ts}.branch-kept" >&2
-  echo "  Fix: read the end of ${GIT_LOG} for the reason (for a held ref lock, confirm nothing is writing to ${MAIN_CHECKOUT} and remove the stale refs/heads/${br}.lock), then run '${fix}'." >&2
+  echo "  Fix: read the end of ${GIT_LOG} for the reason (for a held ref lock, confirm nothing is writing to ${MAIN_CHECKOUT} and remove the stale ${reflock}), then run '${fix}'." >&2
   return 0
 }
 
@@ -701,6 +703,7 @@ delete_lane_branch() {
 # branch ref git cannot read is COULD NOT TELL: kept as found, named, return 2.
 retire_lane() {
   local rid="$1" ctx="$2" wt="${LANES_DIR}/$1" br="leadtime/$1"
+  LAST_DELETE_REFUSED=0
   git -C "${MAIN_CHECKOUT}" worktree remove --force "${wt}" >>"${GIT_LOG}" 2>&1 || rm -rf -- "${wt}"
   git -C "${MAIN_CHECKOUT}" worktree prune >>"${GIT_LOG}" 2>&1 || true
   # `show-ref --exists` (git >= 2.43): 0 exists, 2 absent, anything else is a
