@@ -6739,8 +6739,8 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
   re-request does not reopen, and the item shows again on the merge
   request's next change. That is the safe direction of *A close needs an
   event no older than the row*, accepted.
-  The create, reopen and close writes above also set `forge_trigger`, by the
-  rules in *The storage boundary* → list 2 (the *Later (2026-10-02)* note).
+  The create and reopen writes above also set `forge_trigger`, and a close
+  leaves it as stored, by the rules in *The storage boundary* → list 2.
 
   **Later (2026-09-28):** the reopen bullet before this one named "the forge
   family, DND-439" as a family with no revision token. Superseded: the family
