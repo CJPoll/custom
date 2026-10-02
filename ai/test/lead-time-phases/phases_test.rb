@@ -918,6 +918,15 @@ check("W13 the ledger row carries the flow and verify.gate_runs_s") do
     row_w.dig("phases", "queue", "s") == 1500 && row_w.dig("anchors", "land_start", "at") == "2026-10-01T04:30:00Z"
 end
 
+row_wf = fixture do
+  L::Ledger.improve_row(repo: "custom", landing: wl, anchors: wa, counters: {}, telemetry_status: :ok,
+                        ingested_at: t("2026-10-01T06:00:00Z"), origin: { "origin" => "foreign", "origin_source" => "x" },
+                        verify_gate_runs: gs)
+end
+check("W13 a foreign row records no phase_flow and no gate split: its phases are the foreign nulls") do
+  row_wf.key?("phase_flow") && row_wf["phase_flow"].nil? && !row_wf.dig("phases", "verify").key?("gate_runs_s")
+end
+
 # --summary: code time attributed to no phase, and the flows in the window.
 un_rows = [row(1).merge("code_s" => 200), # phases 10+100+5+20+10 = 145 -> 55 unattributed
            row(2).merge("code_s" => 500, "phases" => row(2)["phases"].merge("queue" => { "s" => nil, "na_reason" => "x" }),

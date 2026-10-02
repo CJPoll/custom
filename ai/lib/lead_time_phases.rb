@@ -503,6 +503,8 @@ module LeadTimePhases
 
       lo = anchors.fetch(from).at
       hi = anchors.fetch(to).at
+      # A run starting before lo cannot exist (gate_first is the first run),
+      # and one starting in hi's own second is left out (hi is floored).
       runs = Match.for_unit(events.items, landing, GATE_RUN_EVENTS).select { |e| Match.at(e) < hi }
       bare = runs.find { |e| !e["duration_s"].is_a?(Numeric) && Match.at(e) >= lo }
       if bare
@@ -740,7 +742,7 @@ module LeadTimePhases
       phases["verify"] = phases["verify"].merge(verify_gate_runs) if verify_gate_runs && !Origin.foreign?(origin)
       base(repo: repo, mode: "improve", landing: landing, ingested_at: ingested_at)
         .merge(origin)
-        .merge("phase_flow" => Phases.flow(anchors), "phases" => phases,
+        .merge("phase_flow" => Origin.foreign?(origin) ? nil : Phases.flow(anchors), "phases" => phases,
                "anchors" => anchors.transform_values(&:to_h_json),
                "telemetry" => telemetry_status.to_s)
         .merge(counters)

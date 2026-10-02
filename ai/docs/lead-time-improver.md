@@ -156,17 +156,24 @@ Lead time is the owner's definition: captain dispatch (the ticket's
    **with-critic flow**: `verify` = first gate run → the last green run's
    start; `integrate` = that run; `queue` = its end → the landing start;
    `merge` = the landing start → the landing. The landing start is the first
-   `merge.lock_wait` after the run, or the start of a timed `merge.landed`
-   push (gh-athena now writes `at` = push start and `duration_s`). The flow
-   applies only when the run is marked `with_critic` and a clean PASS lies
-   inside it; every landing measured under the old rule reads the same. A
-   push from before this change is a point event, so those landings read
-   `queue` and `merge` n/a with that reason. Rows are frozen at ingest and
-   are not re-derived: the window turns over in about a day, and a re-derive
-   would move the baselines that pending experiments compare against. Each
-   row records `phase_flow` and `verify.gate_runs_s`; `--summary` adds the
-   code time no phase holds (`unattributed`). The normative description is
-   `ai/bin/lead-time-phases --help`.
+   `merge.lock_wait` after the run or the start of a timed `merge.landed`
+   push (gh-athena now writes `at` = push start and `duration_s`), whichever
+   is earlier. The flow applies only when the run is marked `with_critic`
+   and a clean PASS lies inside it. A standalone-PASS landing reads the same
+   as before. A with-critic landing's old `merge` (integration end →
+   landing) held the wait for the admiral; that time is now `queue`, and
+   `merge` is only the landing itself. A push from before this change is a
+   point event, so such a landing reads `queue` and `merge` n/a with that
+   reason, rather than the old mislabelled `merge`. Rows are frozen at
+   ingest and are not re-derived: the window turns over in about a day, and
+   a re-derive would rewrite rows the journal and experiments already read.
+   **The series breaks here:** `verify`, `queue` and `merge` are not
+   comparable between rows with no `phase_flow` (before DND-1501) and
+   with-critic rows after it; `implement` and `integrate` carry over. Judge
+   no experiment on those three phases across this landing. Each row records
+   `phase_flow` and `verify.gate_runs_s`; `--summary` adds the code time no
+   phase holds (`unattributed`) and the rows per flow (`flows`). The
+   normative description is `ai/bin/lead-time-phases --help`.
 6. **Rolling window, typical and slow.** The ledger keeps every measured
    landing. The summary reports, per phase, over the last 20 landings: n
    measured, n n/a, median, p90, and the summed time. The biggest contributor

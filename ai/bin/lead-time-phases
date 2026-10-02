@@ -82,11 +82,16 @@ HELP = <<~TXT
   landing start: queue and merge are n/a with that reason. The custom ff
   landing's hand-held lock writes no merge.lock_wait (DND-1370), so its
   fetch and rebase under the lock read as queue.
-  Each improve row records `phase_flow` (with_critic | standalone) and
-  `phases.verify.gate_runs_s`: the gate-run wall (harness_gate.run or
-  gate.run, each clipped to verify) inside verify, so verify splits into
-  machine time and fix time. Rows are frozen at ingest, so a row ingested
-  before DND-1501 keeps its old reading (no phase_flow).
+  A standalone-PASS landing reads as before DND-1501. A with-critic
+  landing does not: its old merge (run end -> landing) is now queue +
+  merge. Rows are frozen at ingest, so a row ingested before DND-1501 keeps
+  its old reading (no phase_flow), and verify, queue and merge are not
+  comparable across that boundary; implement and integrate are.
+  Each improve row records `phase_flow` (with_critic | standalone; none
+  on a foreign row) and `phases.verify.gate_runs_s`: the gate-run wall
+  (harness_gate.run or gate.run, each clipped to verify) inside verify, to
+  split machine time from fix time. Concurrent runs each count, so it can
+  exceed verify; critic time is not in it.
 
   A phase whose anchor is missing is null with a reason; one whose anchors
   are out of order is "invalid" with a reason. Never 0, never negative.
@@ -136,7 +141,8 @@ HELP = <<~TXT
                    summed; n/a phases leave their time here, so an anchor
                    gap shows as a number. n_na counts rows with no code_s.
                    flows: the local rows per phase_flow (with_critic,
-                   standalone, unrecorded = ingested before DND-1501).
+                   standalone, unrecorded = no phase_flow: ingested
+                   before DND-1501, or a watch row).
                    Post-merge CI (DND-1614): the repo's idle_workflow
                    (ai/bin/lead-time-repos) also declares it for the tail.
                      a workflow file  CI declared: every 0 tail with no
