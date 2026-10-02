@@ -591,7 +591,9 @@ shipwright cron never writes Notion, so this is its own runner.
   can verify a click on a cron notice, so it has no buttons. Its veto is a
   `ticket.wontfix_veto` owner approval grant the server acts on
   (`veto=grant <grant_id> <channel>/<ts>`), or, when the server cannot give
-  one, by hand in Notion (`veto=by-hand <reason>`); `veto=UNSTATED` is loud
+  one, by hand in Notion (`veto=by-hand <reason>`). `veto=UNSTATED`,
+  `veto=CONFLICT` and any by-hand reason but `no_tool` or `class_unsupported`
+  are loud
   (`athena:epic-clustering` → *Won't-fix notices* → *On the cron*, DND-1758).
 
   **Later (2026-10-02, DND-1758):** this said the cron notice's veto was

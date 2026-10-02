@@ -11,12 +11,16 @@
 # Two rules live here:
 #   * request_args: the owner_approval_request arguments for one closure,
 #     typed and validated as the contract pins them, never coerced.
-#   * classify: the poster's outcome (no tool, a refusal's text, or the
-#     tool's answer) -> the veto form it got and the notices-file line.
-#     The form is "grant" only for a well-formed answer naming a grant and its
-#     approval message. Everything else is the by-hand fallback with a reason,
-#     so a fallback can never read as a grant post (a failed lookup must never
-#     look like an empty one).
+#   * classify: the poster's outcome (no tool, no request built, or the
+#     tool's answer or refusal, saved verbatim) -> the veto form it got and
+#     the notices-file line. The answer is classified by its CONTENT, never by
+#     which flag the poster chose. The form is "grant" only for a well-formed
+#     answer naming a grant and its approval message. Everything else is the
+#     by-hand fallback with a reason, so a fallback can never read as a grant
+#     post (a failed lookup must never look like an empty one).
+#
+# Which reasons are quiet in a .run record is the runner's, in one place:
+# scripts/athena-clustering-run.sh -> notice_summary.
 require "json"
 require_relative "epic_clustering"
 
@@ -28,6 +32,7 @@ module EpicClusteringVeto
   # Canonical lowercase hyphenated UUID: the contract refuses any other form.
   UUID_RE = /\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/.freeze
   REOPEN_TO = %w[Todo Parked].freeze
+  NOTE_PREFIX = "Won't Fix by the clustering cron: "
   NOTE_MAX = 300
   CHANNEL_RE = /\A[A-Z0-9]+\z/.freeze
   TS_RE = /\A[0-9]+\.[0-9]+\z/.freeze
@@ -43,11 +48,9 @@ module EpicClusteringVeto
   ].freeze
   # A server that does not have the tool at all answers like this (JSON-RPC
   # -32601, or the client's own "unknown tool"): the same as no tool listed.
+  # Read only when no refusal code is named, so a Fix: text cannot hide one.
   NO_TOOL_RE = /unknown tool|tool not found|method not found/i.freeze
-
-  # The by-hand reasons a .run record treats as expected (quiet). Every other
-  # by-hand reason means the server should have granted and did not: loud.
-  QUIET_REASONS = %w[no_tool class_unsupported].freeze
+  GRANT_KEYS = %w[grant_id channel ts click_expires_at].freeze
 
   module_function
 
@@ -57,28 +60,25 @@ module EpicClusteringVeto
     raise DataError, "reopen_to #{reopen_to.inspect} is not one of #{REOPEN_TO.join(', ')}" unless REOPEN_TO.include?(reopen_to)
     raise DataError, "title is empty; the note names the ticket's title" if title.to_s.strip.empty?
 
-    note = "Won't Fix by the clustering cron: #{title.to_s.strip}"
+    note = "#{NOTE_PREFIX}#{title.to_s.strip}"
     note = "#{note[0, NOTE_MAX - 3]}..." if note.length > NOTE_MAX
     { "action_class" => ACTION_CLASS,
       "target" => { "page_id" => page_id, "reopen_to" => reopen_to, "ticket" => ticket },
       "note" => note }
   end
 
-  # outcome: :no_tool, [:refusal, text], or [:result, text].
-  # Returns { form: "grant" | "by-hand", line: "veto DND-N ..." }.
+  # outcome: :no_tool, :no_request, or [:answer, text] (the tool's answer or
+  # refusal, saved verbatim). Returns { form: "grant" | "by-hand", line: ... }.
   def classify(ticket:, outcome:)
     check_ticket(ticket)
     return by_hand(ticket, "no_tool") if outcome == :no_tool
+    return by_hand(ticket, "request_unbuilt") if outcome == :no_request
 
     kind, text = outcome
-    case kind
-    when :refusal then by_hand(ticket, refusal_reason(text.to_s))
-    when :result then result_form(ticket, text.to_s)
-    else raise ArgumentError, "unknown outcome #{outcome.inspect}"
-    end
-  end
+    raise ArgumentError, "unknown outcome #{outcome.inspect}" unless kind == :answer
 
-  def quiet_reason?(reason) = QUIET_REASONS.include?(reason)
+    answer_form(ticket, text.to_s)
+  end
 
   def check_ticket(ticket)
     raise DataError, "ticket #{ticket.inspect} is not an id like DND-12" unless ticket.to_s.match?(TICKET_RE)
@@ -86,33 +86,47 @@ module EpicClusteringVeto
 
   def by_hand(ticket, reason) = { form: "by-hand", line: "veto #{ticket} by-hand #{reason}" }
 
-  def refusal_reason(text)
-    return "no_tool" if text.match?(NO_TOOL_RE)
+  def answer_form(ticket, text)
+    grant = grant_fields(text)
+    if grant
+      return { form: "grant", line: "veto #{ticket} grant #{grant['grant_id']} #{grant['channel']}/#{grant['ts']}" }
+    end
 
-    # The code the text names first: a refusal leads with its code, and its
-    # Fix: may name others.
-    code = REFUSAL_CODES.filter_map { |c| (i = text =~ /\b#{c}\b/) && [i, c] }.min&.last
-    return "class_unsupported" if code == "unknown_action_class"
-
-    "refused:#{code || 'unparsed'}"
+    by_hand(ticket, refusal_reason(text))
   end
 
-  def result_form(ticket, text)
-    grant = grant_fields(text)
-    return by_hand(ticket, "malformed_result") unless grant
+  # A named code wins; then a missing tool; then an answer that tried to be a
+  # grant and is malformed; anything else is an unparsed refusal.
+  def refusal_reason(text)
+    code = REFUSAL_CODES.filter_map { |c| (i = text =~ /\b#{c}\b/) && [i, c] }.min&.last
+    return "class_unsupported" if code == "unknown_action_class"
+    return "refused:#{code}" if code
+    return "no_tool" if text.match?(NO_TOOL_RE)
+    return "malformed_result" if grant_shaped?(text)
 
-    { form: "grant", line: "veto #{ticket} grant #{grant['grant_id']} #{grant['channel']}/#{grant['ts']}" }
+    "refused:unparsed"
   end
 
   def grant_fields(text)
-    doc = JSON.parse(text)
-    doc = doc["data"] if doc.is_a?(Hash) && doc["data"].is_a?(Hash)
-    return nil unless doc.is_a?(Hash)
+    doc = answer_object(text)
+    return nil unless doc && !doc.key?("error")
     return nil unless doc["grant_id"].is_a?(String) && doc["grant_id"].match?(UUID_RE)
     return nil unless doc["channel"].is_a?(String) && doc["channel"].match?(CHANNEL_RE)
     return nil unless doc["ts"].is_a?(String) && doc["ts"].match?(TS_RE)
+    return nil unless doc["click_expires_at"].is_a?(String) && !doc["click_expires_at"].empty?
 
     doc
+  end
+
+  def grant_shaped?(text)
+    doc = answer_object(text)
+    !doc.nil? && GRANT_KEYS.any? { |k| doc.key?(k) }
+  end
+
+  def answer_object(text)
+    doc = JSON.parse(text)
+    doc = doc["data"] if doc.is_a?(Hash) && doc["data"].is_a?(Hash)
+    doc.is_a?(Hash) ? doc : nil
   rescue JSON::ParserError
     nil
   end

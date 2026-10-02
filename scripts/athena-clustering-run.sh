@@ -284,14 +284,17 @@ work exists> --title <its title> --out <file>, and draft its notice twice, with 
 Send the top-level session the request file and both drafts as the skill says. \
 Finish with ONE line: what moved, merged, and closed, and whether the digest \
 was written.' While it runs, you post the won't-fix notices it sends you, and do \
-nothing else yourself. For each notice: first request its veto grant. If \
-mcp__athena__owner_approval_request is not in your tool list, run \
+nothing else yourself. For each notice: first request its veto grant. If no \
+request file came with it, run ${VETO_HELPER} veto-form --ticket DND-N \
+--no-request. Otherwise load the tool with ToolSearch \
+select:mcp__athena__owner_approval_request; only if that finds nothing, run \
 ${VETO_HELPER} veto-form --ticket DND-N --no-tool. Otherwise call it with the \
 request file's action_class, target and note and inbox_name \
-custom-session.jsonl, save its answer, or its refusal text, verbatim to a file \
-with the Write tool, and run ${VETO_HELPER} veto-form --ticket DND-N --result \
-<file> (or --refusal <file>). Append the veto DND-N line it prints after line: \
-to the file named by \$CLUSTERING_NOTICES with one Bash command. Then resolve \
+custom-session.jsonl, save its answer or its refusal text verbatim to a file \
+with the Write tool, and run ${VETO_HELPER} veto-form --ticket DND-N --answer \
+<file>. Append the veto DND-N line it prints after line: to the file named by \
+\$CLUSTERING_NOTICES with one Bash command; when veto-form exits non-zero, \
+append no veto line and post the --veto-by-hand draft. Then resolve \
 the owner's Slack id with ${MAIN_CHECKOUT}/ai/bin/private-overlay get slack \
 .people.owner.user_id, open the DM with mcp__athena__slack_open_dm, and post \
 the draft that matches the form veto-form printed (form: grant is the \
@@ -687,6 +690,11 @@ notice_lines() {
     function add(id) { if (!(id in seen)) { seen[id] = 1; order[++n] = id } }
     function okid(s) { return s ~ /^DND-[0-9]+$/ }
     function okuuid(s) { return s ~ /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/ }
+    function setveto(id, v) {
+      if (!(id in veto) || veto[id] == v) veto[id] = v
+      else if (veto[id] !~ /^CONFLICT /) veto[id] = "CONFLICT " veto[id] " | " v
+      else veto[id] = veto[id] " | " v
+    }
     { sub(/\r$/, "") }
     NF == 0 { next }
     $1 == "closed" && NF == 2 && okid($2) { add($2); next }
@@ -697,11 +705,14 @@ notice_lines() {
     # DND-1758: which veto the notice offers. A grant names its id (a
     # canonical lowercase UUID) and the approval message; a by-hand fallback
     # names its reason (epic-clustering veto-form prints the line).
+    # Two different veto lines for one ticket are a CONFLICT, never "the last
+    # one wins": the record cannot say which form the owner got.
     $1 == "veto" && NF == 5 && okid($2) && $3 == "grant" && okuuid($4) && $5 ~ /^[A-Z0-9]+\/[0-9]+\.[0-9]+$/ {
-      veto[$2] = "grant " $4 " " $5; add($2); next
+      setveto($2, "grant " $4 " " $5); add($2); next
     }
-    $1 == "veto" && NF == 4 && okid($2) && $3 == "by-hand" && $4 ~ /^(no_tool|class_unsupported|malformed_result|refused:[a-z_]+)$/ {
-      veto[$2] = "by-hand " $4; add($2); next
+    $1 == "veto" && NF == 4 && okid($2) && $3 == "by-hand" \
+      && $4 ~ /^(no_tool|class_unsupported|request_unbuilt|malformed_result|refused:[a-z_]+)$/ {
+      setveto($2, "by-hand " $4); add($2); next
     }
     { bad[++nb] = sprintf("notice: UNREADABLE %s line %d: %s", f, NR, $0) }
     END {
@@ -733,15 +744,18 @@ notice_summary() {
     sed 's/^/  /' <<<"${problems}" >&2
     echo "  Fix: read ${log} and ${NOTICES}; check Notion for tickets this run set to Won't Fix, and post each one's notice to the owner by hand (athena:epic-clustering -> Won't-fix notices), or reopen the ticket." >&2
   fi
-  # DND-1758: a veto the record cannot state, or a grant request the server
-  # refused for a reason other than lacking the tool or the class, is loud.
-  # no_tool and class_unsupported are the expected fallback until the server
-  # ships the class, so they are recorded and quiet.
-  problems="$(grep -e ' veto=UNSTATED ' -e ' veto=by-hand refused:' -e ' veto=by-hand malformed_result' <<<"${NOTICE_LINES}" || true)"
+  # DND-1758: a veto the record cannot state, a conflicting one, a request the
+  # architect never built, or a grant request the server refused for a reason
+  # other than lacking the tool or the class, is loud. no_tool and
+  # class_unsupported are the expected fallback until the server ships the
+  # class, so they are recorded and quiet. This is the one home of that
+  # quiet set (athena:epic-clustering -> Won't-fix notices cites it).
+  problems="$(grep -e ' veto=UNSTATED ' -e ' veto=CONFLICT ' -e ' veto=by-hand refused:' \
+    -e ' veto=by-hand malformed_result' -e ' veto=by-hand request_unbuilt' <<<"${NOTICE_LINES}" || true)"
   [ -n "${problems}" ] || return 0
   echo "${ME}: run ${ts}: a won't-fix notice's veto is not the grant the server should have given, or is not recorded:" >&2
   sed 's/^/  /' <<<"${problems}" >&2
-  echo "  Fix: read ${log} and ${NOTICES}. veto=UNSTATED: the poster skipped epic-clustering veto-form; veto=by-hand refused:<code> or malformed_result: the server refused or garbled the ticket.wontfix_veto request (ai/contracts/athena-events.md -> Owner approval grants -> The \`ticket.wontfix_veto\` class). The by-hand notice still lets the owner veto in Notion." >&2
+  echo "  Fix: read ${log} and ${NOTICES}. veto=UNSTATED: the poster skipped epic-clustering veto-form; veto=CONFLICT: it recorded two forms, so check the owner's DM for which one was posted; request_unbuilt: the architect sent no veto-request file; refused:<code> or malformed_result: the server refused or garbled the ticket.wontfix_veto request (ai/contracts/athena-events.md -> Owner approval grants -> The \`ticket.wontfix_veto\` class). A by-hand notice still lets the owner veto in Notion." >&2
 }
 # finish <exit> <outcome> — every tick that spawned a session ends here. It
 # writes runs/<ts>.run and sends ONE harness-lane drain request re: it

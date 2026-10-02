@@ -105,15 +105,17 @@ USAGE = <<~TXT
 
   veto-form (DND-1758): classify the poster's grant request into the veto form
   the notice gets, and the line to append to the notices file. Exactly one of:
-    --no-tool           mcp__athena__owner_approval_request is not in the
-                        session's tool list
-    --refusal FILE      the refusal text the tool answered, saved verbatim
-    --result FILE       the tool's answer, saved verbatim
+    --no-tool           mcp__athena__owner_approval_request cannot be loaded
+                        (ToolSearch select: finds nothing)
+    --no-request        no veto-request file came with the notice
+    --answer FILE       the tool's answer or refusal, saved verbatim; it is
+                        classified by its content
   with --ticket DND-N. Prints "form: grant" or "form: by-hand", then
   "line: veto DND-N grant <grant_id> <channel>/<ts>" or
   "line: veto DND-N by-hand <reason>". The reasons: no_tool (no tool, or the
   server has none), class_unsupported (unknown_action_class: the server lacks
-  the class), refused:<code>, refused:unparsed, malformed_result.
+  the class), request_unbuilt, refused:<code>, refused:unparsed,
+  malformed_result.
 
   c3-feedback (one of):
     --merged PAIRS      DUPLICATE=KEEP[,DUPLICATE=KEEP...], e.g. DND-9=DND-5
@@ -148,7 +150,7 @@ SPEC = {
   "--session" => :value, "--blocks-out" => :value, "--json" => :switch, "--self-test" => :switch,
   "--merged" => :value, "--veto-by-hand" => :switch, "--veto-by-grant" => :switch,
   "--page-id" => :value, "--reopen-to" => :value, "--out" => :value, "--no-tool" => :switch,
-  "--refusal" => :value, "--result" => :value,
+  "--no-request" => :switch, "--answer" => :value,
   "--help" => :switch
 }.freeze
 
@@ -158,7 +160,7 @@ ALLOWED = {
   "digest" => %w[--from-json --started --pass-summary --no-bodies --now --session --blocks-out --json],
   "notice" => %w[--ticket --title --background --why --session --blocks-out --veto-by-hand --veto-by-grant],
   "veto-request" => %w[--ticket --page-id --reopen-to --title --out],
-  "veto-form" => %w[--ticket --no-tool --refusal --result],
+  "veto-form" => %w[--ticket --no-tool --no-request --answer],
   "c3-feedback" => %w[--merged --pass-summary --from-json --json]
 }.freeze
 
@@ -449,13 +451,13 @@ end
 # a line that would read as a classified outcome.
 def cmd_veto_form(opts)
   usage_error("veto-form needs --ticket") unless opts["--ticket"]
-  given = %w[--no-tool --refusal --result].select { |f| opts[f] }
-  usage_error("veto-form needs exactly one of --no-tool, --refusal FILE, --result FILE") unless given.size == 1
+  given = %w[--no-tool --no-request --answer].select { |f| opts[f] }
+  usage_error("veto-form needs exactly one of --no-tool, --no-request, --answer FILE") unless given.size == 1
 
   outcome = case given.first
             when "--no-tool" then :no_tool
-            when "--refusal" then [:refusal, read_answer(opts["--refusal"])]
-            else [:result, read_answer(opts["--result"])]
+            when "--no-request" then :no_request
+            else [:answer, read_answer(opts["--answer"])]
             end
   r = VETO.classify(ticket: opts["--ticket"], outcome: outcome)
   puts "form: #{r[:form]}"

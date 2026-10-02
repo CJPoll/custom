@@ -53,9 +53,10 @@ check("request_args: the class is ticket.wontfix_veto and the target is exactly 
     !a.key?("inbox_name")
 end
 
-check("request_args: the note is at most 300 characters (the contract's note limit)") do
+check("request_args: the note keeps its prefix and is at most 300 characters (the contract's note limit)") do
   a = VETO.request_args(ticket: "DND-9", page_id: PAGE, reopen_to: "Parked", title: "x" * 900)
-  a["note"].length <= 300 && a["target"]["reopen_to"] == "Parked"
+  a["note"].length == 300 && a["note"].start_with?("Won't Fix by the clustering cron: ") &&
+    a["note"].end_with?("...") && a["note"].ascii_only? && a["target"]["reopen_to"] == "Parked"
 end
 
 check("request_args: a malformed target is refused, never coerced (ticket, page id, reopen_to)") do
@@ -76,52 +77,67 @@ end
 
 ok_result = JSON.generate("grant_id" => GRANT, "channel" => "D0FAKE0001", "ts" => "1700000000.000300",
                           "click_expires_at" => "2026-10-09T13:00:00Z")
+ans = ->(text) { VETO.classify(ticket: "DND-9", outcome: [:answer, text]) }
 
 check("classify: a well-formed grant answer is the grant form, naming the grant and its approval message") do
-  VETO.classify(ticket: "DND-9", outcome: [:result, ok_result]) ==
-    { form: "grant", line: "veto DND-9 grant #{GRANT} D0FAKE0001/1700000000.000300" }
+  ans.call(ok_result) == { form: "grant", line: "veto DND-9 grant #{GRANT} D0FAKE0001/1700000000.000300" }
 end
 
 check("classify: a data-wrapped grant answer is read the same") do
-  VETO.classify(ticket: "DND-9", outcome: [:result, JSON.generate("data" => JSON.parse(ok_result))])[:form] == "grant"
+  ans.call(JSON.generate("data" => JSON.parse(ok_result)))[:form] == "grant"
 end
 
 check("classify: no owner_approval_request tool is the by-hand fallback, reason no_tool") do
   VETO.classify(ticket: "DND-9", outcome: :no_tool) == { form: "by-hand", line: "veto DND-9 by-hand no_tool" }
 end
 
+check("classify: no request file from the architect is request_unbuilt, never the quiet no_tool") do
+  VETO.classify(ticket: "DND-9", outcome: :no_request) ==
+    { form: "by-hand", line: "veto DND-9 by-hand request_unbuilt" }
+end
+
 check("classify: a server that lacks the tool (unknown tool / method not found) is no_tool too") do
-  %w[Unknown\ tool:\ owner_approval_request Method\ not\ found].all? do |t|
-    VETO.classify(ticket: "DND-9", outcome: [:refusal, "MCP error -32601: #{t}"])[:line] == "veto DND-9 by-hand no_tool"
+  ["Unknown tool: owner_approval_request", "Method not found"].all? do |t|
+    ans.call("MCP error -32601: #{t}")[:line] == "veto DND-9 by-hand no_tool"
   end
 end
 
 check("classify: unknown_action_class (the server does not have the class yet) is class_unsupported") do
   text = "MCP error -32000: unknown_action_class: ticket.wontfix_veto. Fix: use one of merge.pr_only_workflow, " \
          "priority.transition"
-  VETO.classify(ticket: "DND-9", outcome: [:refusal, text]) ==
-    { form: "by-hand", line: "veto DND-9 by-hand class_unsupported" }
+  ans.call(text) == { form: "by-hand", line: "veto DND-9 by-hand class_unsupported" }
 end
 
-check("classify: any other named refusal keeps its code; an unnamed one is refused:unparsed") do
-  VETO.classify(ticket: "DND-9", outcome: [:refusal, "rate_limited: wait 120 seconds. Fix: ..."])[:line] ==
-    "veto DND-9 by-hand refused:rate_limited" &&
-    VETO.classify(ticket: "DND-9", outcome: [:refusal, "target_invalid (field page_id); Fix: see ticket_not_wont_fix"])[:line] ==
+check("classify: a JSON-RPC error object naming unknown_action_class is class_unsupported, not malformed") do
+  ans.call(JSON.generate("code" => -32_000, "message" => "unknown_action_class: ticket.wontfix_veto"))[:line] ==
+    "veto DND-9 by-hand class_unsupported"
+end
+
+check("classify: a named code wins over 'tool not found' in its Fix: text") do
+  ans.call("rate_limited: wait 120 seconds. Fix: if the tool not found, reload")[:line] ==
+    "veto DND-9 by-hand refused:rate_limited"
+end
+
+check("classify: any other named refusal keeps its code; the first named wins; an unnamed one is refused:unparsed") do
+  ans.call("rate_limited: wait 120 seconds. Fix: ...")[:line] == "veto DND-9 by-hand refused:rate_limited" &&
+    ans.call("target_invalid (field page_id); Fix: see ticket_not_wont_fix")[:line] ==
       "veto DND-9 by-hand refused:target_invalid" &&
-    VETO.classify(ticket: "DND-9", outcome: [:refusal, "something broke"])[:line] ==
-      "veto DND-9 by-hand refused:unparsed"
+    ans.call("something broke")[:line] == "veto DND-9 by-hand refused:unparsed" &&
+    ans.call("not json")[:line] == "veto DND-9 by-hand refused:unparsed" &&
+    ans.call(JSON.generate([1, 2]))[:line] == "veto DND-9 by-hand refused:unparsed"
 end
 
-check("classify: an answer missing grant_id, channel or ts, or with a malformed one, is malformed_result, never a grant") do
+check("classify: a grant-shaped answer missing or malforming a field is malformed_result, never a grant") do
+  good = JSON.parse(ok_result)
   bad = [
-    "not json",
-    JSON.generate("channel" => "D0FAKE0001", "ts" => "1700000000.000300"),
-    JSON.generate("grant_id" => GRANT.upcase, "channel" => "D0FAKE0001", "ts" => "1700000000.000300"),
-    JSON.generate("grant_id" => GRANT, "channel" => "d0fake", "ts" => "1700000000.000300"),
-    JSON.generate("grant_id" => GRANT, "channel" => "D0FAKE0001", "ts" => 1_700_000_000.0003),
-    JSON.generate([1, 2])
+    good.except("grant_id"),
+    good.except("click_expires_at"),
+    good.merge("grant_id" => GRANT.upcase),
+    good.merge("channel" => "d0fake"),
+    good.merge("ts" => 1_700_000_000.0003),
+    good.merge("error" => { "code" => "x" })
   ]
-  bad.all? { |b| VETO.classify(ticket: "DND-9", outcome: [:result, b])[:line] == "veto DND-9 by-hand malformed_result" }
+  bad.all? { |b| ans.call(JSON.generate(b))[:line] == "veto DND-9 by-hand malformed_result" }
 end
 
 check("classify: a bad ticket id is refused before any classification") do
@@ -174,14 +190,19 @@ check("cli: veto-form --no-tool prints the by-hand form and its notices line") d
   code.zero? && out.lines.map(&:chomp) == ["form: by-hand", "line: veto DND-9 by-hand no_tool"]
 end
 
-check("cli: veto-form --result FILE prints the grant form; --refusal FILE the by-hand one") do
+check("cli: veto-form --no-request prints request_unbuilt") do
+  out, _, code = run("veto-form", "--ticket", "DND-9", "--no-request")
+  code.zero? && out.include?("line: veto DND-9 by-hand request_unbuilt")
+end
+
+check("cli: veto-form --answer FILE classifies by content: a grant, or a refusal") do
   Dir.mktmpdir do |d|
-    res = File.join(d, "DND-1758-result.json")
-    ref = File.join(d, "DND-1758-refusal.txt")
+    res = File.join(d, "DND-1758-answer-1.txt")
+    ref = File.join(d, "DND-1758-answer-2.txt")
     File.write(res, ok_result)
     File.write(ref, "unknown_action_class: ticket.wontfix_veto")
-    o1, _, c1 = run("veto-form", "--ticket", "DND-9", "--result", res)
-    o2, _, c2 = run("veto-form", "--ticket", "DND-9", "--refusal", ref)
+    o1, _, c1 = run("veto-form", "--ticket", "DND-9", "--answer", res)
+    o2, _, c2 = run("veto-form", "--ticket", "DND-9", "--answer", ref)
     c1.zero? && o1.include?("form: grant") && o1.include?("line: veto DND-9 grant #{GRANT} D0FAKE0001/1700000000.000300") &&
       c2.zero? && o2.include?("form: by-hand") && o2.include?("line: veto DND-9 by-hand class_unsupported")
   end
@@ -189,8 +210,8 @@ end
 
 check("cli: veto-form needs exactly one outcome; an unreadable file is exit 3, never a fallback line") do
   _, e1, c1 = run("veto-form", "--ticket", "DND-9")
-  _, e2, c2 = run("veto-form", "--ticket", "DND-9", "--no-tool", "--refusal", "/dev/null")
-  o3, e3, c3 = run("veto-form", "--ticket", "DND-9", "--result", "/nonexistent/DND-1758-result.json")
+  _, e2, c2 = run("veto-form", "--ticket", "DND-9", "--no-tool", "--answer", "/dev/null")
+  o3, e3, c3 = run("veto-form", "--ticket", "DND-9", "--answer", "/nonexistent/DND-1758-answer.txt")
   c1 == 2 && e1.include?("Fix:") && c2 == 2 && e2.include?("Fix:") &&
     c3 == 3 && e3.include?("Fix:") && !o3.include?("line:")
 end

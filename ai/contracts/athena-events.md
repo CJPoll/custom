@@ -3832,6 +3832,19 @@ reads the click (DND-1749). This class moves the veto to the server, so it
 needs no session at all. Ratified 2026-10-02 (DND-1758). The custom poster is
 `athena:epic-clustering` → *Won't-fix notices* → *On the cron*.
 
+**Status.** Nothing of it is built in gen_saas. It rides DND-563's T2–T4,
+also unbuilt, so until both ship every request ends in the poster's by-hand
+fallback, and the cron's `.run` record names it (`veto=by-hand no_tool`).
+
+**Prerequisite: a personal Notion integration that may write the tickets
+data source.** The server reads and writes the ticket with a per-owner
+integration token for the owner's personal workspace, held server-side like
+the app's other secrets, with update-content capability scoped to the
+tickets data source. Granting that capability and binding the token is a
+console and secret step only the owner can run (`~/.claude/CLAUDE.md` →
+*Owner approval policy* → *Only Cody can run*). Until it is done, every
+request answers `notion_not_configured`.
+
 - **Requested by a session, like `priority.transition`'s requester.** A
   poster calls `owner_approval_request` with `action_class`
   `ticket.wontfix_veto`, the target, a note, and its own `inbox_name`. The
@@ -4380,6 +4393,14 @@ Stated, not hidden:
   organizers and guests, at most one per meeting in that day's digest. With
   `ticket.wontfix_veto` it includes reopening a ticket the fleet closed Won't
   Fix, which is reversible by closing it again.
+- **The server gains a write path into the owner's personal workspace.** The
+  `ticket.wontfix_veto` token can update pages in the tickets data source,
+  not only the one Status the class writes. The class's reach is enforced in
+  code (*The `ticket.wontfix_veto` class* → *What it can reach*); the token's
+  scope is the outer bound if that code is wrong or the token leaks.
+- **The rate limit is shared.** `owner_approval_request` allows 10 requests
+  per machine per hour across every class, so a clustering pass that closes
+  more tickets than that falls back to by hand for the rest.
 - **The finest binding is the machine.** Machine tokens are per machine, not
   per session, so a sibling session on the requesting machine could redeem the
   identical binding. That is the same action on the same SHA.

@@ -121,6 +121,13 @@ case "$(cat "$d/mode" 2>/dev/null || echo ok)" in
              printf 'closed DND-906\nveto DND-906 by-hand class_unsupported\nposted DND-906 D0FAKE0001/1700000000.000400\n' >>"$notices"
              printf 'closed DND-907\nveto DND-907 by-hand refused:rate_limited\nposted DND-907 D0FAKE0001/1700000000.000500\n' >>"$notices"
              exit 0 ;;
+  loudveto)  : >"$CLUSTERING_RECEIPT"; echo "moved 0, merged 0, closed 0, won't fix 4" >"$CLUSTERING_SUMMARY"
+             printf 'closed DND-910\nveto DND-910 by-hand refused:unparsed\nfailed DND-910 slack_post timed out\n' >>"$notices"
+             printf 'closed DND-911\nveto DND-911 by-hand malformed_result\nposted DND-911 D0FAKE0001/1700000000.000900\n' >>"$notices"
+             printf 'closed DND-912\nveto DND-912 by-hand request_unbuilt\nposted DND-912 D0FAKE0001/1700000000.001000\n' >>"$notices"
+             printf 'closed DND-913\nveto DND-913 grant aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee D0FAKE0001/1700000000.001100\n' >>"$notices"
+             printf 'veto DND-913 by-hand no_tool\nposted DND-913 D0FAKE0001/1700000000.001200\n' >>"$notices"
+             exit 0 ;;
   unstated)  : >"$CLUSTERING_RECEIPT"; echo "moved 0, merged 0, closed 0, won't fix 1" >"$CLUSTERING_SUMMARY"
              printf 'closed DND-908\nposted DND-908 D0FAKE0001/1700000000.000600\n' >>"$notices"
              exit 0 ;;
@@ -220,7 +227,10 @@ notice_brief() { # <file>
 veto_brief() { # <file>
   grep -qF 'mcp__athena__owner_approval_request' "$1" && grep -qF 'veto-request' "$1" \
     && grep -qF 'veto-form' "$1" && grep -qF -- '--veto-by-grant' "$1" && grep -qF -- '--no-tool' "$1" \
-    && grep -qF 'veto DND-N' "$1" && grep -qF 'form: grant' "$1" && grep -qF 'form: by-hand' "$1"
+    && grep -qF 'veto DND-N' "$1" && grep -qF 'form: grant' "$1" && grep -qF 'form: by-hand' "$1" \
+    && grep -qF -- '--no-request' "$1" && grep -qF -- '--answer' "$1" \
+    && grep -qF 'ToolSearch select:mcp__athena__owner_approval_request' "$1" \
+    && grep -qF 'exits non-zero, append no veto line' "$1"
 }
 for when in MORNING EVENING; do
   rc="$(run_runner "$c" CLUSTERING_NOW="${!when}" -- --dry-run)"
@@ -421,6 +431,24 @@ if grep -q 'DND-907' "$c/runner.err" && grep -q 'refused:rate_limited' "$c/runne
   ok "a refused grant request is loud with a Fix:; the expected class_unsupported fallback is not (DND-1758)"
 else
   bad "veto refused loud" "err=$(cat "$c/runner.err")"
+fi
+c="$(new_case)"; echo loudveto >"$c/mode"
+rc="$(run_runner "$c" CLUSTERING_NOW="$EVENING")"
+run_rec="$(newest "$c" run)"
+if [ "$rc" = 0 ] && grep -qx 'notice: NOT POSTED DND-910 slack_post timed out; veto=by-hand refused:unparsed' "$run_rec" \
+   && grep -qx 'notice: posted D0FAKE0001/1700000000.000900 DND-911 veto=by-hand malformed_result' "$run_rec" \
+   && grep -qx 'notice: posted D0FAKE0001/1700000000.001000 DND-912 veto=by-hand request_unbuilt' "$run_rec" \
+   && grep -qx 'notice: posted D0FAKE0001/1700000000.001200 DND-913 veto=CONFLICT grant aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee D0FAKE0001/1700000000.001100 | by-hand no_tool' "$run_rec"; then
+  ok "refused:unparsed, malformed_result, request_unbuilt and two different veto lines (CONFLICT) are recorded per closure (DND-1758)"
+else
+  bad "loud veto lines" "rc=$rc run=$(cat "$run_rec" 2>&1)"
+fi
+if grep -q 'veto=by-hand refused:unparsed' "$c/runner.err" && grep -q 'veto=by-hand malformed_result' "$c/runner.err" \
+   && grep -q 'veto=by-hand request_unbuilt' "$c/runner.err" && grep -q 'veto=CONFLICT' "$c/runner.err" \
+   && [ "$(grep -c 'Fix:' "$c/runner.err")" -ge 2 ]; then
+  ok "each of those is loud on stderr with a Fix:, a NOT POSTED one included (DND-1758)"
+else
+  bad "loud veto stderr" "err=$(cat "$c/runner.err")"
 fi
 c="$(new_case)"; echo unstated >"$c/mode"
 rc="$(run_runner "$c" CLUSTERING_NOW="$EVENING")"
