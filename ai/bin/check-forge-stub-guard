@@ -118,13 +118,34 @@
 # THERE IS NO SUPPRESSION MARKER: an inline "ignore" comment is writable by the
 # same diff it would excuse. Source the helper.
 #
-# RESIDUAL (named, per ~/dev/custom/CLAUDE.md -> "A check's own bar must not
-# live in the diff it is checking"): the rules and STUBBED_TOOLS live in this
-# file, so a diff that edits the check itself can defeat it; review catches
-# that, not this check. And the count of suites stubbing on PATH is printed
-# but not ratcheted against origin/main: a guarded suite rewritten into an
-# unmodeled shape (above) while dropping the helper lowers the count with no
-# red. Only the floor (zero is FOUND NOTHING) is enforced.
+# THE LANDED BAR (DND-1680, per ~/dev/custom/CLAUDE.md -> "A check's own bar
+# must not live in the diff it is checking"). The scan above sees only the
+# shapes it models, so on its own a guarded suite rewritten into an unmodeled
+# shape (a stub written through a helper function, say) while dropping the
+# helper left the scan and passed. So the set of suites that stubbed a tool on
+# PATH is also read from what LANDED: ai/lib/landed.rb's points (the tip of
+# origin/main, proven against origin, and merge-base(HEAD, origin/main)), each
+# point's tree scanned with this same analyzer, the union taken so the stricter
+# point wins. Every suite in that set must still, in the working tree:
+#   * source the helper, call fsg_arm or fsg_make naming every tool it stubbed
+#     on PATH when it landed, and call fsg_verify -- whatever shape its stubs
+#     now take. One that does all three but no longer reads as stubbing on PATH
+#     passes and is NAMED in the OK line.
+#   * a suite whose path is gone is traced with git's rename detection
+#     (Landed.rename_pairs, 50%) to a file the diff added; a moved suite keeps
+#     its bar at the new path. One no file carries is NAMED as removed and
+#     passes: deleting a suite deletes its stubs. A suite stubbing on PATH that
+#     has not landed is NAMED as new.
+# A landed bar that cannot be read (no origin/main, origin unreachable, a
+# local ref that is not origin's, a landed suite the analyzer cannot finish) is
+# a FAILURE, "could not measure", naming every probe; never a pass.
+#
+# RESIDUAL (named): the rules and STUBBED_TOOLS live in this file, so a diff
+# that edits the check itself can defeat it; review catches that, not this
+# check. A suite moved AND rewritten past git's 50% similarity reads as one
+# removed and one new; both are named, but a new suite in an unmodeled shape
+# is still unseen (the WHAT IT DOES NOT MODEL list above). The ratchet keeps
+# what landed from being lost; it does not widen what the scanner sees.
 #
 # EXTENDING THE TOOL LIST: STUBBED_TOOLS below; fsg_arm and fsg_make take the
 # same names. Convert every suite the widened check flags in the same change.
@@ -137,6 +158,7 @@ require "fileutils"
 require "tempfile"
 
 require_relative "../lib/first_party"
+require_relative "../lib/landed"
 
 REPO = File.expand_path("../..", __dir__)
 
@@ -161,9 +183,11 @@ USAGE = <<~TXT.freeze
     ai/bin/check-forge-stub-guard --self-test   deterministic, hermetic suite
     ai/bin/check-forge-stub-guard --help        this text
 
-  Exit 0 = every suite that stubs a tool on PATH is guarded. Exit 1 = at
-  least one is not (each named), a file could not be scanned, or discovery
-  could not run or found nothing. Exit 2 = usage error.
+  Exit 0 = every suite that stubs a tool on PATH is guarded, and every suite
+  that did so guarded when it landed on origin/main still sources, arms and
+  verifies the helper. Exit 1 = at least one is not (each named), a file could
+  not be scanned, discovery could not run or found nothing, or the landed bar
+  could not be measured. Exit 2 = usage error.
 TXT
 
 FIX_TEXT = "Fix: in each suite named above, source the helper and use it the " \
@@ -546,7 +570,8 @@ def order_problems(lexed, on_path, use)
   problems.uniq
 end
 
-# => { on_path: [[lineno, tool, dir]], problems: [String], open: why-or-nil }
+# => { on_path: [[lineno, tool, dir]], problems: [String], use: helper_use,
+#      open: why-or-nil }
 def analyze(text)
   lexed = lex(text)
   dirs = path_dirs(lexed)
@@ -558,8 +583,8 @@ def analyze(text)
     !dir.empty? && (LANDED_TOOLS.include?(t) ? all_dirs : dirs).include?(dir)
   end
   problems = []
+  use = helper_use(lexed)
   unless on_path.empty?
-    use = helper_use(lexed)
     tools = on_path.map { |(_n, t, _d)| t }.uniq
     if !use[:sourced]
       problems << "stubs #{tools.join('/')} on PATH but never sources #{HELPER_REL}"
@@ -574,21 +599,25 @@ def analyze(text)
       problems.concat(order_problems(lexed, on_path, use)) if use[:armed]
     end
   end
-  { on_path: on_path, problems: problems, open: lexed[:open] }
+  { on_path: on_path, problems: problems, use: use, open: lexed[:open] }
 end
 
 # ---------------------------------------------------------------------------
 # Repository scan
 
 # => { suites: Integer, on_path: Integer, findings: [[rel, lines, problem]],
-#      unreadable: [[rel, why]], skipped: [rel] (a symlink or no working-tree file) }
+#      unreadable: [[rel, why]], skipped: [rel] (a symlink or no working-tree file),
+#      files: { rel => analyze result } for every test shell suite read,
+#      tracked: [rel] (every path git lists) }
 def scan(root)
   suites = 0
   on_path = 0
   skipped = []
   findings = []
   unreadable = []
-  FirstParty.git_ls(root, "--cached").sort.each do |rel|
+  files = {}
+  tracked = FirstParty.git_ls(root, "--cached").sort
+  tracked.each do |rel|
     next unless FirstParty.test_path?(rel)
 
     path = File.join(root, rel)
@@ -617,6 +646,7 @@ def scan(root)
       unreadable << [rel, "#{r[:open]}; the rest of the file was not scanned"]
       next
     end
+    files[rel] = r
     next if r[:on_path].empty?
 
     on_path += 1
@@ -624,8 +654,152 @@ def scan(root)
     r[:problems].each { |p| findings << [rel, lines, p] }
   end
   { suites: suites, on_path: on_path, findings: findings, unreadable: unreadable,
-    skipped: skipped }
+    skipped: skipped, files: files, tracked: tracked }
 end
+
+# ---------------------------------------------------------------------------
+# The landed ratchet (DND-1680). See "THE LANDED BAR" in the header.
+
+def utf8(text)
+  text = text.dup.force_encoding(Encoding::UTF_8)
+  text.valid_encoding? ? text : text.scrub
+end
+
+# The suites that stubbed a tool on PATH at the landed points: the union across
+# points, so the stricter one wins. Returns [set, paths]: set is
+# { rel => { tools: [tool], blobs: [blob] } }, paths every file path any point
+# holds. Raises Landed::Unreadable when a point cannot be read, or one of its
+# suites cannot be scanned (an unmeasured landed suite is not a smaller bar).
+def landed_set(root, points)
+  set = {}
+  paths = {}
+  points.each do |label, sha|
+    rows = Landed.tree_files(root, sha, label)
+    rows.each { |(rel, _mode, _blob)| paths[rel] = true }
+    rows = rows.select { |(rel, _mode, _blob)| FirstParty.test_path?(rel) }
+    texts = Landed.blob_texts(root, rows.map { |(_rel, _mode, blob)| blob }, label)
+    rows.each do |(rel, _mode, blob)|
+      text = utf8(texts.fetch(blob))
+      next unless shell_file?(rel, text)
+
+      r = begin
+        analyze(text)
+      rescue StandardError => e
+        raise Landed::Unreadable.new([[label, "#{sha[0, 12]}: #{rel}: the scanner crashed (#{e.class}: #{e.message})"]])
+      end
+      raise Landed::Unreadable.new([[label, "#{sha[0, 12]}: #{rel}: #{r[:open]}"]]) if r[:open]
+      next if r[:on_path].empty?
+
+      entry = (set[rel] ||= { tools: [], blobs: [] })
+      entry[:tools] |= r[:on_path].map { |(_n, tool, _d)| tool }
+      entry[:blobs] |= [blob]
+    end
+  end
+  [set, paths]
+end
+
+# What a landed suite must still do, whatever shape its stubs now take: source
+# the helper, arm it naming every tool it stubbed when it landed, verify it.
+def ratchet_problems(r, landed_tools)
+  use = r[:use]
+  return ["no longer sources #{HELPER_REL}"] unless use[:sourced]
+
+  problems = []
+  problems << "no longer calls fsg_arm or fsg_make" unless use[:armed]
+  missing = use[:armed] ? landed_tools - use[:arm_tools] : []
+  unless missing.empty?
+    problems << "no longer guards #{missing.join('/')} (fsg_arm/fsg_make now name only " \
+                "#{use[:arm_tools].join(' ')})"
+  end
+  problems << "no longer calls fsg_verify" unless use[:verified]
+  problems
+end
+
+# Analyzes a working-tree file the scan did not read as a suite (a landed
+# suite moved to a path that is not a test path). nil when it cannot be read.
+def analyze_path(root, rel)
+  path = File.join(root, rel)
+  return nil if File.symlink?(path) || !File.file?(path)
+
+  r = analyze(utf8(File.binread(path)))
+  r[:open] ? nil : r
+rescue StandardError
+  nil
+end
+
+# => { points:, findings: [[rel, problem]], kept: [rel], moved: [[old, new, score]],
+#      removed: [rel], added: [rel], landed: Integer }
+# Raises Landed::Unreadable / Landed::Mismatch when the bar cannot be measured.
+def ratchet(root, r, points)
+  set, landed_paths = landed_set(root, points)
+  findings = []
+  kept = []
+  moved = []
+  removed = []
+  tracked = r[:tracked].to_h { |rel| [rel, true] }
+
+  gone = set.keys.reject { |rel| tracked[rel] }
+  renames = {}
+  unless gone.empty?
+    added = r[:tracked].reject { |rel| landed_paths[rel] }.select do |rel|
+      p = File.join(root, rel)
+      File.file?(p) && !File.symlink?(p)
+    end
+    sources = gone.flat_map { |rel| set[rel][:blobs].map { |blob| [rel, blob] } }
+    Landed.rename_pairs(root, sources, added).each { |(old, now, score)| renames[old] ||= [now, score] }
+  end
+
+  set.keys.sort.each do |rel|
+    cur = rel
+    unless tracked[rel]
+      unless renames[rel]
+        removed << rel
+        next
+      end
+      cur, score = renames[rel]
+      moved << [rel, cur, score]
+    end
+    info = r[:files][cur] || analyze_path(root, cur)
+    unless info
+      findings << [rel, "#{cur} cannot be read as a shell suite now (a symlink, missing from " \
+                        "the working tree, or not shell), so its landed guard cannot be confirmed"]
+      next
+    end
+    label = cur == rel ? rel : "#{cur} (moved from #{rel})"
+    problems = ratchet_problems(info, set[rel][:tools])
+    problems.each { |p| findings << [label, p] }
+    kept << label if problems.empty? && info[:on_path].empty?
+  end
+
+  targets = moved.to_h { |(_old, now, _s)| [now, true] }
+  added = r[:files].select { |rel, info| !info[:on_path].empty? && !set.key?(rel) && !targets[rel] }.keys.sort
+  { points: points, findings: findings, kept: kept, moved: moved, removed: removed,
+    added: added, landed: set.size }
+end
+
+def names(list, max = 5)
+  "#{list.first(max).join(', ')}#{list.size > max ? ", ... (#{list.size} in all)" : ''}"
+end
+
+# One clause per named case, for the OK line and the failure output alike.
+def ratchet_note(rr)
+  parts = ["landed bar: #{rr[:landed]} suite(s) stubbing on PATH at #{Landed.describe(rr[:points])}"]
+  parts << "#{rr[:kept].size} no longer reads as stubbing on PATH but keeps the helper: #{names(rr[:kept])}" unless rr[:kept].empty?
+  parts << "moved: #{names(rr[:moved].map { |(o, n, s)| "#{o} -> #{n} (#{s}%)" })}" unless rr[:moved].empty?
+  parts << "removed (no working-tree file carries its content): #{names(rr[:removed])}" unless rr[:removed].empty?
+  parts << "new since the landed bar: #{names(rr[:added])}" unless rr[:added].empty?
+  parts.join("; ")
+end
+
+RATCHET_FIX = "Fix: restore the helper in each suite named: source #{HELPER_REL}, " \
+              "fsg_arm or fsg_make naming every tool it stubbed on PATH when it landed, " \
+              "and fsg_verify. Rewriting a stub into a shape this scanner does not model " \
+              "(a stub written through a helper function, to a relative path, ...) does " \
+              "not take the stub off PATH, so it does not take away the guard's job. If " \
+              "a suite truly no longer stubs any tool on PATH, keeping the three helper " \
+              "calls costs nothing. Deleting the suite is allowed and named. The bar is " \
+              "read from origin/main, so there is no in-repo marker: it moves when the " \
+              "owner lands the change on main."
 
 def skipped_note(r)
   return "0 tracked test path(s) skipped" if r[:skipped].empty?
@@ -634,7 +808,9 @@ def skipped_note(r)
     "from the working tree: #{r[:skipped].first(5).join(', ')}#{r[:skipped].size > 5 ? ', ...' : ''}"
 end
 
-def run_check(root = REPO)
+# landed: a lambda returning the landed points [[label, sha], ...] (the
+# self-test's fixture commit); nil reads origin/main through Landed.points.
+def run_check(root = REPO, landed: nil)
   begin
     r = scan(root)
   rescue FirstParty::MeasureError => e
@@ -664,21 +840,43 @@ def run_check(root = REPO)
          "not treat zero as clean."
     return 1
   end
-  if r[:findings].empty?
+  rr = nil
+  unmeasured = nil
+  begin
+    rr = ratchet(root, r, landed ? landed.call : Landed.points(root)[0])
+  rescue Landed::Unreadable => e
+    unmeasured = Landed.unreadable_lines("set of suites guarded on PATH", e.probes)
+  rescue Landed::Mismatch => e
+    unmeasured = Landed.mismatch_lines(e.local, e.remote, e.source)
+  end
+  if r[:findings].empty? && rr && rr[:findings].empty?
     puts "check-forge-stub-guard: OK -- #{r[:suites]} test shell suite(s) " \
          "considered, #{r[:on_path]} stubbing #{STUBBED_TOOLS.join('/')} on PATH, all guarded by " \
-         "#{HELPER_BASENAME}; 0 flagged; #{skipped_note(r)}."
+         "#{HELPER_BASENAME}; 0 flagged; #{skipped_note(r)}; #{ratchet_note(rr)}."
     return 0
   end
 
-  flagged = r[:findings].map(&:first).uniq.size
-  warn "check-forge-stub-guard: FAILED -- #{flagged} of #{r[:on_path]} suite(s) " \
-       "stubbing #{STUBBED_TOOLS.join('/')} on PATH (#{r[:suites]} test shell " \
-       "suite(s) considered) are not guarded, so a missing or non-executable " \
-       "stub would fall through to the REAL tool (DND-1647/DND-1666/DND-1667; " \
-       "#{skipped_note(r)}):"
-  r[:findings].each { |(rel, lines, p)| warn "  #{rel}:#{lines}: #{p}" }
-  warn "  #{FIX_TEXT}"
+  unless r[:findings].empty?
+    flagged = r[:findings].map(&:first).uniq.size
+    warn "check-forge-stub-guard: FAILED -- #{flagged} of #{r[:on_path]} suite(s) " \
+         "stubbing #{STUBBED_TOOLS.join('/')} on PATH (#{r[:suites]} test shell " \
+         "suite(s) considered) are not guarded, so a missing or non-executable " \
+         "stub would fall through to the REAL tool (DND-1647/DND-1666/DND-1667; " \
+         "#{skipped_note(r)}):"
+    r[:findings].each { |(rel, lines, p)| warn "  #{rel}:#{lines}: #{p}" }
+    warn "  #{FIX_TEXT}"
+  end
+  if unmeasured
+    warn "check-forge-stub-guard: FAILED -- could not measure the landed bar (DND-1680):"
+    unmeasured.each { |line| warn line }
+  elsif !rr[:findings].empty?
+    warn "check-forge-stub-guard: FAILED -- #{rr[:findings].map(&:first).uniq.size} suite(s) " \
+         "that stubbed a tool on PATH guarded by #{HELPER_BASENAME} when they landed have " \
+         "lost the guard (DND-1680; the bar is what landed, not what this tree's scanner " \
+         "can see; #{ratchet_note(rr)}):"
+    rr[:findings].each { |(rel, p)| warn "  #{rel}: landed guarded, but #{p}" }
+    warn "  #{RATCHET_FIX}"
+  end
   1
 end
 
@@ -892,6 +1090,8 @@ def run_self_test
     FileUtils.rm_rf(dir)
   end
 
+  count += ratchet_self_test(fail_case)
+
   if ok
     puts "check-forge-stub-guard: self-test OK (#{count} cases)"
     0
@@ -903,6 +1103,87 @@ def run_self_test
   end
 end
 
+# The landed ratchet (DND-1680) against fixture commits, with the landed points
+# injected (no origin). Returns the number of cases run.
+def ratchet_self_test(fail_case)
+  count = 0
+  guard = ". \"$H/ai/lib/forge-stub-guard.sh\"\n"
+  modeled = "echo x > \"$B/gh\"\nPATH=\"$B:$PATH\"\n"
+  # A stub written through a helper function: the scanner does not model it.
+  unmodeled = "mk() { echo x > \"$1\"; }\nmk \"$B/gh\"\nmk \"$B/glab\"\nPATH=\"$B:$PATH\"\n"
+  write = lambda do |dir, files|
+    files.each do |rel, body|
+      path = File.join(dir, rel)
+      FileUtils.mkdir_p(File.dirname(path))
+      body ? File.write(path, "#!/bin/bash\n#{body}") : FileUtils.rm_f(path)
+    end
+  end
+  dir = Dir.mktmpdir("check-forge-stub-guard-ratchet-")
+  begin
+    stage_fixture(dir)
+    write.call(dir, "ai/test/keep/self-test.sh" => "#{modeled}#{guard}fsg_arm \"$T/g\"\nfsg_verify\n",
+                    "ai/test/a/self-test.sh" => "#{modeled}#{guard}fsg_arm \"$T/g\"\nfsg_verify\n",
+                    "ai/test/b/self-test.sh" => "echo x > \"$B/glab\"\nPATH=\"$B:$PATH\"\n" \
+                                                "#{guard}fsg_arm \"$T/g\" gh glab\nfsg_verify\n")
+    older = commit_fixture(dir)
+    write.call(dir, "ai/test/c/self-test.sh" => "#{modeled}#{guard}fsg_arm \"$T/g\"\nfsg_verify\n")
+    newer = commit_fixture(dir)
+    # The diff: a drops the helper (unmodeled shape), b stops guarding glab
+    # (unmodeled shape), c drops fsg_verify (unmodeled shape).
+    write.call(dir, "ai/test/a/self-test.sh" => unmodeled,
+                    "ai/test/b/self-test.sh" => "#{unmodeled}#{guard}fsg_arm \"$T/g\" gh\nfsg_verify\n",
+                    "ai/test/c/self-test.sh" => "#{unmodeled}#{guard}fsg_arm \"$T/g\"\n")
+    stage_fixture(dir)
+
+    count += 1
+    code, err = run_check_captured(dir, landed: -> { [["landed (older)", older]] })
+    want = ["ai/test/a/self-test.sh: landed guarded, but no longer sources",
+            "ai/test/b/self-test.sh: landed guarded, but no longer guards glab"]
+    unless code == 1 && want.all? { |w| err.include?(w) } && !err.include?("ai/test/c/") && err.include?("Fix:")
+      fail_case.call("ratchet: a landed guarded suite rewritten unmodeled loses nothing silently", "exit #{code} #{err}")
+    end
+
+    count += 1
+    code, err = run_check_captured(dir, landed: -> { [["tip", older], ["merge-base", newer]] })
+    unless code == 1 && err.include?("ai/test/c/self-test.sh: landed guarded, but no longer calls fsg_verify")
+      fail_case.call("ratchet: the union across landed points is the bar (c landed at one point only)",
+                     "exit #{code} #{err}")
+    end
+
+    count += 1
+    code, err = run_check_captured(dir, landed: -> { [["landed", "f" * 40]] })
+    unless code == 1 && err.include?("could not measure") && err.include?("ffffffffffff") && err.include?("Fix:")
+      fail_case.call("ratchet: a landed point git cannot read is could-not-measure, never a pass", "exit #{code} #{err}")
+    end
+
+    count += 1
+    write.call(dir, "ai/test/a/self-test.sh" => "#{unmodeled}#{guard}fsg_arm \"$T/g\"\nfsg_verify\n",
+                    "ai/test/b/self-test.sh" => nil,
+                    "ai/test/c/self-test.sh" => "#{unmodeled}#{guard}fsg_arm \"$T/g\"\nfsg_verify\n")
+    stage_fixture(dir)
+    code, err = run_check_captured(dir, landed: -> { [["tip", older], ["merge-base", newer]] })
+    unless code.zero?
+      fail_case.call("ratchet: helper kept through an unmodeled rewrite, a suite removed: passes", "exit #{code} #{err}")
+    end
+  ensure
+    FileUtils.rm_rf(dir)
+  end
+  count
+end
+
+# Commits the fixture's whole tree; returns the commit sha.
+def commit_fixture(dir)
+  [%w[add -A], %w[commit -q --no-verify -m landed]].each do |args|
+    _o, e, st = Open3.capture3("git", "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid",
+                               "-c", "commit.gpgsign=false", "-C", dir, *args)
+    raise "self-test fixture: git #{args.join(' ')} failed in #{dir}: #{e.strip}" unless st.success?
+  end
+  out, e, st = Open3.capture3("git", "-C", dir, "rev-parse", "HEAD")
+  raise "self-test fixture: git rev-parse HEAD failed in #{dir}: #{e.strip}" unless st.success?
+
+  out.strip
+end
+
 # `git init` + stage everything: a fixture's files are TRACKED (staged counts).
 def stage_fixture(dir)
   [%w[init -q], %w[add -A]].each do |args|
@@ -912,13 +1193,13 @@ def stage_fixture(dir)
 end
 
 # [exit code, stderr text] of run_check against a fixture root.
-def run_check_captured(root)
+def run_check_captured(root, landed: nil)
   saved = $stderr.dup
   saved_out = $stdout.dup
   Tempfile.create("check-forge-stub-guard-err-") do |tmp|
     $stderr.reopen(tmp)
     $stdout.reopen(File::NULL, "w")
-    code = run_check(root)
+    code = run_check(root, landed: landed)
     $stderr.flush
     return [code, File.read(tmp.path)]
   end

@@ -7,6 +7,10 @@
 # fall-through class (a missing or non-executable stub reaching the real forge
 # CLI) could come back with no signal.
 #
+# DND-1680 (R10): the bar was only what this tree's scanner could see, so a
+# landed guarded suite rewritten into a shape the scanner does not model, with
+# the helper dropped, passed. The landed set is now read from origin/main.
+#
 # Each case builds a fixture repo, stages a fixture suite, and runs the check
 # against it with --root. The fixture suites are data: nothing here runs them,
 # and no gh or glab is ever executed.
@@ -143,16 +147,91 @@ fsg_verify || exit 1
 SUITE
 }
 
-# mk_repo <name> <rel-path>=<writer>... : a fixture repo with each suite staged.
-mk_repo() {
-  local r="${TMP}/$1" spec rel writer; shift
-  git init -q "${r}" || return 1
+write_unmodeled_unguarded() { # DND-1680: the guarded suite rewritten into a shape
+  # the scanner does not model (a stub written through a helper function), with
+  # the helper dropped. Its stub still sits on PATH, unguarded.
+  cat > "$1" <<'SUITE'
+#!/usr/bin/env bash
+set -uo pipefail
+TMP="$(mktemp -d)"
+mkdir -p "${TMP}/bin"
+mkstub() { printf '#!/bin/sh\necho {}\n' > "$1"; chmod +x "$1"; }
+mkstub "${TMP}/bin/gh"
+export PATH="${TMP}/bin:${PATH}"
+gh pr view 7
+SUITE
+}
+
+write_guarded_relative_unguarded() { # write_guarded, moved: the helper dropped and
+  # the stub written to a relative path (`cd D; cat > gh`, not modeled)
+  cat > "$1" <<'SUITE'
+#!/usr/bin/env bash
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+TMP="$(mktemp -d)"
+mkdir -p "${TMP}/bin"
+cd "${TMP}/bin" && cat > gh <<'EOF'
+#!/bin/sh
+echo '{"state":"MERGED"}'
+EOF
+chmod +x "${TMP}/bin/gh"
+export PATH="${TMP}/bin:${PATH}"
+gh pr view 7
+SUITE
+}
+
+write_unmodeled_guarded() { # the same unmodeled shape, helper kept
+  cat > "$1" <<'SUITE'
+#!/usr/bin/env bash
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+TMP="$(mktemp -d)"
+mkdir -p "${TMP}/bin"
+. "${HERE}/../../lib/forge-stub-guard.sh"
+fsg_arm "${TMP}/forge-guard"
+mkstub() { printf '#!/bin/sh\necho {}\n' > "$1"; chmod +x "$1"; }
+mkstub "${TMP}/bin/gh"
+fsg_require_stubs "${TMP}/bin" gh
+export PATH="${TMP}/bin:${PATH}"
+gh pr view 7
+fsg_verify || exit 1
+SUITE
+}
+
+# The check's ratchet (DND-1680) reads what LANDED on origin/main, so every
+# fixture repo has a local bare origin: landed_fixture lands a baseline README,
+# and the suites under test are written on top of it. No network, no real
+# origin; a gate pin is keyed to the real repo, so it does not apply here.
+. "${ROOT}/ai/test/lib/landed-fixture.bash"
+SRC="${TMP}/src"; mkdir -p "${SRC}"; printf 'fixture\n' > "${SRC}/README"
+
+# write_specs <repo> <rel-path>=<writer>... : write each suite into the repo.
+write_specs() {
+  local r="$1" spec rel writer; shift
   for spec in "$@"; do
     rel="${spec%%=*}"; writer="${spec#*=}"
     mkdir -p "${r}/$(dirname "${rel}")"
     "${writer}" "${r}/${rel}"
   done
+}
+
+# mk_repo <name> <rel-path>=<writer>... : a fixture repo with a README landed
+# on its origin/main and each suite staged on top (not landed).
+mk_repo() {
+  local r="${TMP}/$1"; shift
+  landed_fixture "${SRC}" "${r}" README || return 1
+  write_specs "${r}" "$@"
   git -C "${r}" add -A
+  printf '%s' "${r}"
+}
+
+# mk_landed_repo <name> <rel-path>=<writer>... : each suite LANDED on the
+# fixture's origin/main, the bar the ratchet reads.
+mk_landed_repo() {
+  local r="${TMP}/$1"; shift
+  landed_fixture "${SRC}" "${r}" README || return 1
+  write_specs "${r}" "$@"
+  landed_fixture_land "${r}" || return 1
   printf '%s' "${r}"
 }
 
@@ -235,6 +314,52 @@ run_check "${TMP}/notgit"
 if [ "${RC}" = 1 ] && has "COULD NOT LOOK" && ! has "FOUND NOTHING" && has "Fix:"; then
   ok "R5c. not a git checkout: COULD NOT LOOK, exit 1"
 else bad "R5c. discovery that cannot run fails" "rc=${RC} out=$(printf '%s' "${OUT}" | head -c 300)"; fi
+
+echo "--- R10: the landed guarded set is a ratchet (DND-1680) ---"
+# The defect: the bar was only what this tree's scanner can see. A guarded
+# suite rewritten into a shape the scanner does not model, with the helper
+# dropped, left the scan and passed. The landed set is read from origin/main.
+R="$(mk_landed_repo r10a ai/test/guarded/self-test.sh=write_guarded ai/test/victim/self-test.sh=write_guarded)"
+write_unmodeled_unguarded "${R}/ai/test/victim/self-test.sh"; git -C "${R}" add -A
+run_check "${R}"
+if [ "${RC}" = 1 ] && has "ai/test/victim/self-test.sh" && has "landed" && has "Fix:"; then
+  ok "R10a. a landed guarded suite rewritten unmodeled, helper dropped: named, exit 1, with a Fix:"
+else bad "R10a. a landed guarded suite that drops the helper fails" "rc=${RC} out=$(printf '%s' "${OUT}" | head -c 600)"; fi
+
+R="$(mk_landed_repo r10b ai/test/guarded/self-test.sh=write_guarded ai/test/kept/self-test.sh=write_guarded)"
+write_unmodeled_guarded "${R}/ai/test/kept/self-test.sh"; git -C "${R}" add -A
+run_check "${R}"
+if [ "${RC}" = 0 ] && has "ai/test/kept/self-test.sh" && has "no longer reads as stubbing"; then
+  ok "R10b. rewritten unmodeled but the helper kept: passes, and is named"
+else bad "R10b. an unmodeled rewrite that keeps the helper passes, named" "rc=${RC} out=$(printf '%s' "${OUT}" | head -c 600)"; fi
+
+R="$(mk_landed_repo r10c ai/test/guarded/self-test.sh=write_guarded ai/test/old/self-test.sh=write_guarded)"
+git -C "${R}" rm -q ai/test/old/self-test.sh
+mkdir -p "${R}/ai/test/new"; write_guarded_relative_unguarded "${R}/ai/test/new/self-test.sh"; git -C "${R}" add -A
+run_check "${R}"
+if [ "${RC}" = 1 ] && has "ai/test/new/self-test.sh" && has "ai/test/old/self-test.sh"; then
+  ok "R10c. a landed guarded suite MOVED and stripped of the helper: the new path fails, naming the old"
+else bad "R10c. a moved suite keeps its landed bar" "rc=${RC} out=$(printf '%s' "${OUT}" | head -c 600)"; fi
+
+R="$(mk_landed_repo r10d ai/test/guarded/self-test.sh=write_guarded ai/test/gone/self-test.sh=write_guarded)"
+git -C "${R}" rm -q ai/test/gone/self-test.sh
+run_check "${R}"
+if [ "${RC}" = 0 ] && has "removed" && has "ai/test/gone/self-test.sh"; then
+  ok "R10d. a landed guarded suite deleted outright: passes, and is named as removed"
+else bad "R10d. a removed suite is named" "rc=${RC} out=$(printf '%s' "${OUT}" | head -c 600)"; fi
+
+R="$(mk_repo r10e ai/test/guarded/self-test.sh=write_guarded ai/test/fresh/self-test.sh=write_guarded)"
+run_check "${R}"
+if [ "${RC}" = 0 ] && has "new" && has "ai/test/fresh/self-test.sh"; then
+  ok "R10e. a suite stubbing on PATH that has not landed yet: passes, and is named as new"
+else bad "R10e. a new suite is named" "rc=${RC} out=$(printf '%s' "${OUT}" | head -c 600)"; fi
+
+R="${TMP}/r10f"; git init -q "${R}"
+write_specs "${R}" ai/test/guarded/self-test.sh=write_guarded; git -C "${R}" add -A
+run_check "${R}"
+if [ "${RC}" = 1 ] && has "could not measure" && has "refs/remotes/origin/main" && has "Fix:"; then
+  ok "R10f. no landed bar to read (no origin/main): could not measure, exit 1, every probe named"
+else bad "R10f. an unmeasurable bar fails" "rc=${RC} out=$(printf '%s' "${OUT}" | head -c 600)"; fi
 
 echo "--- R6: this repo, as it stands, passes ---"
 OUT="$(cd "${ROOT}" && "${CHECK}" 2>&1)"; RC=$?

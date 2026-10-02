@@ -81,7 +81,8 @@
 # that fails raises Unreadable ("could not measure"), never "nothing moved".
 # Callers: check-guard-messages (a moved guard keeps its bar), check-tool-risk
 # (a moved tool keeps its landed class), check-bin-help (an exemption covers
-# only its landed content).
+# only its landed content), check-forge-stub-guard (a moved suite keeps its
+# landed guard).
 #
 # Deliberately gem-free (stdlib only).
 
@@ -393,6 +394,54 @@ module Landed
     raise Unreadable.new([[label, "#{sha[0, 12]}: #{path} could not be read"]]) unless ok
 
     text
+  end
+
+  # Every regular file in the commit's whole tree, as [[path, mode, blob]]:
+  # a symlink (120000) or a submodule is left out, as a working-tree scan
+  # skips them. For a check whose bar is a SET of files that landed (DND-1680:
+  # the suites check-forge-stub-guard found guarded). Raises Unreadable when
+  # git cannot list the tree, or lists nothing: a landed commit with no files
+  # is a broken read, never an empty bar.
+  def tree_files(root, sha, label)
+    listing, ok = git_read(root, "ls-tree", "-r", "-z", "--full-tree", sha)
+    raise Unreadable.new([[label, "#{sha[0, 12]}: git ls-tree -r failed"]]) unless ok
+
+    rows = listing.split("\0").filter_map do |row|
+      meta, path = row.split("\t", 2)
+      mode, type, blob = meta.to_s.split(" ")
+      [path, mode, blob] if type == "blob" && mode != "120000" && path
+    end
+    raise Unreadable.new([[label, "#{sha[0, 12]}: git ls-tree -r listed no files"]]) if rows.empty?
+
+    rows
+  end
+
+  # { blob => text } for every blob sha given, read in ONE `git cat-file
+  # --batch`. Raises Unreadable when the read fails or a blob is missing.
+  def blob_texts(root, blobs, label)
+    blobs = blobs.uniq
+    return {} if blobs.empty?
+
+    out, err, status = Open3.capture3({ "GIT_OPTIONAL_LOCKS" => "0" }, "git", "-C", root, "cat-file", "--batch",
+                                      stdin_data: blobs.map { |b| "#{b}\n" }.join, binmode: true)
+    raise Unreadable.new([[label, "git cat-file --batch failed: #{err.strip}"]]) unless status.success?
+
+    texts = {}
+    pos = 0
+    blobs.each do |blob|
+      nl = out.index("\n", pos)
+      header = nl && out[pos...nl]
+      sha, type, size = header.to_s.split(" ")
+      unless sha == blob && type == "blob" && size.to_s.match?(/\A\d+\z/)
+        raise Unreadable.new([[label, "git cat-file --batch: #{blob[0, 12]} could not be read (#{header.inspect})"]])
+      end
+
+      texts[blob] = out.byteslice(nl + 1, size.to_i)
+      pos = nl + 1 + size.to_i + 1
+    end
+    texts
+  rescue Errno::ENOENT
+    raise Unreadable.new([[label, "git executable not found on PATH"]])
   end
 
   # Reads path at every landed point and yields (text, label, sha) for each
