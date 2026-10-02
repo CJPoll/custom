@@ -35,7 +35,8 @@
 #        `env -i PATH=`, `PATH=... cmd` all included), or of any `NAME=`
 #        value that itself holds `$PATH` (`BASE_PATH="${D}:${PATH}"`).
 #   D is compared as written, after removing quotes and spelling `${NAME}` as
-#   `$NAME`: `"${TMP}/bin"` and `$TMP/bin` are the same directory.
+#   `$NAME`: `"${TMP}/bin"` and `$TMP/bin` are the same directory. The idiom
+#   `PATH="$D${PATH:+:$PATH}"` reads as `$D:$PATH`.
 #
 #   Such a suite must, in code:
 #     * source the helper: `. X` or `source X` where X's basename is
@@ -60,11 +61,18 @@
 # WHAT IT DOES NOT MODEL (a lexical scan; named, not hidden)
 #
 #   * A stub whose NAME is computed other than by a `for NAME in ...` loop
-#     that lists the tool (`for s in gh glab; do cat > "$D/$s"` IS modeled):
-#     a helper function taking the name (`stub "$D" gh`), a name read from a
+#     that lists the tool on the `for` line itself (`for s in gh glab; do
+#     cat > "$D/$s"` IS modeled; a word list continued onto the next line
+#     is not): a helper function taking the name or the path (`stub "$D"
+#     gh`, `mkstub "$B/gh"` with `> "$1"` inside), a name read from a
 #     variable or a file.
-#   * A stub written to a relative path (`cd "$D"; cat > gh`), or copied into a
-#     directory operand (`cp "$SRC/gh" "$D/"`).
+#   * A loop's scope: `$NAME` written anywhere in the file counts as each
+#     tool any `for NAME in` loop lists, so a write after the loop can read
+#     as a stub (an over-read: a false red, never a false green).
+#   * A redirection target on the line after a `\` continuation.
+#   * A stub written to a relative path (`cd "$D"; cat > gh`), or into a
+#     directory operand (`cp "$SRC/gh" "$D/"`, `mv "$S/gh" "$B"`,
+#     `ln -t "$B" "$S/gh"`).
 #   * D put on PATH through a variable whose value does not itself hold
 #     `$PATH` (`P="$D"; PATH="$P:$PATH"`), or through `PATH+=`.
 #   * The ORDER the helper requires (fsg_arm before the suite's own PATH
@@ -83,6 +91,14 @@
 #
 # THERE IS NO SUPPRESSION MARKER: an inline "ignore" comment is writable by the
 # same diff it would excuse. Source the helper.
+#
+# RESIDUAL (named, per ~/dev/custom/CLAUDE.md -> "A check's own bar must not
+# live in the diff it is checking"): the rules and STUBBED_TOOLS live in this
+# file, so a diff that edits the check itself can defeat it; review catches
+# that, not this check. And the count of suites stubbing on PATH is printed
+# but not ratcheted against origin/main: a guarded suite rewritten into an
+# unmodeled shape (above) while dropping the helper lowers the count with no
+# red. Only the floor (zero is FOUND NOTHING) is enforced.
 #
 # EXTENDING THE TOOL LIST: STUBBED_TOOLS below. DND-1667 (other tools' PATH
 # stubs, same helper) adds names there; fsg_arm takes the same names.
@@ -255,12 +271,31 @@ end
 # The spelling a path is compared in: quotes removed, `${NAME}` as `$NAME`, no
 # trailing slash.
 def norm(expr)
-  s = expr.delete("\"'").gsub(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/, '$\1')
+  s = expr.delete("\"'").gsub(/\$\{PATH:\+:\$\{?PATH\}?\}/, ":$PATH")
+  s = s.gsub(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/, '$\1')
   s.length > 1 ? s.sub(%r{/+\z}, "") : s
 end
 
+# [dir, base]; both "" for an empty word (`>(...)`, a bare `>`).
 def split_path(expr)
-  norm(expr).split("/", -1).then { |parts| [parts[0..-2].join("/"), parts.last] }
+  parts = norm(expr).split("/", -1)
+  [parts[0..-2].to_a.join("/"), parts.last.to_s]
+end
+
+# The words after position `i` up to the end of the command; an fd number
+# that leads a redirection (`2>/dev/null`) is not an argument.
+def args_from(line, i)
+  words = []
+  loop do
+    w = word_at(line, i)
+    break if w.empty?
+
+    i = line.index(w, i) + w.size
+    next if w =~ /\A\d+\z/ && line[i] =~ /[<>]/
+
+    words << w
+  end
+  words
 end
 
 def code_at?(flags, i)
@@ -281,10 +316,6 @@ end
 # ---------------------------------------------------------------------------
 # Per-file analysis
 
-FILE_CMDS = %w[cp ln install mv].freeze
-SEP_RE = /(?:&&|\|\||[;&|()]|\s)/.freeze
-
-# [[lineno, tool, dir]] for every stub of a STUBBED_TOOLS name the file writes.
 # { "s" => ["gh", "glab", ...] } for every `for NAME in WORDS` loop in code.
 # Scope is ignored: any loop over NAME counts, which can only over-read.
 def loop_values(lexed)
@@ -307,12 +338,14 @@ end
 # The STUBBED_TOOLS a written file name stands for: the name itself, or, for
 # `$NAME` where a `for NAME in ...` loop lists tools, each tool listed.
 def stubbed_names(base, loops)
+  return [] if base.to_s.empty?
   return [base] if STUBBED_TOOLS.include?(base)
 
   var = base[/\A\$([A-Za-z_][A-Za-z0-9_]*)\z/, 1]
   var && loops.key?(var) ? loops[var] & STUBBED_TOOLS : []
 end
 
+# [[lineno, tool, dir]] for every stub of a STUBBED_TOOLS name the file writes.
 def stub_writes(lexed)
   writes = []
   loops = loop_values(lexed)
@@ -327,15 +360,7 @@ def stub_writes(lexed)
     end
     # cp/ln/install/mv: the last operand of the command. tee: every operand.
     code_matches(line, flags, /(?<![\w.\/-])(cp|ln|install|mv|tee)(?=[ \t])/).each do |m|
-      ops = []
-      i = m.end(0)
-      loop do
-        w = word_at(line, i)
-        break if w.empty?
-
-        ops << w unless w.start_with?("-")
-        i = line.index(w, i) + w.size
-      end
+      ops = args_from(line, m.end(0)).reject { |w| w.start_with?("-") }
       dests = m[1] == "tee" ? ops : [ops.last].compact
       dests.each do |w|
         dir, base = split_path(w)
@@ -382,15 +407,7 @@ def helper_use(lexed)
       next if line[m.end(0)..] =~ /\A\s*\(\)/ # a definition, not a call
 
       armed = true
-      i = m.end(0)
-      words = []
-      loop do
-        w = word_at(line, i)
-        break if w.empty?
-
-        words << norm(w)
-        i = line.index(w, i) + w.size
-      end
+      words = args_from(line, m.end(0)).map { |w| norm(w) }
       arm_tools.concat(words.size > 1 ? words[1..] : FSG_DEFAULT_TOOLS)
     end
     verified = true unless code_matches(line, flags, /(?<![\w-])fsg_verify(?![\w-])/).empty?
@@ -426,17 +443,21 @@ end
 # Repository scan
 
 # => { suites: Integer, on_path: Integer, findings: [[rel, lines, problem]],
-#      unreadable: [[rel, why]] }
+#      unreadable: [[rel, why]], skipped: [rel] (a symlink or no working-tree file) }
 def scan(root)
   suites = 0
   on_path = 0
+  skipped = []
   findings = []
   unreadable = []
   FirstParty.git_ls(root, "--cached").sort.each do |rel|
     next unless FirstParty.test_path?(rel)
 
     path = File.join(root, rel)
-    next if File.symlink?(path) || !File.file?(path)
+    if File.symlink?(path) || !File.file?(path)
+      skipped << rel
+      next
+    end
 
     begin
       text = File.read(path, encoding: "UTF-8")
@@ -448,7 +469,12 @@ def scan(root)
     next unless shell_file?(rel, text)
 
     suites += 1
-    r = analyze(text)
+    begin
+      r = analyze(text)
+    rescue StandardError => e
+      unreadable << [rel, "the scanner crashed (#{e.class}: #{e.message})"]
+      next
+    end
     if r[:open]
       unreadable << [rel, "#{r[:open]}; the rest of the file was not scanned"]
       next
@@ -459,7 +485,15 @@ def scan(root)
     lines = r[:on_path].map(&:first).uniq.join(",")
     r[:problems].each { |p| findings << [rel, lines, p] }
   end
-  { suites: suites, on_path: on_path, findings: findings, unreadable: unreadable }
+  { suites: suites, on_path: on_path, findings: findings, unreadable: unreadable,
+    skipped: skipped }
+end
+
+def skipped_note(r)
+  return "0 tracked test path(s) skipped" if r[:skipped].empty?
+
+  "#{r[:skipped].size} tracked test path(s) skipped as a symlink or missing " \
+    "from the working tree: #{r[:skipped].first(5).join(', ')}#{r[:skipped].size > 5 ? ', ...' : ''}"
 end
 
 def run_check(root = REPO)
@@ -495,7 +529,7 @@ def run_check(root = REPO)
   if r[:findings].empty?
     puts "check-forge-stub-guard: OK -- #{r[:suites]} test shell suite(s) " \
          "considered, #{r[:on_path]} stubbing #{STUBBED_TOOLS.join('/')} on PATH, all guarded by " \
-         "#{HELPER_BASENAME}; 0 flagged."
+         "#{HELPER_BASENAME}; 0 flagged; #{skipped_note(r)}."
     return 0
   end
 
@@ -503,7 +537,8 @@ def run_check(root = REPO)
   warn "check-forge-stub-guard: FAILED -- #{flagged} of #{r[:on_path]} suite(s) " \
        "stubbing #{STUBBED_TOOLS.join('/')} on PATH (#{r[:suites]} test shell " \
        "suite(s) considered) are not guarded, so a missing or non-executable " \
-       "stub would fall through to the REAL forge CLI (DND-1647/DND-1666):"
+       "stub would fall through to the REAL forge CLI (DND-1647/DND-1666; " \
+       "#{skipped_note(r)}):"
   r[:findings].each { |(rel, lines, p)| warn "  #{rel}:#{lines}: #{p}" }
   warn "  #{FIX_TEXT}"
   1
@@ -547,6 +582,14 @@ def run_self_test
      %w[gh glab], 1],
     ["for-loop over non-forge names is not a forge stub",
      "for s in git docker; do echo x > \"$B/$s\"; done\nPATH=\"$B:$PATH\"\n", [], 0],
+    ["PATH=\"$B${PATH:+:$PATH}\" idiom", "echo x > \"$B/gh\"\nexport PATH=\"$B${PATH:+:$PATH}\"\n", %w[gh], 1],
+    ["process substitution >(...) does not crash", "cmd 2> >(tee \"$L\") | x\nPATH=\"$B:$PATH\"\n", [], 0],
+    ["a bare > at end of line does not crash", "printf x > \\\n  \"$B/gh\"\nPATH=\"$B:$PATH\"\n", [], 0],
+    ["fd before a redirect is not cp's destination",
+     "cp \"$S/fake\" \"$B/gh\" 2>/dev/null\nPATH=\"$B:$PATH\"\n", %w[gh], 1],
+    ["fd before a redirect is not an fsg_arm tool name",
+     "echo x > \"$B/gh\"\nPATH=\"$B:$PATH\"\n. \"$H/ai/lib/forge-stub-guard.sh\"\n" \
+     "fsg_arm \"$T/g\" 2>/dev/null\nfsg_verify\n", %w[gh], 0],
     ["guarded: sourced, armed, verified", "echo x > \"$B/gh\"\nPATH=\"$B:$PATH\"\n#{guarded_tail}", %w[gh], 0],
     ["sourced through a variable", "L=\"$H/ai/lib/forge-stub-guard.sh\"\n. \"${L}\"\nfsg_arm \"$T/g\"\n" \
                                    "echo x > \"$B/gh\"\nPATH=\"$B:$PATH\"\nfsg_verify\n", %w[gh], 0],
@@ -598,6 +641,15 @@ def run_self_test
     end
   end
 
+  # FSG_DEFAULT_TOOLS restates the helper's default guard set; pin the two.
+  count += 1
+  helper = File.join(REPO, HELPER_REL)
+  default = File.file?(helper) && File.read(helper)[/^\s*\[ "\$#" -gt 0 \] \|\| set -- (.+)$/, 1]
+  unless default && default.split == FSG_DEFAULT_TOOLS
+    fail_case.call("FSG_DEFAULT_TOOLS matches #{HELPER_REL}'s fsg_arm default",
+                   "helper default #{default.inspect}, check #{FSG_DEFAULT_TOOLS.inspect}")
+  end
+
   open_cases = [
     ["unclosed heredoc", "cat <<EOF\nnever closed\n", "heredoc"],
     ["unclosed single quote", "echo 'never closed\n", "single quote"],
@@ -627,8 +679,14 @@ def run_self_test
       FileUtils.mkdir_p(File.dirname(File.join(dir, rel)))
       File.write(File.join(dir, rel), body)
     end
+    FileUtils.mkdir_p(File.join(dir, "ai/test/link"))
+    File.symlink("../bad/self-test.sh", File.join(dir, "ai/test/link/self-test.sh"))
     stage_fixture(dir)
     r = scan(dir)
+    count += 1
+    unless r[:skipped] == ["ai/test/link/self-test.sh"]
+      fail_case.call("tree scan counts a skipped symlink", "got #{r[:skipped].inspect}")
+    end
     count += 1
     got = r[:findings].map(&:first).uniq.sort
     want = ["ai/hooks/x.self-test.sh", "ai/test/bad/self-test.sh", "ai/test/noext/run"]

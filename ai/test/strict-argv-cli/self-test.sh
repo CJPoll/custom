@@ -139,6 +139,8 @@ refused "check-guard-messages: --root with --self-test is refused" "--self-test"
 # check-forge-stub-guard --root (DND-1666)
 refused "check-forge-stub-guard: a valueless --root is refused" "--root needs a value" check-forge-stub-guard --root
 refused "check-forge-stub-guard: --root with --self-test is refused" "--self-test" check-forge-stub-guard --self-test --root "${REPO}"
+refused "check-forge-stub-guard: --root does not swallow --self-test" "--root needs a value" check-forge-stub-guard --root --self-test
+refused "check-forge-stub-guard: --root twice is refused" "--root given more than once" check-forge-stub-guard --root "${REPO}" --root "${REPO}"
 
 # check-hooks-registered --norm
 refused "check-hooks-registered: a valueless --norm is refused, not normalised as the empty string" "--norm needs a value" check-hooks-registered --norm

@@ -72,6 +72,21 @@ fsg_verify || exit 1
 SUITE
 }
 
+write_loop_unguarded() { # strict-argv-cli's shape: stubs written in a loop, no helper
+  cat > "$1" <<'SUITE'
+#!/usr/bin/env bash
+TMP="$(mktemp -d)"; mkdir -p "${TMP}/stubs"
+for s in gh glab gh-athena; do
+  cat > "${TMP}/stubs/${s}" <<EOF
+#!/bin/sh
+exit 1
+EOF
+  chmod +x "${TMP}/stubs/${s}"
+done
+export PATH="${TMP}/stubs:${PATH}"
+SUITE
+}
+
 write_env_selected() { # a gh stub chosen by env var, never put on PATH
   cat > "$1" <<'SUITE'
 #!/usr/bin/env bash
@@ -112,6 +127,13 @@ else bad "R1. the unguarded suite is flagged" "rc=${RC} out=$(printf '%s' "${OUT
 if has "ai/test/guarded/self-test.sh:"; then
   bad "R1b. the guarded suite in the same repo is not flagged" "out=$(printf '%s' "${OUT}" | head -c 400)"
 else ok "R1b. the guarded suite in the same repo is not flagged"; fi
+
+echo "--- R1c: stubs written in a for loop, no helper, FAIL ---"
+R="$(mk_repo r1c ai/test/guarded/self-test.sh=write_guarded ai/test/loop/self-test.sh=write_loop_unguarded)"
+run_check "${R}"
+if [ "${RC}" = 1 ] && has "ai/test/loop/self-test.sh" && has "gh/glab on PATH but never sources"; then
+  ok "R1c. a loop-written gh/glab stub on PATH without the helper is flagged"
+else bad "R1c. loop-written stubs are flagged" "rc=${RC} out=$(printf '%s' "${OUT}" | head -c 400)"; fi
 
 echo "--- R2: a suite that sources the helper, arms and verifies PASSES ---"
 R="$(mk_repo r2 ai/test/guarded/self-test.sh=write_guarded)"
