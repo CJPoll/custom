@@ -41,6 +41,15 @@ PROG="integration-gate"
 # The receipt schema/path and the gate-declaration rule live in ONE shared
 # library, also read by locked-merge and gh-athena's merge guard, so the three
 # cannot drift (DND-969).
+# /proc/<pid>/stat is read by the one shared rule (whole file, fields after
+# the LAST ") "), never line by line (DND-1625).
+PS_LIB="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../../lib/proc-stat.sh"
+# shellcheck source=../../../lib/proc-stat.sh
+if ! . "$PS_LIB" 2>/dev/null; then
+  echo "${PROG}: cannot load ${PS_LIB}." >&2
+  echo "Fix: run integration-gate from its committed path in a full ~/dev/custom checkout (ai/skills and ai/lib side by side)." >&2
+  exit 2
+fi
 IR_LIB="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../../lib/integration-receipt.sh"
 # shellcheck source=../../../lib/integration-receipt.sh
 if ! . "$IR_LIB" 2>/dev/null; then
@@ -608,7 +617,7 @@ if [ -n "$PRESTARTED" ]; then
   if [[ "$p_pgid" =~ ^[1-9][0-9]*$ ]] && [[ "$p_sha" =~ ^[0-9a-f]{40}$ ]] \
      && [[ "$(basename "${p_log:-x}")" == integration-gate-critic.* ]] && [ -f "$p_log" ] \
      && grep -q 'critic-review' <<<"$(tr '\0' ' ' <"/proc/${p_pgid}/cmdline" 2>/dev/null)" \
-     && [ "$(sed 's/.*) //' "/proc/${p_pgid}/stat" 2>/dev/null | cut -d' ' -f3)" = "$p_pgid" ]; then
+     && [ "$(proc_stat_field "/proc/${p_pgid}/stat" 3)" = "$p_pgid" ]; then
     PRE_PGID="$p_pgid"; PRE_SHA="$p_sha"; PRE_LOG="$p_log"
   elif [ -f "${p_log:-}" ] && [[ "$(basename "$p_log")" == integration-gate-critic.* ]]; then
     # The judge already finished (its verdict is on disk): adopt only the log.

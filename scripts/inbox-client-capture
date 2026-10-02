@@ -141,6 +141,7 @@ usage() { awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"; }
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 LIVENESS_LIB="${HERE}/../ai/skills/athena:inbox/lib/liveness.sh"
 WEDGE_LIB="${HERE}/../ai/skills/athena:inbox/lib/wedge.sh"
+PROC_STAT_LIB="${HERE}/../ai/lib/proc-stat.sh"
 REPO="$(cd -- "${HERE}/.." && pwd -P)"
 INBOX_LIB_DIR="${HERE}/../ai/skills/athena:inbox/lib"
 
@@ -181,6 +182,13 @@ done
 }
 # shellcheck source=ai/skills/athena:inbox/lib/wedge.sh
 . "${WEDGE_LIB}"
+[ -r "${PROC_STAT_LIB}" ] || {
+  echo "error: the /proc stat library is missing: ${PROC_STAT_LIB}" >&2
+  echo "  Fix: run this from a complete ~/dev/custom checkout; restore ai/lib/proc-stat.sh with git." >&2
+  exit 2
+}
+# shellcheck source=ai/lib/proc-stat.sh
+. "${PROC_STAT_LIB}"
 
 # The athena:inbox manager, for the unread harness-alerts references retention
 # must not prune (DND-367). NOT fatal when missing: retention then treats every
@@ -418,11 +426,12 @@ quit_handled() {
 # proc_start_epoch <pid> — the process's real start time (boot time + field 22
 # of /proc/<pid>/stat). NOT the mtime of /proc/<pid>: that inode is made when
 # someone first looks at it, which can be long after the process started.
+# The stat is read whole and parsed after the LAST ") " (ai/lib/proc-stat.sh,
+# DND-1625): a client name holding a newline or ") " is never misread.
 proc_start_epoch() {
-  local p="$1" btime ticks hz rest
+  local p="$1" btime ticks hz
   btime="$(awk '$1=="btime"{print $2; exit}' /proc/stat 2>/dev/null)"
-  rest="$(sed 's/^.*) //' "/proc/${p}/stat" 2>/dev/null)" || return 1
-  ticks="$(printf '%s\n' "${rest}" | awk '{print $20}')"
+  ticks="$(proc_stat_field "/proc/${p}/stat" 20)" || return 1
   hz="$(getconf CLK_TCK 2>/dev/null)"
   case "${btime}:${ticks}:${hz}" in *[!0-9:]*|:*|*::*|*:) return 1 ;; esac
   printf '%s\n' $(( btime + ticks / hz ))

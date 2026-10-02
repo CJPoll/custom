@@ -1004,6 +1004,7 @@ grep -q 'GATE NOT RUN' <<<"$out" && bad "s4 read the gate's own 75 as a slot tim
 layout_copy() {
   mkdir -p "$1/ai/skills/athena:merge-boarding/scripts" "$1/ai/bin" "$1/ai/lib"
   ln -s "$(cd "${ROOT}/../../lib" && pwd)/integration-receipt.sh" "$1/ai/lib/integration-receipt.sh"
+  ln -s "$(cd "${ROOT}/../../lib" && pwd)/proc-stat.sh" "$1/ai/lib/proc-stat.sh"
   git init -q "$1"
   cp "$GATE" "$1/ai/skills/athena:merge-boarding/scripts/integration-gate"
   ln -s "$(cd "${ROOT}/../../bin" && pwd)/critic-review" "$1/ai/bin/critic-review"

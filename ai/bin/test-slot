@@ -1395,14 +1395,17 @@ write_outcome() { # write_outcome KIND [EXIT]
 # read_ppid: set CUR_PPID to this process's parent pid now, read from the
 # kernel (bash's $PPID is fixed at startup); empty when unreadable. Call it in
 # the main shell, never in $(...): it reads /proc/self/stat with the read
-# builtin, so /proc/self is this shell, and no process is forked.
+# builtin, so /proc/self is this shell, and no process is forked. The file is
+# read WHOLE (-d '') and parsed after the LAST ") ": a name holding a newline
+# or ") " is never misread (DND-1625). This is ai/lib/proc-stat.sh's rule,
+# spelled inline because test-slot also runs with no ai/lib beside it.
 read_ppid() {
-  local stat rest
+  local stat=""
   CUR_PPID=""
-  if read -r stat 2>/dev/null </proc/self/stat; then
-    rest=${stat##*) }
-    read -r _ CUR_PPID _ <<<"$rest"
-  fi
+  { IFS= read -r -d '' stat; } 2>/dev/null </proc/self/stat
+  case $stat in *") "*) ;; *) return 0 ;; esac
+  stat=${stat##*) }
+  read -r _ CUR_PPID _ <<<"$stat"
 }
 
 # orphan_exit WHY: the caller is gone (or cannot be confirmed). Leave the

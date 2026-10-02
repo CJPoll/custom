@@ -110,7 +110,9 @@ site   "SITE-1 integration-gate reads the critic's pgrp with proc_stat_field" "$
 nosite "SITE-1b integration-gate has no line-oriented sed over a stat file" "${IG}" "sed [^|]*/proc/[^ ]*/stat"
 site   "SITE-2 inbox-client-capture reads starttime with proc_stat_field" "${CAP}" 'proc_stat_field "/proc/\$\{p\}/stat" 20'
 nosite "SITE-2b inbox-client-capture has no line-oriented sed over a stat file" "${CAP}" "sed [^|]*/proc/[^ ]*/stat"
-site   "SITE-3 test-slot's read_ppid reads its own stat with proc_stat_rest" "${TS}" 'proc_stat_rest /proc/self/stat'
+# test-slot runs with no ai/lib beside it (its self-test G10), so it spells
+# the same rule inline: a whole-file read (-d '') of its own stat.
+site   "SITE-3 test-slot's read_ppid reads its own stat whole" "${TS}" "read -r -d '' stat; \\} 2>/dev/null </proc/self/stat"
 nosite "SITE-3b test-slot has no single-line read of /proc/self/stat" "${TS}" "read -r [a-z_]+ [^<]*</proc/self/stat"
 
 printf '\n%s passed, %s failed\n' "${PASS}" "${FAIL}"

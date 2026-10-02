@@ -2467,7 +2467,9 @@ def self_test_hang_named
         hp = File.read(File.join(dir, "#{n}.pid")).to_i rescue 0
         # Only the fixture's own `cat` counts, never a recycled pid.
         mine = hp.positive? && (File.binread("/proc/#{hp}/cmdline").include?(never) rescue false)
-        state = mine ? (File.read("/proc/#{hp}/stat")[/\) (\S)/, 1] rescue nil) : nil
+        # The state through ProcState, the shared last-") " rule (DND-1625):
+        # a first-") " match misreads a name holding ") ".
+        state = mine ? (ProcState.fields(hp)&.first rescue nil) : nil
         fail_with.call("#{n}'s process #{hp} is still running (state #{state})") if hp.positive? && state && state != "Z"
       end
     ensure

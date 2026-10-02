@@ -30,10 +30,17 @@ module ProcState
     rescue SystemCallError => e
       blind("/proc/#{pid}/stat (#{e.class})")
     end
-    cut = raw.rindex(") ")
-    f = cut ? raw[(cut + 2)..].split : []
+    f = stat_fields(raw) || []
     blind("/proc/#{pid}/stat (empty or short)") if f.size < 20
     f
+  end
+
+  # The pure parse every Ruby reader shares (DND-1625): the fields of a whole
+  # /proc/<pid>/stat text after the LAST ") ", so [0] is the state. nil when
+  # there is no ") " (empty or not the kernel's format); never a guess.
+  def stat_fields(raw)
+    cut = raw.to_s.rindex(") ")
+    cut ? raw[(cut + 2)..].split : nil
   end
 
   def blind(what)
