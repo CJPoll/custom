@@ -325,6 +325,46 @@ else
 fi
 
 # ===========================================================================
+case_ 'setup-shipwright-cron — the spool probe classifies on exit status (DND-1644)'
+
+# The probe used to match crontab's stderr against text, and printed "usable."
+# for anything it did not recognise, a permission error included. Only
+# "no crontab for <user>" and a clean read are usable; a recognised broken-spool
+# shape is repaired (root); any other failure is named, with Fix:, and stops.
+ct="${TMP}/ct-probe"
+printf '0 7 * * * /opt/other-job\n' >"$ct"
+cp "$ct" "${TMP}/ct-probe.orig"
+rc="$(FAKE_CRONTAB_FAIL="$DENIED" inst "$ct")"
+if [ "$rc" = 2 ] && ! grep -q 'usable\.' "${TMP}/inst.out" && ! grep -q 'repairing' "${TMP}/inst.out" \
+   && grep -q 'Permission denied' "${TMP}/inst.err" && grep -q 'Fix:' "${TMP}/inst.err" \
+   && ! compgen -G "${TMP}/*.sudo" >/dev/null && cmp -s "$ct" "${TMP}/ct-probe.orig"; then
+  ok "a permission error is never 'usable', never routed to the root repair; exit 2 with Fix:"
+else
+  bad "probe EACCES" "rc=$rc $(out)"
+fi
+rm -f "$ct"
+rc="$(inst "$ct")"
+if [ "$rc" = 0 ] && grep -q 'usable\.' "${TMP}/inst.out" && grep -qxF "$ENTRY" "$ct"; then
+  ok "'no crontab for <user>' is usable and installs"
+else
+  bad "probe no crontab" "rc=$rc $(out)"
+fi
+printf '0 7 * * * /opt/other-job\n' >"$ct"
+rc="$(inst "$ct")"
+if [ "$rc" = 0 ] && grep -q 'usable\.' "${TMP}/inst.out"; then
+  ok "a clean read is usable"
+else
+  bad "probe clean" "rc=$rc $(out)"
+fi
+rc="$(FAKE_CRONTAB_FAIL='"/var/spool/cron/crontabs" is not a directory, bailing out' inst "$ct")"
+if grep -q 'repairing (needs root)' "${TMP}/inst.out" && compgen -G "${TMP}/*.sudo" >/dev/null; then
+  ok "a broken-spool shape still takes the root repair path"
+else
+  bad "probe broken spool" "rc=$rc $(out)"
+fi
+rm -f "${TMP}"/*.sudo
+
+# ===========================================================================
 case_ 'no case reached root'
 if compgen -G "${TMP}/*.sudo" >/dev/null; then
   bad "no case ran sudo" "calls: $(cat "${TMP}"/*.sudo 2>&1)"

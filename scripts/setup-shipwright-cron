@@ -203,12 +203,31 @@ if [ "$REMOVE" -eq 1 ]; then
 fi
 
 # ---- 1. ensure the crontab spool dir is present AND usable -----------------
-# Probe by actually asking crontab. "no crontab for user" (empty) is usable;
-# "is not a directory, bailing out" means the spool tree is broken.
+# Probe by actually asking crontab, and classify on its EXIT STATUS first
+# (DND-1644). Exit 0 and "no crontab for <user>" are usable. A failure with a
+# broken-spool shape (a missing or non-directory spool) takes the root repair.
+# Any other failure (a permission error, say) is NOT usable and is no spool
+# repair either: it is named, and the installer stops.
 step "Crontab spool dir ($SPOOL_DIR)"
-spool_err="$(crontab -l 2>&1 >/dev/null || true)"
-case "$spool_err" in
-  *"not a directory"*|*"bailing out"*|*"No such file"*|*[Cc]"annot"*)
+spool_rc=0
+spool_err="$(LC_ALL=C crontab -l 2>&1 >/dev/null)" || spool_rc=$?
+spool_state=usable
+if [ "$spool_rc" -ne 0 ]; then
+  case "$spool_err" in
+    *"no crontab for"*) ;;
+    *"not a directory"*|*"bailing out"*|*"No such file"*) spool_state=broken ;;
+    *) spool_state=unreadable ;;
+  esac
+fi
+case "$spool_state" in
+  unreadable)
+    # Not a spool shape we repair. The shared reader names the failure (exit,
+    # stderr) with its Fix:, so the wording lives in one place.
+    echo "  crontab -l failed (exit ${spool_rc}); not a recognised broken-spool shape, so no repair is attempted." >&2
+    cron_read_crontab setup-shipwright-cron >/dev/null || exit 2
+    exit 2
+    ;;
+  broken)
     say "  spool not usable — repairing (needs root)."
     # The crontab binary is setgid to a group (often "crontab", NOT "cron"):
     # the spool dir must belong to THAT group for the setgid client to write
