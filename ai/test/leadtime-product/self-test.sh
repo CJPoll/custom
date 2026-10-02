@@ -741,6 +741,63 @@ printf '{"event":"opened","at":"x","repo":"prod","pr":3,"url":"u","phase":"p","b
 rc="$(lp sweep)"
 [ "$rc" = 3 ] && grep -q 'line 2 is not JSON' "${TMP}/err" && ok "an unreadable store line is could-not-look (exit 3) naming the line, never an empty sweep" || bad "bad store" "rc=$rc $(cat "${TMP}/err")"
 
+# The same class after the fetch: origin's landing branch fetched fine but its
+# remote-tracking ref cannot be read (DND-1703). A failed read is never printed
+# as a moved branch ("origin's <branch> is at , not the recorded head"): the
+# line says it could not look, names the ref, and carries a Fix:. Nothing is
+# gated. The read is injected through the library (git itself is real).
+new_repo; open_one
+pr_json 7 OPEN "$HEAD7" "$GREEN"
+BR7="$BR7" /usr/bin/ruby - "$ROOT" "$MAN" >"${TMP}/out" 2>"${TMP}/err" <<'RUBY'
+root, man = ARGV
+require File.join(root, "ai/lib/leadtime_product_io")
+module LeadTimeProductIO
+  module Git
+    class << self
+      alias_method :real_rev, :rev
+      def rev(dir, ref) = ref == "refs/remotes/origin/#{ENV.fetch("BR7")}" ? nil : real_rev(dir, ref)
+    end
+  end
+end
+m = LeadTimeProductIO.load_manifest(man)
+summary, lines, = LeadTimeProductIO.sweep(m, gate_timeout: 1500, budget_s: 3480)
+puts summary
+lines.each { |l| puts l }
+RUBY
+rc=$?
+if [ "$rc" = 0 ] && grep -q "pr=#7 open: COULD NOT TELL (cannot read refs/remotes/origin/$BR7 after fetching it" "${TMP}/out" \
+   && grep -q "Fix: check the ref" "${TMP}/out" && ! grep -q 'is at' "${TMP}/out" \
+   && [ "$(called integration-gate)" = 0 ] && [ ! -e "$LANES/$RUN_ID-land" ]; then
+  ok "origin's landing ref unreadable after the fetch: COULD NOT TELL naming the ref with a Fix:, never 'is at , not the recorded head'; no gate"
+else bad "origin ref unreadable" "rc=$rc out=$(cat "${TMP}/out") err=$(cat "${TMP}/err")"; fi
+
+# The same class after the gate: the lane's HEAD cannot be read. An empty head
+# compared unequal to the recorded one and read as "rebased onto main" (a push).
+# It is could-not-look: nothing merged, nothing pushed.
+new_repo; open_one
+pr_json 7 OPEN "$HEAD7" "$GREEN"
+/usr/bin/ruby - "$ROOT" "$MAN" >"${TMP}/out" 2>"${TMP}/err" <<'RUBY'
+root, man = ARGV
+require File.join(root, "ai/lib/leadtime_product_io")
+module LeadTimeProductIO
+  module Git
+    class << self
+      alias_method :real_rev, :rev
+      def rev(dir, ref) = ref == "HEAD" && dir.end_with?("-land") ? nil : real_rev(dir, ref)
+    end
+  end
+end
+m = LeadTimeProductIO.load_manifest(man)
+summary, lines, = LeadTimeProductIO.sweep(m, gate_timeout: 1500, budget_s: 3480)
+puts summary
+lines.each { |l| puts l }
+RUBY
+rc=$?
+if [ "$rc" = 0 ] && grep -q "pr=#7 open: COULD NOT TELL (cannot resolve HEAD in the landing lane" "${TMP}/out" \
+   && ! grep -q 'rebased' "${TMP}/out" && [ "$(called locked-merge)" = 0 ] && ! grep -q 'push' "$FAKE/calls"; then
+  ok "the landing lane's HEAD unreadable after the gate: COULD NOT TELL, never an empty head read as a rebase; no merge, no push"
+else bad "lane HEAD unreadable" "rc=$rc out=$(cat "${TMP}/out") err=$(cat "${TMP}/err") calls=$(cat "$FAKE/calls")"; fi
+
 echo "== cut --metric (DND-1529)"
 new_repo
 hold_lock "$LANES/$RUN_ID.lock"

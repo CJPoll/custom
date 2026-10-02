@@ -704,7 +704,16 @@ module LeadTimeProductIO
     _, code = Git.call(rl.path, "fetch", "--quiet", "origin", "+refs/heads/#{s.branch}:refs/remotes/origin/#{s.branch}")
     return ["open: could not fetch #{s.branch}; the next run retries", false, false] unless code.zero?
 
-    remote = Git.rev(rl.path, "refs/remotes/origin/#{s.branch}")
+    # A ref that cannot be read after a good fetch is could-not-look, never a
+    # moved branch (DND-1703). Reported on the PR's line like the local read
+    # above: the sweep goes on and the next run retries.
+    ref = "refs/remotes/origin/#{s.branch}"
+    remote = Git.rev(rl.path, ref)
+    unless remote
+      return ["open: COULD NOT TELL (cannot read #{ref} after fetching it in #{rl.path}); nothing gated, the next run retries. " \
+              "Fix: check the ref ('git -C #{rl.path} rev-parse --verify #{ref}') and the remote, then fetch it again by hand.",
+              false, false]
+    end
     return ["open: origin's #{s.branch} is at #{remote.to_s[0, 12]}, not the recorded head", false, false] unless remote == s.head
 
     if local && local != s.head
@@ -726,7 +735,14 @@ module LeadTimeProductIO
                          chdir: dir, timeout: gate_cap)
     FileUtils.mkdir_p(runs_dir(m))
     File.write(File.join(runs_dir(m), "#{m.run_id}.#{rl.name}-pr#{s.pr}.gate.log"), out, perm: 0o600)
-    after = Git.rev(dir, "HEAD").to_s
+    after = Git.rev(dir, "HEAD")
+    # Same class (DND-1703): an unreadable HEAD is never an empty head, which
+    # compared unequal to the recorded one and read as a rebase.
+    unless after
+      return ["open: COULD NOT TELL (cannot resolve HEAD in the landing lane #{dir} after the gate, exit #{code}); nothing merged or pushed, the next run retries. " \
+              "Fix: check the lane ('git -C #{dir} rev-parse --verify HEAD').", false, false]
+    end
+
     g = P.gate_outcome(code, out, head_before: s.head, head_after: after)
     case g.action
     when :close then [close_pr(m, rl, s, g.reason), false, false]
