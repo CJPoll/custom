@@ -147,6 +147,26 @@ Lead time is the owner's definition: captain dispatch (the ticket's
    inferred. The tracked config declares custom `"none"` and gen_saas
    `post-merge.yml`. The normative description is
    `ai/bin/lead-time-phases --help`.
+
+   **Later (2026-10-02, DND-1501):** the table above is the standalone-PASS
+   flow. In custom the captain's verify step is `integration-gate
+   --with-critic`, so the PASS is judged inside the run, none stands before
+   it, and `verify` and `queue` read n/a on most landings (13 and 15 of the
+   last 20 at 2026-10-02T20:57Z). Such a landing now uses the
+   **with-critic flow**: `verify` = first gate run → the last green run's
+   start; `integrate` = that run; `queue` = its end → the landing start;
+   `merge` = the landing start → the landing. The landing start is the first
+   `merge.lock_wait` after the run, or the start of a timed `merge.landed`
+   push (gh-athena now writes `at` = push start and `duration_s`). The flow
+   applies only when the run is marked `with_critic` and a clean PASS lies
+   inside it; every landing measured under the old rule reads the same. A
+   push from before this change is a point event, so those landings read
+   `queue` and `merge` n/a with that reason. Rows are frozen at ingest and
+   are not re-derived: the window turns over in about a day, and a re-derive
+   would move the baselines that pending experiments compare against. Each
+   row records `phase_flow` and `verify.gate_runs_s`; `--summary` adds the
+   code time no phase holds (`unattributed`). The normative description is
+   `ai/bin/lead-time-phases --help`.
 6. **Rolling window, typical and slow.** The ledger keeps every measured
    landing. The summary reports, per phase, over the last 20 landings: n
    measured, n n/a, median, p90, and the summed time. The biggest contributor
@@ -223,6 +243,11 @@ n/a or is too coarse.
   `merge.landed` (via=push) only. Its lock is taken by hand, so its
   `merge.lock_wait` reads n/a until DND-1370 gives that path a tool;
   `locked-merge` emits both.
+
+  **Later (2026-10-02, DND-1501):** the via=push `merge.landed` is timed: `at`
+  is the push start and `duration_s` its wall. It was a point event after the
+  push, so no landing marked when the admiral began the landing. Its start
+  now ends `queue` and starts `merge` in the with-critic flow (Decision 5).
 
 ## The improvement procedure (`athena:lead-time-improve`)
 

@@ -28,6 +28,15 @@ rescue StandardError => e
   $failures << "#{desc} (raised #{e.class}: #{e.message})"
 end
 
+# A fixture computed outside a check: a raise is a named failure (and {} for
+# the checks that read it), so one missing method cannot hide the rest.
+def fixture
+  yield
+rescue StandardError => e
+  $failures << "fixture raised #{e.class}: #{e.message.lines.first&.chomp}"
+  {}
+end
+
 def t(iso) = Time.iso8601(iso).utc
 
 HEAD = "a" * 40
@@ -774,6 +783,157 @@ und = L::Stats.summarize(loc + [row(5).merge("mode" => "improve", "origin" => ni
 check("F5 an undecided row is unknown with its own reason, and foreign counts the judged rows") do
   und["foreign"] == 0 && und["origin"]["unknown"] == 1 &&
     und["origin"]["unknown_reasons"].first["reason"] == "telemetry: could not look (x)"
+end
+
+# ── DND-1501: the --with-critic integration flow ───────────────────────────
+# The captain's verify step IS `integration-gate --with-critic`, so its critic
+# PASS is judged inside the integration run and no PASS stands before it. The
+# phases then read: verify = first gate -> final integration start; integrate
+# = that run; queue = integration end -> the landing start (the first
+# merge.lock_wait, or the start of a timed merge.landed push); merge = landing
+# start -> landing. Every anchor is a recorded event; none is invented.
+
+WC_LANDED = "2026-10-01T04:30:05Z"
+WC_RUN = { "exit_code" => 0, "outcome" => "ok", "with_critic" => true }.freeze
+WC = [
+  ev("harness_gate.run", "2026-10-01T02:00:00.400Z", duration_s: 100.0, attrs: { "ok" => true, "run_id" => "g1" }),
+  # an earlier integration attempt: the critic BLOCKed (fix round follows)
+  ev("integration_gate.run", "2026-10-01T03:00:00Z", duration_s: 200.0,
+                             attrs: { "exit_code" => 3, "outcome" => "no_critic_pass", "with_critic" => true }),
+  ev("harness_gate.run", "2026-10-01T03:00:05Z", duration_s: 180.0, attrs: { "ok" => true, "run_id" => "g2" }),
+  ev("critic.round", "2026-10-01T03:00:06Z", duration_s: 70.0, attrs: { "verdict" => "block" }),
+  # the final, green integration run with its PASS inside it
+  ev("integration_gate.run", "2026-10-01T04:00:00Z", duration_s: 300.0, attrs: WC_RUN),
+  ev("harness_gate.run", "2026-10-01T04:00:02Z", duration_s: 280.0, attrs: { "ok" => true, "run_id" => "g3" }),
+  ev("critic.round", "2026-10-01T04:00:03Z", duration_s: 45.0, attrs: { "verdict" => "pass" }),
+].freeze
+# The landing push, timed (DND-1501): at = the push start, duration_s = its wall.
+PUSH = ev("merge.landed", "2026-10-01T04:30:00Z", duration_s: 4.0, attrs: { "via" => "push", "after" => HEAD })
+
+wl = landing(landed: WC_LANDED)
+wa = anchors(wl, S.ok(WC + [PUSH]))
+wp = L::Phases.compute(wa)
+check("W1 with-critic: every phase is measured") { L::PHASES.all? { |p| wp[p]["s"].is_a?(Integer) } }
+check("W1 the phases sum to landing - dispatch exactly") do
+  wp.values.sum { |c| c["s"] } == (wl["landed_at"] - wl["start"]).to_i
+end
+check("W1 verify = first gate -> the final integration run's start") { wp["verify"]["s"] == 7200 }
+check("W1 integrate = the final run's duration") { wp["integrate"]["s"] == 300 }
+check("W1 queue = integration end -> the landing push start") { wp["queue"]["s"] == 25 * 60 }
+check("W1 merge = the landing push start -> the landing") { wp["merge"]["s"] == 5 }
+check("W1 implement is unchanged") { wp["implement"]["s"] == 3600 }
+check("W2 the flow is recorded as with_critic") { L::Phases.flow(wa) == "with_critic" }
+check("W2 the critic_pass anchor is the PASS inside the run, marked with_critic") do
+  wa["critic_pass"].at == t("2026-10-01T04:00:48Z") && wa["critic_pass"].with_critic == true &&
+    wa["critic_pass"].to_h_json["with_critic"] == true
+end
+check("W2 the land_start anchor names its source") do
+  wa["land_start"].at == t("2026-10-01T04:30:00Z") && wa["land_start"].source.include?("merge.landed")
+end
+
+# The rows ingested before DND-1501: the push was a point event (no
+# duration_s), so the landing start is not recorded. queue and merge are n/a
+# with that reason, never 0, and never the old mislabel (queue inside merge).
+old_push = PUSH.merge("duration_s" => nil)
+wo = L::Phases.compute(anchors(wl, S.ok(WC + [old_push])))
+check("W3 no landing start recorded: verify and integrate still measured") do
+  wo["verify"]["s"] == 7200 && wo["integrate"]["s"] == 300
+end
+check("W3 queue and merge are n/a with a reason naming the missing landing start, never 0") do
+  %w[queue merge].all? { |p| wo[p]["s"].nil? && wo[p]["na_reason"].include?("no landing start") }
+end
+check("W3 the reason names the missing instrumentation") do
+  wo["queue"]["na_reason"].include?("merge.lock_wait") && wo["queue"]["na_reason"].include?("DND-1501")
+end
+
+# A locked-merge landing (gen_saas): merge.lock_wait marks the landing start,
+# and the earliest one after integration counts (retries stay in merge).
+locks = [ev("merge.lock_wait", "2026-10-01T03:30:00Z", duration_s: 1.0, attrs: { "outcome" => "acquired" }),
+         ev("merge.lock_wait", "2026-10-01T04:20:00Z", duration_s: 2.0, attrs: { "outcome" => "acquired" }),
+         ev("merge.lock_wait", "2026-10-01T04:25:00Z", duration_s: 2.0, attrs: { "outcome" => "acquired" })]
+wl2 = L::Phases.compute(anchors(wl, S.ok(WC + locks + [PUSH])))
+check("W4 the first merge.lock_wait after integration ends is the landing start") do
+  wl2["queue"]["s"] == 15 * 60 && wl2["merge"]["s"] == (t(WC_LANDED) - t("2026-10-01T04:20:00Z")).to_i
+end
+
+# A run not marked --with-critic: a PASS inside it is not a with-critic flow.
+plain = WC.map { |e| e["event"] == "integration_gate.run" ? e.merge("attrs" => e["attrs"].merge("with_critic" => false)) : e }
+pp_ = L::Phases.compute(anchors(wl, S.ok(plain + [PUSH])))
+check("W5 a PASS inside a run NOT marked --with-critic: verify and queue n/a, named") do
+  %w[verify queue].all? { |p| pp_[p]["s"].nil? && pp_[p]["na_reason"].include?("not marked --with-critic") }
+end
+# A PASS after the run ended is not inside it.
+late_pass = WC.reject { |e| e["event"] == "critic.round" } +
+            [ev("critic.round", "2026-10-01T04:10:00Z", duration_s: 20.0, attrs: { "verdict" => "pass" })]
+check("W6 a PASS after the integration run ended is not a with-critic PASS") do
+  a = anchors(wl, S.ok(late_pass + [PUSH]))
+  a["critic_pass"].at.nil? && L::Phases.flow(a) == "standalone"
+end
+dirty_in = WC.map { |e| e["event"] == "critic.round" ? e.merge("attrs" => e["attrs"].merge("dirty" => true)) : e }
+check("W7 a dirty PASS inside the run is never one, so the flow is not with_critic") do
+  a = anchors(wl, S.ok(dirty_in + [PUSH]))
+  a["critic_pass"].at.nil? && L::Phases.flow(a) == "standalone"
+end
+
+# The standalone-PASS flow is unchanged: a PASS stood before integration.
+std = anchors(l, S.ok(FULL + [PUSH.merge("at" => "2026-10-01T04:55:00Z")]))
+check("W8 standalone PASS: the phases are exactly as before DND-1501") do
+  L::Phases.compute(std) == ph && L::Phases.flow(std) == "standalone"
+end
+check("W8 standalone PASS: the critic_pass anchor carries no with_critic mark") { std["critic_pass"].with_critic.nil? }
+# No integration run: n/a as today.
+check("W9 no integration run: the flow is standalone, phases as before") do
+  a = anchors(l, S.ok(no_integ))
+  L::Phases.compute(a) == ph3 && L::Phases.flow(a) == "standalone"
+end
+a_cnl = anchors(wl, S.could_not_look("store gone"))
+ph_cnl = L::Phases.compute(a_cnl)
+check("W10 telemetry could not look: every phase n/a, never 0, and the land_start miss says could not look") do
+  L::PHASES.all? { |p| ph_cnl[p]["s"].nil? } && a_cnl["land_start"]&.reason == "telemetry: could not look (store gone)"
+end
+
+# verify.gate_runs_s: the gate-run wall inside verify (machine time vs fix time).
+gs = fixture { L::Counters.verify_gate_runs(landing: wl, events: S.ok(WC + [PUSH]), anchors: wa) }
+check("W11 gate_runs_s sums the gate runs inside verify, the final run's excluded") { gs["gate_runs_s"] == 280.0 }
+gs_std = fixture { L::Counters.verify_gate_runs(landing: l, events: S.ok(FULL), anchors: anchors(l, S.ok(FULL))) }
+check("W11 standalone: a run is clipped at verify's end") do
+  # verify 02:00:00 -> 03:20:45: runs 100 + 120.5 + 90 all end inside it.
+  gs_std["gate_runs_s"] == 310.5
+end
+nodur_g = WC.map { |e| e["at"] == "2026-10-01T03:00:05Z" ? e.merge("duration_s" => nil) : e }
+gs_nd = fixture { L::Counters.verify_gate_runs(landing: wl, events: S.ok(nodur_g), anchors: anchors(wl, S.ok(nodur_g + [PUSH]))) }
+check("W12 a gate run inside verify with no duration: null with a reason, never summed as 0") do
+  gs_nd["gate_runs_s"].nil? && gs_nd["gate_runs_na"].include?("no duration_s")
+end
+gs_na = fixture { L::Counters.verify_gate_runs(landing: wl, events: S.ok([]), anchors: anchors(wl, S.ok([]))) }
+check("W12 verify n/a: gate_runs_s is null with verify's reason") do
+  gs_na["gate_runs_s"].nil? && gs_na["gate_runs_na"].start_with?("verify n/a:")
+end
+row_w = fixture do
+  L::Ledger.improve_row(repo: "custom", landing: wl, anchors: wa, counters: {}, telemetry_status: :ok,
+                        ingested_at: t("2026-10-01T06:00:00Z"), origin: L::Origin.local("x"), verify_gate_runs: gs)
+end
+check("W13 the ledger row carries the flow and verify.gate_runs_s") do
+  row_w["phase_flow"] == "with_critic" && row_w.dig("phases", "verify", "gate_runs_s") == 280.0 &&
+    row_w.dig("phases", "queue", "s") == 1500 && row_w.dig("anchors", "land_start", "at") == "2026-10-01T04:30:00Z"
+end
+
+# --summary: code time attributed to no phase, and the flows in the window.
+un_rows = [row(1).merge("code_s" => 200), # phases 10+100+5+20+10 = 145 -> 55 unattributed
+           row(2).merge("code_s" => 500, "phases" => row(2)["phases"].merge("queue" => { "s" => nil, "na_reason" => "x" }),
+                        "phase_flow" => "with_critic"), # 20+100+20+10 = 150 -> 350
+           row(3).merge("code_s" => nil, "phase_flow" => "standalone")]
+un = fixture { L::Stats.summarize(un_rows) }
+check("W14 unattributed = code minus the measured phases, summed over rows with code") do
+  un["unattributed"]["sum_s"] == 405 && un["unattributed"]["code_s"] == 700 && un["unattributed"]["n"] == 2 &&
+    un["unattributed"]["n_na"] == 1
+end
+check("W14 the flows in the window, a row from before DND-1501 counted as unrecorded") do
+  un["flows"] == { "with_critic" => 1, "standalone" => 1, "unrecorded" => 1 }
+end
+un_f = fixture { L::Stats.summarize([row(1).merge("code_s" => 200, "origin" => "foreign")]) }
+check("W14 a foreign row is out of unattributed, as out of the phase stats") do
+  un_f["unattributed"]["n"].zero? && un_f["unattributed"]["sum_s"].nil?
 end
 
 if $failures.empty?

@@ -66,7 +66,7 @@
       }
     },
     "merge.landed": {
-      "description": "A landing on the default branch, a point event: a merge locked-merge confirmed (via=pr; at = confirmation, head = the gated PR head, unit from the PR head branch, before = the base, after = the merge commit) or a gh-athena push that moved the remote default branch (via=push; at = after the push, head = after, before absent when it could not be read). Emitter: DND-1475.",
+      "description": "A landing on the default branch: a merge locked-merge confirmed (via=pr; a point event, at = confirmation, head = the gated PR head, unit from the PR head branch, before = the base, after = the merge commit) or a gh-athena push that moved the remote default branch (via=push; head = after, before absent when it could not be read). A via=push event is timed (DND-1501): at = when the push began, duration_s = its wall through the after read, so its at is the landing start the lead-time ledger reads; one from before DND-1501, or whose clock could not be read, is a point event at after the push. Emitter: DND-1475.",
       "attrs": {
         "via": "label",
         "pr": "int",

@@ -281,14 +281,20 @@ ghpush() { # <dir> <store> <git args...> -> OUT RC ERR
 }
 
 origin_with_main p1; S="${TMP}/p1-store"
+# DND-1501: the event is timed. at = the push start (inside the bracket the
+# test reads around the push), duration_s = its wall (a number, not null).
+T_PRE="$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
 ghpush "${W}" "${S}" push -q origin HEAD:main
+T_POST="$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
 EV="$(landed "${S}")"
+EV_AT="$(jq -r .at <<<"${EV}" 2>/dev/null)"
 if [ "${RC}" = 0 ] && [ "$(landed_n "${S}")" = 1 ] \
   && [ "$(jq -cS .attrs <<<"${EV}")" = "$(jq -cnS --arg b "${BEFORE}" --arg a "${AFTER}" '{via:"push",before:$b,after:$a}')" ] \
-  && [ "$(jq -r .head <<<"${EV}")" = "${AFTER}" ] && [ "$(jq -r .duration_s <<<"${EV}")" = null ] \
+  && [ "$(jq -r .head <<<"${EV}")" = "${AFTER}" ] && [ "$(jq -r '.duration_s | type' <<<"${EV}")" = number ] \
+  && [[ ! "${EV_AT}" < "${T_PRE}" ]] && [[ ! "${EV_AT}" > "${T_POST}" ]] \
   && [ ! -e "${S}/write-failures" ]; then
-  ok "19. a push that moves origin's main: one merge.landed via=push, before/after/head right, no drops"
-else bad "19. merge.landed on a main push" "rc=${RC} ev='${EV}' err='${ERR}' failures='$(cat "${S}/write-failures" 2>/dev/null)'"; fi
+  ok "19. a push that moves origin's main: one merge.landed via=push, before/after/head right, timed from the push start (DND-1501), no drops"
+else bad "19. merge.landed on a main push" "rc=${RC} ev='${EV}' pre=${T_PRE} post=${T_POST} err='${ERR}' failures='$(cat "${S}/write-failures" 2>/dev/null)'"; fi
 
 S="${TMP}/p2-store"; git -C "${W}" commit -q --allow-empty -m c2
 ghpush "${W}" "${S}" push -q origin HEAD:refs/heads/topic

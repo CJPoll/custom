@@ -4,11 +4,19 @@
 # no file, process, network or clock access. Every input arrives as a value.
 #
 # A landing (one row of `ai/bin/lead-time --since --json`, DND-1009) splits
-# into five phases between six anchors (ai/docs/lead-time-improver.md ->
-# Decision 5):
+# into five phases between anchors (ai/docs/lead-time-improver.md ->
+# Decision 5). The standalone-PASS flow:
 #
 #   dispatch --implement--> gate_first --verify--> critic_pass --queue-->
 #   integrate_start --integrate--> integrate_end --merge--> landed
+#
+# The --with-critic flow (DND-1501), whose PASS is judged inside the run:
+#
+#   dispatch --implement--> gate_first --verify--> integrate_start
+#   --integrate--> integrate_end --queue--> land_start --merge--> landed
+#
+# land_start is the first merge.lock_wait after the run ended, or the start
+# of a timed merge.landed push (gh-athena, DND-1501), whichever is earlier.
 #
 # gate_first is the unit's first run of its repo's declared gate: a
 # harness_gate.run (custom) or a gate.run that test-slot writes for any other
@@ -32,8 +40,9 @@ require_relative "lead_time_config"
 module LeadTimePhases
   SCHEMA = 1
   PHASES = %w[implement verify queue integrate merge].freeze
-  ANCHORS = %w[dispatch gate_first critic_pass integrate_start integrate_end landed].freeze
-  # phase -> [start anchor, end anchor]
+  ANCHORS = %w[dispatch gate_first critic_pass integrate_start integrate_end land_start landed].freeze
+  # phase -> [start anchor, end anchor], for the standalone-PASS flow: a
+  # clean critic PASS stood before the integration run started.
   PHASE_ANCHORS = {
     "implement" => %w[dispatch gate_first],
     "verify" => %w[gate_first critic_pass],
@@ -41,6 +50,20 @@ module LeadTimePhases
     "integrate" => %w[integrate_start integrate_end],
     "merge" => %w[integrate_end landed],
   }.freeze
+  # The --with-critic flow (DND-1501): no PASS stood before the integration
+  # run, and its own critic judged the PASS inside it (the captain's verify
+  # step IS `integration-gate --with-critic`). Verify runs to that run's
+  # start (fix rounds, re-gates and earlier attempts), and the wait for the
+  # admiral comes AFTER the run: queue = run end -> the landing start, merge =
+  # the landing start -> the landing. The five still telescope.
+  WITH_CRITIC_PHASE_ANCHORS = {
+    "implement" => %w[dispatch gate_first],
+    "verify" => %w[gate_first integrate_start],
+    "queue" => %w[integrate_end land_start],
+    "integrate" => %w[integrate_start integrate_end],
+    "merge" => %w[land_start landed],
+  }.freeze
+  FLOWS = %w[with_critic standalone].freeze
   TOTALS = { "lead" => "lead_s", "code" => "code_s", "tail" => "tail_s" }.freeze
   # The telemetry events a phase or counter reads. telemetry.probe is never an
   # anchor (ai/telemetry/events.json).
@@ -248,24 +271,30 @@ module LeadTimePhases
   end
 
   module Anchors
-    Anchor = Struct.new(:at, :source, :reason, keyword_init: true) do
-      def to_h_json = { "at" => Util.iso(at), "source" => source, "reason" => reason }.compact
+    # with_critic: true on a critic_pass judged inside a --with-critic
+    # integration run (DND-1501), which selects WITH_CRITIC_PHASE_ANCHORS.
+    Anchor = Struct.new(:at, :source, :reason, :with_critic, keyword_init: true) do
+      def to_h_json = { "at" => Util.iso(at), "source" => source, "reason" => reason,
+                        "with_critic" => with_critic }.compact
     end
 
     module_function
 
-    def found(time, source) = Anchor.new(at: Util.floor(time), source: source)
+    def found(time, source, with_critic: nil) = Anchor.new(at: Util.floor(time), source: source,
+                                                           with_critic: with_critic)
     def missing(reason) = Anchor.new(at: nil, reason: reason)
 
     # events/receipt/verdicts are Sources. -> {anchor name => Anchor}
     def from(landing:, events:, receipt:, verdicts:)
-      integ = integrate(landing, events, receipt)
+      run = last_ok_run(landing, events)
+      integ = integrate(landing, events, receipt, run)
       {
         "dispatch" => dispatch(landing),
         "gate_first" => gate_first(landing, events),
-        "critic_pass" => critic_pass(landing, events, verdicts, integ),
+        "critic_pass" => critic_pass(landing, events, verdicts, integ, run),
         "integrate_start" => integ[0],
         "integrate_end" => integ[1],
+        "land_start" => land_start(landing, events, integ[1]),
         "landed" => found(landing["landed_at"], "lead-time"),
       }
     end
@@ -300,7 +329,9 @@ module LeadTimePhases
     # only its end known, before it ended; with neither, before the landing).
     # Telemetry critic.round for the unit and the head's verdict receipts are
     # both candidates. A dirty PASS judged an uncommitted tree: never one.
-    def critic_pass(landing, events, verdicts, integ)
+    # When none stood before the run, the PASS its own --with-critic critic
+    # judged inside it is the anchor, marked with_critic (DND-1501).
+    def critic_pass(landing, events, verdicts, integ, run = nil)
       cands = Match.for_unit(events.items, landing, "critic.round")
                    .select { |e| Match.attr(e, "verdict").to_s.downcase == "pass" && !Match.dirty?(e) }
                    .map { |e| [Match.end_of(e), "telemetry critic.round"] }
@@ -312,14 +343,37 @@ module LeadTimePhases
       bound, what = integ[0].at ? [integ[0].at, "started"] : [integ[1].at, "ended"]
       if bound
         before = cands.select { |t, _| Util.floor(t) <= bound }
-        if before.empty?
-          return missing("every critic PASS for #{Landing.unit_desc(landing)} ended after integration-gate " \
-                         "#{what} (a --with-critic round); none stood before it")
-        end
+        return with_critic_pass(landing, cands, integ, run, what) if before.empty?
+
         cands = before
       end
       t, src = cands.max_by(&:first)
       found(t, src)
+    end
+
+    # No clean PASS stood before the integration run. -> the last PASS judged
+    # inside that run when the run is marked --with-critic (its own critic
+    # judged it), else missing with the reason. The run must be known by its
+    # start: with only the receipt's end, "inside" cannot be told.
+    def with_critic_pass(landing, cands, integ, run, what)
+      none = "every critic PASS for #{Landing.unit_desc(landing)} ended after integration-gate #{what}"
+      return missing("#{none} (a --with-critic round); none stood before it") unless run && integ[0].at
+
+      flag = Match.attr(run, "with_critic")
+      unless flag == true
+        return missing("#{none}, and that run is not marked --with-critic (its with_critic attr is " \
+                       "#{flag.inspect}); none stood before it")
+      end
+      inside = cands.select do |t, _|
+        f = Util.floor(t)
+        f >= integ[0].at && (integ[1].at.nil? || f <= integ[1].at)
+      end
+      if inside.empty?
+        return missing("#{none}, and none was judged inside that --with-critic run (it ended " \
+                       "#{Util.iso(integ[1].at)}); none stood before it")
+      end
+      t, src = inside.max_by(&:first)
+      found(t, "#{src}, inside the --with-critic integration_gate.run", with_critic: true)
     end
 
     def critic_miss(landing, events, verdicts)
@@ -332,12 +386,17 @@ module LeadTimePhases
         "#{Landing.head_desc(landing)})"
     end
 
+    # The last successful integration_gate.run on the landed head, or nil.
+    def last_ok_run(landing, events)
+      Match.for_gated(events.items, landing, "integration_gate.run")
+           .select { |e| Match.attr(e, "exit_code") == 0 }
+           .max_by { |e| Match.at(e) }
+    end
+
     # -> [start Anchor, end Anchor]: the last successful integration_gate.run
-    # on the landed head, else the receipt's recorded_at as the end only.
-    def integrate(landing, events, receipt)
-      runs = Match.for_gated(events.items, landing, "integration_gate.run")
-                  .select { |e| Match.attr(e, "exit_code") == 0 }
-      run = runs.max_by { |e| Match.at(e) }
+    # on the landed head (run: last_ok_run's), else the receipt's recorded_at
+    # as the end only.
+    def integrate(landing, events, receipt, run = last_ok_run(landing, events))
       sha = Landing.head_desc(landing)
       # sha names the head-keyed receipt; gated names the key the run lookup used.
       gated = Landing.gated_desc(landing)
@@ -355,14 +414,43 @@ module LeadTimePhases
       rec_why = receipt.could_not_look? ? "receipt: could not look (#{receipt.reason})" : "no integration receipt for #{sha}"
       [missing(no_run), missing("#{no_run}; #{rec_why}")]
     end
+
+    # When the admiral began landing the gated head (DND-1501): the earliest
+    # of the first merge.lock_wait (locked-merge) and the start of a timed
+    # merge.landed push (gh-athena: at = the push start, duration_s = its
+    # wall), at or after the integration run ended (integ_end: an Anchor). A
+    # point merge.landed (a locked-merge confirmation, or a push from before
+    # DND-1501) marks only the end, so it is never a start.
+    def land_start(landing, events, integ_end)
+      locks = Match.for_gated(events.items, landing, "merge.lock_wait")
+                   .map { |e| [Match.at(e), "telemetry merge.lock_wait"] }
+      pushes = Match.for_gated(events.items, landing, "merge.landed")
+                    .select { |e| Match.attr(e, "via") == "push" && e["duration_s"].is_a?(Numeric) }
+                    .map { |e| [Match.at(e), "telemetry merge.landed (the push start)"] }
+      cands = (locks + pushes).select { |t, _| integ_end.at.nil? || Util.floor(t) >= integ_end.at }
+      return found(*cands.min_by(&:first)) unless cands.empty?
+
+      missing(telemetry_miss(events, "no landing start for #{Landing.gated_desc(landing)}: no merge.lock_wait " \
+                                     "and no timed merge.landed push after integration ended (a gh-athena push " \
+                                     "to main records its start from DND-1501 on; the custom ff landing's " \
+                                     "hand-held lock writes no merge.lock_wait until DND-1370)"))
+    end
   end
 
   module Phases
     module_function
 
+    # "with_critic" when the critic_pass anchor was judged inside a
+    # --with-critic integration run (DND-1501), else "standalone" (the
+    # Decision 5 rule, including every row with no PASS at all).
+    def flow(anchors) = anchors["critic_pass"]&.with_critic ? "with_critic" : "standalone"
+
+    # phase -> [start anchor, end anchor] for the flow.
+    def anchor_map(anchors) = flow(anchors) == "with_critic" ? WITH_CRITIC_PHASE_ANCHORS : PHASE_ANCHORS
+
     # anchors: {name => Anchor} -> {phase => {"s"=>Integer|nil, "na_reason"=>.., "invalid"=>true}}
     def compute(anchors)
-      PHASE_ANCHORS.to_h do |phase, (from, to)|
+      anchor_map(anchors).to_h do |phase, (from, to)|
         a = anchors.fetch(from)
         b = anchors.fetch(to)
         [phase, value(a, b, from, to)]
@@ -402,6 +490,31 @@ module LeadTimePhases
       family(landing, events, "merge.lock_wait", %w[lock_wait_s], out, na) { |evs| [wall(evs)] }
       { "counters" => out, "counters_na" => na }.merge(check_fields(landing, events, timings))
     end
+
+    # verify.gate_runs_s (DND-1501): the summed wall of every gate run for
+    # the unit (GATE_RUN_EVENTS) inside verify's window, each clipped to it.
+    # It splits verify into machine time and the captain's fix time.
+    # Concurrent runs each count, so it can exceed verify.
+    # -> {"gate_runs_s"=>Float} or {"gate_runs_s"=>nil, "gate_runs_na"=>why}
+    def verify_gate_runs(landing:, events:, anchors:)
+      from, to = Phases.anchor_map(anchors).fetch("verify")
+      cell = Phases.value(anchors.fetch(from), anchors.fetch(to), from, to)
+      return gate_runs_na("verify n/a: #{cell['na_reason']}") if cell["s"].nil?
+
+      lo = anchors.fetch(from).at
+      hi = anchors.fetch(to).at
+      runs = Match.for_unit(events.items, landing, GATE_RUN_EVENTS).select { |e| Match.at(e) < hi }
+      bare = runs.find { |e| !e["duration_s"].is_a?(Numeric) && Match.at(e) >= lo }
+      if bare
+        return gate_runs_na("no duration_s on the #{bare['event']} at #{Util.iso(Match.at(bare))} inside verify " \
+                            "for #{Landing.unit_desc(landing)}")
+      end
+      wall = runs.select { |e| e["duration_s"].is_a?(Numeric) }
+                 .sum { |e| [[Match.end_of(e), hi].min - [Match.at(e), lo].max, 0].max }
+      { "gate_runs_s" => wall.round(3) }
+    end
+
+    def gate_runs_na(why) = { "gate_runs_s" => nil, "gate_runs_na" => why }
 
     # The summed duration_s, or nil when no event carries one (a missing
     # duration is never summed as 0).
@@ -619,11 +732,15 @@ module LeadTimePhases
 
     # origin: Origin.decide's result (DND-1531). A foreign landing's phases
     # are null with the foreign reason; its anchors and counters are kept.
-    def improve_row(repo:, landing:, anchors:, counters:, telemetry_status:, ingested_at:, origin:)
+    # verify_gate_runs: Counters.verify_gate_runs's result, merged into the
+    # verify cell (DND-1501). phase_flow names the anchor map the phases used.
+    def improve_row(repo:, landing:, anchors:, counters:, telemetry_status:, ingested_at:, origin:,
+                    verify_gate_runs: nil)
       phases = Origin.foreign?(origin) ? Origin.foreign_phases(landing["ticket"]) : Phases.compute(anchors)
+      phases["verify"] = phases["verify"].merge(verify_gate_runs) if verify_gate_runs && !Origin.foreign?(origin)
       base(repo: repo, mode: "improve", landing: landing, ingested_at: ingested_at)
         .merge(origin)
-        .merge("phases" => phases,
+        .merge("phase_flow" => Phases.flow(anchors), "phases" => phases,
                "anchors" => anchors.transform_values(&:to_h_json),
                "telemetry" => telemetry_status.to_s)
         .merge(counters)
@@ -907,7 +1024,28 @@ module LeadTimePhases
       end
       { "rows" => rows.size, "foreign" => org["judged"].zero? ? nil : org["foreign"],
         "origin" => org.except("judged"), "phases" => ph, "biggest" => big, "totals" => tot,
+        "unattributed" => unattributed(local), "flows" => flows(local),
         "tail_ci" => TailCI.report(decl, rows) }
+    end
+
+    # Code time attributed to no phase (DND-1501): per row with a measured
+    # code_s, code minus its measured phases, summed. A phase that is n/a
+    # leaves its time here, so a future anchor gap shows as a number instead
+    # of vanishing. n_na: rows with no code_s (unticketed, no stamp). Sums
+    # are null, never 0, when no row has code_s.
+    def unattributed(rows)
+      coded = rows.select { |r| r["code_s"].is_a?(Numeric) }
+      gaps = coded.map { |r| r["code_s"] - PHASES.sum { |p| (s = r.dig("phases", p, "s")).is_a?(Numeric) ? s : 0 } }
+      { "sum_s" => coded.empty? ? nil : gaps.sum, "code_s" => coded.empty? ? nil : coded.sum { |r| r["code_s"] },
+        "n" => coded.size, "n_na" => rows.size - coded.size }
+    end
+
+    # How many rows each anchor map measured (DND-1501). A row ingested
+    # before DND-1501 has no phase_flow: unrecorded.
+    def flows(rows)
+      out = FLOWS.to_h { |f| [f, 0] }.merge("unrecorded" => 0)
+      rows.each { |r| out[FLOWS.include?(r["phase_flow"]) ? r["phase_flow"] : "unrecorded"] += 1 }
+      out
     end
 
     # Where the window's landings were worked. foreign_units names each

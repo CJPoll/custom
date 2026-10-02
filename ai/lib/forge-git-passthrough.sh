@@ -300,8 +300,10 @@ fg_refuse_non_https() {
 # `push` runs git as a CHILD instead of exec'ing it, so that after a push that
 # exits 0 the wrapper can tell whether the remote's default branch moved, and
 # record that as one `merge.landed` event (via=push, before, after). That is
-# how ~/dev/custom lands (athena:merge-boarding, the no-CI ff push), and the
-# lead-time ledger's `merge` phase reads it.
+# how ~/dev/custom lands (athena:merge-boarding, the no-CI ff push). The event
+# is timed (DND-1501): at = when this push began, duration_s = its wall
+# through the AFTER read. The lead-time ledger reads its start as the landing
+# start of a --with-critic flow, where `queue` ends and `merge` begins.
 #
 # How "moved" is read: `git ls-remote --symref <url> HEAD refs/heads/main`
 # BEFORE the push gives the default branch (HEAD's symref; refs/heads/main when
@@ -339,6 +341,13 @@ fg_probe() { timeout 10 env -u GIT_ASKPASS -u SSH_ASKPASS GIT_TERMINAL_PROMPT=0 
 fg_push_and_record() {
   local -a probe=( git "${FG_PUSH_GLOB[@]}" -c credential.helper= -c core.askPass= -c "$(fg_rewrite)" )
   local ls="" line name sha ref="" sym="" head_sha="" main_sha="" before="" known=0 rc=0 after=""
+  local t0_at="" t0_us=""
+  # The push start (DND-1501): the lead-time phase ledger reads it as the
+  # landing start, ending `queue` and starting `merge` in a --with-critic
+  # flow. Taken before the BEFORE read, so the event's wall is the push's.
+  if . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/telemetry-emit.sh" 2>/dev/null; then
+    t0_at="$(athena_telemetry_now)"; t0_us="$(athena_telemetry_clock_us)"
+  fi
   if ls="$(fg_probe "${probe[@]}" ls-remote --symref "$FG_PUSH_URL" HEAD refs/heads/main)"; then
     known=1
     while IFS= read -r line; do
@@ -359,7 +368,7 @@ fg_push_and_record() {
     done <<<"$ls"
     if [[ "$after" =~ ^[0-9a-f]{40}$ ]] && fg_push_sent "$after" "${ref#refs/heads/}" "$@" \
        && { { [ "$known" -eq 0 ] && fg_push_names_default "${ref#refs/heads/}" "$@"; } || { [ "$known" -eq 1 ] && [ "$after" != "$before" ]; }; }; then
-      fg_record_landing "$before" "$after" "${ref#refs/heads/}"
+      fg_record_landing "$before" "$after" "${ref#refs/heads/}" "$t0_at" "$t0_us"
     fi
   fi
   exit "$rc"
@@ -417,14 +426,20 @@ fg_push_names_default() {
   return "$hit"
 }
 
-# fg_record_landing <before or ""> <after> <default branch name> : one
-# merge.landed event, from the pushed repo's top level. Never fails.
+# fg_record_landing <before or ""> <after> <default branch name>
+#                   [<start at> <start clock_us>] : one merge.landed event,
+# from the pushed repo's top level. With both start values it is timed (at =
+# the push start, duration_s = the push's wall, DND-1501); without either, or
+# with a clock that cannot be read, it is a point event at now, as before.
+# Never fails.
 fg_record_landing() {
-  local before="$1" after="$2" def="$3" top="" b n=0 ub=""
+  local before="$1" after="$2" def="$3" t0_at="${4:-}" t0_us="${5:-}" top="" b n=0 ub="" wall=""
   local -a opt=( --head "$after" )
   if ! . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/telemetry-emit.sh" 2>/dev/null; then
     return 0
   fi
+  [ -n "$t0_at" ] && wall="$(athena_telemetry_seconds_since "$t0_us")"
+  [ -n "$wall" ] && opt+=( --at "$t0_at" --duration "$wall" )
   [[ "$before" =~ ^[0-9a-f]{40}$ ]] && opt+=( --attr "before=$before" )
   while IFS= read -r b; do
     [ -n "$b" ] && [ "$b" != "$def" ] && { ub="$b"; n=$((n + 1)); }
