@@ -1418,6 +1418,9 @@ parse_case "JSON-RPC error refused: ..." "$(rpc_err_msg 'refused: slack_thread_c
 parse_case "JSON-RPC error invalid: ..." "$(rpc_err_msg 'invalid: thread_ts must be digits.digits')" "invalid"
 parse_case "a bare already_claimed token (tool error)" "$(err_msg 'already_claimed')" "already-claimed"
 parse_case "a bare already_claimed token (JSON-RPC error)" "$(rpc_err_msg 'already_claimed')" "already-claimed"
+parse_case "a bare refused token (JSON-RPC error)" "$(rpc_err_msg 'refused')" "refused"
+parse_case "a bare invalid token (JSON-RPC error)" "$(rpc_err_msg 'invalid')" "invalid"
+parse_case "'not found' under a protocol code (-32601) is not a refusal" "$(rpc_err_msg 'not found' -32601)" "mcp-error:not found"
 parse_case "already_claimedX is not the token" "$(rpc_err_msg 'already_claimedX: no')" "mcp-error:already_claimedX: no"
 parse_case "'not found here' is not the token" "$(rpc_err_msg 'not found here')" "mcp-error:not found here"
 parse_case "Invalid params (a protocol error) is not invalid" "$(rpc_err_msg 'Invalid params' -32602)" "mcp-error:Invalid params"
@@ -1425,6 +1428,10 @@ claim_fn claim_server_words "$(rpc_err_msg 'already_claimed: held. Fix: ask the 
 if [[ "${OUT}" == "already_claimed: held. Fix: ask the holder." ]]; then
   ok "claim_server_words: a JSON-RPC error's message is the server's words"
 else bad "claim_server_words: a JSON-RPC error's message is the server's words" "got '${OUT}' rc=${RC}"; fi
+claim_fn claim_server_words "$(rpc_err_msg 'Method not found' -32601)"
+if [[ -z "${OUT}" && "${RC}" == 0 ]]; then
+  ok "claim_server_words: a protocol error (-32601) has no server words"
+else bad "claim_server_words: a protocol error (-32601) has no server words" "got '${OUT}' rc=${RC}"; fi
 
 # u5. claim_reason_fix: every reason has its own non-empty Fix text.
 setup_case

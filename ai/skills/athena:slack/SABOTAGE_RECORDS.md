@@ -551,3 +551,12 @@ DND-1645: the athena server sends every `slack_thread_claim` refusal as Hermes' 
 | S99 | `claim_refusal_kind` drops the bare `already_claimed` token (colon form only) | 2 | `FAIL claim_parse_result: a bare already_claimed token (tool error) -> already-claimed` / `... (JSON-RPC error) -> already-claimed` |
 
 After the restore the suite returned to `VERDICT: PASS (298 cases)`.
+
+Review round (critic BLOCK [tests]: bare `refused` / `invalid` untested; code-reviewer nits: a JSON-RPC protocol error's message could read as a refusal, and became `server:` words). Refusal text is now read only from an `isError` result or an Error.execution (code -32000) JSON-RPC error. Baseline `VERDICT: PASS (302 cases)`. The three mutations below applied together (exact anchors, each asserted once), one run, restored with `cp` (verified by `cmp`): `VERDICT: FAIL (4 of 302 cases)`.
+
+| # | Mutation | Cases reddened | Failure string(s) |
+|---|---|---|---|
+| S100 | `_claim_refusal_text` accepts a JSON-RPC error of any code | 2 | `FAIL claim_parse_result: 'not found' under a protocol code (-32601) is not a refusal -> mcp-error:not found` / `FAIL claim_server_words: a protocol error (-32601) has no server words` |
+| S101 | `claim_refusal_kind` drops the bare `refused` and `invalid` tokens | 2 | `FAIL claim_parse_result: a bare refused token (JSON-RPC error) -> refused` / `FAIL claim_parse_result: a bare invalid token (JSON-RPC error) -> invalid` |
+
+After the restore the suite returned to `VERDICT: PASS (302 cases)`.

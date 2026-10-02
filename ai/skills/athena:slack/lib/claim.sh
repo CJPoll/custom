@@ -13,9 +13,10 @@
 # (DND-1521).
 #
 # BUCKETS.
-#   claim_parse_result, claim_refusal_kind, claim_server_words,
-#   claim_reason_fix, claim_pick_slack_channel -- Domain:
-#     pure string-in / string-out, tested directly.
+#   claim_parse_result, _claim_refusal_text, claim_refusal_kind,
+#   claim_server_words, claim_reason_fix, claim_pick_slack_channel -- Domain:
+#     pure string-in / string-out; tested directly, or (the refusal readers)
+#     through claim_parse_result and claim_server_words.
 #   claim_resolve_inbox -- Side Effect: reads git and the inbox registry through
 #     athena:inbox's own adapters (fs.sh, inbox.sh), never a second copy of the
 #     repo-identity rule.
@@ -42,15 +43,18 @@ claim_oneline() {
 # _claim_refusal_text <json-rpc-message>
 #
 # DOMAIN. The server's refusal text, or nothing when the answer carries no
-# error. The athena server sends a refusal as Hermes' Error.execution: a
-# JSON-RPC `error` whose message is the text (DND-1645). An `isError` tool
-# result carrying the text is read the same way, so either server shape works
-# and the landing order of a server change does not matter.
+# tool refusal. The athena server sends a refusal as Hermes' Error.execution: a
+# JSON-RPC `error` with code -32000 whose message is the text (DND-1645). An
+# `isError` tool result carrying the text is read the same way, so either
+# server shape works and the landing order of a server change does not
+# matter. A JSON-RPC error with any other code is a protocol error, never a
+# refusal: claim_parse_result reports it as mcp-error, whatever its message.
+CLAIM_EXECUTION_ERROR_CODE=-32000
 _claim_refusal_text() {
-  printf '%s' "$1" | jq -r '
+  printf '%s' "$1" | jq -r --argjson code "${CLAIM_EXECUTION_ERROR_CODE}" '
       if (.result.isError // false) then
         ([.result.content[]? | .text? // empty] | join(" ") | if . == "" then "a tool error" else . end)
-      elif .error then (.error.message // "an MCP error" | tostring)
+      elif (.error | type) == "object" and .error.code == $code then (.error.message // "an MCP error" | tostring)
       else empty end' 2>/dev/null
 }
 
@@ -85,7 +89,8 @@ claim_refusal_kind() {
 #   claimed | already_yours                  -- the claim holds (success)
 #   not-found | refused | already-claimed | invalid
 #                                            -- the server's refusal, by kind,
-#                                               from a JSON-RPC error or an
+#                                               from an Error.execution
+#                                               (-32000) JSON-RPC error or an
 #                                               isError result alike
 #   mcp-error:<words>                        -- anything else. An empty body,
 #                                               non-JSON, a protocol error, or a
@@ -102,6 +107,10 @@ claim_parse_result() {
   if [ -n "${err}" ]; then
     claim_refusal_kind "${err}"; return 1
   fi
+  err="$(printf '%s' "${msg}" | jq -r 'if .error then (.error.message // "an MCP error" | tostring) else empty end' 2>/dev/null)"
+  if [ -n "${err}" ]; then
+    printf 'mcp-error:%s\n' "$(claim_oneline "${err}")"; return 1
+  fi
   status="$(printf '%s' "${msg}" | jq -r '
       (.result.structuredContent // (.result.content[0].text | fromjson? // null)) as $r
       | if ($r | type) == "object" and ($r.status | type) == "string" then $r.status else "" end' 2>/dev/null)"
@@ -113,8 +122,9 @@ claim_parse_result() {
 }
 
 # claim_server_words <json-rpc-message>
-# DOMAIN. The server's own refusal words (a JSON-RPC error's message, or an
-# isError tool result's text) as one bounded line, or nothing. claim-thread
+# DOMAIN. The server's own refusal words (an Error.execution JSON-RPC
+# error's message, or an isError tool result's text) as one bounded line, or
+# nothing; a protocol error has no refusal words. claim-thread
 # prints them as `server: ...` beside a refusal: they are the server's Fix,
 # never message content.
 claim_server_words() {
