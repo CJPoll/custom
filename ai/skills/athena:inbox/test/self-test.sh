@@ -92,6 +92,11 @@ unset CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_SESSION_ATTENDED CLAUDE_CODE_PRINT_BG_W
 # DND-1163 cases below set them per case.
 unset CLAUDE_PROJECT_DIR CLAUDE_PID
 
+# AND THE SESSION ID (DND-1428). inbox-wait keys its watermark on
+# CLAUDE_CODE_SESSION_ID; left set, every arm below would share the running
+# session's mark. Cases that test the mark set it themselves.
+unset CLAUDE_CODE_SESSION_ID
+
 # A case directory + a private inbox root + a private registry, per case.
 CASE_N=0
 setup_case() {
@@ -3551,12 +3556,12 @@ SHIM_DIR="$(mktemp -d)"
 # without them the shim PATH makes every case fail with `env: bash: No such
 # file or directory` and exit 127 -- a failure of the FIXTURE that looks
 # exactly like the refusal under test failing to happen.
-for c in bash env dirname basename mktemp head cut seq sleep ln jq awk sed date stat mv rm mkdir touch cat printf ls find sort wc tr grep cp chmod realpath git flock paste timeout inotifywait; do
+for c in bash env dirname basename mktemp head cut seq sleep ln jq awk sed date stat mv rm mkdir touch cat printf ls find sort wc tr grep cp chmod realpath git flock paste timeout inotifywait mkfifo; do
   cp_p="$(command -v "$c" 2>/dev/null)" && ln -sf "${cp_p}" "${SHIM_DIR}/$c"
 done
 REAL_GIT="$(agent_free_git)" || exit 1   # the real git, not the agent wrapper (DND-1103)
 ln -sf "${REAL_GIT}" "${SHIM_DIR}/git"
-for missing in inotifywait timeout; do
+for missing in inotifywait timeout mkfifo; do
   rm -f "${SHIM_DIR}/${missing}"
   ERR="$(cd "${BREPO}" && PATH="${SHIM_DIR}" "${BIN}/inbox-wait" 2>&1 >/dev/null)"; RC=$?
   assert_eq "W-12 an absent ${missing} is REFUSED, never degraded to a poll" "2" "${RC}"
@@ -3598,6 +3603,162 @@ ERR="$(cd "${BREPO}" && timeout 10 "${BIN}/inbox-wait" --dry-run 2>&1 >/dev/null
 assert_contains "W-10 a log channel that has NEVER been delivered to is reported, not silently armed on" \
   "nothing has EVER been delivered" "${ERR}"
 assert_contains "W-10 and the notice names producer registration" "register this channel's producer" "${ERR}"
+
+echo
+echo "== DND-1428: the arm is LEVEL-triggered, not edge-triggered =="
+
+# THE MISSED OWNER MESSAGE. A consumer reads (offset written), a delivery
+# lands and rings its doorbell, and only THEN does the consumer re-arm. The
+# ring happened while nobody was watching, so an edge-only waiter blocks with
+# the mail unread past the offset until some unrelated later ring. Measured
+# twice (an owner @-mention unread 9+ minutes; an owner DM missed ~2 min).
+#
+# Bounded, functional: the waiter's own budget is the cap. On the unfixed
+# script the waiter blocks to that budget and exits 75 -- that is the failure,
+# read from its exit status, never from a wall clock.
+setup_case
+LREPO="$(make_repo lvl)"
+register lvl "${LREPO}" '{
+  "slack": {"kind":"log","path":"lvl-slack.jsonl"},
+  "peer-mail": {"kind":"maildir","namespace":"agent-mail/lpeer","read":"from-server","write":"to-server","identity":"athena"}
+}'
+LV_LOG="${ATHENA_INBOX_ROOT}/lvl-slack.jsonl"
+LV_BELL="${ATHENA_INBOX_ROOT}/lvl-slack.event"
+lv_line() {
+  jq -nc --arg e "$1" --arg ts "$2" \
+    '{v:1,received_at:"2026-10-02T15:35:02Z",channel:"D01",ts:$ts,event_id:$e,text:"synthetic"}'
+}
+lv_line EvL1 1790.0001 > "${LV_LOG}"
+( cd "${LREPO}" && "${BIN}/inbox-wait" --dry-run ) >/dev/null 2>&1      # provision the doorbells
+( cd "${LREPO}" && "${BIN}/read-inbox" slack ) >/dev/null 2>&1          # the consumer's read + ack
+assert_eq "L-0 after the consumer's read, nothing is unread on slack" "0" \
+  "$(cd "${LREPO}" && "${BIN}/inbox-status" --json 2>/dev/null | jq -r '.channels[] | select(.name=="slack") | .count')"
+
+# The delivery between the read and the arm: append, then ring -- the order
+# every writer uses. Nobody is armed, so this ring is lost by construction.
+lv_line EvL2 1790.0002 >> "${LV_LOG}"
+touch "${LV_BELL}"
+arm_waiter "${LREPO}" 5
+reap_waiter
+assert_eq "L-1 mail delivered between the read and the arm wakes the arm at once (0), not the budget (75)" \
+  "0" "${WAIT_RC}"
+assert_contains "L-1 and the wake names that channel on the stable machine line" \
+  "rang-channels: slack" "$(cat "${WAIT_OUT}")"
+assert_contains "L-1 and marks it as pending when the waiter armed" \
+  "pending-at-arm: slack" "$(cat "${WAIT_OUT}")"
+
+# NO FALSE WAKE. Once the consumer has read, an arm with nothing unread must
+# still block for its budget and exit 75. A waiter that wakes on every arm is
+# a spin loop with an LLM turn inside it.
+( cd "${LREPO}" && "${BIN}/read-inbox" slack ) >/dev/null 2>&1
+arm_waiter "${LREPO}" 1
+reap_waiter
+assert_eq "L-2 a read-to-arm with nothing unread still blocks to its budget (75), no false wake" \
+  "75" "${WAIT_RC}"
+assert_not_contains "L-2 and it names no channel as pending" "pending-at-arm" "$(cat "${WAIT_OUT}")"
+
+# The maildir kind goes through the same count: an unread message already in
+# the read directory wakes the arm.
+LV_MD="${ATHENA_INBOX_ROOT}/agent-mail/lpeer/from-server"
+printf -- '---\nfrom: peer\nto: athena\nsent_at: 2026-10-02T15:35:02Z\n---\n\nsynthetic\n' \
+  > "${LV_MD}/20261002T153502Z-001-synthetic.md"
+arm_waiter "${LREPO}" 5
+reap_waiter
+assert_eq "L-3 an unread maildir message waiting at arm wakes it at once (0)" "0" "${WAIT_RC}"
+assert_contains "L-3 and names the maildir channel as pending" \
+  "pending-at-arm: peer-mail" "$(cat "${WAIT_OUT}")"
+assert_not_contains "L-3 and the wake still carries no peer-chosen filename" \
+  "synthetic.md" "$(cat "${WAIT_OUT}")"
+
+# A POSITION THAT CANNOT BE READ IS NOT ZERO UNREAD. A NUL byte in the log
+# file makes the count refuse (fs_assert_no_nul). Reading that as "quiet" and
+# blocking would be the failed lookup that looks like an empty one, so the arm
+# must report it with a Fix: and return the fault status -- never block, never
+# exit 0 with nothing named.
+setup_case
+UREPO="$(make_repo unreadable)"
+register unreadable "${UREPO}" '{"slack": {"kind":"log","path":"u-slack.jsonl"}}'
+printf 'a\000b\n' > "${ATHENA_INBOX_ROOT}/u-slack.jsonl"
+ERR="$(cd "${UREPO}" && ATHENA_INBOX_WAIT_BUDGET=5 timeout 20 "${BIN}/inbox-wait" 2>&1 >/dev/null)"; RC=$?
+assert_eq "L-4 an unreadable channel position is a fault (1), not a quiet block (75) and not a wake (0)" \
+  "1" "${RC}"
+assert_contains "L-4 and names the channel it could not count" "slack" "${ERR}"
+assert_contains "L-4 and carries a Fix:" "Fix:" "${ERR}"
+
+# Unreadable AND pending: the pending mail still wakes (0) -- the broken
+# channel must not hide real mail on another one -- and the unreadable one is
+# still named on stderr with a Fix:.
+register unreadable "${UREPO}" '{
+  "slack": {"kind":"log","path":"u-slack.jsonl"},
+  "ok-chan": {"kind":"log","path":"u-ok.jsonl"}
+}'
+lv_line EvU1 1791.0001 > "${ATHENA_INBOX_ROOT}/u-ok.jsonl"
+OUT="$(cd "${UREPO}" && ATHENA_INBOX_WAIT_BUDGET=5 timeout 20 "${BIN}/inbox-wait" 2>"${TMP}/l5-err")"; RC=$?
+assert_eq "L-5 pending mail on one channel wakes the arm even when another is unreadable" "0" "${RC}"
+assert_contains "L-5 and names the pending channel" "pending-at-arm: ok-chan" "${OUT}"
+assert_contains "L-5 and still reports the unreadable channel, with a Fix:" "Fix:" "$(cat "${TMP}/l5-err")"
+
+# THE WATERMARK: LEVEL-TRIGGERED MUST NOT MEAN WAKE-ON-EVERY-ARM. A
+# ticket-lane trigger (walt_ui's `flaky`) is deliberately left unacked while an
+# admiral drains. A pure level check would wake every arm on it, for hours. The
+# session's watermark (when its previous waiter started watching) lets a
+# delivery wake at most once more after it was announced, and never forever.
+setup_case
+MREPO="$(make_repo marked)"
+register marked "${MREPO}" '{"flaky": {"kind":"log","path":"m-flaky.jsonl"}}'
+lv_line EvM1 1792.0001 > "${ATHENA_INBOX_ROOT}/m-flaky.jsonl"
+touch -d '1 hour ago' "${ATHENA_INBOX_ROOT}/m-flaky.jsonl"
+export CLAUDE_CODE_SESSION_ID="00000000-0000-4000-8000-000000001428"
+MARK_FILE="${ATHENA_INBOX_ROOT}/wait-marks/${CLAUDE_CODE_SESSION_ID}"
+
+arm_waiter "${MREPO}" 5
+reap_waiter
+assert_eq "L-6 a session's FIRST arm wakes for unread it was never woken for" "0" "${WAIT_RC}"
+assert_contains "L-6 and names it as pending" "pending-at-arm: flaky" "$(cat "${WAIT_OUT}")"
+assert_eq "L-6 the arm records the session's watermark, 0600" "600" "$(stat -c '%a' "${MARK_FILE}" 2>/dev/null)"
+assert_eq "L-6 in a 0700 directory" "700" "$(stat -c '%a' "${ATHENA_INBOX_ROOT}/wait-marks" 2>/dev/null)"
+
+# Left unread on purpose, nothing new: the next arm blocks. This is the case
+# that would be a spin loop without the mark.
+arm_waiter "${MREPO}" 1
+reap_waiter
+assert_eq "L-7 unread mail the session was already woken for does NOT wake the next arm (75)" "75" "${WAIT_RC}"
+
+# A new delivery between arms, its ring lost, wakes the next arm: the mark
+# never hides mail that arrived after the previous waiter started watching.
+lv_line EvM2 1792.0002 >> "${ATHENA_INBOX_ROOT}/m-flaky.jsonl"
+touch "${ATHENA_INBOX_ROOT}/m-flaky.event"
+arm_waiter "${MREPO}" 5
+reap_waiter
+assert_eq "L-8 a delivery after the previous arm wakes the next arm, mark or no mark (0)" "0" "${WAIT_RC}"
+assert_contains "L-8 and names the channel" "pending-at-arm: flaky" "$(cat "${WAIT_OUT}")"
+
+# The mark is per SESSION: another session on the same project has not been
+# woken for anything yet, so it is.
+CLAUDE_CODE_SESSION_ID="00000000-0000-4000-8000-000000000002"
+arm_waiter "${MREPO}" 5
+reap_waiter
+assert_eq "L-9 another session's first arm still wakes for the same unread mail (marks are per session)" \
+  "0" "${WAIT_RC}"
+
+# An unreadable mark is said, and read as NO mark (wake), never as "nothing new".
+CLAUDE_CODE_SESSION_ID="00000000-0000-4000-8000-000000001428"
+printf 'not-an-epoch\n' > "${MARK_FILE}"
+arm_waiter "${MREPO}" 5
+reap_waiter
+assert_eq "L-10 an unreadable watermark wakes the arm rather than hiding unread mail" "0" "${WAIT_RC}"
+assert_contains "L-10 and says so, with a Fix:" "watermark" "$(cat "${WAIT_ERR}")"
+assert_contains "L-10 and carries a Fix:" "Fix:" "$(cat "${WAIT_ERR}")"
+
+# A malformed session id never becomes a path.
+CLAUDE_CODE_SESSION_ID="../escape"
+arm_waiter "${MREPO}" 5
+reap_waiter
+assert_eq "L-11 a malformed session id wakes on unread (no mark), never names a path" "0" "${WAIT_RC}"
+assert_contains "L-11 and says the id is unusable" "not a usable watermark key" "$(cat "${WAIT_ERR}")"
+assert_eq "L-11 and writes nothing outside wait-marks/" "absent" \
+  "$([ -e "${ATHENA_INBOX_ROOT}/escape" ] && echo present || echo absent)"
+unset CLAUDE_CODE_SESSION_ID
 
 echo
 echo "== DND-187 / 1. Domain: the writer's half of lib/maildir.sh =="

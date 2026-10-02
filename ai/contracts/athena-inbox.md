@@ -2116,6 +2116,27 @@ timeout "$BUDGET" inotifywait -qq -e attrib,modify,close_write,move_self,delete_
 
 - Block on the doorbells; **do not poll and do not spin**. A single blocking
   `inotifywait` over every owned `.event` satisfies this directly.
+- **The arm is level-triggered, not edge-triggered** (DND-1428). A ring that
+  lands between the consumer's read and the next arm has nobody watching, and
+  nothing rings that bell again. So the waiter MUST also wake, at once and with
+  exit 0, when unread mail is **already waiting** when it arms, naming each such
+  channel. Unread is the count `inbox-status` reports (the same offset and
+  unread-set rules, one implementation); a never-delivered `log` channel is not
+  unread. The check MUST run only after the watch is established — every
+  writer appends before it rings, so a delivery is then either counted or rung
+  on a watched bell. A position that cannot be read is NOT zero unread: the
+  waiter names it with a `Fix:` and, with nothing else pending, exits with the
+  fault status rather than block.
+  **The level check MUST NOT wake every arm on mail the session leaves unread
+  on purpose** (a ticket-lane trigger stays unacked while an admiral drains).
+  So a waiter records, per session, when it started watching (a watermark),
+  and an unread channel wakes the next arm only when its last delivery is at or
+  after that mark. Mail older than the mark was counted or rung while a waiter
+  of that session watched, so it was announced. The comparison is biased
+  toward waking: a missing age, a missing or unreadable mark, or no session
+  key all wake. The watermark is `<root>/wait-marks/<session-id>` (directory
+  `0700`, file `0600`), keyed by `CLAUDE_CODE_SESSION_ID`; it is waiter
+  state, never consumption state, and advances nothing.
 - One waiter watches **all** the session's doorbells, of **both** kinds.
 - `BUDGET` depends on the session mode. **Interactive** (`CLAUDE_CODE_ENTRYPOINT=cli`
   and `CLAUDE_CODE_SESSION_ATTENDED=1`, both) defaults to **1800s** under a

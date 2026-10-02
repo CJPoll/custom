@@ -379,6 +379,45 @@ fs_write_state() {
   return 0
 }
 
+# --- the waiter's watermark (DND-1428) -------------------------------------
+#
+# One file per session, `<root>/wait-marks/<session-id>`, holding one epoch:
+# when that session's last waiter STARTED watching. The waiter's level check
+# reads it to tell mail that arrived since then (wake) from unread mail a
+# previous wake already announced (the session chose to leave it, e.g. a
+# ticket-lane trigger left unacked while an admiral drains). Directory 0700,
+# file 0600, written by rename, like every other state file here.
+
+# fs_wait_mark_path <session-id>
+fs_wait_mark_path() { printf '%s/wait-marks/%s\n' "$(fs_inbox_root)" "$1"; }
+
+# fs_read_wait_mark <session-id>
+# Prints the epoch, or NOTHING with status 0 when there is no mark yet (a
+# session's first arm). Status 1 when a mark exists but cannot be read or is
+# not an epoch: "could not look" is never "no mark".
+fs_read_wait_mark() {
+  local path v
+  path="$(fs_wait_mark_path "$1")"
+  [ -e "${path}" ] || [ -L "${path}" ] || return 0
+  fs_assert_regular "${path}" || return 1
+  v="$(head -n 1 "${path}" 2>/dev/null)" || return 1
+  case "${v}" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "${v}"
+}
+
+# fs_write_wait_mark <session-id> <epoch>
+fs_write_wait_mark() {
+  local dir path tmp
+  path="$(fs_wait_mark_path "$1")"
+  dir="$(dirname "${path}")"
+  ( umask 077; mkdir -p "${dir}" ) || return 1
+  fs_assert_not_symlink "${dir}" || return 1
+  [ ! -L "${path}" ] || return 1
+  tmp="${path}.tmp.$$"
+  ( umask 077; printf '%s\n' "$2" > "${tmp}" ) || return 1
+  mv -f "${tmp}" "${path}" || { rm -f "${tmp}" 2>/dev/null; return 1; }
+}
+
 # --- retention: rotate and sweep --------------------------------------------
 
 # fs_rotated_name <inbox-path>  -- exactly one generation, `<channel>.jsonl.1`.

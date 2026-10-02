@@ -630,6 +630,100 @@ inbox_status_json() {
   [ "${failed}" -eq 0 ]
 }
 
+# _INBOX_PENDING_JQ (DND-1428): classify one status document's channels for the
+# waiter's arm. It reads ONLY the normalized `count` that _INBOX_COUNT_JQ put on
+# each channel, and the freshness age inbox_status_json already merged, so the
+# arm and inbox-status share one count and one position rule (offset vs size
+# for a log, the unread set for a maildir). Emits one `<verdict>\t<name>` line
+# per channel that matters:
+#   pending     count > 0 AND the channel's last delivery is at or after
+#               $mark - 2 (or there is no mark, or its age is unknown);
+#   unreadable  count null and NOT a never-delivered log: the position could
+#               not be read, which is never "zero unread".
+# A never-delivered log channel (no inbox file has ever existed) is skipped: it
+# has nothing to read, inbox_doorbells already reports it on every arm, and
+# waking on it would wake every arm forever.
+#
+# THE MARK BOUNDS THE WAKES; IT DOES NOT NARROW THE CHECK. `$mark` is when this
+# session's previous waiter started watching. Mail delivered before it was
+# either counted by that waiter's own level check or rang a bell it watched, so
+# it was announced; a session that left it unread did so on purpose (a
+# ticket-lane trigger stays unacked while an admiral drains). Without the mark
+# that channel would wake every arm, for hours: a spin loop with an LLM turn in
+# it. The comparison is biased toward waking: the delivery epoch is estimated
+# as `$now - age`, where `$now` is read AFTER the ages were (so the estimate is
+# never earlier than the truth), the 2s slack covers the seconds granularity,
+# and a missing age wakes. A wrong guess costs one extra wake, never a lost one.
+# shellcheck disable=SC2034
+_INBOX_PENDING_JQ='
+  .channels[]
+  | if (.count | type) == "number" then
+      (if .count > 0
+          and ($mark == null
+               or ((.last_delivery_age_s | type) != "number")
+               or (($now - .last_delivery_age_s) >= ($mark - 2)))
+       then "pending\t\(.name)" else empty end)
+    elif (.kind == "log" and (.never_delivered // false) and ((.error // false) | not)) then empty
+    else "unreadable\t\(.name)"
+    end'
+
+# inbox_now_epoch -- the local clock, for the waiter's watermark. MANAGER, so
+# bin/ never reaches into the adapter.
+inbox_now_epoch() { fs_now_epoch; }
+
+# inbox_pending_at_arm <project-dir> <watch-started-epoch>
+#
+# MANAGER. The level half of the waiter's arm (DND-1428): which of this
+# session's channels have unread mail the session has not yet been woken for,
+# and which could not be counted. It is inbox_status_json, the same count
+# inbox-status reports, classified by _INBOX_PENDING_JQ -- never a second copy
+# of the position logic.
+#
+# The session's watermark (fs.sh -> fs_read_wait_mark) is read first and
+# replaced by <watch-started-epoch> after: the caller MUST pass a time taken
+# before its watch was started, so the next arm treats everything since as
+# possibly unannounced. The key is CLAUDE_CODE_SESSION_ID. No session id means
+# no mark (every unread channel wakes: correct, only noisier). A malformed id
+# or an unreadable mark is said on stderr and treated the same way -- never as
+# "nothing new since".
+#
+# Prints `pending\t<name>` / `unreadable\t<name>` lines (nothing when nothing
+# needs a wake). Status 0 when it produced a classification, 1 when the status
+# document itself could not be built (a refusal has gone to stderr with its
+# Fix:). A per-channel count failure is NOT status 1: inbox_status_json still
+# emits the document, and that channel comes back as `unreadable`.
+inbox_pending_at_arm() {
+  local project="${1:-.}" started="${2:-}" sid="${CLAUDE_CODE_SESSION_ID:-}" mark="" doc now out
+  case "${started}" in
+    ''|*[!0-9]*)
+      inbox_fail "inbox_pending_at_arm was given no watch-start epoch" \
+        "this is a bug in the caller: pass the epoch taken before the watch started."
+      return 1 ;;
+  esac
+  if [ -n "${sid}" ] && ! names_valid_session_id "${sid}"; then
+    inbox_fail "CLAUDE_CODE_SESSION_ID is not a usable watermark key, so this arm wakes on every unread channel" \
+      "unset it or make it letters, digits and '-' only. Waking on every unread channel is safe, only noisier."
+    sid=""
+  fi
+  if [ -n "${sid}" ] && ! mark="$(fs_read_wait_mark "${sid}")"; then
+    inbox_fail "the waiter's watermark $(fs_wait_mark_path "${sid}") could not be read, so this arm wakes on every unread channel" \
+      "delete that file; the next arm writes a fresh one. Waking on every unread channel is safe, only noisier."
+    mark=""
+  fi
+
+  doc="$(inbox_status_json "${project}")"
+  [ -n "${doc}" ] || return 1
+  now="$(fs_now_epoch)"
+  out="$(printf '%s' "${doc}" | jq -r --argjson now "${now}" \
+    --argjson mark "${mark:-null}" "${_INBOX_PENDING_JQ}")" || return 1
+
+  if [ -n "${sid}" ] && ! fs_write_wait_mark "${sid}" "${started}"; then
+    inbox_fail "could not write the waiter's watermark $(fs_wait_mark_path "${sid}")" \
+      "check that the inbox root is writable and wait-marks/ is a 0700 directory, not a symlink. Until it is written the next arm falls back to the older mark: more wakes, never fewer."
+  fi
+  [ -z "${out}" ] || printf '%s\n' "${out}"
+}
+
 # ============================================================================
 # READ / ACK / RETENTION (DND-184).
 #

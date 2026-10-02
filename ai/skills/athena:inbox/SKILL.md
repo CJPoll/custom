@@ -436,10 +436,21 @@ again THE standing mechanism, and the exit-code table below is unchanged.
 
 | exit | meaning | what to do |
 |---|---|---|
-| `0` | a doorbell rang | read the channel(s) it **named** (below), then **re-arm** |
+| `0` | a doorbell rang, or unread mail was already waiting at arm | read the channel(s) it **named** (below), then **re-arm** |
 | `75` | the budget elapsed, nothing rang | **re-arm** — this is *not* "all clear" |
-| `2` | refused (bad usage, no `inotifywait`, an unusable budget, nothing to watch) | fix what the `Fix:` line names; re-arming will not help |
-| `1` | `inotifywait` faulted; one reason line is printed | re-arm **once**, then surface it rather than looping |
+| `2` | refused (bad usage, no `inotifywait`/`timeout`/`mkfifo`, an unusable budget, nothing to watch) | fix what the `Fix:` line names; re-arming will not help |
+| `1` | faulted: `inotifywait` failed, or a channel's unread position could not be read at arm; one reason line and a `Fix:` are printed | re-arm **once**, then surface it rather than looping |
+
+**The arm is level-triggered** (DND-1428; the contract's *Waiter rules*). It
+starts the watch, waits until `inotifywait` reports its watches established,
+then counts unread with the same count `inbox-status` uses. Mail already
+waiting wakes it at once, so a delivery that rang between your read and your
+re-arm is no longer lost. Such a wake names the channels on `rang-channels:` as
+usual and adds `athena:inbox: pending-at-arm: <name> […]`. Mail you leave
+unread on purpose (a ticket-lane trigger) does not wake every arm: a
+per-session watermark (`<root>/wait-marks/<session-id>`, when this session's
+last waiter started watching) lets unread mail wake the arm only when it was
+delivered since then. A missing or unreadable mark wakes rather than hides.
 
 **The wake names which channel rang.** On exit `0` the waiter prints a stable,
 machine-readable line:

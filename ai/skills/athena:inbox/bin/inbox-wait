@@ -13,15 +13,26 @@
 #
 # ============================ EXIT STATUS ==================================
 #
-#   0   a doorbell rang. Run inbox-status, then read-inbox <channel>, then
-#       RE-ARM. A wake does NOT imply unread mail: an ack by the peer rings
-#       the same bell, and so does a doorbell being deleted and recreated.
+#   0   a doorbell rang, OR unread mail was already waiting when the waiter
+#       armed (`pending-at-arm:`, DND-1428). Run inbox-status, then
+#       read-inbox <channel>, then RE-ARM. A rung bell does NOT imply unread
+#       mail: an ack by the peer rings the same bell, and so does a doorbell
+#       being deleted and recreated.
 #   75  the budget elapsed and nothing rang. RE-ARM. This is NOT "all clear" --
 #       treating it as one turns a quiet hour into a lost message.
-#   2   refused: bad usage, no inotifywait, an unusable budget, or nothing to
-#       watch. Fix what the `Fix:` line names; re-arming will not help.
-#   1   inotifywait faulted. One reason line is printed. Re-arm ONCE; if it
-#       faults again, surface it rather than looping.
+#   2   refused: bad usage, no inotifywait/timeout/mkfifo, an unusable budget,
+#       or nothing to watch. Fix what the `Fix:` line names; re-arming will
+#       not help.
+#   1   the waiter faulted: inotifywait failed, or a channel's unread position
+#       could not be read at arm and nothing else was pending. One reason line
+#       and a `Fix:` are printed. Re-arm ONCE; if it faults again, surface it
+#       rather than looping.
+#
+# **THE ARM IS LEVEL-TRIGGERED (DND-1428).** It starts the watch, waits for
+# inotifywait's "Watches established.", and only then counts unread on every
+# channel with the count inbox-status uses. Mail already waiting wakes it at
+# once; a delivery after the count rings a bell that is already watched. A
+# ring that landed between the consumer's read and this arm is no longer lost.
 #
 # **75, NOT 0, FOR A QUIET BUDGET.** A waiter that exits 0 on "nothing ever
 # arrived" is the worst shape this facility can take: success is what the
@@ -63,11 +74,13 @@
 #
 # ============================ SAFE WAIT ====================================
 #
-# One blocking call. No `while`, no `until`, no poll, no sleep. The child is
+# One blocking call. No poll, no sleep, no re-check loop. The child is
 # backgrounded only so its pid can be trapped -- an orphaned waiter is the
 # orphaned-spin-loop class (a spin loop reparented to PID 1 pinned this box's load at ~290
 # for an hour and flaked neighbouring suites into Postgres 57014 timeouts).
-# `wait` blocks on the pid; it does not re-check it.
+# `wait` blocks on the pid; it does not re-check it. The one `while` is the
+# arm's handshake: blocking `read`s of inotifywait's stderr stream, a few
+# lines long, ended by "Watches established." or by the stream closing.
 #--- end usage ---
 set -uo pipefail
 
@@ -185,6 +198,11 @@ if ! command -v timeout >/dev/null 2>&1; then
     "install coreutils (it provides timeout). The budget is what bounds the waiter (under the ${BUDGET_CEILING}s ceiling for this ${BUDGET_MODE}-mode session; headless \`claude -p\` kills background tasks past its ceiling); arming without it would be an unbounded wait, which this harness forbids."
   exit "${EX_REFUSED}"
 fi
+if ! command -v mkfifo >/dev/null 2>&1; then
+  inbox_fail "mkfifo(1) was not found on PATH, so the arm cannot learn when its watches are established" \
+    "install coreutils (it provides mkfifo). The arm checks for mail already waiting only AFTER inotifywait reports its watches established, over a FIFO; without that handshake a delivery between the check and the watch would be lost (DND-1428)."
+  exit "${EX_REFUSED}"
+fi
 
 # Tenancy, provisioning, and the refusals -- all in the manager. A zero-channel
 # session is refused there rather than armed on nothing.
@@ -236,6 +254,14 @@ ERRF="$(mktemp)" || { inbox_fail "could not create a temporary file for inotifyw
 OUTF="$(mktemp)" || { inbox_fail "could not create a temporary file for inotifywait's stdout" \
   "check that \$TMPDIR is writable, then re-run."; rm -f "${ERRF}"; exit "${EX_REFUSED}"; }
 
+# inotifywait's STDERR goes through this FIFO, because the handshake below
+# reads its "Watches established." line as it is written (DND-1428).
+FIFO_DIR="$(mktemp -d)" && mkfifo -m 600 "${FIFO_DIR}/stderr" || {
+  inbox_fail "could not create the FIFO the arm reads inotifywait's watch handshake from" \
+    "check that \$TMPDIR is writable, then re-run."
+  rm -f "${ERRF}" "${OUTF}"; [ -n "${FIFO_DIR:-}" ] && rm -rf "${FIFO_DIR}"; exit "${EX_REFUSED}"; }
+ERR_FIFO="${FIFO_DIR}/stderr"
+
 # ============================================================================
 # CLEANUP AND SIGNALS.
 #
@@ -255,9 +281,9 @@ OUTF="$(mktemp)" || { inbox_fail "could not create a temporary file for inotifyw
 # to launch this with `run_in_background`, so every stop produced that.
 # ============================================================================
 child=""
-trap 'kill "$child" 2>/dev/null; rm -f "${ERRF}" "${OUTF}"' EXIT
-trap 'kill "$child" 2>/dev/null; rm -f "${ERRF}" "${OUTF}"; exit 130' INT
-trap 'kill "$child" 2>/dev/null; rm -f "${ERRF}" "${OUTF}"; exit 143' TERM
+trap 'kill "$child" 2>/dev/null; rm -f "${ERRF}" "${OUTF}"; rm -rf "${FIFO_DIR}"' EXIT
+trap 'kill "$child" 2>/dev/null; rm -f "${ERRF}" "${OUTF}"; rm -rf "${FIFO_DIR}"; exit 130' INT
+trap 'kill "$child" 2>/dev/null; rm -f "${ERRF}" "${OUTF}"; rm -rf "${FIFO_DIR}"; exit 143' TERM
 
 # ============================================================================
 # THE ARM.
@@ -282,18 +308,113 @@ trap 'kill "$child" 2>/dev/null; rm -f "${ERRF}" "${OUTF}"; exit 143' TERM
 # link count and therefore emits ATTRIB, so the two overlap today; the overlap
 # is not a guarantee and is not what the waiter relies on.)
 # ============================================================================
-# `-q --format '%w%f'`, NOT `-qq`. `-qq` prints nothing, so the wake could
-# never say which doorbell rang. `-q` suppresses the "Watches established"
-# chatter (measured: stderr stays empty, exactly as under `-qq`, so the fault
-# branch below still reads a clean ERRF) while `--format '%w%f'` prints the
-# fired doorbell's path to stdout. Watching FILES, `%f` is empty and `%w` is
-# the path as passed, so `%w%f` is that path; without `-m`, inotifywait reads
-# one event and exits, so OUTF holds the single line naming what rang.
-timeout "${BUDGET}" inotifywait -q --format '%w%f' \
+# NOT `-q`, and NOT `-qq` (DND-1428). Without `-q`, inotifywait writes
+# "Setting up watches." and then "Watches established." to stderr once every
+# watch is registered -- and that second line is the handshake the level check
+# below waits for. `--format '%w%f'` prints the fired doorbell's path to
+# stdout. Watching FILES, `%f` is empty and `%w` is the path as passed, so
+# `%w%f` is that path; without `-m`, inotifywait reads one event and exits, so
+# OUTF holds the single line naming what rang.
+# Taken BEFORE the watch starts: it becomes this session's watermark, and the
+# next arm treats every delivery since as possibly unannounced (see the level
+# check below and lib/inbox.sh -> _INBOX_PENDING_JQ).
+WATCH_STARTED="$(inbox_now_epoch)"
+timeout "${BUDGET}" inotifywait --format '%w%f' \
   -e attrib,modify,close_write,move_self,delete_self \
-  -- "${EVENT_FILES[@]}" >"${OUTF}" 2>"${ERRF}" &
+  -- "${EVENT_FILES[@]}" >"${OUTF}" 2>"${ERR_FIFO}" &
 child=$!
-wait "${child}"; RC=$?
+
+# ============================================================================
+# THE LEVEL CHECK (DND-1428). WATCH FIRST, THEN LOOK.
+#
+# An edge-only arm loses a delivery that rang between the consumer's read and
+# this arm: nobody was watching the bell when it rang, and nothing rings it
+# again. Measured twice -- an owner @-mention unread 9+ minutes, an owner DM
+# missed ~2 minutes. So the arm also asks whether mail is ALREADY waiting.
+#
+# THE ORDER IS WHAT MAKES IT RACE-FREE. Every writer appends first and rings
+# second. The arm (1) starts inotifywait, (2) blocks until inotifywait says
+# "Watches established.", and only then (3) counts unread. Take any delivery:
+#   * its append landed before (3) -> (3) counts it;
+#   * its append landed after (3)  -> its ring comes later still, after (2),
+#                                     so the watch catches it.
+# There is no third case. Checking BEFORE starting the watch would leave the
+# check-to-watch gap open (the 2026-10-02 miss was exactly a delivery between
+# a count and the new watch), and a re-check after a sleep would be a guess.
+#
+# THE HANDSHAKE IS A BLOCKING READ OF A STREAM, NOT A POLL. Each `read` blocks
+# on the FIFO until inotifywait writes a line or exits. inotifywait writes a
+# few lines at most, and `timeout` bounds its life to the budget, so the
+# stream ends no later than the budget. `read -t` is a second cap on a hang
+# (the budget plus slack); it is never the thing that decides a verdict.
+#
+# The FIFO is opened for read only after the child is started, so the child's
+# open-for-write and this open rendezvous. fd 3 stays open across the `wait`,
+# so a later stderr write cannot SIGPIPE inotifywait.
+# ============================================================================
+exec 3<"${ERR_FIFO}"
+ESTABLISHED=0
+HANDSHAKE_LINE=""
+while IFS= read -r -t "$(( BUDGET + 10 ))" -u 3 HANDSHAKE_LINE; do
+  case "${HANDSHAKE_LINE}" in
+    "Watches established.") ESTABLISHED=1; break ;;
+    "Setting up watches.") : ;;
+    *) printf '%s\n' "${HANDSHAKE_LINE}" >> "${ERRF}" ;;
+  esac
+done
+
+PENDING_CHANNELS=""
+UNREADABLE_CHANNELS=""
+if [ "${ESTABLISHED}" -eq 1 ]; then
+  # The same count inbox-status reports (lib/inbox.sh -> inbox_pending_at_arm).
+  # A channel the session already left unread on purpose (delivered before its
+  # previous waiter started watching) does not wake it again: that is what
+  # keeps a ticket-lane trigger, unacked while an admiral drains, from waking
+  # every arm.
+  if PENDING_LINES="$(inbox_pending_at_arm "${PROJECT_DIR}" "${WATCH_STARTED}")"; then
+    while IFS=$'\t' read -r VERDICT VCH; do
+      [ -n "${VCH:-}" ] || continue
+      case "${VERDICT}" in
+        pending)    PENDING_CHANNELS="${PENDING_CHANNELS:+${PENDING_CHANNELS} }${VCH}" ;;
+        unreadable) UNREADABLE_CHANNELS="${UNREADABLE_CHANNELS:+${UNREADABLE_CHANNELS} }${VCH}" ;;
+      esac
+    done <<< "${PENDING_LINES}"
+  else
+    # NO DOCUMENT AT ALL. The registry or the repo identity could not be read
+    # (its refusal and Fix: are already on stderr). That is "could not look",
+    # never "nothing waiting", so the arm does not block on it.
+    kill "${child}" 2>/dev/null; wait "${child}" 2>/dev/null
+    inbox_fail "could not count this session's channels at arm, so mail already waiting cannot be ruled out" \
+      "fix what the refusal above names, then re-arm ONCE. If it fails again, stop and surface it: blocking here would read \"could not look\" as \"no mail\"."
+    exit "${EX_FAULT}"
+  fi
+
+  if [ -n "${UNREADABLE_CHANNELS}" ]; then
+    # A POSITION THAT CANNOT BE READ IS NOT ZERO UNREAD. Named loudly, on every
+    # arm, whether or not something else is pending.
+    inbox_fail "could not read the unread position of: ${UNREADABLE_CHANNELS}. Mail may be waiting there that this arm cannot see" \
+      "run inbox-status (it names why each channel could not be counted) and inbox-doctor, and repair that channel. Until it is repaired the arm reports it on every arm rather than reading it as quiet."
+  fi
+
+  if [ -n "${PENDING_CHANNELS}" ]; then
+    # Wake now. Stop the watch first; a ring that landed during the check is
+    # still in OUTF and joins the names below.
+    kill "${child}" 2>/dev/null; wait "${child}" 2>/dev/null
+    RC=0
+  elif [ -n "${UNREADABLE_CHANNELS}" ]; then
+    # Nothing provably waiting, and a channel nobody could count: the fault
+    # status, so the caller re-arms ONCE and then surfaces it -- never a quiet
+    # block, which would be the failed lookup that looks empty.
+    kill "${child}" 2>/dev/null; wait "${child}" 2>/dev/null
+    exit "${EX_FAULT}"
+  else
+    wait "${child}"; RC=$?
+  fi
+else
+  # No handshake: inotifywait exited (a fault, or the budget) or never came up.
+  # Its status decides below; what it printed is already in ERRF.
+  wait "${child}"; RC=$?
+fi
 
 case "${RC}" in
   0)
@@ -315,15 +436,32 @@ case "${RC}" in
       esac
     done < "${OUTF}"
 
+    # PENDING AT ARM (DND-1428) joins the same list: a channel with mail
+    # already waiting is read exactly like one whose bell just rang, so the
+    # consumer's parser needs no second case.
+    for RANG_CH in ${PENDING_CHANNELS}; do
+      case " ${RANG_CHANNELS} " in
+        *" ${RANG_CH} "*) : ;;
+        *) RANG_CHANNELS="${RANG_CHANNELS:+${RANG_CHANNELS} }${RANG_CH}" ;;
+      esac
+    done
+
     # COUNTS ONLY, and not even a count in the bodies sense: these lines are the
     # reader's own narration and never carry a byte anybody else wrote. The
     # bodies come later, from read-inbox, inside fences.
     if [ -n "${RANG_CHANNELS}" ]; then
-      printf 'athena:inbox: a doorbell rang (%s watched). Run inbox-status, then read-inbox <channel>, then re-arm.\n' "${#EVENT_FILES[@]}"
+      if [ -n "${PENDING_CHANNELS}" ]; then
+        printf 'athena:inbox: unread mail was already waiting when the waiter armed (%s watched). Run inbox-status, then read-inbox <channel>, then re-arm.\n' "${#EVENT_FILES[@]}"
+      else
+        printf 'athena:inbox: a doorbell rang (%s watched). Run inbox-status, then read-inbox <channel>, then re-arm.\n' "${#EVENT_FILES[@]}"
+      fi
       # THE STABLE, MACHINE-READABLE LINE. A consumer greps `^athena:inbox:
       # rang-channels: ` and reads the space-separated channel names after it.
       # This line's shape is a contract (see SKILL.md → bin/inbox-wait).
       printf 'athena:inbox: rang-channels: %s\n' "${RANG_CHANNELS}"
+      # Which of those were already unread at arm, on a separate line so the
+      # rang-channels line keeps its exact shape.
+      [ -z "${PENDING_CHANNELS}" ] || printf 'athena:inbox: pending-at-arm: %s\n' "${PENDING_CHANNELS}"
     else
       # RANG, BUT UNATTRIBUTABLE. This is exit 0 by contract (a bell DID ring),
       # but it must NOT read as "rang, nothing to do": OUTF was empty, or the
@@ -359,6 +497,9 @@ case "${RC}" in
     # this machine's diagnostic (a watch limit reached, a vanished path), not
     # anybody else's content -- but it is relayed verbatim and never parsed
     # into a decision.
+    # The child has exited, so the FIFO's write end is closed: drain what it
+    # wrote after the handshake (bounded, in case a stray writer survives).
+    timeout 5 cat <&3 >> "${ERRF}" 2>/dev/null
     REASON=""
     [ -f "${ERRF}" ] && REASON="$(tr -d '\000' < "${ERRF}" | head -n 3)"
     inbox_fail "the waiter faulted (exit ${RC})${REASON:+: ${REASON}}" \

@@ -242,3 +242,20 @@ names_safe_curl_config_value() {
   [ "$(names_byte_length "${v}")" -le "${max}" ] || return 1
   return 0
 }
+
+# names_valid_session_id <id>  (DND-1428)
+#
+# The key a waiter's watermark file is named by: CLAUDE_CODE_SESSION_ID, a
+# UUID in every session measured. It becomes a FILENAME under the inbox root,
+# so it is an allowlist -- letters, digits and `-`, 1..128 bytes -- and
+# anything else (a `/`, a `..`, an empty string) is refused where it is used,
+# never truncated or matched against nothing.
+names_valid_session_id() {
+  local v="$1"
+  [ -n "${v}" ] || return 1
+  case "${v}" in
+    *[!A-Za-z0-9-]*) return 1 ;;
+  esac
+  [ "$(names_byte_length "${v}")" -le 128 ] || return 1
+  return 0
+}
