@@ -175,6 +175,9 @@ STATIC_CHECKS = [
   # dispatched into a worktree out of the MAIN checkout. Dedicated .self-test.sh
   # against throwaway repos under a fake HOME (never the live checkout).
   ["worktree-escape-guard self-test", %w[ai/hooks/worktree-escape-guard.self-test.sh]],
+  # scratch-rm-guard (DND-1653): the PreToolUse guard against a delete by
+  # pattern in a shared session scratchpad. Command text only; deletes nothing.
+  ["scratch-rm-guard self-test", %w[ai/hooks/scratch-rm-guard.self-test.sh]],
   # secret-env-warn (DND-845): the SessionStart per-machine-secrets warning. Only
   # its SELF-TEST is gated here; the check it runs (check-machine-secrets) and
   # its registry row join at the migration's final step (contract -> Rollout).

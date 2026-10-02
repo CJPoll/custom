@@ -636,6 +636,9 @@ it. **Delete only files you created, by exact path, never by glob.** Measured
 and the log read `exit=0` with no gate output. `ai/bin/test-slot` now restores
 a deleted stdout/stderr file and names it, but only the file test-slot's own
 stdout or stderr is redirected to, and only once CMD has run.
+`ai/hooks/scratch-rm-guard.sh` (DND-1653) denies the cause: a glob `rm`,
+`find -delete` or `xargs rm` in any session scratchpad, and a recursive `rm` of
+one or a directory above it.
 
 The standing question to ask of any such code, in review or while writing it,
 is **"what does this do when the input is MISSING rather than wrong?"** — the
