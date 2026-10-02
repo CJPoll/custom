@@ -39,7 +39,9 @@ HELP = <<~TXT
        optional key (product_epic, idle_workflow) the tracked default declares
        for the same repo name and the entry omits (DND-1672), so a field later
        added to the tracked default reaches every machine. A key the entry
-       declares wins. Output names each inherited key ("inherited", and
+       declares wins, so an override cannot clear an inherited key (null is
+       refused); it can declare another value. Output names each inherited
+       key ("inherited", and
        "(tracked default)" in the table) and the file it came from
        (inherits_from). The tracked default must then parse too, or the
        override is refused. It must be a regular file owned by you and not
@@ -64,8 +66,10 @@ HELP = <<~TXT
   Output: one line per repo and one per skip; --json prints
   {"source","path","inherits_from","window","improvement_epic","repos":[{name,
   path,mode,product_epic,product_epic_source,idle_workflow,inherited}],
-  "skipped":[{name,path,reason}],"considered"}. inherits_from is null unless
-  the override inherited from the tracked default; inherited lists the keys.
+  "skipped":[{name,path,reason}],"considered"}. inherits_from is the tracked
+  default's path when the source is the per-user override, whether or not a
+  key came across, else null; inherited lists the keys each repo took. The
+  table prints idle_workflow=<value>, or "undeclared".
 
   --repo-path NAME prints one CHANGE repo's path (DND-1528): the repo a
   change landed in, which need not be a measured repo (experiment record

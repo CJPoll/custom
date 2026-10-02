@@ -103,8 +103,9 @@ module LeadTimeConfig
     def to_h = { "name" => name, "path" => path, "reason" => reason }
   end
 
-  # inherits_from: the tracked default's path when the repo entries inherited
-  # from it (the per-user override), else nil.
+  # inherits_from: the tracked default's path when the source is the per-user
+  # override (the file its entries inherit from, whether or not any key came
+  # across), else nil.
   Resolution = Struct.new(:source, :path, :inherits_from, :window, :improvement_epic, :repos, :skipped, :considered,
                           keyword_init: true) do
     # -> the Repo; raises Skipped (configured, not here) or NotConfigured.
@@ -166,8 +167,8 @@ module LeadTimeConfig
     end
 
     def to_h
-      { "source" => source, "path" => path, "inherits_from" => inherits_from, "window" => window, "improvement_epic" => improvement_epic,
-        "repos" => repos.map(&:to_h), "skipped" => skipped.map(&:to_h), "considered" => considered }
+      { "source" => source, "path" => path, "inherits_from" => inherits_from, "window" => window,
+        "improvement_epic" => improvement_epic, "repos" => repos.map(&:to_h), "skipped" => skipped.map(&:to_h), "considered" => considered }
     end
   end
 

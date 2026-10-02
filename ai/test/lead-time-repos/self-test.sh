@@ -115,12 +115,16 @@ eq "... and is named as inherited" "$(jq_r 'j["repos"][0]["inherited"].join(",")
 eq "the override's own idle_workflow wins over the tracked one" "$(jq_r 'j["repos"][1]["idle_workflow"]')" "none"
 eq "... and nothing is inherited for it" "$(jq_r 'j["repos"][1]["inherited"].size')" "0"
 eq "the override still changes a repo's mode" "$(jq_r 'j["repos"][1]["mode"]')" "improve"
+eq "inherits_from names the tracked default" "$(jq_r 'j["inherits_from"]')" "${ROOT}/ai/config/lead-time-repos.json"
 eq "a repo the override drops does not come back" "$(jq_r 'j["repos"].map { |r| r["name"] }.join(",")')" "custom,gen_saas"
 run --
 has "the table names the inherited field and where it came from" "${OUT}" "idle_workflow=none (tracked default)"
 GOOD_ENV="$(cfg envonly.json "{\"repos\":[{\"name\":\"custom\",\"path\":\"~/dev/custom\",\"mode\":\"improve\"}],\"window\":20,\"improvement_epic\":\"e\"}")"
 run ATHENA_LEADTIME_CONFIG="${GOOD_ENV}" -- --json
-eq "ATHENA_LEADTIME_CONFIG stays authoritative: nothing inherited" "$(jq_r '[j["repos"][0]["idle_workflow"].inspect, j["repos"][0]["inherited"].size].join(",")')" "nil,0"
+eq "ATHENA_LEADTIME_CONFIG stays authoritative: nothing inherited" "$(jq_r '[j["repos"][0]["idle_workflow"].inspect, j["repos"][0]["inherited"].size, j["inherits_from"].inspect].join(",")')" "nil,0,nil"
+rm -f "${OVR}"
+run -- --json
+eq "no override: inherits_from is null" "$(jq_r 'j["inherits_from"].inspect')" "nil"
 
 echo "== override refused (exit 2, Fix:), never read as no override"
 refused() { # DESC EXPECT-IN-ERR
