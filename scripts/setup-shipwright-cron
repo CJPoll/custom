@@ -34,7 +34,9 @@
 #
 # Options:
 #   --schedule "<expr>"  Five-field cron schedule (default: "0 * * * *" = hourly)
-#   --check              Read-only: exit 0 if the entry is live, 1 if it is not
+#   --check              Read-only: exit 0 if the entry is live and the runner's
+#                        own --dry-run passes; 1 if the entry is not live; 2 if
+#                        the runner's --dry-run refuses
 #   --remove             Remove the shipwright crontab entry and exit
 #   --backup <file>      Snapshot the current crontab to <file> (mode 600)
 #   --dry-run            Print what would happen; change nothing
@@ -48,11 +50,22 @@
 # --dry-run skips that repair, so on a broken spool it exits 2 on the read
 # rather than previewing a crontab it could not read.
 #
+# The runner's own --dry-run (DND-1729). --check (once the entry is live),
+# --install and --dry-run run the main checkout's runner with --dry-run
+# (read-only) through scripts/lib/cron-entry.sh's cron_runner_dry_run, and
+# refuse with exit 2 when it refuses, quoting its reason and its Fix:. It
+# checks what this installer does not, such as the scripts/lib files a tick
+# loads. --install runs it before the spool repair, so a refusal writes
+# nothing. --remove and --backup never run it. It also sets DRY_RUN=1 for the
+# runner: a main checkout older than DND-1729 has a runner that ignores
+# --dry-run and would run a whole tick, but has always honoured DRY_RUN=1.
+#
 # Exit codes: 0 ok · 1 usage/arg error, or --check found the entry missing or
 #               a STALE line
 #             · 2 missing prerequisite (outside a git checkout included), or
-#               the current crontab could not be read, or the --backup file
-#               could not be written · 3 need root
+#               the runner's own --dry-run refuses, or the current crontab
+#               could not be read, or the --backup file could not be written
+#             · 3 need root
 #             · 5 refused: --install or --remove run from a linked worktree
 #               (the one code for that refusal in every cron installer,
 #               DND-1643; 3 here means "need root", 4 is unused)
@@ -145,6 +158,13 @@ if [ "${CHECK:-0}" -eq 1 ]; then
   live="$(printf '%s\n' "$current" | cron_entry_lines "$RUNNER" ours)"
   stale="$(printf '%s\n' "$current" | stale_lines)"
   if [ -n "$live" ] && [ -z "$stale" ]; then
+    # The runner's own --dry-run, last: it checks what this installer does
+    # not, such as the scripts/lib files a tick loads (DND-1729).
+    if ! DRY_RUN=1 cron_runner_dry_run "$RUNNER"; then
+      echo "setup-shipwright-cron: the entry is installed, but ${CRON_DRY_WHY%.}; a tick would not start." >&2
+      echo "  Fix: ${CRON_DRY_FIX}" >&2
+      exit 2
+    fi
     say "OK — the athena-shipwright cron entry is installed:"
     printf '%s\n' "$live" | sed 's/^/  /'
     exit 0
@@ -200,6 +220,15 @@ if [ "$REMOVE" -eq 1 ]; then
   warn_stale "$current"
   say "Done. (Any spool dir and the cron daemon are left as-is.)"
   exit 0
+fi
+
+# ---- the runner's own --dry-run, before any write --------------------------
+# An entry whose every tick exits 78 is not an install (DND-1729). It runs
+# before the spool repair, so a refusal writes nothing, root step included.
+if ! DRY_RUN=1 cron_runner_dry_run "$RUNNER"; then
+  echo "setup-shipwright-cron: ${CRON_DRY_WHY%.}; a tick would not start." >&2
+  echo "  Fix: ${CRON_DRY_FIX} Nothing was written." >&2
+  exit 2
 fi
 
 # ---- 1. ensure the crontab spool dir is present AND usable -----------------

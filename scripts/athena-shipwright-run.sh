@@ -39,10 +39,13 @@
 #
 # Usage:
 #   scripts/athena-shipwright-run.sh          # normal (timer) invocation
-#   DRY_RUN=1 scripts/athena-shipwright-run.sh  # check the libs a tick loads,
+#   scripts/athena-shipwright-run.sh --dry-run  # check the libs a tick loads,
 #                                               # then print the brief and exit
 #                                               # (read-only: no lane, lock or
 #                                               # state write; 78 on a lib fault)
+#   DRY_RUN=1 is the same as --dry-run. Any other argument is refused (exit 64)
+#   before anything runs (DND-1729: it used to be ignored, so a mistyped flag
+#   ran a whole tick).
 #
 # Environment (test seams + the documented override):
 #   SHIPWRIGHT_ALLOW_DIRTY=1  run even though the main checkout is dirty (below)
@@ -91,10 +94,11 @@
 #       sends ONE harness-alert naming it (DND-834). Cron mail is not delivered
 #       on every machine, so neither depends on it. The exit stays 75 even when
 #       the record or the alert fails; each failure is loud with a Fix: line.
+#   64  EX_USAGE: an unknown argument; nothing ran (DND-1729)
 #   78  a scripts/lib file this tick needs (dbus-env.sh, shipwright-stale-dirt.sh)
 #       is missing, unreadable or unloadable: no session. It leaves <ts>.failed in runs/ and
 #       counts toward the wedge like any unsuccessful outcome (DND-1603)
-#       DRY_RUN=1 runs the same lib check and exits 78 on the same faults,
+#       --dry-run (or DRY_RUN=1) runs the same lib check and exits 78 on the same faults,
 #       naming each lib with a Fix:, but writes no record and counts nothing
 #       (DND-1725). A lib that loads without defining every function the
 #       tick calls is a fault too.
@@ -353,11 +357,20 @@ one-line summary verbatim and stop."
 
 # A human reading a cron-mailed `Fix:` line is exactly the reader who then runs
 # this by hand, so the knobs those messages mention are discoverable here.
-case "${1:-}" in
-  -h|--help)
-    sed -n '/^# Usage:/,/^#   \*   whatever the headless session/p' -- "$0" | sed 's/^# \{0,1\}//'
-    exit 0 ;;
-esac
+# --dry-run is DRY_RUN=1: the installer's shared cron_runner_dry_run
+# (scripts/lib/cron-entry.sh) calls `<runner> --dry-run` (DND-1729).
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      sed -n '/^# Usage:/,/^#   \*   whatever the headless session/p' -- "$0" | sed 's/^# \{0,1\}//'
+      exit 0 ;;
+    --dry-run) DRY_RUN=1 ;;
+    *) echo "athena-shipwright: unknown argument: $1; nothing was run." >&2
+       echo "  Fix: run with no arguments (the cron form), --dry-run, or --help." >&2
+       exit 64 ;;
+  esac
+  shift
+done
 
 # --- the libraries a tick loads (DND-1603, DND-1725) -------------------------
 #

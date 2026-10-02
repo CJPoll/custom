@@ -477,7 +477,10 @@ across sessions — it is not a one-shot queue drain.
 - **Install / restore / verify:** `scripts/setup-shipwright-cron` is the
   committed, idempotent source of the entry — re-run it to reinstall after a
   reset (`--dry-run` to preview, `--remove` to uninstall). `--check` asserts the
-  entry is live (read-only); `--backup <file>` snapshots the current crontab to a
+  entry is live and that the runner's own `--dry-run` passes (read-only;
+  DND-1729), so a green check means a tick can start. `--install` and
+  `--dry-run` run that dry run too, and `--install` writes nothing when it
+  refuses. `--backup <file>` snapshots the current crontab to a
   local (gitignored) file. The committed installer is the canonical source, so
   the loop is always restorable even without the snapshot. The entry names the
   main checkout's runner; `--install` and `--remove` refuse from a linked

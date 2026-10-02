@@ -372,6 +372,85 @@ fi
 rm -f "${TMP}"/*.sudo
 
 # ===========================================================================
+case_ "setup-shipwright-cron — the runner's own --dry-run (DND-1729)"
+
+# The runner's dry run checks what this installer does not (the scripts/lib
+# files a tick loads, DND-1725). --check used to look only at the crontab, so it
+# was green while every tick would exit 78. A stub runner stands in: it logs
+# its argv, then exits as the case says. Synthetic text only.
+STUB_LOG="${TMP}/stub-runner.args"
+stub_runner() { # <exit> — the stub refuses with a reason and a Fix: unless <exit> is 0
+  printf '#!/usr/bin/env bash\necho "$*" >>%q\necho "env DRY_RUN=${DRY_RUN:-}" >>%q\n' "$STUB_LOG" "$STUB_LOG" >"$RUN"
+  if [ "$1" != 0 ]; then
+    printf 'echo "athena-shipwright: /x/scripts/lib/dbus-env.sh (could not be loaded); a tick would exit 78 and spawn no session." >&2\n' >>"$RUN"
+    printf 'echo "  Fix: restore the synthetic lib." >&2\n' >>"$RUN"
+  fi
+  printf 'exit %s\n' "$1" >>"$RUN"
+  chmod +x "$RUN"
+}
+ct="${TMP}/ct-dry"
+printf '0 7 * * * /opt/other-job\n%s\n' "$ENTRY" >"$ct"
+stub_runner 0; rm -f "$STUB_LOG"
+rc="$(inst "$ct" --check)"
+if [ "$rc" = 0 ] && grep -q '^OK' "${TMP}/inst.out" && [ "$(grep -cx -- '--dry-run' "$STUB_LOG" 2>/dev/null)" = 1 ] \
+   && grep -qx 'env DRY_RUN=1' "$STUB_LOG"; then
+  ok "--check runs the runner's --dry-run once, with DRY_RUN=1 for an older runner, and is green when it passes"
+else
+  bad "check runner dry run passes" "rc=$rc $(out) args=$(cat "$STUB_LOG" 2>&1)"
+fi
+stub_runner 78; rm -f "$STUB_LOG"
+rc="$(inst "$ct" --check)"
+if [ "$rc" = 2 ] && ! grep -q '^OK' "${TMP}/inst.out" \
+   && grep -q "runner's own --dry-run refuses" "${TMP}/inst.err" && grep -qF 'dbus-env.sh (could not be loaded)' "${TMP}/inst.err" \
+   && grep -q 'Fix: restore the synthetic lib.' "${TMP}/inst.err"; then
+  ok "--check is red (exit 2) quoting the runner's reason and Fix: when its --dry-run refuses"
+else
+  bad "check runner dry run refuses" "rc=$rc $(out)"
+fi
+rc="$(INST="$WT/scripts/setup-shipwright-cron" inst "$ct" --check)"
+if [ "$rc" = 2 ] && grep -qF "$RUN --dry-run" "${TMP}/inst.err"; then
+  ok "from a linked worktree, --check runs the MAIN checkout's runner --dry-run"
+else
+  bad "worktree check runner dry run" "rc=$rc $(out)"
+fi
+printf '0 7 * * * /opt/other-job\n' >"$ct"
+rc="$(inst "$ct" --check)"
+if [ "$rc" = 1 ] && grep -q 'MISSING' "${TMP}/inst.err"; then
+  ok "--check with no entry is still MISSING (exit 1), whatever the runner's --dry-run says"
+else
+  bad "check missing beats dry run" "rc=$rc $(out)"
+fi
+cp "$ct" "${TMP}/ct-dry.orig"; rm -f "${ct}.calls"
+rc="$(inst "$ct")"
+if [ "$rc" = 2 ] && grep -q "runner's own --dry-run refuses" "${TMP}/inst.err" && grep -q 'Nothing was written' "${TMP}/inst.err" \
+   && cmp -s "$ct" "${TMP}/ct-dry.orig" && ! grep -qx -- '-' "${ct}.calls" 2>/dev/null && ! compgen -G "${TMP}/*.sudo" >/dev/null; then
+  ok "install refuses (exit 2) before any write, the spool repair included, when the runner's --dry-run refuses"
+else
+  bad "install runner dry run refuses" "rc=$rc $(out) ct=$(cat "$ct") calls=$(cat "${ct}.calls" 2>&1)"
+fi
+rc="$(inst "$ct" --dry-run)"
+if [ "$rc" = 2 ] && grep -q "runner's own --dry-run refuses" "${TMP}/inst.err" && ! grep -q 'would install' "${TMP}/inst.out"; then
+  ok "--dry-run is red (exit 2) when the runner's --dry-run refuses"
+else
+  bad "dry-run runner dry run refuses" "rc=$rc $(out)"
+fi
+printf '%s\n' "$ENTRY" >"$ct"; rm -f "$STUB_LOG"
+rc="$(inst "$ct" --backup "${TMP}/bak-dry")"
+rc2="$(inst "$ct" --remove)"
+if [ "$rc" = 0 ] && [ "$rc2" = 0 ] && [ ! -e "$STUB_LOG" ] && ! grep -qF "$RUN" "$ct"; then
+  ok "--backup and --remove never run the runner's --dry-run"
+else
+  bad "backup/remove skip dry run" "rc=$rc rc2=$rc2 args=$(cat "$STUB_LOG" 2>&1) ct=$(cat "$ct")"
+fi
+stub_runner 0; rm -f "$STUB_LOG"
+rc="$(inst "$ct")"
+if [ "$rc" = 0 ] && grep -qxF "$ENTRY" "$ct" && [ "$(grep -cx -- '--dry-run' "$STUB_LOG" 2>/dev/null)" = 1 ]; then
+  ok "install runs the runner's --dry-run once and installs when it passes"
+else
+  bad "install runner dry run passes" "rc=$rc $(out) args=$(cat "$STUB_LOG" 2>&1)"
+fi
+
+# ===========================================================================
 case_ 'no case reached root'
 if compgen -G "${TMP}/*.sudo" >/dev/null; then
   bad "no case ran sudo" "calls: $(cat "${TMP}"/*.sudo 2>&1)"

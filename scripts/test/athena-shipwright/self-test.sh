@@ -2584,6 +2584,44 @@ done
 dry_case "dbus-env.sh loads but defines nothing" dbus-env.sh 'does not define athena_dbus_env_setup' empty
 dry_case "shipwright-stale-dirt.sh loads but defines nothing" shipwright-stale-dirt.sh 'does not define sd_measure sd_state_get sd_next_streak sd_display_paths' empty
 dry_case "shipwright-stale-dirt.sh lacks sd_display_paths" shipwright-stale-dirt.sh 'does not define sd_display_paths' partial
+
+# DND-1729: --dry-run is the same dry run as DRY_RUN=1, because the installer's
+# shared cron_runner_dry_run calls `<runner> --dry-run`. The runner used to read
+# only $1 for --help and ignore every other argument, so --dry-run ran a whole
+# tick. An unknown argument is now refused before anything runs.
+sx_argv() { # <repo> <args...> -> rc; out/err beside the repo; DRY_RUN unset
+  local r="$1" a; shift; a="$(aux "$r")"
+  env -u DRY_RUN SHIPWRIGHT_REPO="$r" SHIPWRIGHT_CLAUDE="${a}/stub-claude" \
+    "$RUNNER" "$@" >"${a}/runner.out" 2>"${a}/runner.err"
+  echo $?
+}
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 0
+RUNNER="$(sx_runner "$a")"; sx_stub_reaper "$a"
+rc="$(sx_argv "$r" --dry-run)"
+if [ "$rc" = 0 ] && grep -q 'Sync your tree' "$a/runner.out" && dry_untouched "$r"; then
+  ok "--dry-run with every lib present: exit 0, the brief, and nothing written or started"
+else
+  bad "--dry-run control" "rc=$rc out=$(cat "$a/runner.out") err=$(cat "$a/runner.err") state=$(ls -a "$r/ai-artifacts" 2>&1)"
+fi
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 0
+RUNNER="$(sx_runner "$a")"; sx_stub_reaper "$a"
+printf 'return 1\n' >"$a/sx/scripts/lib/dbus-env.sh"
+rc="$(sx_argv "$r" --dry-run)"
+if [ "$rc" = 78 ] && grep -qF 'scripts/lib/dbus-env.sh (could not be loaded)' "$a/runner.err" && grep -q 'Fix:' "$a/runner.err" \
+   && [ ! -s "$a/runner.out" ] && dry_untouched "$r"; then
+  ok "--dry-run with an unloadable dbus-env.sh: exit 78 naming it, a Fix:, nothing written or started"
+else
+  bad "--dry-run fault" "rc=$rc out=$(cat "$a/runner.out") err=$(cat "$a/runner.err")"
+fi
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 0
+RUNNER="$(sx_runner "$a")"; sx_stub_reaper "$a"
+rc="$(sx_argv "$r" --bogus)"
+if [ "$rc" = 64 ] && grep -q 'unknown argument: --bogus' "$a/runner.err" && grep -q 'Fix:' "$a/runner.err" \
+   && [ ! -s "$a/runner.out" ] && dry_untouched "$r"; then
+  ok "an unknown argument is refused (exit 64, Fix:) before anything is written or started"
+else
+  bad "unknown argument" "rc=$rc out=$(cat "$a/runner.out") err=$(cat "$a/runner.err") state=$(ls -a "$r/ai-artifacts" 2>&1)"
+fi
 RUNNER="$REAL_RUNNER"
 
 # RUNNER_LIBS must name every lib function the runner calls, or a call added
