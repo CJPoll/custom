@@ -386,8 +386,14 @@ declares a gate, and the only documented path is `integration-gate` then
   moved on since the gate is accepted, and the line says `BASE MOVED`). It
   refuses before any merge call, with one of `NO RECEIPT`,
   `RECEIPT UNREADABLE (COULD NOT LOOK)`, `RECEIPT INVALID`,
+  `RECEIPT UNVERIFIED` (not sealed by `integration-gate` as landed on this
+  machine: hand-written, edited, or from an unlanded gate copy; DND-1814.
+  OPEN, both DND-1808's: any same-uid process can still run the sealer, and
+  gen_saas's gate cannot be sandboxed; see athena:merge-boarding),
+  `RECEIPT UNVERIFIABLE (COULD NOT LOOK)` (the seal cannot be checked),
   `RECEIPT FOR ANOTHER BASE` (the recorded base is not an ancestor of the tip)
-  or `RECEIPT BASE UNKNOWN (COULD NOT LOOK)`. A conflict with the moved tip is
+  or `RECEIPT BASE UNKNOWN (COULD NOT LOOK)`. The push guard reads the receipt
+  the same way. A conflict with the moved tip is
   refused by GitHub's squash. So a merge must run from a checkout of the PR's
   repo: a cwd that is not one, or a base tip missing from the local object
   store, is refused as COULD NOT LOOK, never read as "no gate". A repo whose base

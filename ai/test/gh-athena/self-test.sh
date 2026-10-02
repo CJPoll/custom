@@ -51,6 +51,9 @@ export GH_ATHENA_TOKEN_CACHE="${TMP}/token-cache"
 # machine's real store from a fixture.
 export ATHENA_TELEMETRY_DIR="${TMP}/telemetry"
 unset ATHENA_UNIT
+# Receipts are sealed under the machine's receipt-seal key (DND-1814): a
+# private key under TMP here, never the real one.
+export ATHENA_SECRETS_ROOT="${TMP}/secrets"
 
 # new_repo <name> <origin-url> -> a repo with one commit, origin set, echoes path.
 new_repo() {
@@ -411,8 +414,15 @@ red_marker() {
   printf 'schema=main-health-red/1\nsha=%s\nfirst_red=%s\nsince=2026-10-01T00:00:00Z\nrecord=%s/main-health/verdicts/%s\nalert=\n' \
     "$2" "$2" "${c}" "$2" > "${c}/main-health/red"
 }
-# pass_receipt <work dir> <head> <base> : integration-gate's pass receipt for <head>.
+# pass_receipt <work dir> <head> <base> : integration-gate's pass receipt for
+# <head>, sealed as the gate seals it (DND-1814).
 pass_receipt() {
+  forge_receipt "$@" \
+    && "${AI_DIR}/bin/receipt-seal" seal --kind integration "$(git -C "$1" rev-parse --path-format=absolute --git-common-dir)/integration-receipts/$2.json"
+}
+# forge_receipt <work dir> <head> <base> : the same receipt, UNSEALED -- what
+# a person or branch code writes by hand.
+forge_receipt() {
   local c; c="$(git -C "$1" rev-parse --path-format=absolute --git-common-dir)"
   mkdir -p "${c}/integration-receipts"
   jq -n --arg h "$2" --arg b "$3" '{schema:"integration-receipt/1", verdict:"pass", head:$h, base:$b,
@@ -545,6 +555,23 @@ is_gate_refusal && [ "$(git --git-dir="${O}" rev-parse main)" = "${B}" ] && [[ "
 gha "${W}" push origin "${H}:refs/heads/main"
 is_gate_refusal && ok "35b. <sha>:refs/heads/main refused before the dry-run print" \
   || bad "35b. dry-run push refused" "rc=${RC} out='${OUT}' err='${ERR}'"
+
+# 35c. DND-1814: a FORGED receipt for exactly the head -- the right shape,
+# written by hand (or by branch code during a gate), with no seal. Before
+# DND-1814 this landed on main. Now it is refused, origin unmoved.
+forge_receipt "${W}" "${H}" "${B}"
+ghpush "${W}" "${TMP}/g1-store" push -q origin HEAD:main
+is_gate_refusal && [[ "${ERR}" == *"UNSEALED"* ]] && [ "$(git --git-dir="${O}" rev-parse main)" = "${B}" ] \
+  && ok "35c. a forged (unsealed) receipt for the pushed head does not pass the push guard, origin unmoved" \
+  || bad "35c. forged receipt refused" "rc=${RC} err='${ERR}' main=$(git --git-dir="${O}" rev-parse main)"
+# 35d. A sealed receipt edited after sealing (its base moved by hand) is refused.
+pass_receipt "${W}" "${H}" "${B}"
+C="$(git -C "${W}" rev-parse --path-format=absolute --git-common-dir)/integration-receipts/${H}.json"
+jq -c '.target_ref = "origin/elsewhere"' "${C}" > "${C}.t" && mv "${C}.t" "${C}"
+gha "${W}" push origin "${H}:refs/heads/main"
+is_gate_refusal && [[ "${ERR}" == *"FORGED OR EDITED"* ]] \
+  && ok "35d. a sealed receipt edited by hand does not pass the push guard" \
+  || bad "35d. edited receipt refused" "rc=${RC} err='${ERR}'"
 
 # 36. The lane-shaped push that PASSES: integration-gate's receipt for exactly
 # the head (as `integration-gate --with-critic --rebase` writes it).

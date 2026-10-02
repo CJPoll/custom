@@ -20,6 +20,9 @@ AI_DIR="$(cd "${HERE}/../.." && pwd)"
 TOOL="${MAIN_HEALTH_UNDER_TEST:-${AI_DIR}/bin/main-health}"
 
 T="$(mktemp -d)"; trap 'rm -rf "${T}"' EXIT
+# Receipts are sealed under the machine's receipt-seal key (DND-1814): a
+# private key under the suite's temp dir here, never the real one.
+export ATHENA_SECRETS_ROOT="${T}/secrets"
 PASS=0; FAIL=0
 ok()  { printf '  ok    %s\n' "$1"; PASS=$((PASS+1)); }
 bad() { printf '  FAIL  %s\n        %s\n' "$1" "$2"; FAIL=$((FAIL+1)); }
@@ -186,11 +189,24 @@ P="$(git -C "${W}" rev-parse HEAD)"
 mkdir -p "${COMMON}/integration-receipts"
 printf '{"schema":"integration-receipt/1","verdict":"pass","head":"%s","base":"%s","target_ref":"origin/main","recorded_at":"2026-10-01T00:00:00Z"}\n' \
   "${P}" "${G2}" > "${COMMON}/integration-receipts/${P}.json"
+"${AI_DIR}/bin/receipt-seal" seal --kind integration "${COMMON}/integration-receipts/${P}.json"
 git -C "${W}" push -q origin HEAD:main 2>/dev/null
 N="$(slot_n)"; run check --repo "${W}"
 [ "${RC}" = 0 ] && [ "$(slot_n)" = "${N}" ] && [ "$(kv "${STORE}/verdicts/${P}" source)" = receipt ] \
   && ok "15. a tip with integration-gate's pass receipt for exactly itself: green, source=receipt, no gate run" \
   || bad "15. receipt shortcut" "rc=${RC} slots=$(slot_n) was ${N} out='${OUT}' err='${ERR}'"
+
+# 15b. DND-1814: a FORGED receipt (the right shape, no seal) for the tip is
+# not a pass: the tip is gated for real (source=gate, a slot taken).
+printf '0\n' > "${W}/gate-rc"; git -C "${W}" add -A; git -C "${W}" commit -q -m "forged-receipt tip"
+P="$(git -C "${W}" rev-parse HEAD)"
+printf '{"schema":"integration-receipt/1","verdict":"pass","head":"%s","base":"%s","target_ref":"origin/main","recorded_at":"2026-10-01T00:00:00Z"}\n' \
+  "${P}" "${G2}" > "${COMMON}/integration-receipts/${P}.json"
+git -C "${W}" push -q origin HEAD:main 2>/dev/null
+N="$(slot_n)"; run check --repo "${W}"
+[ "${RC}" = 0 ] && [ "$(slot_n)" != "${N}" ] && [ "$(kv "${STORE}/verdicts/${P}" source)" = gate ] \
+  && ok "15b. a tip with only a FORGED receipt is gated for real, never green by receipt" \
+  || bad "15b. forged receipt shortcut" "rc=${RC} slots=$(slot_n) was ${N} source=$(kv "${STORE}/verdicts/${P}" source) err='${ERR}'"
 
 echo "--- no verdict is ever invented ---"
 U1="$(land 6)"

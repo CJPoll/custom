@@ -58,6 +58,13 @@ APPROVAL="session:${FX_SID}/${FX_MID} quote:yes, provision the KMS key"
 unset ATHENA_TEST_SLOT_HELD ATHENA_TEST_SLOT_HEARTBEAT ATHENA_TEST_SLOT_PARENT_CHECK INTEGRATION_GATE_IN_SLOT INTEGRATION_GATE_PRESTARTED_CRITIC ATHENA_TEST_SLOT_GATE_RUN
 export ATHENA_TEST_SLOT_DIR="${TMP}/slots" ATHENA_TEST_SLOTS=1
 TEST_SLOT="$(cd "${ROOT}/../../bin" && pwd)/test-slot"
+# DND-1814: every receipt is sealed under the machine's receipt-seal key. The
+# fixtures use a private key under TMP, never the real one, and seal the
+# receipts they forge as a landed judge would (seal_receipt); forge_verdict
+# writes one unsealed, as a person or branch code would.
+export ATHENA_SECRETS_ROOT="${TMP}/secrets"
+SEAL="$(cd "${ROOT}/../../bin" && pwd)/receipt-seal"
+seal_receipt() { "$SEAL" seal --kind "$1" "$2"; } # <critic|integration> <file>
 
 ok()   { PASS=$((PASS+1)); printf '  ok   %s\n' "$1"; }
 bad()  { FAIL=$((FAIL+1)); printf '  FAIL %s\n' "$1"; [ -n "${2-}" ] && printf '       %s\n' "$2"; }
@@ -74,6 +81,12 @@ stub_gate_pair()  { printf '#!/bin/sh\nif [ -f a.txt ] && [ -f b.txt ]; then ech
 # critic-review's own reader, so a schema drift fails this suite rather than
 # silently passing every merge.
 record_verdict() { # <repo dir> <verdict> [sha]
+  forge_verdict "$@" && ( cd "$1" && sha="${3:-$(git rev-parse HEAD)}" \
+    && seal_receipt critic "$(git rev-parse --git-path critic-verdicts)/${sha}.json" )
+}
+# forge_verdict <repo dir> <verdict> [sha] -- the same receipt, UNSEALED: what
+# a person or a branch's code writes by hand (DND-1814).
+forge_verdict() {
   # ${3:-...}, never ${3-...}: record_pass passes an EXPLICITLY EMPTY third
   # argument when no SHA is given, and ${3-...} treats that as "set" -- which
   # silently wrote a receipt named for the empty string, i.e. a receipt that
@@ -832,7 +845,8 @@ record_carried() { # <repo dir> <carried_from sha> [sha] [schema] [merge_base]
            dirty:false, at:"2026-09-27T00:00:00Z", merge_base:$mb, patch_id:("b"*40),
            diff_digest:("c"*64), msgs_digest:("d"*64), judge_digest:("e"*64),
            carried_from:(if $src == "" then null else $src end),
-           carried_receipt:(if $src == "" then null else "/x/\($src).json" end)}' > "${d}/${sha}.json" )
+           carried_receipt:(if $src == "" then null else "/x/\($src).json" end)}' > "${d}/${sha}.json" \
+    && seal_receipt critic "${d}/${sha}.json" )
 }
 src_sha="$(printf 'f%.0s' {1..40})"
 R="${TMP}/c32"; new_repo "$R"
@@ -866,7 +880,8 @@ stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
 record_carried "$R" "$src_sha"
 up_from="$(printf 'a%.0s' {1..40})"; up_to="$(printf 'c%.0s' {1..40})"
 ( cd "$R" && d="$(git rev-parse --git-path critic-verdicts)" && f="${d}/$(git rev-parse HEAD).json" \
-  && jq --arg r "${up_from}..${up_to}" '.upstream_range = $r | .interaction = "pass"' "$f" > "$f.t" && mv "$f.t" "$f" )
+  && jq --arg r "${up_from}..${up_to}" '.upstream_range = $r | .interaction = "pass"' "$f" > "$f.t" && mv "$f.t" "$f" \
+  && seal_receipt critic "$f" )
 head_sha="$( cd "$R" && git rev-parse HEAD )"; rf="$(receipt_of "$R" "$head_sha")"
 out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
 okl="$(grep '^INTEGRATION OK' <<<"$out")"
@@ -888,7 +903,8 @@ out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; 
 grep -q 'CRITIC CARRIED' <<<"$out" && bad "c32 F2 judged PASS reported as carried" "$out" || ok "c32 F2 no CRITIC CARRIED"
 jq -e '.critic_carried_from == null' "$rf" >/dev/null 2>&1 && ok "c32 F2 critic_carried_from is null" || bad "c32 F2 receipt" "$(cat "$rf" 2>&1)"
 
-# F3 a legacy schema-1 PASS still gates green (record_pass is schema 1).
+# F3 a schema-1 PASS body still gates green once the landed judge has sealed
+# it (record_pass is schema 1). An UNSEALED one is refused: case c33.
 R="${TMP}/c32c"; new_repo "$R"
 ( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
 stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
@@ -1299,6 +1315,88 @@ s13b_ev="$(cat "${TMP}/s13b-tel"/*.jsonl 2>/dev/null | jq -c 'select(.event == "
   && ok "s13 a declared harness-gate writes no gate.run" || bad "s13 harness-gate expected exit 0 and no gate.run, got rc $rc, $s13b_ev event(s)" "$out"
 grep -q / "${TMP}/s13.claims" \
   && bad "s13 harness-gate was claimed (claims: $(tr '\n' ' ' < "${TMP}/s13.claims"))" "$out" || ok "s13 a declared harness-gate is never claimed"
+
+# ---------------------------------------------------------------- case 33
+# DND-1814: THE CRITIC BAR TRUSTS ONLY A SEALED VERDICT. A critic receipt was a
+# plain JSON file: one hand-written for a head no judge ever ran on read
+# VERDICT PASS, and integration-gate runs the branch's gate unsandboxed, so a
+# gate step could write one mid-gate and the gate then read it as the judge's.
+# Each refusal below printed INTEGRATION OK on the unfixed gate.
+#
+# R1 a forged (unsealed) PASS for a head no judge ever ran on.
+R="${TMP}/c33a"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
+forge_verdict "$R" pass
+head_sha="$( cd "$R" && git rev-parse HEAD )"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 3 ] && grep -q 'UNVERIFIED PASS' <<<"$out" && grep -q 'UNSEALED' <<<"$out" \
+  && ok "c33 R1 a forged PASS for a never-judged head does not meet the critic bar (exit 3)" \
+  || bad "c33 R1 expected exit 3 UNVERIFIED PASS, got $rc" "$out"
+grep -q 'INTEGRATION OK' <<<"$out" && bad "c33 R1 printed INTEGRATION OK on a forged PASS" "$out" || ok "c33 R1 no INTEGRATION OK"
+[ ! -e "$(receipt_of "$R" "$head_sha")" ] && ok "c33 R1 no integration receipt" || bad "c33 R1 an integration receipt was written"
+
+# R2 the gate step itself writes a PASS receipt for HEAD while the gate runs.
+# It WRITES one. A step that deliberately runs the sealer
+# (ai/bin/receipt-seal seal) is not refused: that residual is stated in
+# ai/lib/receipt_seal.rb and needs a privilege boundary, not a file format.
+R="${TMP}/c33b"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+cat > "${R}/g.sh" <<'GATE'
+#!/bin/sh
+sha="$(git rev-parse HEAD)"; d="$(git rev-parse --path-format=absolute --git-path critic-verdicts)"
+mkdir -p "$d"
+printf '{"schema":2,"tool":"critic-review","sha":"%s","base":"main","verdict":"pass","findings":[],"dirty":false,"at":"2026-10-02T00:00:00Z","merge_base":"%s"}\n' \
+  "$sha" "$(git merge-base main HEAD)" > "${d}/${sha}.json"
+exit 0
+GATE
+chmod +x "${R}/g.sh"
+head_sha="$( cd "$R" && git rev-parse HEAD )"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 3 ] && grep -q 'UNVERIFIED PASS' <<<"$out" \
+  && ok "c33 R2 a PASS a gate step writes mid-gate does not meet the critic bar (exit 3)" \
+  || bad "c33 R2 expected exit 3 UNVERIFIED PASS, got $rc" "$out"
+grep -q 'INTEGRATION OK' <<<"$out" && bad "c33 R2 printed INTEGRATION OK on a mid-gate PASS" "$out" || ok "c33 R2 no INTEGRATION OK"
+
+# R3 a sealed PASS of ANOTHER head copied onto this head's name: the seal
+# covers the sha inside it, so it never counts for a head it does not name.
+R="${TMP}/c33c"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
+old_sha="$( cd "$R" && git rev-parse HEAD )"; record_pass "$R"
+( cd "$R" && echo g > g.txt && git add g.txt && git commit -qm g )
+head_sha="$( cd "$R" && git rev-parse HEAD )"
+( cd "$R" && d="$(git rev-parse --git-path critic-verdicts)" && cp "${d}/${old_sha}.json" "${d}/${head_sha}.json" )
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 3 ] && grep -q 'does not record the commit it is filed under' <<<"$out" \
+  && ok "c33 R3 a sealed PASS copied onto another head's name does not count (exit 3)" \
+  || bad "c33 R3 expected exit 3 naming the copied receipt, got $rc" "$out"
+
+# R4 a sealed PASS edited after sealing (a BLOCK turned into a PASS).
+R="${TMP}/c33d"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
+record_verdict "$R" block
+( cd "$R" && f="$(git rev-parse --git-path critic-verdicts)/$(git rev-parse HEAD).json" \
+  && jq -c '.verdict = "pass"' "$f" > "$f.t" && mv "$f.t" "$f" )
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 3 ] && grep -q 'FORGED OR EDITED' <<<"$out" \
+  && ok "c33 R4 a BLOCK edited into a PASS does not meet the critic bar (exit 3)" \
+  || bad "c33 R4 expected exit 3 FORGED OR EDITED, got $rc" "$out"
+
+# R5 the legitimate path still passes: a sealed PASS (c1 and c3 above) and a
+# PASS the gate's own --with-critic judge records (c31) both reach
+# INTEGRATION OK, and the integration receipt the gate writes is sealed.
+R="${TMP}/c33e"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
+record_pass "$R"
+head_sha="$( cd "$R" && git rev-parse HEAD )"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && grep -q "^INTEGRATION OK ${head_sha}" <<<"$out" \
+  && ok "c33 R5 a legitimately judged (sealed) head still passes" || bad "c33 R5 expected INTEGRATION OK, got $rc" "$out"
+"$SEAL" verify --kind integration "$(receipt_of "$R" "$head_sha")" \
+  && ok "c33 R5 the integration receipt the gate wrote is sealed and verifies" || bad "c33 R5 the gate's receipt does not verify"
 
 # ---------------------------------------------------------------- DND-1064
 # The containment bar ("HEAD contains the target when the gate starts") was
@@ -1784,7 +1882,7 @@ landed_layout() {
   cp "$GATE" "$1/ai/skills/athena:merge-boarding/scripts/integration-gate"
   cp -R "${DND1796_REPO}/ai/lib" "$1/ai/lib"
   cp "${DND1796_REPO}/ai/blast-radius/surfaces.json" "$1/ai/blast-radius/surfaces.json"
-  for b in integration-gate blast-radius test-slot critic-review; do cp "${DND1796_REPO}/ai/bin/${b}" "$1/ai/bin/${b}"; done
+  for b in integration-gate blast-radius test-slot critic-review receipt-seal; do cp "${DND1796_REPO}/ai/bin/${b}" "$1/ai/bin/${b}"; done
   ( cd "$1" && git init -q -b main . && git add -A && git commit -qm layout \
     && printf '/g.sh\n/GATE_RAN\n' >> .git/info/exclude )
 }
@@ -1855,10 +1953,39 @@ grep -qE 'MAIN-DIRTY|BRANCH-COPY' <<<"$out" && bad "lb3b a working-tree copy wro
 left="$(find "${TMP}/lb3b-tmp" -maxdepth 1 -name 'integration-gate-landed.*')"
 [ -z "$left" ] && ok "lb3b the landed copy removed its materialised tree" || bad "lb3b a materialised landed tree was left behind" "$left"
 
+# lb3d (DND-1814): the receipt lb3's landed copy sealed from its materialised
+# temp tree (now removed) still verifies for a reader in the branch, whose own
+# gate copy differs from the producer: the landed-history lookup finds it.
+git -C "$L" update-ref refs/remotes/origin/main main
+out="$( cd "$W" && "${W}/ai/bin/receipt-seal" verify --kind integration \
+  "$(git -C "$W" rev-parse --path-format=absolute --git-common-dir)/integration-receipts/${head_sha}.json" 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && ok "lb3d a receipt the landed copy sealed verifies for a branch reader after its temp tree is gone" \
+  || bad "lb3d expected the landed copy's receipt to verify, got $rc" "$out"
+
 # lb3c: the re-exec marker outside a held slot is refused, never honoured.
 out="$( cd "$W" && INTEGRATION_GATE_LANDED_REEXEC=1 INTEGRATION_GATE_SCRIPT_COMMON="${L}/.git" "${W}/${LBG}" --target main --no-fetch --gate "${W}/g.sh" 2>&1 )"; rc=$?
 [ "$rc" -eq 2 ] && grep -q '^Fix:' <<<"$out" && ! grep -q 'INTEGRATION OK' <<<"$out" && ok "lb3c a forged re-exec marker is refused (exit 2)" \
   || bad "lb3c expected exit 2 for a forged marker, got $rc" "$out"
+
+# lb9 (DND-1814): a green gate whose receipt cannot be SEALED is exit 5: no
+# INTEGRATION OK line, and no receipt left in the store. The layout's landed
+# receipt-seal refuses to seal (verify still works, so the critic bar reads).
+L="${TMP}/lb9-layout"; landed_layout "$L"
+printf '#!/bin/sh\nif [ "$1" = seal ]; then echo "receipt-seal: could not seal: fixture refusal." >&2; echo "Fix: fixture." >&2; exit 1; fi\nexec %s "$@"\n' "$SEAL" \
+  > "${L}/ai/bin/receipt-seal"
+( cd "$L" && git commit -qam 'a sealer that refuses to seal' ) || bad "lb9 fixture: could not commit the refusing sealer"
+W="${TMP}/lb9-wt"; landed_branch "$L" "$W"
+( cd "$W" && echo f > f.txt && git add f.txt && git commit -qm f )
+record_pass "$W"
+head_sha="$(git -C "$W" rev-parse HEAD)"
+out="$( cd "$W" && "${W}/${LBG}" --target main --no-fetch --gate "${W}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 5 ] && grep -q 'could not be SEALED' <<<"$out" && grep -q '^Fix:' <<<"$out" \
+  && ok "lb9 a receipt that cannot be sealed is exit 5 with Fix:" || bad "lb9 expected exit 5 naming the seal, got $rc" "$out"
+grep -q '^INTEGRATION OK' <<<"$out" && bad "lb9 printed INTEGRATION OK with no sealed receipt" "$out" || ok "lb9 no INTEGRATION OK"
+store="$(git -C "$W" rev-parse --path-format=absolute --git-common-dir)/integration-receipts"
+[ ! -e "${store}/${head_sha}.json" ] && ok "lb9 no receipt for the head" || bad "lb9 an unsealed receipt was left for the head"
+left="$(find "$store" -maxdepth 1 -name ".${head_sha}.json.tmp.*" 2>/dev/null)"
+[ -z "$left" ] && ok "lb9 no temp receipt left in the store" || bad "lb9 a temp receipt was left in the store" "$left"
 
 # lb5: --rebase on a gate-editing branch behind the target: the rebase runs,
 # then the landed copy (of the NEW target) judges the rebased head.

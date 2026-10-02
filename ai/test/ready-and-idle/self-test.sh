@@ -47,6 +47,9 @@ if [ ! -x "${BIN}" ]; then
 fi
 
 TMP="$(mktemp -d)"; trap 'rm -rf "${TMP}"' EXIT
+# Receipts are sealed under the machine's receipt-seal key (DND-1814): a
+# private key under the suite's temp dir here, never the real one.
+export ATHENA_SECRETS_ROOT="${TMP}/secrets"
 FIX="${TMP}/fixtures"; STUB="${TMP}/stub"; WORK="${TMP}/repo"
 mkdir -p "${FIX}" "${STUB}"
 
@@ -459,11 +462,13 @@ mk_ir_receipt() { # mk_ir_receipt <head> <base> [critic override reason]
   mkdir -p "${COMMON}/integration-receipts"
   printf '{"schema":"integration-receipt/1","verdict":"pass","head":"%s","base":"%s","target_ref":"main","critic_override":%s,"recorded_at":"2026-10-01T00:00:00Z"}\n' \
     "$1" "$2" "${co}" > "${COMMON}/integration-receipts/$1.json"
+  "${REPO}/ai/bin/receipt-seal" seal --kind integration "${COMMON}/integration-receipts/$1.json"
 }
 mk_critic() { # mk_critic <head> <pass|block>
   mkdir -p "${COMMON}/critic-verdicts"
   printf '{"schema":2,"tool":"critic-review","sha":"%s","base":"main","merge_base":"%s","verdict":"%s","findings":["fixture finding"],"dirty":false,"at":"2026-10-01T00:00:00Z"}\n' \
     "$1" "${SHA_TIP}" "$2" > "${COMMON}/critic-verdicts/$1.json"
+  "${REPO}/ai/bin/receipt-seal" seal --kind critic "${COMMON}/critic-verdicts/$1.json"
 }
 clear_evidence() { rm -rf "${COMMON}/integration-receipts" "${COMMON}/critic-verdicts"; }
 
@@ -524,6 +529,13 @@ noci_excl "a receipt that overrode the critic, and no PASS" no_critic_pass
 # The recorded base is not an ancestor of origin/main (the PR head itself).
 clear_evidence; mk_ir_receipt "${SHA_GATED}" "${SHA_GATED}"; mk_critic "${SHA_GATED}" pass
 noci_excl "a receipt for another base" stale_gate_receipt
+# A receipt of the right shape that integration-gate never sealed (written by
+# hand, by branch code, or edited after sealing): UNVERIFIED, so judged
+# stale_gate_receipt, never reported ready (DND-1814).
+clear_evidence; mk_ir_receipt "${SHA_GATED}" "${SHA_TIP}"; mk_critic "${SHA_GATED}" pass
+printf '{"schema":"integration-receipt/1","verdict":"pass","head":"%s","base":"%s","target_ref":"main","critic_override":null,"recorded_at":"2026-10-01T00:00:00Z"}\n' \
+  "${SHA_GATED}" "${SHA_TIP}" > "${COMMON}/integration-receipts/${SHA_GATED}.json"
+noci_excl "a hand-written (unsealed) receipt" stale_gate_receipt
 
 # 14g. COULD NOT LOOK is not "no receipt": a head this checkout does not have
 # cannot be asked whether it declares a gate. It is NOT JUDGED, never CLEAN,

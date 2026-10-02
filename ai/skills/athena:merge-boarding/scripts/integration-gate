@@ -30,6 +30,17 @@
 # INTEGRATION OK removes any receipt for its head, so a stale pass cannot
 # outlive a later RED. A receipt it cannot remove (before the gate runs) or
 # cannot write (after a green gate) is exit 5; only the second follows a gate.
+# The receipt is SEALED (DND-1814): ai/bin/receipt-seal adds the producer (the
+# git blobs of the gate files that wrote it) and an HMAC under this machine's
+# receipt-seal key, and every reader (ai/lib/integration-receipt.sh) refuses a
+# receipt that does not verify. The critic verdict this gate reads is sealed
+# the same way by critic-review, so a pass a person or the branch's own gate
+# code merely WRITES is never trusted. Residual, said out loud: code running as
+# this user that deliberately invokes the sealer (ai/bin/receipt-seal, or
+# ai/lib/receipt_seal.rb) can still seal one; ai/lib/receipt_seal.rb says why
+# and what closing it needs. OPEN, both DND-1808's (this seal does not fix
+# it): (a) the sealer is an oracle to any same-uid process; (b) gen_saas's
+# gate cannot be sandboxed.
 # After the gate runs, in a linked worktree that runs a
 # compose stack, it also has teardown-stack record that worktree's stack
 # marker in the worktree's own git dir (DND-1576), outside every working tree.
@@ -121,8 +132,12 @@ source, any --critic-override / --owner-approval, the SHA a carried critic
 PASS came from (critic_carried_from; the OK line then says CRITIC CARRIED) and
 the upstream range its interaction review covered (critic_upstream_range; the
 OK line then says CRITIC CARRIED + INTERACTION), the
-blast-radius verdict, the INTEGRATION OK line, and a UTC timestamp.
-locked-merge requires it. Any other
+blast-radius verdict, the INTEGRATION OK line, and a UTC timestamp. It is
+SEALED (DND-1814): ai/bin/receipt-seal adds the producer (the git blobs of
+the gate files that wrote it) and an HMAC under this machine's receipt-seal
+key. locked-merge, gh-athena's merge and push guards, main-health and
+ready-and-idle require it and refuse one that does not verify: unsealed,
+edited, another key's, or written by a gate copy that never landed. Any other
 outcome removes a receipt for that head, a usage error (exit 2) included; a
 usage error that cannot remove it still exits 2 and says so, never 5. There is
 no flag that skips it.
@@ -181,7 +196,10 @@ prefixed `integration-gate: `; it never changes the verdict or exit code.
                    parent does not cover the target and is re-judged). It is joined before the verdict
                    step, which then reads the judge's receipt exactly as
                    without the flag, so wall time is max(gate, critic), not
-                   the sum. On a RED gate the judge is still joined, so one
+                   the sum. Only a SEALED PASS counts, before the gate or
+                   after it (DND-1814): one written by hand, or by a gate
+                   step mid-gate, is no verdict (exit 3, UNVERIFIED PASS).
+                   On a RED gate the judge is still joined, so one
                    round returns both sets of findings. The judge queues in
                    test-slot's model pool (DND-1326), never the cpu pool.
   --slot-wait-timeout <secs>
@@ -267,7 +285,7 @@ Exit codes: 0 integration OK | 1 gate RED on the integrated head
             5 receipt error, no INTEGRATION OK printed. Either a stale
               receipt for the head could not be removed (raised BEFORE the
               gate runs: no gate ran, nothing passed), or the receipt could
-              not be written after a green gate (the gate passed, but the
+              not be written or sealed after a green gate (the gate passed, but the
               pass is not recorded and locked-merge will refuse the head).
               Read the message to tell them apart; a usage error that
               cannot remove it still exits 2, never 5
@@ -907,14 +925,19 @@ fi
 # gate) cannot edit these judges in its diff, so they still resolve beside
 # the script there.
 # Residual, said out loud: this runs in whichever copy the caller starts. A
-# branch whose own copy drops it defeats it when a caller runs that copy, and
-# a critic receipt is a file any process can write. The main checkout's
+# branch whose own copy drops it defeats it when a caller runs that copy;
+# what that copy's own judges seal does not pass: receipts are sealed with
+# the blobs of the files that wrote them, and a reader refuses an unlanded
+# producer (DND-1814, ai/lib/receipt_seal.rb). That copy can still run the
+# LANDED sealer on purpose and get an accepted receipt: OPEN, DND-1808 (a),
+# the sealer is an oracle to any same-uid process. The main checkout's
 # ~/dev/custom/ai/bin/integration-gate is landed code, which is why the briefs
 # and athena:merge-boarding name that path.
 IG_SELF_REL="ai/skills/athena:merge-boarding/scripts/integration-gate"
 # The judges the re-executed copy asserts are the target's.
 IG_JUDGE_PATHS=( "$IG_SELF_REL" ai/lib/integration-receipt.sh ai/lib/proc-stat.sh ai/lib/telemetry-emit.sh
-  ai/bin/blast-radius ai/blast-radius/surfaces.json ai/lib/owner_turn.rb ai/lib/owner_click.rb ai/bin/critic-review )
+  ai/bin/blast-radius ai/blast-radius/surfaces.json ai/lib/owner_turn.rb ai/lib/owner_click.rb ai/bin/critic-review
+  ai/bin/receipt-seal ai/lib/receipt_seal.rb )
 # SELF_DIR is <top>/ai/skills/athena:merge-boarding/scripts: four levels up.
 SELF_TOP="$(cd "${SELF_DIR}/../../../.." 2>/dev/null && pwd -P)"
 COMMON_REAL="$(realpath -e "$COMMON_DIR" 2>/dev/null)"
@@ -1392,6 +1415,7 @@ if [ -n "$CRITIC_OVERRIDE" ]; then
       # judge did not run (DND-457: a lookup that only read its own worktree
       # used to print "has NOT run" for a PASS sitting in another checkout).
       *"no receipt recorded"*)  OVERRIDE_STATE="NO RECEIPT for this head in any checkout of this repo" ;;
+      *"UNVERIFIED PASS"*)      OVERRIDE_STATE="receipt UNVERIFIED (unsealed, edited, or from an unlanded judge: no verdict)" ;;
       *"COULD NOT LOOK"*)       OVERRIDE_STATE="verdict store COULD NOT BE READ (not a miss)" ;;
       *"CONFLICTING"*)          OVERRIDE_STATE="CONFLICTING receipts across checkouts (none is a BLOCK)" ;;
       *"DIRTY working tree"*)   OVERRIDE_STATE="verdict recorded against a DIRTY tree" ;;
@@ -1402,7 +1426,7 @@ if [ -n "$CRITIC_OVERRIDE" ]; then
   echo "Fix: copy the INTEGRATION OK line below verbatim into your run's state log and name the override in the final report, so this decision is attributable." >&2
 elif [ "$VERDICT_RC" -ne 0 ]; then
   echo "${PROG}: no green standing-judge verdict on the integrated head $(short "$HEAD_SHA"). NOT safe to merge." >&2
-  echo "Fix: see the critic-review line above — it names WHICH state you are in (no receipt in any checkout / still running / fail-open / dirty tree / conflicting / could not look / block). Get a verdict (re-run ~/dev/custom/ai/bin/critic-review here), or hold this ONE MR and move to the next Mission. If and ONLY IF the state is an ABSENCE of a verdict, merge past it with --critic-override '<reason>'; a recorded BLOCK is refused even with that flag." >&2
+  echo "Fix: see the critic-review line above — it names WHICH state you are in (no receipt in any checkout / still running / fail-open / dirty tree / conflicting / unverified (an unsealed or forged receipt, DND-1814) / could not look / block). Get a verdict (re-run ~/dev/custom/ai/bin/critic-review here), or hold this ONE MR and move to the next Mission. If and ONLY IF the state is an ABSENCE of a verdict, merge past it with --critic-override '<reason>'; a recorded BLOCK is refused even with that flag." >&2
   exit 3
 fi
 
@@ -1478,10 +1502,19 @@ write_receipt() {
       owner_approval: ($oa | nul),
       blast_radius: $blast, integration_ok_line: $ok_line, checkout: $checkout,
       recorded_at: $at}' > "$RECEIPT_TMP" || return 1
+  # Seal it (DND-1814): the producer (this gate's own files) and an HMAC under
+  # this machine's receipt-seal key. Every reader refuses a receipt that does
+  # not verify, so a file branch code or a person writes is never a pass.
+  "$IR_SEAL" seal --kind integration "$RECEIPT_TMP" || return 2
   mv -f "$RECEIPT_TMP" "$RECEIPT" || return 1
   RECEIPT_TMP=""
 }
-if ! write_receipt; then
+write_receipt; WR_RC=$?
+if [ "$WR_RC" -eq 2 ]; then
+  echo "${PROG}: the gate is green on $(short "$HEAD_SHA") but its receipt could not be SEALED (see the receipt-seal line above)." >&2
+  echo "Fix: repair what receipt-seal names (its key under \${ATHENA_SECRETS_ROOT:-~/.config/athena-secrets}/harness, or the gate files it reads; ${IR_SEAL} --help), then re-run integration-gate. Do not merge: an unsealed receipt is refused by every reader, and no INTEGRATION OK was issued." >&2
+  exit 5
+elif [ "$WR_RC" -ne 0 ]; then
   echo "${PROG}: the gate is green on $(short "$HEAD_SHA") but its receipt could not be written to ${RECEIPT}." >&2
   echo "Fix: make ${RECEIPT_DIR} writable (ls -ld '${RECEIPT_DIR}'; df -h '${COMMON_DIR}') and re-run integration-gate. Do not merge: locked-merge requires this receipt, and no INTEGRATION OK was issued." >&2
   exit 5

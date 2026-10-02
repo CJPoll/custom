@@ -31,6 +31,9 @@ lacks() { case "$2" in *"$3"*) bad "$1" "unexpected [$3] in: $2" ;; *) ok "$1" ;
 TMP="$(mktemp -d)" || { echo "FAIL mktemp"; echo "  Fix: free space in TMPDIR"; exit 1; }
 cleanup() { rm -rf "${TMP}"; }
 trap cleanup EXIT INT TERM
+# Receipts are sealed and verified under a temp key (DND-1814), so the
+# machine's real receipt-seal key is never read or minted.
+export ATHENA_SECRETS_ROOT="${TMP}/secrets"
 
 echo "== domain + io"
 if /usr/bin/ruby "${BIN}" --self-test >"${TMP}/lib.out" 2>&1; then
@@ -472,6 +475,10 @@ rb_commit d.txt four "an unticketed change" && RB_N="$("${GITC[@]}" rev-parse HE
 mkdir -p "${RB}/.git/integration-receipts"
 printf '{"schema":"integration-receipt/1","verdict":"pass","head":"%s","base":"%s","target_ref":"main","recorded_at":"2026-10-01T04:05:00Z"}\n' \
   "${RB_G}" "${RB_M0}" >"${RB}/.git/integration-receipts/${RB_G}.json"
+# The cover rule reads only a receipt integration-gate sealed (DND-1814).
+# Seal it under a temp key, so the machine's real key is never read or minted.
+"${ROOT}/ai/bin/receipt-seal" seal --kind integration "${RB}/.git/integration-receipts/${RB_G}.json" \
+  || { echo "FAIL could not seal the fixture receipt"; echo "  Fix: run ai/bin/receipt-seal --help; the rebase-cover cases need a sealed receipt"; exit 1; }
 TEL_RB="${TMP}/telemetry-rebase"
 mkdir -p "${TEL_RB}" && chmod 700 "${TEL_RB}"
 rb_ev() { printf '{"v":1,"event":"%s","at":"%s","duration_s":%s,"unit":"DND-9201","unit_source":"branch","repo":"custom","head":"%s","host":"h","pid":1,"attrs":%s}\n' "$@"; }

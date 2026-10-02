@@ -514,6 +514,8 @@ fg_refuse_red_main() {
 # (DND-1685). The decision is ir_push_covered in ai/lib/integration-receipt.sh:
 # a receipt for exactly the pushed commit, or a clean rebase (or merge) of a
 # gated head onto the landed main (the DND-1463 rule, kept), or nothing new.
+# A receipt counts only when its seal verifies (DND-1814): one written by hand
+# or by branch code is RECEIPT UNVERIFIED and covers nothing.
 #
 # The landed main is the PUSHED remote's tracking ref (refs/remotes/<r>/main,
 # where <r> is the configured remote whose push URL is the one pushed to). The

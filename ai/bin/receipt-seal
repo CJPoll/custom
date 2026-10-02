@@ -1,0 +1,170 @@
+#!/usr/bin/ruby
+# frozen_string_literal: true
+
+# receipt-seal -- seal or verify a merge-bar receipt (DND-1814), for the bash
+# callers: integration-gate seals its integration receipt, and
+# ai/lib/integration-receipt.sh verifies one for every reader (locked-merge,
+# gh-athena's merge and push guards, main-health, ready-and-idle).
+# critic-review uses the same library in-process. The rules live once, in
+# ai/lib/receipt_seal.rb; this file only parses argv and maps outcomes to exit
+# codes. See --help.
+
+require_relative "../lib/receipt_seal"
+require "json"
+
+USAGE = <<~TXT
+  Usage:
+    receipt-seal seal   --kind critic|integration FILE
+        Add the producer (the judge files' git blobs, read from THIS tool's
+        own tree) and the HMAC-SHA256 seal under this machine's receipt-seal
+        key to the JSON receipt FILE, rewriting it atomically. The key is
+        ${ATHENA_SECRETS_ROOT:-~/.config/athena-secrets}/harness/receipt-seal-key
+        (0600 in a 0700 directory; a per-machine secret, never printed).
+        init-key mints it; seal mints it only where init-key has not run.
+    receipt-seal verify --kind critic|integration FILE
+        Is FILE a receipt this machine's key sealed, written by this tool's own
+        judge files or by a version of them that landed on origin/main?
+    receipt-seal init-key [--check]
+        The per-machine installer (DND-1814): mint this machine's key if it is
+        absent, then check it is a 0600/0400 regular file this user owns, in a
+        directory no one else can write, holding a well-formed key. Prints
+        only metadata: its path, mode and key id (a hash prefix every sealed
+        receipt already carries), never the value. Idempotent: an existing
+        key is kept. Run it once per machine, from the main checkout, after
+        the seal lands; a sealing run mints the key itself where it has not
+        run. --check mints nothing.
+    receipt-seal --help
+
+  Exit codes:
+    0   sealed / VERIFIED / the key is present and safe
+    1   seal: could not seal (Fix: on stderr)
+        verify: UNVERIFIED -- unsealed, forged or edited, sealed under another
+        key, or produced by a judge that never landed. Never a pass.
+        init-key: the key could not be minted, or it is unsafe or malformed
+    2   init-key --check: no key on this machine yet (NOT PROVISIONED)
+    3   verify: COULD NOT LOOK -- no key, an unsafe key, or a landed history
+        that cannot be read. Never a pass, and not the same as unverified.
+        init-key --check: the key exists but is unsafe or unreadable, or
+        its path cannot be computed
+        any command: the tool itself failed (a crash is never a verdict)
+    64  bad arguments
+TXT
+
+def usage_error(msg)
+  warn "receipt-seal: #{msg}"
+  warn "Fix: run receipt-seal --help; the forms are `receipt-seal seal|verify --kind critic|integration FILE` and `receipt-seal init-key [--check]`."
+  exit 64
+end
+
+def parse(argv)
+  cmd = argv.first
+  usage_error("the first argument must be seal, verify or init-key (got #{cmd.inspect})") unless %w[seal verify].include?(cmd)
+  rest = argv.drop(1)
+  kind = nil
+  files = []
+  until rest.empty?
+    a = rest.shift
+    case a
+    when "--kind"
+      kind = rest.shift
+      usage_error("--kind needs critic or integration") unless ReceiptSeal::KINDS.key?(kind)
+    when /\A-/
+      usage_error("unknown flag #{a}")
+    else
+      files << a
+    end
+  end
+  usage_error("--kind is required") unless kind
+  usage_error("exactly one FILE is required (got #{files.size})") unless files.size == 1
+  [cmd, kind, files.first]
+end
+
+def read_body(file)
+  [JSON.parse(File.read(file)), nil]
+rescue SystemCallError, JSON::ParserError => e
+  [nil, "#{file} is not a readable JSON receipt (#{e.class.name.split('::').last})"]
+end
+
+# init-key [--check]: the per-machine installer. Prints metadata only.
+def init_key(rest)
+  check = false
+  rest.each do |a|
+    a == "--check" ? (check = true) : usage_error("init-key takes only --check (got #{a.inspect})")
+  end
+  path, why = ReceiptSeal.key_path(ENV)
+  if why
+    warn "receipt-seal: init-key: #{why}."
+    warn "Fix: set HOME (or ATHENA_SECRETS_ROOT) to an absolute path, then re-run receipt-seal init-key."
+    return check ? 3 : 1
+  end
+  if check && !(File.exist?(path) || File.symlink?(path))
+    warn "receipt-seal: init-key --check: NOT PROVISIONED: no receipt-seal key at #{path}."
+    warn "Fix: run ~/dev/custom/ai/bin/receipt-seal init-key on this machine (it mints the key; metadata only)."
+    return 2
+  end
+  key, why = check ? ReceiptSeal.read_key(path) : ReceiptSeal.ensure_key(path)
+  if why
+    warn "receipt-seal: init-key#{check ? ' --check' : ''}: #{why}."
+    warn "Fix: repair what is named (ls -l '#{path}'; the key must be a 0600 regular file you own, in a 0700 directory). " \
+         "To replace a malformed key, rm it and re-run receipt-seal init-key; receipts sealed under the old key then read UNVERIFIED."
+    return check ? 3 : 1
+  end
+  mode = File.stat(path).mode & 0o7777
+  puts format("receipt-seal: key OK: %s (mode %04o, key id %s)", path, mode, ReceiptSeal.key_id(key))
+  0
+end
+
+def main(argv)
+  if argv.include?("--help") || argv.include?("-h")
+    puts USAGE
+    return 0
+  end
+  return init_key(argv.drop(1)) if argv.first == "init-key"
+
+  cmd, kind, file = parse(argv)
+  body, why = read_body(file)
+  if cmd == "seal"
+    sealed, why = ReceiptSeal.seal(body, kind) unless why
+    if why
+      warn "receipt-seal: could not seal #{file}: #{why}."
+      warn "Fix: make the key path writable and the receipt readable, then re-run; an unsealed receipt is refused by every reader."
+      return 1
+    end
+    # Exclusive, 0600 and randomly named, so a stale file never collides and
+    # the sealed receipt keeps the private mode integration-gate gave it.
+    tmp = "#{file}.seal.#{Process.pid}.#{SecureRandom.hex(6)}"
+    begin
+      File.open(tmp, File::WRONLY | File::CREAT | File::EXCL, 0o600) { |f| f.write(JSON.generate(sealed)) }
+      File.rename(tmp, file)
+    rescue SystemCallError => e
+      File.unlink(tmp) if File.exist?(tmp)
+      warn "receipt-seal: could not rewrite #{file} (#{e.message})."
+      warn "Fix: make #{File.dirname(file)} writable and re-run."
+      return 1
+    end
+    return 0
+  end
+
+  if why
+    warn "receipt-seal: COULD NOT LOOK at #{file}: #{why}."
+    warn "Fix: inspect it (ls -l '#{file}'), then #{ReceiptSeal::REJUDGE[kind]}."
+    return 3
+  end
+  res = ReceiptSeal.verify(body, kind)
+  return 0 if res.ok?
+
+  label = res.status == :could_not_look ? "COULD NOT LOOK" : "UNVERIFIED"
+  warn "receipt-seal: #{label} #{file}: #{res.why}."
+  warn "Fix: #{res.fix}"
+  res.status == :could_not_look ? 3 : 1
+end
+
+# A crash is never a verdict: it is COULD NOT LOOK (exit 3), not the
+# UNVERIFIED (exit 1) a reader would report as a definite refusal.
+begin
+  exit main(ARGV)
+rescue StandardError => e
+  warn "receipt-seal: COULD NOT LOOK: the tool failed (#{e.class}: #{e.message.lines.first.to_s.strip})."
+  warn "Fix: run ~/dev/custom/ai/bin/receipt-seal --help and repair what failed; a receipt this tool could not check is never a pass."
+  exit 3
+end

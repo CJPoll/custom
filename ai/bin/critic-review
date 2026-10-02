@@ -34,6 +34,17 @@
 # fail-opened twice and was caught only by the admiral's discretion.
 # `integration-gate` reads these; see athena:merge-boarding -> "The merge bar".
 #
+# Receipts are SEALED (DND-1814): every receipt carries the git blobs of the
+# judge files that wrote it and an HMAC under this machine's receipt-seal key
+# (ai/lib/receipt_seal.rb). The reader takes a PASS only when that seal
+# verifies and the judge files are its own or landed, so a receipt written by
+# hand, by branch code during a gate, or by a branch's edited judge is no
+# verdict. A BLOCK keeps its exit 2 sealed or not: a forged BLOCK only refuses.
+# OPEN, both DND-1808's (this seal does not fix it): (a) the sealer is an
+# oracle to any same-uid process, so code that runs it on purpose can still
+# seal a PASS; (b) gen_saas's gate cannot be sandboxed. See the header of
+# ai/lib/receipt_seal.rb ("WHAT IT CLOSES, AND WHAT IT DOES NOT").
+#
 # Receipts are WRITTEN per checkout but READ from every checkout of the repo
 # (keyed on the realpath of the git common dir), so a verdict recorded in a
 # worktree is found from the main checkout too -- see "The READ side" below
@@ -70,6 +81,7 @@ AI_DIR = File.expand_path("..", __dir__)
 require File.join(AI_DIR, "lib", "critic_prompt")
 require File.join(AI_DIR, "lib", "critic_carry")
 require File.join(AI_DIR, "lib", "critic_verdict_stores")
+require File.join(AI_DIR, "lib", "receipt_seal")
 # The telemetry writer (DND-1474, see emit_critic_round). It fails open, and so
 # does loading it: a writer that cannot load leaves the critic as it was.
 begin
@@ -103,9 +115,20 @@ USAGE = <<~TXT.freeze
                                            exit 0 pass / 2 block / 3 no green
                                            verdict (none / running / fail-open /
                                            stale-tree / malformed / conflicting
-                                           / could-not-look -- each named).
-                                           Searches every checkout (main and
-                                           worktrees) of the current repo.
+                                           / unverified / could-not-look --
+                                           each named). Searches every checkout
+                                           (main and worktrees) of the current
+                                           repo. A PASS counts only when its
+                                           SEAL verifies (DND-1814): an HMAC
+                                           under this machine's receipt-seal
+                                           key over the receipt, which names
+                                           the judge files that wrote it, each
+                                           this reader's own copy or a version
+                                           landed on origin/main. Unsealed,
+                                           edited, another key's, or an
+                                           unlanded judge's: exit 3, never a
+                                           pass. Every review run seals what
+                                           it records (ai/lib/receipt_seal.rb).
     ai/bin/critic-review --verdict-for SHA --covering REF
                                            as above, and a PASS counts only if
                                            the diff it judged covers REF..SHA:
@@ -330,6 +353,7 @@ def write_verdict(sha, base, action, findings, dirty, keys: nil, carried: nil, e
     .merge(key_fields)
     .merge("carried_from" => carried&.fetch(:root), "carried_receipt" => carried&.fetch(:receipt))
     .merge("upstream_range" => interaction&.fetch(:range), "interaction" => interaction&.fetch(:verdict))
+  receipt = seal_receipt(receipt)
   body = JSON.generate(receipt)
   if exclusive
     tmp = File.join(dir, ".#{sha}.json.tmp.#{Process.pid}")
@@ -352,6 +376,21 @@ def write_verdict(sha, base, action, findings, dirty, keys: nil, carried: nil, e
   retire_report(dir, sha)
   emit_critic_round(receipt)
   path
+end
+
+# Seal a receipt before it is written (DND-1814): the producer (this judge's
+# own files) and an HMAC under this machine's receipt-seal key
+# (ai/lib/receipt_seal.rb). The reader refuses a PASS that does not verify, so
+# a file a person or branch code writes is never one. A seal that cannot be
+# made still records the receipt -- a BLOCK, a fail-open and the round count
+# stay visible -- but unsealed, and says so: such a PASS reads as no verdict.
+def seal_receipt(receipt)
+  sealed, why = ReceiptSeal.seal(receipt, "critic")
+  return sealed if sealed
+
+  warn "critic-review: NOTE the verdict for #{receipt['sha']} could not be SEALED (#{why}); it is recorded unsealed, and an unsealed PASS is never a pass."
+  warn "  Fix: repair what is named (ai/bin/receipt-seal --help names the key path), then re-run ~/dev/custom/ai/bin/critic-review."
+  receipt
 end
 
 # One critic.round telemetry event per receipt written (DND-1474), so a
@@ -490,6 +529,10 @@ def judge_receipt(sha, full, covering = nil)
     return [3, :err, ["critic-review: verdict receipt for #{sha} is unreadable (#{e.message}).",
                       "  Fix: delete #{full} and re-run ai/bin/critic-review. A corrupt receipt is an error, never a pass."]]
   end
+  unless data.is_a?(Hash) && data["sha"] == File.basename(full, ".json")
+    return [3, :err, ["critic-review: verdict receipt #{full} does not record the commit it is filed under (it records #{data.is_a?(Hash) ? data['sha'].inspect : 'no object'}).",
+                      "  Fix: delete #{full} and re-run ~/dev/custom/ai/bin/critic-review at #{sha}. A verdict copied onto another head's name is never a pass."]]
+  end
   if data["dirty"]
     return [3, :err, ["critic-review: the verdict for #{sha} was recorded against a DIRTY working tree — it did not judge what you are about to merge.",
                       "  Fix: commit or discard the working-tree changes, then re-run ai/bin/critic-review so the verdict matches the head being merged."]]
@@ -514,6 +557,15 @@ def judge_receipt(sha, full, covering = nil)
   end
   case data["verdict"]
   when "pass"
+    # DND-1814: a PASS counts only when the landed judge sealed it on this
+    # machine. A BLOCK keeps its exit 2 sealed or not: a forged BLOCK can only
+    # refuse, never pass.
+    seal = ReceiptSeal.verify(data, "critic")
+    unless seal.ok?
+      label = seal.status == :could_not_look ? "COULD NOT LOOK — the PASS seal" : "UNVERIFIED PASS"
+      return [3, :err, ["critic-review: #{label} for #{sha}: #{seal.why} (receipt #{full}).",
+                        "  Fix: #{seal.fix}"]]
+    end
     if covering && (refusal = coverage_refusal(sha, data, full, covering))
       return refusal
     end
@@ -1005,6 +1057,12 @@ def attempt_carry(base, sha, dirty, keys, key_reason)
     next unless r["schema"] == 2 && r["verdict"] == "pass"
     next unless CriticCarry::MATCH_KEYS.all? { |k| r[k] == keys[k] }
     c[:validated], c[:invalid_reason] = revalidate_source(r)
+    next unless c[:validated]
+
+    # DND-1814: carry only a PASS the landed judge sealed, or a forged source
+    # would be laundered into a sealed receipt for this head.
+    seal = ReceiptSeal.verify(r, "critic")
+    c[:validated], c[:invalid_reason] = [false, "its seal does not verify (#{seal.why})"] unless seal.ok?
   end
 
   dec = CriticCarry.decide(keys, candidates)
@@ -1267,6 +1325,15 @@ ensure
   prev&.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }
 end
 
+# A receipt body sealed as the landed judge seals it (DND-1814), for the
+# cases that forge an on-disk receipt the reader must accept.
+def sealed_for_test(receipt)
+  sealed, why = ReceiptSeal.seal(receipt, "critic")
+  raise "self-test could not seal a fixture receipt: #{why}" unless sealed
+
+  sealed
+end
+
 # The receipt half of the suite. It runs inside a REAL throwaway git repo,
 # because the writer/reader resolve their store through git -- running it in
 # the live repo would both pollute $GIT_DIR and test the wrong tree.
@@ -1320,7 +1387,7 @@ def run_receipt_self_test
         r = { "schema" => schema, "tool" => "critic-review", "sha" => sha, "base" => "x", "verdict" => "pass",
               "findings" => [], "dirty" => false, "at" => "2026-09-29T00:00:00Z" }
         r["merge_base"] = mb if schema >= 2
-        File.write(File.join(dir, "#{sha}.json"), JSON.generate(r))
+        File.write(File.join(dir, "#{sha}.json"), JSON.generate(sealed_for_test(r)))
       end
       read = ->(cov) { capture_err { capture_out { verdict_for(sha, cov) }[0] } }
       receipt.call(parent)
@@ -2491,14 +2558,50 @@ def run_carry_self_test
     check.call("M15 --no-carry: SKIPPED and judged", err.include?("CARRY SKIPPED (--no-carry); running the judge.") && rc == 2)
   end
 
-  # M16 a schema-1 source is never used, and the reader still reads it.
+  # M16 a schema-1 source is never used, and the reader still reads it once
+  # the landed judge has sealed it (DND-1814).
   fixture.call do |f1, _f2, _root|
     legacy = receipt.call(f1).slice("tool", "sha", "base", "verdict", "findings", "dirty", "at").merge("schema" => 1)
-    File.write(File.join(verdict_dir, "#{f1}.json"), JSON.generate(legacy))
+    File.write(File.join(verdict_dir, "#{f1}.json"), JSON.generate(sealed_for_test(legacy)))
     rc, _o, err = go.call(["--base", "main"], block_out)
     check.call("M16 schema 1: judge ran, miss names schema 1", rc == 2 && err.include?("schema 1"))
     code, = capture_err { capture_out { verdict_for(f1) }[0] }
-    check.call("M16 the reader still passes a schema-1 PASS", code == 0)
+    check.call("M16 the reader still passes a sealed schema-1 PASS", code == 0)
+    # M16b the same body UNSEALED -- hand-written, or recorded before DND-1814 --
+    # is no verdict (exit 3, Fix:), never a pass.
+    File.write(File.join(verdict_dir, "#{f1}.json"), JSON.generate(legacy))
+    code, err = capture_err { capture_out { verdict_for(f1) }[0] }
+    check.call("M16b an unsealed PASS is UNVERIFIED, exit 3 with Fix:",
+               code == 3 && err.include?("UNVERIFIED PASS") && err.include?("Fix:"))
+  end
+
+  # M16c DND-1814: a carry never launders a forged source. An UNSEALED PASS on
+  # the identical change (keys that recompute) is not a source: the judge runs.
+  fixture.call do |f1, _f2, _root|
+    forged = receipt.call(f1).reject { |k, _| %w[seal producer].include?(k) }
+    File.write(File.join(verdict_dir, "#{f1}.json"), JSON.generate(forged))
+    rc, _o, err = go.call(["--base", "main"], block_out)
+    check.call("M16c an unsealed source is never carried: the judge ran", rc == 2 && err.include?("does not verify"))
+  end
+
+  # M16d DND-1814: a verdict that cannot be SEALED (here: a secrets root that
+  # is not absolute, so no key path) is recorded unsealed with a NOTE and a
+  # Fix:, and the reader then refuses its PASS (exit 3), never passes it.
+  fixture.call do |f1, _f2, _root|
+    body = receipt.call(f1).reject { |k, _| %w[seal producer].include?(k) }
+    saved = ENV.fetch("ATHENA_SECRETS_ROOT", nil)
+    begin
+      ENV["ATHENA_SECRETS_ROOT"] = "relative/secrets"
+      out_body = nil
+      _c, err = capture_err { out_body = seal_receipt(body) }
+    ensure
+      saved.nil? ? ENV.delete("ATHENA_SECRETS_ROOT") : ENV["ATHENA_SECRETS_ROOT"] = saved
+    end
+    check.call("M16d a seal failure says so with Fix: and records the body unsealed",
+               err.include?("could not be SEALED") && err.include?("Fix:") && !out_body.key?("seal"))
+    File.write(File.join(verdict_dir, "#{f1}.json"), JSON.generate(out_body))
+    code, err = capture_err { capture_out { verdict_for(f1) }[0] }
+    check.call("M16d the unsealed PASS it recorded is refused (exit 3)", code == 3 && err.include?("UNVERIFIED PASS"))
   end
 
   # M17 MISS: a source whose recorded keys do not recompute.
@@ -2616,6 +2719,10 @@ def run_self_test
   prev_tel = ENV["ATHENA_TELEMETRY_DIR"]
   tel_dir = Dir.mktmpdir("critic-review-selftest-telemetry-")
   ENV["ATHENA_TELEMETRY_DIR"] = File.join(tel_dir, "store")
+  # DND-1814: every receipt is sealed under a receipt-seal key. The suite's
+  # key lives in a temp secrets root, never the machine's.
+  prev_sec = ENV["ATHENA_SECRETS_ROOT"]
+  ENV["ATHENA_SECRETS_ROOT"] = File.join(tel_dir, "secrets")
   ok = begin
     with_hermetic_git_config do
       # Every sub-suite runs, so one failing suite never hides another's failures.
@@ -2625,6 +2732,7 @@ def run_self_test
     end
   ensure
     prev_tel.nil? ? ENV.delete("ATHENA_TELEMETRY_DIR") : ENV["ATHENA_TELEMETRY_DIR"] = prev_tel
+    prev_sec.nil? ? ENV.delete("ATHENA_SECRETS_ROOT") : ENV["ATHENA_SECRETS_ROOT"] = prev_sec
     FileUtils.rm_rf(tel_dir)
   end
   if ok && SELF_TEST_FAILED_CASES.empty?

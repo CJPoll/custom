@@ -195,6 +195,36 @@ took one captain and a 24 s run.
   checkout on a head the captain judged in its worktree. A receipt inside a
   worktree that has been REMOVED is gone with it, so read the verdict before
   tearing the worktree down.
+- **A recorded PASS counts only when the landed judge SEALED it on this
+  machine (DND-1814).** Receipts were plain JSON, so a PASS hand-written for a
+  head no judge ever ran on read `VERDICT PASS`, and a gate step (the branch's
+  own code, run unsandboxed by `integration-gate`) could write one mid-gate.
+  `critic-review` now seals every verdict: the producer (the git blobs of its
+  own judge files) and an HMAC under this machine's receipt-seal key
+  (`ai/lib/receipt_seal.rb`; the key is the per-machine secret
+  `receipt-seal-key`). `--verdict-for` reads a PASS only when the seal
+  verifies AND every producer blob is the reader's own copy or a version that
+  landed on `origin/main`. Otherwise it is exit 3 with the reason:
+  `UNSEALED`, `FORGED OR EDITED`, `SEALED UNDER ANOTHER KEY`, `PRODUCED BY A
+  JUDGE THAT NEVER LANDED`, or `COULD NOT LOOK` (no key, or a landed history it
+  cannot read). The integration receipt is sealed the same way; see *Landing
+  onto a moving main*. A carry only carries a sealed source, and a sealed PASS
+  copied onto another head's name never counts. The fix is always a re-run of
+  the landed judge (or the gate), which seals what it records. A verdict
+  recorded before DND-1814 reads `UNSEALED`: re-judge that head. Residual,
+  said out loud: this closes every receipt that is merely WRITTEN, not
+  deliberate forgery. Code running as this user, a gate step included, can
+  still run the sealer (`ai/bin/receipt-seal seal`) or read the key and get a
+  receipt every reader accepts. Closing that needs a privilege boundary
+  branch code cannot cross (a sealer under another uid, or branch code run
+  sandboxed away from the key), not a file format; `ai/lib/receipt_seal.rb`
+  says so in its header. Two things stay OPEN, both DND-1808's (which stays
+  open; this seal does not fix it): (a) the sealer is an oracle to any
+  same-uid process, so deliberate forgery is not closed; (b) gen_saas's
+  declared gate needs the docker socket and the network, so it cannot be
+  sandboxed. The key is minted once per machine by
+  `ai/bin/receipt-seal init-key` (metadata only; a sealing run mints it where
+  that has not run).
 - **On exit 3 you get a verdict, or you hold that ONE MR — you never merge past
   it.** In order: (1) if it reports a run IN PROGRESS, wait for it; (2)
   otherwise re-run the judge yourself in the Mission's worktree
@@ -225,7 +255,8 @@ took one captain and a 24 s run.
   BLOCK is refused with the flag exactly as without it.** Its scope is the four
   states in which the judge did not deliver an opinion on this head: it **never
   ran**, it is **still running**, it **fail-opened**, or its receipt is
-  **unreadable/dirty/for another SHA**. A BLOCK is not an absence of
+  **unreadable/dirty/for another SHA/unverified** (an unsealed or forged
+  receipt is no verdict, DND-1814). A BLOCK is not an absence of
   information; it is the judge's answer, and no flag goes past it. The gate now
   enforces that itself — it reads the receipt FIRST, then applies the flag, so
   the override can only ever refuse a merge it used to allow. The `INTEGRATION
@@ -488,9 +519,20 @@ working tree is read, the main checkout's included. A judge the
 the target lacks, or an object git cannot read, is exit 2, never the branch's
 copy. A branch that edits `integration-gate` itself still lands, judged by the
 landed copy. The residual: this runs in the copy the caller starts, and a
-branch's own copy can drop it; a critic receipt is a file any process can
-write. So run the main checkout's path above. Another repo (gen_saas) cannot
-edit these judges in its diff; its gate uses the copies beside the script.
+branch's own copy can drop it. So run the main checkout's path above. A
+receipt that copy's own judges seal does not pass: every receipt names the
+judge files that sealed it, and a reader refuses one whose files never landed
+(DND-1814). That copy can still run the LANDED sealer and get a receipt every
+reader accepts: OPEN, DND-1808 (a), the sealer is an oracle to any same-uid
+process. Another repo (gen_saas) cannot edit these judges in its diff; its
+gate uses the copies beside the script, and its gate cannot be sandboxed
+(OPEN, DND-1808 (b)).
+
+**Later (2026-10-02, DND-1814):** the residual above also said "a critic
+receipt is a file any process can write". Narrowed, not closed: a merely
+WRITTEN receipt (unsealed, edited, or from an unlanded judge) is now refused,
+but same-uid code that runs the sealer on purpose still gets an accepted
+receipt (DND-1808, open; *The merge bar*, the sealed-PASS bullet).
 
 **Later (2026-10-02, DND-1796):** this said to run the gate "from the
 Mission's worktree" as `ai/skills/athena:merge-boarding/scripts/integration-gate`,
@@ -551,10 +593,13 @@ on a conflict (below). Its one other write is its **receipt**: on exit 0,
 and only then, it records the pass at
 `<git common dir>/integration-receipts/<head-sha>.json` (head, the target SHA it
 contained, gate and source, any override or owner approval, blast radius, the OK
-line, UTC time). Every other exit removes the receipt for that head, and a
+line, UTC time), sealed (DND-1814): the producer (the git blobs of the gate
+files that wrote it) and an HMAC under this machine's receipt-seal key, added by
+`ai/bin/receipt-seal`. Every other exit removes the receipt for that head, and a
 receipt error is exit 5 with no OK line: a stale receipt it cannot remove (before
-the gate runs, so no gate ran) or a receipt it cannot write after a green gate. `locked-merge` requires the
-receipt (*Landing onto a moving main*).
+the gate runs, so no gate ran), or a receipt it cannot write or seal after a
+green gate. `locked-merge` requires the receipt, and every reader verifies the
+seal (*Landing onto a moving main*).
 
 **Later (2026-10-01, DND-1463):** this paragraph and the `--with-critic` one
 above had no exception: a rebase always needed a new gate and verdict, and the
@@ -735,9 +780,15 @@ So the merge step is a critical section on every GitHub-merged repo:
   Still run `integration-gate` first, still merge one at a time. With no
   usable receipt it refuses before merging, exit 9, and says which:
   `NO RECEIPT`, `RECEIPT UNREADABLE (COULD NOT LOOK)`, `RECEIPT INVALID`,
-  `RECEIPT FOR ANOTHER BASE` (the recorded base is not an ancestor of
-  `origin/<base>`), or `RECEIPT BASE UNKNOWN (COULD NOT LOOK)` (an object is
-  missing, so ancestry cannot be read). The fix is to run
+  `RECEIPT UNVERIFIED` (unsealed, forged or edited, sealed under another
+  key, or written by a gate copy that never landed: DND-1814),
+  `RECEIPT UNVERIFIABLE (COULD NOT LOOK)` (no seal key, or a landed history
+  it cannot read), `RECEIPT FOR ANOTHER BASE` (the recorded base is not an
+  ancestor of `origin/<base>`), or `RECEIPT BASE UNKNOWN (COULD NOT LOOK)` (an
+  object is missing, so ancestry cannot be read). Each reader of the receipt
+  (`locked-merge`, gh-athena's merge and push guards, `main-health`,
+  `ready-and-idle`) reads it through `ai/lib/integration-receipt.sh`, so each
+  applies the same seal check. The fix is to run
   `integration-gate` on that head and merge the SHA its `INTEGRATION OK` names.
   The gh-athena merge guard applies the same receipt rule to a bare
   `gh-athena pr merge` (DND-969); it has no tree check.

@@ -39,6 +39,9 @@ AI_DIR="$(cd "${HERE}/../.." && pwd)"
 WRAPPER="${GH_ATHENA_UNDER_TEST:-${AI_DIR}/bin/gh-athena}"
 
 TMP="$(mktemp -d)"; trap 'rm -rf "${TMP}"' EXIT
+# Receipts are sealed under the machine's receipt-seal key (DND-1814): a
+# private key under the suite's temp dir here, never the real one.
+export ATHENA_SECRETS_ROOT="${TMP}/secrets"
 PASS=0; FAIL=0
 ok()  { printf '  ok    %s\n' "$1"; PASS=$((PASS+1)); }
 bad() { printf '  FAIL  %s\n        %s\n' "$1" "$2"; FAIL=$((FAIL+1)); }
@@ -815,6 +818,7 @@ plant() {
   jq -n --arg h "${4:-$1}" --arg b "$2" --arg v "${3:-pass}" \
     '{schema:"integration-receipt/1", verdict:$v, head:$h, target_ref:"origin/main", base:$b,
       gate:"bin/prep-commit.sh", recorded_at:"2026-09-27T00:00:00Z"}' > "${STORE_FX}/$1.json"
+  "${AI_DIR}/bin/receipt-seal" seal --kind integration "${STORE_FX}/$1.json"
 }
 
 # receipt_refused <label> <kind> : refused with that kind, a Fix: that names
@@ -838,6 +842,13 @@ run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
 if [ "${RC}" = 0 ] && grep -qx "pr merge 362 --squash --match-head-commit ${HEAD_SHA}" "${STUB_LOG}"; then
   ok "D2. a valid receipt for this head and this base -> the merge runs, argv unchanged"
 else bad "D2. valid receipt merges" "$(detail)"; fi
+
+# DND-1814: the same receipt FORGED -- right shape, this head, this base, but
+# written by hand with no seal. Before DND-1814 the merge ran on it.
+reset_fx; pr_view "${GREEN}"; base_is "${GATED_BASE}"; plant "${HEAD_SHA}" "${GATED_BASE}"
+jq 'del(.seal, .producer)' "${STORE_FX}/${HEAD_SHA}.json" > "${STORE_FX}/f.tmp" && mv "${STORE_FX}/f.tmp" "${STORE_FX}/${HEAD_SHA}.json"
+run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
+receipt_refused "D2b. a FORGED (unsealed) receipt for this head and base -> refused before the merge call (DND-1814)" "RECEIPT UNVERIFIED"
 
 # DND-1463: the receipt's base may be an ANCESTOR of the base tip (main moved
 # on since the gate ran). NOGATE_BASE is GATED_BASE's parent. Before DND-1463

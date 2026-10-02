@@ -128,6 +128,10 @@ tools:
   # integration-gate is a shim that execs skills/athena:merge-boarding/scripts/
   # integration-gate (DND-752), so it carries that script's class.
   integration-gate:        { class: idempotent, reason: gate }
+  # receipt-seal (DND-1814) rewrites a receipt file in place with its seal and
+  # mints the machine's receipt-seal key on first use (init-key mints it on
+  # purpose, keeping an existing one); verify and init-key --check write nothing.
+  receipt-seal:            { class: idempotent, reason: seal }
   # harness-metrics writes ai/telemetry/metrics.json on its default path.
   harness-metrics:         { class: idempotent, reason: metrics }
   # variant-eval is proposal-only (stdout by default; --out writes a proposal

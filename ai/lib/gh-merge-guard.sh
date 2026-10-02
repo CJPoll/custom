@@ -105,16 +105,27 @@
 # 2026-09-25), so on a repo that gates only through classic protection `--auto`
 # is refused too. That is deny-by-default working: take the non-auto path.
 #
-# Residual of the receipt check (DND-969): the receipt is a local file, so any
-# local actor can write one (the same trust level as critic-verdicts), and a
-# repo that declares no gate on its base tip is not checked at all. Since
+# Residual of the receipt check (DND-969): a repo that declares no gate on its
+# base tip is not checked at all. The receipt is a local file, but a written
+# one no longer passes: ir_read_receipt verifies its seal (DND-1814). OPEN,
+# both DND-1808's: (a) the sealer is an oracle to any same-uid process, so
+# code running as this user that invokes the sealer (ai/bin/receipt-seal
+# seal) or reads the seal key can still forge one this guard accepts; (b)
+# gen_saas's gate cannot be sandboxed, so its branch code has that access. Since
 # DND-1463 a receipt on an older base the tip descends from is accepted, so the
 # head combined with the base's newer commits was never gated; GitHub's squash
 # refuses only a textual conflict. The owner accepted that risk for velocity
 # (2026-10-01). locked-merge also checks the landed tree and that the head
 # contains the receipt's base; this guard does neither, because the pinned head
 # need not be in the local object store. integration-gate records only a base
-# the head contains, so only a hand-written receipt meets that gap.
+# the head contains, and a hand-written receipt does not verify (DND-1814), so
+# only a deliberate forger (one that runs the sealer or reads its key) meets
+# that gap.
+#
+# **Later (2026-10-02, DND-1814):** this residual said any local actor can
+# write a receipt, "the same trust level as critic-verdicts". Narrowed, not
+# closed: both receipt kinds are sealed and every reader verifies the seal, so
+# a merely written receipt is refused; deliberate forgery stays open (DND-1808).
 #
 # Usage: set GMG_TOOL, then `gmg_guard "$@"`. It returns 0 when the command may
 # run, and exits 3 with a REFUSING line and a Fix: line otherwise. It calls

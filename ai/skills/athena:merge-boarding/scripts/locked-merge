@@ -91,7 +91,9 @@ Exit (every non-zero prints a Fix: line):
   7 LANDED UNGATED: parent or tree mismatch -- re-gate origin/main now, report it
   8 merge ran but landing not confirmed -- investigate, do not retry blind
   9 no usable integration-gate receipt for --head: NO RECEIPT, RECEIPT
-    UNREADABLE (COULD NOT LOOK), RECEIPT INVALID, RECEIPT FOR ANOTHER BASE
+    UNREADABLE (COULD NOT LOOK), RECEIPT INVALID, RECEIPT UNVERIFIED (not
+    sealed by the landed gate, DND-1814), RECEIPT UNVERIFIABLE (COULD NOT
+    LOOK), RECEIPT FOR ANOTHER BASE
     (recorded base not an ancestor of origin/<base>), or RECEIPT BASE
     UNKNOWN (COULD NOT LOOK) -- run integration-gate on this head (nothing landed)
   10 LANDED and confirmed, but the worktree stack teardown failed -- do not re-merge

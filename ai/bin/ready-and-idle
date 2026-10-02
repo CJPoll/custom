@@ -481,7 +481,10 @@ IR_BRIDGE = <<~'SH'
   printf 'receipt\t%s\t%s\t%s\t%s\n' "$rrc" "$IR_KIND" "$IR_RECEIPT" "$IR_WHY"
 SH
 
+# RECEIPT UNVERIFIED (DND-1814: unsealed, forged, edited, or an unlanded
+# gate's) is a definite answer, so it is :invalid, never could-not-look.
 RECEIPT_KINDS = { "NO RECEIPT" => :none, "RECEIPT INVALID" => :invalid,
+                  "RECEIPT UNVERIFIED" => :invalid,
                   "RECEIPT FOR ANOTHER BASE" => :other_base }.freeze
 
 def git_line(dir, *args)

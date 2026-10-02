@@ -38,6 +38,10 @@ export LOCKED_MERGE_CONFIRM_SLEEP=0
 # locked-merge (and the real integration-gate r2/r7 run) emit telemetry
 # (DND-1475): never into the machine's real store from a fixture.
 export ATHENA_TELEMETRY_DIR="${TMP}/telemetry"
+# Receipts are sealed under the machine's receipt-seal key (DND-1814): a
+# private key under the suite's temp dir here, never the real one.
+export ATHENA_SECRETS_ROOT="${TMP}/secrets"
+SEAL="$(cd "${HERE}/../../../../bin" && pwd)/receipt-seal"
 unset ATHENA_UNIT
 
 ok()  { PASS=$((PASS+1)); printf '  ok   %s\n' "$1"; }
@@ -147,6 +151,7 @@ plant_receipt() {
       gate:"g.sh", gate_source:"caller-supplied", gate_edited_by_branch:false,
       critic_override:null, critic_override_state:null, owner_approval:null,
       blast_radius:"BLAST-RADIUS COLD", recorded_at:"2026-09-27T00:00:00Z"}' > "${f}"
+  "${SEAL}" seal --kind integration "${f}"
 }
 advance_main() { local G="git --git-dir=${BARE}"
   ${G} update-ref refs/heads/main "$(${G} commit-tree "$(${G} rev-parse main^{tree})" -p "$(${G} rev-parse main)" -m ahead)"; }
@@ -428,7 +433,8 @@ grep -qF "NO RECEIPT" <<<"${out}" && bad "r6 misread an unreadable store as abse
 fixture r7; rm -f "$(receipt_path "${H}")"
 printf '#!/bin/sh\nexit 0\n' > "${TMP}/r7/green.sh"; chmod +x "${TMP}/r7/green.sh"
 ( cd "${WT}" && d="$(git rev-parse --git-path critic-verdicts)" && mkdir -p "$d" \
-  && printf '{"schema":1,"tool":"critic-review","sha":"%s","base":"main","verdict":"pass","findings":[],"dirty":false,"at":"2026-09-27T00:00:00Z"}\n' "${H}" > "${d}/${H}.json" )
+  && printf '{"schema":1,"tool":"critic-review","sha":"%s","base":"main","verdict":"pass","findings":[],"dirty":false,"at":"2026-09-27T00:00:00Z"}\n' "${H}" > "${d}/${H}.json" \
+  && "${SEAL}" seal --kind critic "${d}/${H}.json" )
 ( cd "${WT}" && "${igate}" --gate "${TMP}/r7/green.sh" >"${TMP}/r7/igate.out" 2>&1 ); irc=$?
 [ "${irc}" -eq 0 ] && ok "r7 integration-gate passes" || bad "r7 integration-gate expected exit 0, got ${irc}" "$(cat "${TMP}/r7/igate.out")"
 run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/r7.lock"; expect r7 0
@@ -449,7 +455,19 @@ done
 fixture c15
 f="$(receipt_path "${H}")"
 jq --arg s "$(printf 'f%.0s' {1..40})" '.critic_carried_from = $s' "${f}" > "${f}.tmp" && mv "${f}.tmp" "${f}"
+# The gate seals what it writes (DND-1814); reseal the edited body as it would.
+"${SEAL}" seal --kind integration "${f}"
 run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/c15.lock"; expect c15-carried-receipt 0
+
+# c16 DND-1814: a FORGED receipt -- the right shape for exactly the head and
+# base, written by hand with no seal -- is refused before any merge call, with
+# the re-gate Fix:. Before DND-1814 locked-merge merged on it.
+fixture c16
+f="$(receipt_path "${H}")"
+jq 'del(.seal, .producer)' "${f}" > "${f}.tmp" && mv "${f}.tmp" "${f}"
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/c16.lock"; expect_receipt_refusal c16 "RECEIPT UNVERIFIED"
+grep -q 'UNSEALED' <<<"${out}" && grep -q '^Fix:.*integration-gate' <<<"${out}" \
+  && ok "c16 the refusal says UNSEALED and carries the re-gate Fix:" || bad "c16 forged receipt not explained" "${out}"
 
 # ---- DND-1475: telemetry, merge.lock_wait and merge.landed ----
 # Each case has its own store. tel_events <store> <event> -> the lines.
