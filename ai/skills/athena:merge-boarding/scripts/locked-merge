@@ -324,7 +324,7 @@ idle_check() {
       || die 2 "COULD NOT LOOK: gh run view ${id} did not return run ${id} for ${B}" "check gh auth; nothing was merged."
     st="$(jq -r '.status' <<<"${view}")"; conc="$(jq -r '.conclusion // ""' <<<"${view}")"
     [ "${st}" = completed ] || die 5 "BASE DEPLOY BUSY: ${wf} run ${id} for base ${B} is ${st}" \
-      "gh run watch ${id}, then re-run locked-merge; nothing was merged."
+      "wait with ~/dev/custom/ai/bin/gh-ci-wait --repo <owner>/<repo> --run-id ${id} --sha ${B} (a 60 s poll on the App budget, DND-1706), then re-run locked-merge; nothing was merged."
     [ -n "${base_run}" ] || { base_run="${id}"; base_conc="${conc}"; }
   done
   if [ -z "${base_run}" ]; then
@@ -348,7 +348,7 @@ idle_check() {
     || die 2 "COULD NOT LOOK: gh run list --branch returned non-JSON" "check gh auth; nothing was merged."
   live="$(jq -r '[.[] | select(.status != "completed") | .databaseId] | map(tostring) | join(" ")' <<<"${branch_json}")"
   [ -z "${live}" ] || die 5 "${base} BUSY: ${wf} has queued/in-progress run(s): ${live}" \
-    "wait for those runs to finish (gh run watch <id>), then re-run; nothing was merged."
+    "wait for each run with ~/dev/custom/ai/bin/gh-ci-wait --repo <owner>/<repo> --run-id <id> (a 60 s poll on the App budget, DND-1706), then re-run; nothing was merged."
   if [ -n "${base_run}" ]; then
     echo "IDLE ${wf} base ${B}: BASE-RUN ${base_run} completed/${base_conc}; ${base} list counted $(jq length <<<"${branch_json}") runs, none live"
     [ "${base_conc}" = success ] || echo "WARN base deploy ${base_run} for ${B} concluded ${base_conc:-unknown}; merging anyway: no ratified rule holds a merge on a failed deploy (DND-1378 escalation)"

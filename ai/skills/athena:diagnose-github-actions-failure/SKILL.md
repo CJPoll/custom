@@ -159,8 +159,8 @@ runners API is the only authority.
   session is not on and cannot reach, is Cody's step: surface it with the
   identity that makes the instruction actionable: runner **name, id, labels, status**, which **host**
   it runs on, the repo, and the time of the last successful dispatch.
-- **Stop watching and re-plan around it.** An indefinite `gh pr checks --watch`
-  is a stall, not a wait. Split the scope by what the runner gates: drive every
+- **Stop watching and re-plan around it.** An indefinite CI wait (re-running
+  `gh-ci-wait` on a queue that never starts) is a stall, not a wait. Split the scope by what the runner gates: drive every
   **runner-independent** tier (anything landing by a local gate rather than CI)
   all the way to landed, and build the runner-dependent work as far as it goes
   — fully implemented, reviewed, local checks green — as **stacked PRs that

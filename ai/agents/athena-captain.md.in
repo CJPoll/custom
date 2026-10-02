@@ -200,9 +200,9 @@ bare role name reaches you specifically.
    `adr-review` alongside build/lint/test, so "CI is done" and "the bots have
    reviewed" are the same event: the pipeline reaching a terminal state).
    **Forge:** the pipeline / `glab ci` model is GitLab (default); on a
-   `github.com` remote there is no single pipeline — watch Actions **checks**
-   with `gh pr checks <n> --watch` (it blocks until every check concludes) and
-   read PR reviews / check-runs — see athena:github.
+   `github.com` remote there is no single pipeline — wait on Actions **checks**
+   with `~/dev/custom/ai/bin/gh-ci-wait --repo <r> --sha <head>` (never a
+   `--watch` poll) and read PR reviews / check-runs — see athena:github.
    Once it has:
    - **The review floor is mandatory on EVERY PR/MR — every forge, every path.**
      A green pipeline with no bot feedback does NOT mean you are done: the floor

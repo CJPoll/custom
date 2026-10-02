@@ -147,7 +147,7 @@ GMG_ESCALATE='Never merge or move a branch around this (a bare `gh pr merge`, a 
 # which makes the pinned `pr merge` call itself under the repo's merge lock.
 GMG_MB="~/dev/custom/ai/skills/athena:merge-boarding/scripts"
 GMG_LAND="run \`$GMG_MB/integration-gate\` on the PR's head from a checkout of its repo, then land it with \`$GMG_MB/locked-merge --pr <n> --head <the SHA its INTEGRATION OK line names>\` (athena:merge-boarding -> Landing onto a moving main)"
-GMG_SAFE_PATH="wait until every check on the PR's exact head SHA is green (\`gh pr checks <n> --watch\`), then $GMG_LAND"
+GMG_SAFE_PATH="wait until every check on the PR's exact head SHA is green (\`~/dev/custom/ai/bin/gh-ci-wait --repo <owner>/<repo> --sha <head>\`), then $GMG_LAND"
 
 # gh's own top-level commands (gh 2.83). A first word outside this list may be
 # an alias, which is expanded and checked.
@@ -525,7 +525,7 @@ gmg_receipt_gate() {
   esac
   if [ -z "$head" ]; then
     gmg_refuse "$shown" "$owner/$repo declares an integration gate ($gate on $base at $tip), and \`--auto\` merges later, when the required checks pass, onto whatever $base is then. No integration-gate receipt can cover that base" \
-      "drop --auto; wait until every check on the PR's head is green (\`gh pr checks <n> --watch\`), then $GMG_LAND"
+      "drop --auto; wait until every check on the PR's head is green (\`~/dev/custom/ai/bin/gh-ci-wait --repo <owner>/<repo> --sha <head>\`), then $GMG_LAND"
   fi
   if ! ir_read_receipt "$GMG_COMMON" "$head" "$tip"; then
     gmg_refuse "$shown" "$IR_KIND: $owner/$repo declares an integration gate ($gate on $base at $tip), and $IR_WHY" \
@@ -666,7 +666,7 @@ gmg_checks_green() {
   case "$shape" in
     OK) ;;
     EMPTY) gmg_refuse "$shown" "no check has reported on head $head, so nothing shows it green" \
-             "wait for CI to report on $head (\`gh pr checks <n> --watch\`), then $GMG_SAFE_PATH" ;;
+             "wait for CI to report on $head (\`~/dev/custom/ai/bin/gh-ci-wait --repo <owner>/<repo> --sha <head>\`), then $GMG_SAFE_PATH" ;;
     *) gmg_refuse "$shown" "could not read the checks on head $head: ${shape#ERR$'\t'}, so nothing shows it green" "$rfix" ;;
   esac
   if ! judged="$(jq -r "$GMG_ROLLUP_JUDGE" <<<"$rollup" 2>&1)"; then
@@ -693,7 +693,7 @@ ${odd%$'\n'}" \
 ${bad%$'\n'}${old:+
   superseded runs, not judged:
 ${old%$'\n'}}" \
-      "wait for these to conclude (\`gh pr checks <n> --watch\`) and fix any red one. A run with no start time is queued: wait for it to start. A tie for the newest start time needs a fresh run on a new commit. Then $GMG_SAFE_PATH"
+      "wait for these to conclude (\`~/dev/custom/ai/bin/gh-ci-wait --repo <owner>/<repo> --sha <head>\`) and fix any red one. A run with no start time is queued: wait for it to start. A tie for the newest start time needs a fresh run on a new commit. Then $GMG_SAFE_PATH"
   fi
   printf '%s: CHECKS head %s: every judged run is green; %s superseded run(s) not judged%s\n' \
     "$GMG_TOOL" "$head" "$n_old" "${old:+:

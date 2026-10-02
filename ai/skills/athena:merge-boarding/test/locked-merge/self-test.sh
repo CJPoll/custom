@@ -224,11 +224,14 @@ set_base_run() { # <status> <conclusion> [view-status]
 }
 idle_run() { run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/$1.lock" --require-idle-workflow post-merge.yml; }
 names() { grep -qF -- "$2" <<<"${out}" && ok "$1 names '$2'" || bad "$1 does not name '$2'" "${out}"; }
+unnamed() { grep -qF -- "$2" <<<"${out}" && bad "$1 names '$2'" "${out}" || ok "$1 does not name '$2'"; }
 
 # i1 THE #562 MISS: the branch list reads idle (empty), but the base commit's
 # own run is in progress. The old check merged here.
 idle_fixture i1 in_progress ""
 idle_run i1; expect i1 5; no_merge i1; names i1 "BASE DEPLOY BUSY"; names i1 "101"
+# DND-1706: a busy refusal names the slow waiter, never `gh run watch` (a 3 s poll).
+names i1 "gh-ci-wait"; unnamed i1 "gh run watch"
 # i2 a stale list status: the list says completed, the by-id read says running.
 idle_fixture i2; set_base_run completed "" in_progress
 idle_run i2; expect i2 5; no_merge i2; names i2 "BASE DEPLOY BUSY"
@@ -252,6 +255,7 @@ idle_run i6b; expect i6b 5; no_merge i6b
 # run): refuse and name it. (Was c6.)
 idle_fixture i7; echo '[{"databaseId":55,"status":"queued","headSha":"x"}]' > "${ST}/runs.json"
 idle_run i7; expect i7 5; no_merge i7; names i7 "55"
+names i7 "gh-ci-wait"; unnamed i7 "gh run watch"
 # i8 a lookup that cannot be trusted is COULD NOT LOOK, never idle.
 idle_fixture i8a; jq '.[0].headSha="'"$(printf 'c%.0s' {1..40})"'"' "${ST}/runs_commit.json" > "${ST}/x" && mv "${ST}/x" "${ST}/runs_commit.json"
 idle_run i8a; expect i8a 2; no_merge i8a; names i8a "COULD NOT LOOK"

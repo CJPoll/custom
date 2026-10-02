@@ -221,6 +221,37 @@ check "M19. pkill -f mentioned inside a quoted message" allow
 run "$(bash_json 'kill "$pid"')"
 check "M20. kill on a captured pid" allow
 
+# Shape 6 (DND-1706/DND-1708): a default-cadence forge watcher. `gh run watch`
+# polls every 3 s and `gh pr checks --watch` every 10 s; several at once
+# exhausted the owner's 5000/h GitHub budget on 2026-10-02.
+run "$(bash_json 'gh run watch 36983467648')"
+check "6a. gh run watch <id>" deny
+case $OUT in
+  *gh-ci-wait*) PASS=$((PASS + 1)); echo "  PASS  6a'. the deny names the replacement, gh-ci-wait" ;;
+  *) FAIL=$((FAIL + 1)); echo "  FAIL  6a'. the deny names the replacement, gh-ci-wait: [$OUT]" ;;
+esac
+
+run "$(bash_json 'cd /w && timeout 590 gh pr checks 711 --watch --interval 30 2>&1 | tail -n 15')"
+check "6b. gh pr checks --watch behind cd and timeout" deny
+
+run "$(bash_json '~/dev/custom/ai/bin/gh-athena run watch 5 --exit-status')"
+check "6c. gh-athena run watch (the App budget is finite too)" deny
+
+run "$(bash_json 'gh pr checks 711 --repo CJPoll/gen_saas --watch')"
+check "6d. --watch after --repo" deny
+
+run "$(bash_json 'gh pr checks 711; gh pr view 711 --json headRefOid')"
+check "M23. gh pr checks without --watch (one read)" allow
+
+run "$(bash_json 'gh run view 5 --json status')"
+check "M24. gh run view (one read)" allow
+
+run "$(bash_json 'printf "never use gh run watch\n" >/dev/null; git commit -m "drop gh pr checks --watch"')"
+check "M25. the watcher named inside quoted text" allow
+
+run "$(bash_json 'ai/bin/gh-ci-wait --repo a/b --sha "$SHA" --max 570')"
+check "M26. the sanctioned waiter" allow
+
 echo
 echo "--- HEREDOC cases (only a one-line send-mail shape is exempt) ---"
 

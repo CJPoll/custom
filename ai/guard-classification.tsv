@@ -350,3 +350,5 @@ scripts/setup-private-overlay	guard
 ai/lib/private_overlay_install.rb	library	pure verdict/plan rules required by scripts/setup-private-overlay (DND-703); returns Verdicts and the Fix: text (fix_for) that the installer prints
 ai/lib/private_overlay_install_host.rb	library	claude/git/filesystem adapter required by scripts/setup-private-overlay (DND-703); returns [nil, reason] or raises PrivateOverlayInstall::HostError, and the installer prints the Fix:
 ai/lib/notion-version-shim.cjs	library	preloaded by ai/bin/notion-athena-mcp; adds the default Notion-Version header to requests that carry none (DND-1449); no failure path of its own
+ai/lib/gh_ci_wait.rb	library	pure rules of ai/bin/gh-ci-wait (DND-1708): parse a gh api -i response, judge CI state, the wait decision and argument validation; no I/O; raises GhCiWait::Usage carrying its Fix:, which the caller prints
+ai/lib/gh_ci_wait_io.rb	library	the wait loop and the bounded gh api reader of ai/bin/gh-ci-wait (DND-1708); every non-DONE outcome carries a Fix: the caller prints

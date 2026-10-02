@@ -1,6 +1,6 @@
 ---
 name: athena:github
-description: Act on GitHub as Athena's own App identity (athena-harness[bot]) via the gh-athena wrapper — PR create/comment/review, Actions-checks watching, and merges (integration-gate, then athena:merge-boarding's locked-merge, which calls gh-athena pr merge --squash --match-head-commit <sha>; the wrapper refuses a merge whose pinned head is not all green or, in a repo that declares a gate, has no integration-gate receipt, and refuses --auto where no required checks gate it or the repo declares a gate). The GitHub-forge alternative to athena:gitlab, used when the repo's remote is github.com; GitLab stays Athena's default vocabulary. Reads stay on plain gh. Use whenever a GitHub WRITE should be authored by the agent.
+description: Act on GitHub as Athena's own App identity (athena-harness[bot]) via the gh-athena wrapper — PR create/comment/review, Actions-checks waiting (ai/bin/gh-ci-wait, never gh run watch), and merges (integration-gate, then athena:merge-boarding's locked-merge, which calls gh-athena pr merge --squash --match-head-commit <sha>; the wrapper refuses a merge whose pinned head is not all green or, in a repo that declares a gate, has no integration-gate receipt, and refuses --auto where no required checks gate it or the repo declares a gate). The GitHub-forge alternative to athena:gitlab, used when the repo's remote is github.com; GitLab stays Athena's default vocabulary. One-off reads stay on plain gh. Use whenever a GitHub WRITE should be authored by the agent.
 ---
 
 # athena:github
@@ -33,13 +33,15 @@ git remote get-url origin
 
 | | Acts as | Use it for |
 |---|---|---|
-| **plain `gh`** (Cody's OAuth) | Cody Poll | **reads** — `pr view`, `pr checks`, `run view`, `api` GETs |
+| **plain `gh`** (Cody's OAuth) | Cody Poll | **one-off reads** — `pr view`, `pr checks`, `run view`, `api` GETs. Never a repeated poll (see *Watching CI*) |
 | **`gh-athena` wrapper** (the `athena-harness` GitHub App, shows as `athena-harness[bot]`) | the Athena bot | **writes** — PR create, comment, review replies, thread resolves, label edits, CI re-triggers (close + reopen; see *Expected refusals*), merges, authenticated pushes |
 
 Writing through plain `gh` puts **Cody's name** on actions Athena took. That is
 the one thing the wrapper exists to prevent, so: **every GitHub write that
 represents Athena's own work goes through `gh-athena`.** Reads may stay on plain
-`gh` — there's nothing to misattribute in a GET.
+`gh` — there's nothing to misattribute in a GET. A **repeated** read (a CI,
+deploy or merge wait) is different: it goes through `ai/bin/gh-ci-wait`, which
+reads on the App's own budget (*Watching CI*).
 
 Deleting a repo, force-pushing `main`, and changing repo settings or branch
 protection are `~/.claude/CLAUDE.md` → *Owner approval policy*, item 4: read
@@ -198,7 +200,7 @@ GitLab terms are primary; reach for the GitHub column only under this skill.
 | Merge Request / MR | Pull Request / PR |
 | `glab mr create --fill` | `gh-athena pr create --fill --base <target>` |
 | `glab mr update --target-branch <b>` (retarget) | `gh-athena pr edit <n> --base <b>` |
-| one **pipeline**; `glab ci status` / poll `.../pipelines/<id>` | Actions **checks** (per-workflow check-runs, no single pipeline object); `gh pr checks <n> --watch` |
+| one **pipeline**; `glab ci status` / poll `.../pipelines/<id>` | Actions **checks** (per-workflow check-runs, no single pipeline object); `ai/bin/gh-ci-wait --repo <r> --sha <head>` |
 | `detailed_merge_status == mergeable` | every check on the exact head green, asserted by `gh-athena` itself (branch protection only where the plan has it) |
 | **merge train** (`POST merge_trains/...`, boarding) | `integration-gate`, then `locked-merge --pr <n> --head <sha>`, which makes the pinned `gh-athena pr merge` call (no train/queue — see Merging) |
 | `Auto-Deploy` label + `release:watch` job pace the deploy | the repo's own post-merge deploy workflow (no label convention) |
@@ -216,20 +218,37 @@ commits. Retarget a dependency's PR with `gh-athena pr edit <n> --base <branch>`
 ## Watching CI — Actions checks, not a pipeline
 
 GitHub has **no single pipeline object**; CI is a set of **check-runs**, one per
-workflow. Watch them by **blocking**, never by hand-rolling a poll:
+workflow. Wait on them with the fleet's one waiter, never with `gh run watch`,
+`gh pr checks --watch` or a hand-rolled loop:
 
 ```sh
-gh pr checks <n> --watch     # blocks until every check concludes, then exits
-gh run watch <run-id>        # block on one specific workflow run
+W=~/dev/custom/ai/bin/gh-ci-wait
+$W --repo <owner>/<repo> --sha <head>                    # every check-run on the head you pushed
+$W --repo <owner>/<repo> --run-id <id> --sha <head>      # one workflow run, read by id
+$W --repo <owner>/<repo> --workflow <name> --sha <head>  # a deploy run on a merged sha
 ```
 
-`gh pr checks --watch` **blocks and returns when checks are terminal** — it
-satisfies the safe-wait rule (block, don't spin) directly; prefer it over any
-shell loop. "CI is done" = every **required** check-run has concluded **on the
-head you pushed**.
+It blocks (60 s reads, `--max 570` by default, so it fits one foreground tool
+call), prints one `VERDICT:` line and exits 0 DONE, 1 TIMEOUT (still pending,
+re-run it), 3 COULD-NOT-LOOK, 4 FAILED or 5 WRONG-HEAD; `--help` has the rest.
+"CI is done" = every **required** check-run has concluded **on the head you
+pushed**; pass `--min-checks N` (the repo's usual check count) so a workflow
+that has not queued yet is not read as green.
+
+**Why not `gh run watch` / `gh pr checks --watch`.** They poll every 3 s and
+10 s on the owner's token. On 2026-10-02 a few at once exhausted the owner's
+5000/h budget, every plain-`gh` read went 403 for about an hour, and one
+watcher read the 403 as terminal (DND-1706, DND-1708). `safe-wait-guard`
+denies both. `gh-ci-wait` reads through `gh-athena` (the App's own budget,
+9000/h measured), and reads GitHub's rate-limit headers on every response: a
+limit is never terminal and never "no runs". It sleeps to the reset when that
+falls inside `--max`, and otherwise stops with COULD-NOT-LOOK naming the
+reset time. Do not judge a limit by `gh api rate_limit`: measured 2026-10-02
+08:20Z, it read core `used=0` for the owner's token while a real core read's
+headers said `used=635`.
 
 **Right after a push, `gh pr checks` can still show the previous head's
-finished checks**, so `--watch` can return at once on a stale green. Measured
+finished checks**, so a PR-level read can return at once on a stale green. Measured
 2026-09-30, gen_saas #617: seconds after a push it listed the old head's 9
 passing checks while the new head's CI was 4 of 6 pending. The merge was
 refused only because the merge helper re-read the checks. Pin the head before
@@ -242,7 +261,8 @@ gh api repos/<owner>/<repo>/commits/<sha>/check-runs \
 ```
 
 Until `headRefOid` is your sha, the rollup is not yours. Count checks from the
-sha's own check-runs, never from a check count alone.
+sha's own check-runs, never from a check count alone. `gh-ci-wait --sha` reads
+only that sha's check-runs, so it cannot see the old head's.
 
 When a check **fails in ~1-2s with an empty log** (BlobNotFound), it did not
 flake — read **athena:diagnose-github-actions-failure** before re-running; the
@@ -253,9 +273,9 @@ integration`). To re-trigger a run that failed on infra, use the `run rerun`
 row in *Expected refusals*: close and reopen the PR, same SHA. An empty commit
 is a new SHA and a re-gate.
 
-`--watch` only blocks *usefully* if a runner ever picks the job up. When checks
+A wait only blocks *usefully* if a runner ever picks the job up. When checks
 stay **`queued` with nothing reaching `in_progress`** for more than a few
-minutes — especially on a repo using `runs-on: [self-hosted, …]` — the watch is
+minutes — especially on a repo using `runs-on: [self-hosted, …]` — the wait is
 no longer a wait but a stall, and waiting longer cannot distinguish a slow queue
 from a dead one. Stop and read the same skill (*Signature 2 — the pipeline never
 starts*): one `gh api repos/<owner>/<repo>/actions/runners` call says whether
@@ -291,7 +311,7 @@ decision). Merge with:
 
 ```sh
 MB=~/dev/custom/ai/skills/athena:merge-boarding/scripts
-gh pr checks <n> --watch                   # block until every check concludes
+~/dev/custom/ai/bin/gh-ci-wait --repo <owner>/<repo> --sha <sha>  # block until every check concludes
 "$MB/integration-gate"                     # from the PR's worktree; prints INTEGRATION OK <sha>
 "$MB/locked-merge" --pr <n> --head <sha>   # <sha> = the one INTEGRATION OK names
 ```
@@ -401,8 +421,9 @@ declares a gate, and the only documented path is `integration-gate` then
   (reads only) and prints the command instead of running it.
 - **Deploy** is whatever the repo ships (typically a post-merge Actions
   workflow that fires automatically on merge to the default branch). There is
-  **no `Auto-Deploy` label and no `release:watch` job** — watch the deploy run
-  with `gh run watch <run-id>`; merges are not paced by a label.
+  **no `Auto-Deploy` label and no `release:watch` job** — wait on the deploy run
+  with `gh-ci-wait --repo <owner>/<repo> --workflow <name> --sha <merged-sha>`;
+  merges are not paced by a label.
 - **Confirm the merge landed** before the DM / moving the ticket / teardown:
   `gh pr view <n> --json state,mergedAt` shows `state: MERGED` and a non-null
   `mergedAt` (the GitHub equivalent of MR `state=merged` / `merged_at`). The CLI

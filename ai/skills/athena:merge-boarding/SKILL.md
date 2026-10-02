@@ -859,8 +859,8 @@ car of a batch you intend to deploy, assert at least the tail MR carries
 ## GitHub path (no merge train)
 
 On a `github.com` remote there is **no merge train or queue**: once
-`gh pr checks <n> --watch` shows every check green on the exact head (pin it
-first: `athena:github` → *Watching CI — Actions checks, not a pipeline*), run
+`~/dev/custom/ai/bin/gh-ci-wait --repo <owner>/<repo> --sha <head>` says
+`VERDICT: DONE` for the exact head (pin it first: `athena:github` → *Watching CI — Actions checks, not a pipeline*), run
 `integration-gate`, then
 `scripts/locked-merge --pr <n> --head <sha>` with the SHA its `INTEGRATION OK`
 names (*Landing onto a moving main*). `locked-merge` makes the pinned
@@ -874,7 +874,9 @@ recorded against the base branch's current tip or an ancestor of it
 plan), so `--auto` there would merge immediately; it is refused, and branch
 protection is NOT the gate. A refusal is expected, not an auth error: follow its
 `Fix:`. The deploy is the repo's own post-merge Actions workflow — no `Auto-Deploy`
-label; watch it with `gh run watch <run-id>`. See [[athena:github]]; GitLab
+label; wait on it with `gh-ci-wait --repo <owner>/<repo> --workflow <name> --sha
+<merged-sha>` (one 60 s waiter on the App budget; never a 3 s `gh run watch`,
+DND-1706). See [[athena:github]]; GitLab
 forge mechanics are in [[athena:gitlab]].
 
 **Later (2026-09-27, DND-969):** this section named the direct

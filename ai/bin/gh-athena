@@ -21,8 +21,11 @@
 #                                     # (see "The git passthrough" below)
 #   gh-athena --check                 # verify config + mint a token + print the bot slug
 #
-# Reads may use plain `gh`; use gh-athena for anything that should be attributed
-# to Athena. Pass this rule to athena-captains for PR creation and review replies.
+# One-off reads may use plain `gh`; use gh-athena for anything that should be
+# attributed to Athena. Pass this rule to athena-captains for PR creation and
+# review replies. A repeated read (a CI, deploy or merge wait) goes through
+# ai/bin/gh-ci-wait, which reads through this wrapper on the App's own budget
+# (DND-1708: fleet polls on the owner's token exhausted its 5000/h limit).
 
 set -euo pipefail
 

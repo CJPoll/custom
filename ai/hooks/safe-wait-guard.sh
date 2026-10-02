@@ -25,6 +25,10 @@
 #      process (measured 2026-09-30, DND-1330).
 #   5. pkill -f self-kill  — a `pkill -f <pattern>` whose pattern matches the
 #                            command's own text kills the agent's tool shell.
+#   6. Fast forge watcher  — `gh run watch` (3 s poll) or `gh pr checks
+#                            --watch` (10 s) as a command, gh or gh-athena;
+#                            they exhausted the GitHub API budget
+#                            (DND-1706/DND-1708). Use ai/bin/gh-ci-wait.
 # (Rule #3, the foreground-`sleep`-returns-immediately gotcha, is surfaced inside
 #  the messages above rather than as a standalone block, because every sanctioned
 #  poll uses a foreground `sleep` — blocking on it would nuke the good pattern.)
@@ -310,8 +314,10 @@ split_commands() {
   ' 2>/dev/null
 }
 
-# pkill_pattern <words…> : print the pattern of a `pkill -f`, else nothing.
-pkill_pattern() {
+# wrapper_len <words…> : how many leading words are wrappers (then, do, sudo,
+# nohup, env VAR=x, timeout N, …) before the real command word.
+wrapper_len() {
+  _n=$#
   while [ $# -gt 0 ]; do
     case $1 in
       then|do|else|elif|if|while|until|'!'|'{'|exec|command|sudo|nohup|setsid|time|xargs) shift ;;
@@ -322,6 +328,13 @@ pkill_pattern() {
       *) break ;;
     esac
   done
+  echo $((_n - $#))
+}
+
+# pkill_pattern <words…> : print the pattern of a `pkill -f`, else nothing.
+pkill_pattern() {
+  _k=$(wrapper_len "$@")
+  shift "$_k"
   case ${1-} in pkill|*/pkill) shift ;; *) return 0 ;; esac
   _full=false; _pat=''; _skip=false
   for _w in "$@"; do
@@ -372,6 +385,48 @@ pkill_self_match() {
 PKILL_HIT=$(pkill_self_match)
 if [ -n "$PKILL_HIT" ]; then
   deny 'SAFE-WAIT (pkill -f self-match): the pattern `'"$PKILL_HIT"'` matches this command'"'"'s own text. The Bash tool runs your command as `zsh -c '"'"'<command>'"'"'`, and pkill excludes only itself, so it kills your own tool shell (and anything that shell started) before the target. Fix: kill the PID you captured when you started the process (`cmd & pid=$!`, later `kill "$pid"`), or match by process name (`pkill -x <comm>`), or write the pattern so it cannot match its own text, e.g. a bracket class: `pkill -f "[m]y-pattern"`.'
+fi
+
+# ---- Shape 6: a default-cadence forge watcher (DND-1706, DND-1708) ----------
+# `gh run watch` polls every 3 s (~1,200 API calls an hour) and `gh pr checks
+# --watch` every 10 s. On 2026-10-02 several at once exhausted the owner's
+# 5000/h GitHub budget, and every plain-gh read went 403 for an hour. The test
+# is the command word, found with split_commands like shape 5, so the watcher
+# named inside quoted text (a commit message, a printf) passes. gh-athena's
+# App budget is finite too, so its watch forms are denied as well.
+forge_watcher() {
+  _k=$(wrapper_len "$@")
+  shift "$_k"
+  case ${1-} in gh|*/gh|gh-athena|*/gh-athena) shift ;; *) return 0 ;; esac
+  case "${1-} ${2-}" in
+    'run watch') printf 'gh run watch\n' ;;
+    'pr checks')
+      shift 2
+      for _w in "$@"; do
+        case $_w in --watch|--watch=*) printf 'gh pr checks --watch\n'; return 0 ;; esac
+      done
+      ;;
+  esac
+  return 0
+}
+
+forge_watcher_hit() {
+  case $SCAN in *watch*) ;; *) return 0 ;; esac
+  _us=$(printf '\037')
+  split_commands "$SCAN" | while IFS= read -r _line; do
+    case $_line in *watch*) ;; *) continue ;; esac
+    _hit=$(
+      IFS=$_us; set -f
+      # shellcheck disable=SC2086
+      set -- $_line
+      forge_watcher "$@"
+    )
+    if [ -n "$_hit" ]; then printf '%s\n' "$_hit"; break; fi
+  done
+}
+WATCH_HIT=$(forge_watcher_hit)
+if [ -n "$WATCH_HIT" ]; then
+  deny 'SAFE-WAIT (fast forge watcher): `'"$WATCH_HIT"'` polls GitHub every few seconds (`gh run watch` 3 s, `gh pr checks --watch` 10 s). A few at once exhausted the 5000/h API budget on 2026-10-02 (DND-1706/DND-1708): every plain-gh read went 403 for an hour, and watchers read the 403 as terminal or as no runs. Fix: wait with `~/dev/custom/ai/bin/gh-ci-wait --repo OWNER/NAME --sha <head>` (every check-run on the commit), `--run-id <id> [--sha <head>]` (one run), or `--workflow NAME --sha <head>` (a deploy run). It reads through gh-athena every 60 s, backs off on errors, prints one VERDICT: line, and reports a rate limit as COULD-NOT-LOOK with its reset time. For a one-off look, `gh pr checks <n>` without --watch is fine.'
 fi
 
 # No dangerous construct detected -> allow silently.

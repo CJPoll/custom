@@ -1,0 +1,133 @@
+#!/usr/bin/ruby
+# frozen_string_literal: true
+
+# gh-ci-wait -- the one bounded, slow GitHub CI waiter for the fleet
+# (DND-1708, DND-1706). Blocks until a commit's check-runs, or one workflow
+# run, reach a verdict, or a --max bound passes.
+#
+# Buckets: FRAMEWORK (argv, output, exit codes) here; MANAGER and SIDE
+# EFFECTS in ai/lib/gh_ci_wait_io.rb; DOMAIN in ai/lib/gh_ci_wait.rb.
+# Read-only: it only GETs from the forge.
+
+require_relative "../lib/strict_argv"
+require_relative "../lib/gh_ci_wait"
+require_relative "../lib/gh_ci_wait_io"
+
+HELP = <<~TXT
+  Usage:
+    ai/bin/gh-ci-wait --repo OWNER/NAME --sha SHA [--min-checks N] [--interval S] [--max S]
+    ai/bin/gh-ci-wait --repo OWNER/NAME --run-id ID [--sha SHA] [--interval S] [--max S]
+    ai/bin/gh-ci-wait --repo OWNER/NAME --workflow NAME --sha SHA [--interval S] [--max S]
+
+  Block until GitHub CI on one commit reaches a verdict, then print one
+  VERDICT: line on stdout. Use it for every CI, deploy or merge wait on a
+  GitHub repo, in place of `gh run watch` (a 3 s poll) and `gh pr checks
+  --watch` (a 10 s poll). Those exhausted the owner's 5000/h API budget on
+  2026-10-02 (DND-1706, DND-1708).
+
+  Modes:
+    --sha SHA            every check-run on that commit (filter=latest).
+                         --min-checks N (default 1): fewer completed
+                         check-runs than N is still pending, so a workflow
+                         that has not queued yet is not read as green.
+    --run-id ID          that workflow run, read by id (DND-1378). With
+                         --sha, a run for another commit is WRONG-HEAD.
+    --workflow NAME      the newest run of that workflow (its name, or its
+                         file name such as ci.yml) on --sha. A deploy watch.
+
+  Options:
+    --interval S         seconds between reads; default #{GhCiWait::DEFAULT_INTERVAL}, floor #{GhCiWait::MIN_INTERVAL}.
+    --max S              the wait's bound in seconds; default #{GhCiWait::DEFAULT_MAX}, which fits
+                         under a 600 s foreground tool call.
+
+  Reads go through ~/dev/custom/ai/bin/gh-athena (the App's own API budget),
+  never the owner's gh token. GH_CI_WAIT_GH names another gh executable; the
+  test suite uses it for a fake. Each read is `gh api -i`, so a rate limit is
+  read from GitHub's own headers: primary or secondary, its resource, and
+  when it clears. A rate-limited read is never terminal and never empty: the
+  wait sleeps to the reset when it falls inside --max, and otherwise stops
+  with COULD-NOT-LOOK naming the reset time. Read errors back off: the
+  interval, then doubled per error in a row, up to 300 s. Progress lines,
+  including every RATE-LIMITED line, go to stderr.
+
+  Exit codes and VERDICT lines (stdout):
+    0  DONE            every check-run (or the run) succeeded, skipped or neutral
+    1  TIMEOUT         read fine, still pending at --max; nothing failed yet
+    2  usage error
+    3  COULD-NOT-LOOK  rate-limited past --max, auth refused, the key matched
+                       nothing, an unreadable body, or no read succeeded.
+                       Never idle, never green.
+    4  FAILED          a check-run or the run completed without success
+    5  WRONG-HEAD      --run-id names a run for another commit than --sha
+  Every verdict but DONE is followed by a Fix: line.
+TXT
+
+SPEC = {
+  "--repo" => :value, "--sha" => :value, "--run-id" => :value, "--workflow" => :value,
+  "--min-checks" => :value, "--interval" => :value, "--max" => :value, "--help" => :switch
+}.freeze
+
+EXIT = { done: 0, timeout: 1, could_not_look: 3, failed: 4, wrong_head: 5 }.freeze
+
+def usage(what, fix)
+  warn "gh-ci-wait: usage error: #{what}"
+  warn "Fix: #{fix}"
+  2
+end
+
+def target_from(opts)
+  repo = GhCiWait.repo!(opts["--repo"])
+  if opts["--run-id"]
+    raise GhCiWait::Usage.new("--run-id takes no --workflow or --min-checks", "pass --run-id ID [--sha SHA]") \
+      if opts["--workflow"] || opts["--min-checks"]
+
+    sha = opts["--sha"] && GhCiWait.sha!(opts["--sha"])
+    return GhCiWait::Target.new(mode: :run_id, repo: repo, id: GhCiWait.run_id!(opts["--run-id"]), sha: sha)
+  end
+  raise GhCiWait::Usage.new("--sha is required", "pass the pushed head's full sha (git rev-parse HEAD)") unless opts["--sha"]
+
+  sha = GhCiWait.sha!(opts["--sha"])
+  if opts["--workflow"]
+    raise GhCiWait::Usage.new("--workflow takes no --min-checks", "drop --min-checks") if opts["--min-checks"]
+    raise GhCiWait::Usage.new("--workflow is empty", "pass the workflow's name or file name") if opts["--workflow"].strip.empty?
+
+    return GhCiWait::Target.new(mode: :run_workflow, repo: repo, sha: sha, workflow: opts["--workflow"])
+  end
+  min = opts["--min-checks"] ? GhCiWait.min_checks!(opts["--min-checks"]) : 1
+  GhCiWait::Target.new(mode: :checks, repo: repo, sha: sha, min_checks: min)
+end
+
+def gh_command(env)
+  override = env["GH_CI_WAIT_GH"]
+  return [File.expand_path("gh-athena", __dir__)] if override.nil?
+  raise GhCiWait::Usage.new("GH_CI_WAIT_GH must be an absolute path to an executable, got #{override.inspect}",
+                            "unset GH_CI_WAIT_GH to read through gh-athena") \
+    unless override.start_with?("/") && File.executable?(override)
+
+  [override]
+end
+
+def main(argv, env)
+  opts = StrictArgv.parse(argv, SPEC)
+  if opts["--help"]
+    puts HELP
+    return 0
+  end
+  target = target_from(opts)
+  interval = opts["--interval"] ? GhCiWait.interval!(opts["--interval"]) : GhCiWait::DEFAULT_INTERVAL
+  max = opts["--max"] ? GhCiWait.max!(opts["--max"]) : GhCiWait::DEFAULT_MAX
+  clock = -> { Time.now.utc }
+  reader = GhCiWait::GhApiReader.new(gh: gh_command(env), clock: clock)
+  log = ->(line) { warn "gh-ci-wait #{clock.call.strftime('%H:%M:%SZ')}: #{line}" }
+  outcome = GhCiWait::Waiter.new(reader: reader, clock: clock, sleeper: ->(s) { sleep(s) }, log: log)
+                            .wait(target, interval: interval, max: max)
+  puts outcome.line
+  puts "Fix: #{outcome.fix}" if outcome.fix
+  EXIT.fetch(outcome.verdict)
+rescue StrictArgv::UsageError => e
+  usage(e.message, "see --help")
+rescue GhCiWait::Usage => e
+  usage(e.message, e.fix)
+end
+
+exit main(ARGV, ENV) if $PROGRAM_NAME == __FILE__
