@@ -1660,3 +1660,20 @@ A bug fix, so the evidence is the unfixed code going red, plus one mutation.
   `if false then`, so a click falls back to `channel:ts`): `VERDICT: FAIL (17
   of 1047 cases)`, first `FAIL DND-1785 two distinct clicks on ONE message are
   both counted`.
+
+## DND-1804 (2026-10-02): a deleted message is not a status failure
+
+- **Defect:** `athena:slack/bin/status` exits 4 when Slack has no message
+  under the key (the owner deleted it before the read). `lib/thinking.sh`
+  read every non-zero exit as a failure to "resolve the status tool's error",
+  and so sent the attendant to set the status by hand on a message that is
+  gone.
+- **Code:** `lib/thinking.sh` (`thinking_set`, the `rc -eq 4` branch).
+- **Suite run:** `bash test/self-test.sh` (the `T-15` cases).
+- **Before the fix** (unfixed `a2d79e44`): `VERDICT: FAIL (2 of 1060
+  cases)`: `FAIL T-15 ... the outcome names the key and says it is gone` --
+  `got [athena:inbox: the thinking status was not set on
+  DFAKE0001/1790000001.000100 (status exit 4). ...]`; and `FAIL T-15 ...
+  which never says to resolve the tool's error`.
+- **After:** `VERDICT: PASS (1060 cases)`; `VERDICT: PASS (1061 cases)` after
+  the review round added the ledger-line case.

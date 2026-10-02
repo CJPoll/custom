@@ -20,16 +20,18 @@
 # caller must log that and carry on: the status is a courtesy, and a failed one
 # must never block or delay the reply it announces.
 #
-# Exit codes: 0 set or cleared; 1 Slack refused it; 2 usage; 4 the message no
-# longer exists in Slack (deleted before the call), so there is nothing to
-# show a status in.
+# Exit codes: 0 set or cleared; 1 any other failure; 2 usage; 4 Slack has no
+# message under this key (deleted before the call, or a wrong channel/ts
+# pair), so there is nothing to show a status in.
 #
 # invalid_thread_ts has two causes, and the Fix: differs (DND-1804, measured
 # live 2026-10-02 in the owner DM): a reply's own ts was passed instead of its
 # parent's, or the message was deleted. A top-level message with no replies,
 # passed by its own ts, is accepted. So on invalid_thread_ts this asks
 # conversations.replies about the same key and says which it is. A probe that
-# fails, or answers with no message, says it could not tell.
+# fails, or answers with no message, says it could not tell. The probe needs
+# the bot's *:history scopes; without them every such case reads "could not
+# tell".
 set -eu
 SELF_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 . "$SELF_DIR/../lib/slack.sh"
@@ -66,8 +68,12 @@ slack_die() {
 
 # status_probe -- asks conversations.replies about the key setStatus refused.
 # Prints exactly one of:
-#   gone:<slack error>   the message no longer exists (thread_not_found)
-#   parent:<ts>          the key is a reply; <ts> is its thread's parent
+#   gone:<why>           no message under this key: thread_not_found, or a
+#                        deleted parent kept only as a tombstone
+#   parent:<ts>          the key is a reply; <ts> is its thread's parent.
+#                        Live, a reply's ts answers with the reply itself
+#                        (its thread_ts is the parent); an answer that leads
+#                        with the parent instead is read the same way.
 #   toplevel             the message exists and is its own parent
 #   unknown:<why>        the probe failed, or its answer cannot say
 # A subshell, so its own slack_die never exits the script.
@@ -77,17 +83,21 @@ status_probe() (
   if ! _pr="$(slack_get conversations.replies \
       "channel=$(slack_urlencode "$CHANNEL")&ts=$(slack_urlencode "$THREAD_TS")&limit=1")"; then
     case "$_pr" in
-      *thread_not_found*|*message_not_found*) printf 'gone:%s\n' "${_pr#error:}" ;;
+      *thread_not_found*) printf 'gone:%s\n' "${_pr#error:}" ;;
       *) printf 'unknown:%s\n' "${_pr#error:}" ;;
     esac
     exit 0
   fi
   printf '%s' "$_pr" | jq -r --arg t "$THREAD_TS" '
     ((.messages // [])[0]) as $m
+    | (($m.ts // "") | tostring) as $mts
+    | (($m.thread_ts // "") | tostring) as $mtt
     | if $m == null then "unknown:conversations.replies answered with no message"
-      elif (($m.ts // "") | tostring) != $t then "unknown:conversations.replies answered about another message"
-      elif ((($m.thread_ts // "") | tostring) != "" and (($m.thread_ts | tostring) != $t)) then "parent:\($m.thread_ts)"
-      else "toplevel" end' 2>/dev/null \
+      elif $mts == $t and ($m.subtype // "") == "tombstone" then "gone:the message was deleted (a tombstone keeps its replies)"
+      elif $mts == $t and $mtt != "" and $mtt != $t then "parent:\($mtt)"
+      elif $mts == $t then "toplevel"
+      elif $mts != "" and $mtt == $mts then "parent:\($mts)"
+      else "unknown:conversations.replies answered about another message" end' 2>/dev/null \
     || printf 'unknown:conversations.replies answer could not be parsed\n'
 )
 
@@ -99,9 +109,9 @@ status_explain_invalid_ts() {
   _courtesy='The status is a courtesy: log this failure and send the reply anyway.'
   case "$_probe" in
     gone:*)
-      printf 'athena-slack: status not set: message %s no longer exists in Slack (%s; assistant.threads.setStatus answered invalid_thread_ts).\n' \
+      printf 'athena-slack: status not set: no message %s exists in Slack: deleted, or the channel/ts pair is wrong (%s; assistant.threads.setStatus answered invalid_thread_ts).\n' \
         "$_key" "${_probe#gone:}" >&2
-      printf 'Fix: nothing to set and nothing to retry: the message was deleted, so there is no conversation to show a status in. Reply only if what it asked still needs an answer.\n' >&2
+      printf 'Fix: if the message was deleted, there is nothing to set or retry; reply only if what it asked still needs an answer. If it was not, check this channel and ts against the inbox line they came from: a wrong key reads the same.\n' >&2
       exit 4 ;;
     parent:*)
       printf 'athena-slack: status failed: %s (%s is a reply in thread %s).\n' "$1" "$_key" "${_probe#parent:}" >&2

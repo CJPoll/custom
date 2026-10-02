@@ -5119,13 +5119,14 @@ assert_contains "T-14 ... and says the value is not a Slack user id" "not a Slac
 #      the attendant to set the status by hand on a message that is gone.
 thinking_case "${OWNER_IM}"
 ( cd "${LPROJ}" && STATUS_STUB_RC=4 \
-  STATUS_STUB_ERR='athena-slack: status not set: message DFAKE0001/1790000001.000100 no longer exists in Slack (conversations.replies: thread_not_found).' \
+  STATUS_STUB_ERR='athena-slack: status not set: no message DFAKE0001/1790000001.000100 exists in Slack: deleted, or the channel/ts pair is wrong (conversations.replies failed: thread_not_found).' \
   "${BIN}/read-inbox" slack >"${CASE_DIR}/t15.out" 2>"${CASE_DIR}/t15.err" ); RC=$?
 OUT="$(cat "${CASE_DIR}/t15.out")"; ERR="$(cat "${CASE_DIR}/t15.err")"
 assert_eq "T-15 a deleted message leaves read-inbox's exit at 0" "0" "${RC}"
 assert_eq "T-15 ... the status was attempted on its own ts" "DFAKE0001 1790000001.000100" "$(status_calls)"
 assert_contains "T-15 ... the outcome names the key and says it is gone" \
-  "no thinking status on DFAKE0001/1790000001.000100: the message no longer exists in Slack" "${ERR}"
+  "no thinking status on DFAKE0001/1790000001.000100: no such message in Slack (deleted before the status call, or the line's channel/ts is wrong)" "${ERR}"
+assert_contains "T-15 ... and its Fix: names the ledger line" "log status-gone in the attend ledger" "${ERR}"
 assert_contains "T-15 ... with the status tool's own line" "thread_not_found" "${ERR}"
 assert_contains "T-15 ... and a Fix:" "Fix:" "${ERR}"
 assert_not_contains "T-15 ... which never says to resolve the tool's error" "resolve the status tool" "${ERR}"

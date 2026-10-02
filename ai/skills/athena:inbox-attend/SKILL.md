@@ -198,13 +198,15 @@ for every owner DM/thread line, not only ones you will reply to. So:
 **Later (2026-10-02, DND-1804):** a deleted message is not a status failure.
 When the owner deletes a message before the read sets its status, Slack
 answers `invalid_thread_ts`, and `bin/status` exits 4. `read-inbox` then
-prints `athena:inbox: no thinking status on <channel>/<ts>: the message no
-longer exists in Slack …`, with a `Fix:`. Do not set it by hand: there is no
-conversation to show it in. Add the ledger line `<utc-ts> <channel>:<ts>
-status-gone message-deleted`, and reply only if the deleted message still
-needs an answer. Measured: walt_ui's two `invalid_thread_ts` failures that day
-were owner DMs that no longer existed. A top-level message with no thread
-takes the status on its own ts.
+prints `athena:inbox: no thinking status on <channel>/<ts>: no such message
+in Slack …`, with a `Fix:`. Do not set it by hand: there is no conversation
+to show it in. Add the ledger line `<utc-ts> <channel>:<ts> status-gone
+message-deleted`, and reply only if the deleted message still needs an
+answer. The same holds when you run `bin/status` by hand and it exits 4. If
+the owner did not delete it, the key is wrong: run `inbox-doctor`, and log
+`status-failed no-such-message` instead. Measured: walt_ui's two
+`invalid_thread_ts` failures that day were owner DMs that no longer existed.
+A top-level message with no thread takes the status on its own ts.
 
 ## What you may do (tiers)
 
@@ -744,6 +746,10 @@ One line per thing you did, appended to the resolved `$LEDGER` from step 1
 **Later (2026-09-25):** added by DND-682. `status-failed <slack-error>` records
 a failed thinking-status call (*Show that Athena is thinking*). The Slack error
 code is this machine's own fact, never message content.
+
+**Later (2026-10-02):** added by DND-1804. `status-gone message-deleted`
+records a status that had no message to show in: the owner deleted it first
+(*Show that Athena is thinking*).
 
 **Later (2026-09-25):** added by DND-548. A `slack.interaction` line's key is
 `<channel>:<ts>:<action_ts>`, not `<channel>:<ts>` alone — `<ts>` names the

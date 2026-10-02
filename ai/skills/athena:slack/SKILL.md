@@ -88,7 +88,7 @@ can thread onto it.
 | `update <channel> <ts> [text]` | Edit — bot's own messages only. |
 | `delete <channel> <ts>` | Delete — bot's own messages only. No undo. |
 | `react <channel> <ts> <emoji> [--remove]` | Add/remove a reaction. Bare name (`eyes`, not `:eyes:`). |
-| `status <channel> <thread_ts> [text] [--clear]` | Shows "Athena is thinking…" (or `text`) in a DM or thread while a session works on it. `--clear` removes it. Exit 4: the message no longer exists. See *The thinking status* below. |
+| `status <channel> <thread_ts> [text] [--clear]` | Shows "Athena is thinking…" (or `text`) in a DM or thread while a session works on it. `--clear` removes it. Exit 4: no message under that key. See *The thinking status* below. |
 | `read-channel <channel> [--since TS] [--before TS] [--limit N] [--json]` | Channel history, oldest-first, ids resolved to names. `--before` reads only older messages (Slack's `latest`). |
 | `read-thread <channel> <thread_ts> [--json]` | One thread, oldest-first. |
 | `read-inbox [--json] [--peek]` | New DMs + mentions **with bodies**; advances the seen-state unless `--peek`. `--json` emits a JSON **array** (`[]` when empty, never zero bytes); a failure exits non-zero with a `Fix:` line, never an empty inbox. |
@@ -295,11 +295,16 @@ for."*
   reply anyway. A failed status never blocks or delays the reply.
 - **`invalid_thread_ts` has two causes, and `bin/status` names which**
   (DND-1804). It asks `conversations.replies` about the same key:
-  - **The message was deleted.** Exit 4, `no longer exists in Slack`, and a
-    `Fix:` that says there is nothing to set or retry.
+  - **No message under the key.** Exit 4, `no message <channel>/<ts> exists
+    in Slack`. Usually it was deleted (a deleted parent with replies is a
+    tombstone, and counts). A wrong channel/ts pair reads the same, so the
+    `Fix:` says both: nothing to retry if it was deleted, else check the key.
   - **A reply's own ts was passed.** Exit 1, and the `Fix:` names the parent
     ts to pass instead.
-  - A probe that fails or cannot say is exit 1, `could not tell`.
+  - **The message exists at top level and Slack still refuses it.** Exit 1;
+    the `Fix:` points at the bot's membership.
+  - A probe that fails or cannot say is exit 1, `could not tell`. The probe
+    needs the bot's `*:history` scopes.
 
   Measured live in the owner DM on 2026-10-02: a top-level message with no
   replies, passed by its own ts, answered `ok:true`. The same ts after the

@@ -142,13 +142,14 @@ thinking_set() {
     # stdin is /dev/null: the tool must never read the remaining targets.
     err="$(timeout "${THINKING_CALL_TIMEOUT_S}" "${status_bin}" "${ch}" "${ts}" 2>&1 >/dev/null </dev/null)"; rc=$?
     [ "${rc}" -eq 0 ] && continue
-    # Exit 4: the message was deleted before the call (DND-1804). Nothing is
-    # wrong with the key or the tool, so this is named as its own outcome,
-    # never as a failure to fix by hand.
+    # Exit 4: Slack has no message under this key (DND-1804). Usually the
+    # owner deleted it before the call; a wrong channel/ts pair reads the
+    # same, so the line says both and names the key. It is its own outcome,
+    # never a failure to set by hand.
     if [ "${rc}" -eq 4 ]; then
-      printf 'athena:inbox: no thinking status on %s/%s: the message no longer exists in Slack (deleted before the status call).\n' "${ch}" "${ts}" >&2
+      printf 'athena:inbox: no thinking status on %s/%s: no such message in Slack (deleted before the status call, or the line'"'"'s channel/ts is wrong).\n' "${ch}" "${ts}" >&2
       [ -z "${err}" ] || printf '%s\n' "${err}" | sed 's/^/  /' >&2
-      printf '  Fix: nothing to set or retry. The read and the ack are unaffected; reply only if the deleted message still needs an answer.\n' >&2
+      printf '  Fix: if the owner deleted it, there is nothing to set or retry; log status-gone in the attend ledger (athena:inbox-attend -> Show that Athena is thinking) and reply only if it still needs an answer. If not, run inbox-doctor: the producer wrote a key Slack does not know. The read and the ack are unaffected.\n' >&2
       continue
     fi
     if [ "${rc}" -eq 124 ]; then

@@ -1293,7 +1293,8 @@ for err in channel_not_found; do
     channel_not_found) want="bot must be a member" ;;
   esac
   if [[ "${RC}" != 0 ]] && [[ -z "${OUT}" ]] && [[ "${ERR}" == *"${err}"* ]] \
-     && [[ "${ERR}" == *"Fix:"*"${want}"* ]] && [[ "${ERR}" == *"send the reply anyway"* ]]; then
+     && [[ "${ERR}" == *"Fix:"*"${want}"* ]] && [[ "${ERR}" == *"send the reply anyway"* ]] \
+     && [[ "$(calls_of conversations.replies)" == 0 ]]; then
     ok "status: ${err} exits non-zero with a specific Fix:"
   else bad "status: ${err} exits non-zero with a specific Fix:" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
 done
@@ -1364,7 +1365,7 @@ fixture conversations.replies '{"ok":false,"error":"thread_not_found"}'
 run_bin status D0DMCHAN "${ST_TS}"
 RURL="$(url_of conversations.replies)"
 if [[ "${RC}" == 4 ]] && [[ -z "${OUT}" ]] \
-   && [[ "${ERR}" == *"D0DMCHAN/${ST_TS} no longer exists"* ]] \
+   && [[ "${ERR}" == *"no message D0DMCHAN/${ST_TS} exists in Slack: deleted, or the channel/ts pair is wrong"* ]] \
    && [[ "${ERR}" == *"thread_not_found"* ]] && [[ "${ERR}" == *"Fix:"* ]] \
    && [[ "${ERR}" != *"PARENT ts"* ]] \
    && [[ "${RURL}" == *"channel=D0DMCHAN"* && "${RURL}" == *"ts=${ST_TS}"* ]]; then
@@ -1376,7 +1377,7 @@ setup_case
 fixture assistant.threads.setStatus '{"ok":false,"error":"invalid_thread_ts"}'
 fixture conversations.replies '{"ok":false,"error":"thread_not_found"}'
 run_bin status D0DMCHAN "${ST_TS}" --clear
-if [[ "${RC}" == 4 ]] && [[ "${ERR}" == *"no longer exists"* ]]; then
+if [[ "${RC}" == 4 ]] && [[ "${ERR}" == *"no message D0DMCHAN/"* ]]; then
   ok "status: --clear on a deleted message exits 4 the same way"
 else bad "status: --clear on a deleted message exits 4 the same way" "rc=${RC} err='${ERR}'"; fi
 
@@ -1398,7 +1399,7 @@ for probe in '{"ok":false,"error":"missing_scope","needed":"im:history"}' '{"ok"
   fixture conversations.replies "${probe}"
   run_bin status D0DMCHAN "${ST_TS}"
   if [[ "${RC}" == 1 ]] && [[ "${ERR}" == *"could not tell"* ]] \
-     && [[ "${ERR}" != *"no longer exists"* ]] && [[ "${ERR}" == *"Fix:"* ]]; then
+     && [[ "${ERR}" != *"exists in Slack: deleted"* ]] && [[ "${ERR}" == *"Fix:"* ]]; then
     ok "status: an unusable probe answer (${probe:0:24}…) reads as could-not-tell"
   else bad "status: an unusable probe answer (${probe:0:24}…) reads as could-not-tell" "rc=${RC} err='${ERR}'"; fi
 done
@@ -1413,6 +1414,49 @@ if [[ "${RC}" == 1 ]] && [[ "${ERR}" == *"still exists as a top-level message"* 
    && [[ "${ERR}" != *"PARENT ts"* ]] && [[ "${ERR}" == *"Fix:"* ]]; then
   ok "status: an existing top-level message Slack refuses is named as such"
 else bad "status: an existing top-level message Slack refuses is named as such" "rc=${RC} err='${ERR}'"; fi
+
+# 84g. a thread parent WITH replies (thread_ts == its own ts) is top-level,
+#      never "a reply".
+setup_case
+fixture assistant.threads.setStatus '{"ok":false,"error":"invalid_thread_ts"}'
+fixture conversations.replies "{\"ok\":true,\"messages\":[{\"ts\":\"${ST_TS}\",\"thread_ts\":\"${ST_TS}\",\"reply_count\":3}]}"
+run_bin status D0DMCHAN "${ST_TS}"
+if [[ "${RC}" == 1 ]] && [[ "${ERR}" == *"still exists as a top-level message"* ]] \
+   && [[ "${ERR}" != *"is a reply"* ]]; then
+  ok "status: a thread parent with replies is top-level, not a reply"
+else bad "status: a thread parent with replies is top-level, not a reply" "rc=${RC} err='${ERR}'"; fi
+
+# 84h. an answer that leads with the thread's parent (not the reply asked
+#      about) still names that parent.
+setup_case
+fixture assistant.threads.setStatus '{"ok":false,"error":"invalid_thread_ts"}'
+fixture conversations.replies "{\"ok\":true,\"messages\":[{\"ts\":\"${ST_PARENT}\",\"thread_ts\":\"${ST_PARENT}\",\"reply_count\":2}]}"
+run_bin status D0DMCHAN "${ST_TS}"
+if [[ "${RC}" == 1 ]] && [[ "${ERR}" == *"is a reply"* ]] \
+   && [[ "${ERR}" == *"Fix:"*"${ST_PARENT}"* ]]; then
+  ok "status: a parent-led probe answer still names the parent ts"
+else bad "status: a parent-led probe answer still names the parent ts" "rc=${RC} err='${ERR}'"; fi
+
+# 84i. a deleted parent kept as a tombstone (it had replies) is gone: exit 4.
+setup_case
+fixture assistant.threads.setStatus '{"ok":false,"error":"invalid_thread_ts"}'
+fixture conversations.replies "{\"ok\":true,\"messages\":[{\"ts\":\"${ST_TS}\",\"thread_ts\":\"${ST_TS}\",\"subtype\":\"tombstone\",\"reply_count\":1}]}"
+run_bin status D0DMCHAN "${ST_TS}"
+if [[ "${RC}" == 4 ]] && [[ "${ERR}" == *"tombstone"* ]]; then
+  ok "status: a tombstoned parent exits 4"
+else bad "status: a tombstoned parent exits 4" "rc=${RC} err='${ERR}'"; fi
+
+# 84j. THE MISS: an answer about some other, unthreaded message, and an
+#      unparseable answer, are could-not-tell.
+for probe in "{\"ok\":true,\"messages\":[{\"ts\":\"${ST_PARENT}\"}]}" '{"ok":true,"messages":"not-a-list"}'; do
+  setup_case
+  fixture assistant.threads.setStatus '{"ok":false,"error":"invalid_thread_ts"}'
+  fixture conversations.replies "${probe}"
+  run_bin status D0DMCHAN "${ST_TS}"
+  if [[ "${RC}" == 1 ]] && [[ "${ERR}" == *"could not tell"* ]] && [[ "${ERR}" != *"is a reply in thread"* ]]; then
+    ok "status: a probe answer that cannot say (${probe:0:30}…) reads as could-not-tell"
+  else bad "status: a probe answer that cannot say (${probe:0:30}…) reads as could-not-tell" "rc=${RC} err='${ERR}'"; fi
+done
 
 # 76. DND-508: every bin answers --help (and -h) with its usage on STDOUT, exit
 #     0, and no Slack call. Before this, `post --help` took "--help" as the
