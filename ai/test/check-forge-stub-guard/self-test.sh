@@ -236,6 +236,20 @@ fsg_verify || exit 1
 SUITE
 }
 
+write_helper_forms_unguarded() { # DND-1692 review: brace on the next line, ${1}, a call continued by a backslash
+  cat > "$1" <<'SUITE'
+#!/usr/bin/env bash
+stub_git()
+{
+  cat >"${1}/git"
+}
+d="$(mktemp -d)"
+stub_git \
+  "$d" <<<'echo shim'
+PATH="$d:$PATH"
+SUITE
+}
+
 write_helper_not_a_stub() { # helpers that write other files; the PATH is real, no stub is written
   cat > "$1" <<'SUITE'
 #!/usr/bin/env bash
@@ -358,6 +372,12 @@ R="$(mk_repo r11e ai/test/guarded/self-test.sh=write_guarded ai/test/helperoff/s
 run_check "${R}"
 if [ "${RC}" = 0 ]; then ok "R11e. a helper-written stub whose directory never reaches PATH is not flagged"
 else bad "R11e. an off-PATH helper-written stub is not flagged" "rc=${RC} out=$(printf '%s' "${OUT}" | head -c 400)"; fi
+
+R="$(mk_repo r11f ai/test/guarded/self-test.sh=write_guarded ai/test/helperforms/self-test.sh=write_helper_forms_unguarded)"
+run_check "${R}"
+if [ "${RC}" = 1 ] && has "ai/test/helperforms/self-test.sh:7" && has "git on PATH but never sources"; then
+  ok "R11f. a brace on the next line, \${1}, and a backslash-continued call are all seen (call line 7)"
+else bad "R11f. brace-next-line, \${1} and continued-call helper forms are flagged" "rc=${RC} out=$(printf '%s' "${OUT}" | head -c 400)"; fi
 
 echo "--- R2: a suite that sources the helper, arms and verifies PASSES ---"
 R="$(mk_repo r2 ai/test/guarded/self-test.sh=write_guarded)"

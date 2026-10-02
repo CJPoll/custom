@@ -95,10 +95,14 @@
 #   * A helper function beyond the two shapes named under WHAT IS FLAGGED: one
 #     that reaches its write through another function (a wrapper calling a
 #     writer), one invoked through `xargs`/`eval`/a variable, one whose body
-#     writes the parameter by `$@` or `${1:-...}`, or one defined in a file
-#     the suite sources. A function is matched by name wherever the name
-#     appears as a command word, ignoring shadowing and scope (an over-read:
-#     a false red, never a false green).
+#     copies the parameter into a variable first (`local p="$1/git"`), writes
+#     it by `$@` or `${1:-...}`, or has a subshell body `name() ( ... )`, one
+#     defined mid-line (`true; mk() { ...; }`) or in a file the suite sources,
+#     and a call whose redirection precedes its argument (`mk <in "$d"`). A
+#     brace on the line after `name()` and a call continued by a `\` are
+#     modeled. A function is matched by name wherever the name appears in
+#     code followed by a space or tab, ignoring shadowing and scope (an
+#     over-read: a false red, never a false green).
 #   * A loop's scope: `$NAME` written anywhere in the file counts as each
 #     tool any `for NAME in` loop lists, so a write after the loop can read
 #     as a stub (an over-read: a false red, never a false green).
@@ -356,7 +360,7 @@ end
 # trailing slash.
 def norm(expr)
   s = expr.delete("\"'").gsub(/\$\{PATH:\+:\$\{?PATH\}?\}/, ":$PATH")
-  s = s.gsub(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/, '$\1')
+  s = s.gsub(/\$\{([A-Za-z_][A-Za-z0-9_]*|[0-9]+)\}/, '$\1')
   s.length > 1 ? s.sub(%r{/+\z}, "") : s
 end
 
@@ -478,6 +482,10 @@ def function_spans(lexed)
     opened = false
     last = n
     rows[idx..].each do |(n2, line2, flags2)|
+      if !opened && n2 > n
+        next if line2.strip.empty? || line2.strip.start_with?("#")
+        break unless line2.lstrip.start_with?("{") # the brace may sit on the next line
+      end
       (n2 == n ? m.end(0) : 0).upto(line2.size - 1) do |i|
         next unless code_at?(flags2, i)
 
@@ -491,7 +499,6 @@ def function_spans(lexed)
       end
       last = n2
       break if opened && depth <= 0
-      break unless opened # no brace on the definition line: not a brace body
     end
     spans << [m[1] || m[2], n, last] if opened && depth <= 0
   end
@@ -521,11 +528,18 @@ def helper_writes(lexed, loops)
   writes = []
   funcs.each do |name, shapes|
     re = /(?<![\w.\/$-])#{Regexp.escape(name)}(?=[ \t])/
-    lexed[:lines].each do |(n, line, flags)|
+    lexed[:lines].each_with_index do |(n, line, flags), idx|
       code_matches(line, flags, re).each do |m|
         next if line[m.end(0)..] =~ /\A\s*\(\)/ # the definition, not a call
 
-        args = args_from(line, m.end(0)).map { |w| norm(w) }
+        # A call continued onto the next line(s) by a trailing `\`.
+        text = line
+        k = idx
+        while text.end_with?("\\") && lexed[:lines][k + 1]
+          k += 1
+          text = "#{text.chomp('\\')} #{lexed[:lines][k][1]}"
+        end
+        args = args_from(text, m.end(0)).map { |w| norm(w) }
         shapes.uniq.each do |(pos, kind, tool)|
           arg = args[pos - 1]
           next if arg.nil?
