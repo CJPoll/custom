@@ -88,7 +88,10 @@ module FirstParty
 
   # Directory words of layouts that often hold tests but name no test word:
   # Cucumber features/, Jest __mocks__/ and __snapshots__/, Go testing/,
-  # fixtures/, stubs/, fakes/, cypress/, playwright/.
+  # fixtures/, stubs/, fakes/, cypress/, playwright/. It over-names by design:
+  # a React `src/features/` or an Elixir `lib/stubs/` folder of plain source
+  # is named too. Naming holds nothing, so over-naming costs a look, while
+  # under-naming is the silent miss this exists to close.
   LAYOUT_WORDS = %w[features mocks snapshots testing fixtures stubs fakes cypress playwright].freeze
 
   # File extensions that are test material in every layout (Gherkin, Jest

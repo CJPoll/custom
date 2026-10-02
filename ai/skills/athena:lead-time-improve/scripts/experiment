@@ -124,6 +124,9 @@ HELP = <<~TXT
            "This reverts commit <sha>." line, so judge still records
            `reverted`) or decline. The status stays revert; a fresh revert's
            status row carries `held`; the tally counts held on its own.
+           Every revert line, held or not, also names the commit's
+           unclassified additions (DND-1634; see record), which hold
+           nothing.
            A pending change is CONFOUNDED (DND-1529) when another commit
            on the harness repo's main (custom, the runner's own repo; and
            R's main when R is another repo) carries a Lead-time-experiment
@@ -599,11 +602,13 @@ module Record
   end
 
   # What a plain revert of the commit would delete (DND-1549).
+  # Plus its unclassified additions (DND-1634), named or n/a.
   def describe_tests(tests)
-    if tests["revert_deletes_tests_na"]
-      return "; revert_deletes_tests n/a (#{tests['revert_deletes_tests_na']}): a revert verdict on it is held"
-    end
-    out = tests["revert_deletes_tests"].empty? ? "" : "; a plain revert would delete test additions in #{tests['revert_deletes_tests'].join(', ')}"
+    out = if tests["revert_deletes_tests_na"]
+            "; revert_deletes_tests n/a (#{tests['revert_deletes_tests_na']}): a revert verdict on it is held"
+          elsif tests["revert_deletes_tests"].empty? then ""
+          else "; a plain revert would delete test additions in #{tests['revert_deletes_tests'].join(', ')}"
+          end
     note = X.unclassified_text(tests)
     note ? "#{out}; #{note}" : out
   end
@@ -733,8 +738,9 @@ module Judge
   def held(exp, v, ctx, repo, res, harness: nil)
     return [exp, v, ctx, nil, nil] unless v["status"] == "revert"
 
-    note = X.unclassified_text(unclassified_fields(exp, repo, res))
-    hold = X.hold(v["status"], tests_fields(exp, repo, res))
+    fields = layout_fields(exp, repo, res)
+    note = X.unclassified_text(fields)
+    hold = X.hold(v["status"], fields)
     return [exp, v, ctx, nil, note] unless hold
 
     refusal, = X.decline_error(exp.merge("status" => "revert", "last" => v))
@@ -778,24 +784,21 @@ module Judge
     yield path
   end
 
-  # The record's revert_deletes_tests list, else the same answer computed
-  # now with the same adapter: for a record written before DND-1549 (no
+  # The record's revert_deletes_tests and revert_unclassified (DND-1634)
+  # lists; each one missing is computed now from ONE numstat read with the
+  # same adapter: for a record written before DND-1549 or DND-1634 (no
   # field), and for one whose git could not look at record time (_na), so a
   # one-off git failure does not hold the revert for good. Still unknown
-  # stays _na, which X.hold holds.
-  def tests_fields(exp, repo, res)
-    return exp if exp["revert_deletes_tests"].is_a?(Array)
+  # stays _na, which X.hold holds. X.hold reads only the tests fields; the
+  # unclassified ones feed only the line's text.
+  def layout_fields(exp, repo, res)
+    tests = exp["revert_deletes_tests"].is_a?(Array)
+    unclassified = exp["revert_unclassified"].is_a?(Array)
+    return exp if tests && unclassified
 
-    X.deletes_tests_fields(in_change_repo(exp, repo, res) { |path| XG.numstat(path, exp["commit"]) })
-  end
-
-  # The record's revert_unclassified list (DND-1634), else the same answer
-  # computed now: for a record written before the field, or one whose git
-  # could not look at record time. It feeds only the line's text.
-  def unclassified_fields(exp, repo, res)
-    return exp if exp["revert_unclassified"].is_a?(Array)
-
-    X.unclassified_fields(in_change_repo(exp, repo, res) { |path| XG.numstat(path, exp["commit"]) })
+    src = in_change_repo(exp, repo, res) { |path| XG.numstat(path, exp["commit"]) }
+    (tests ? exp.slice("revert_deletes_tests") : X.deletes_tests_fields(src))
+      .merge(unclassified ? exp.slice("revert_unclassified") : X.unclassified_fields(src))
   end
 
   # Under the lock: only experiments whose status is still the one judged
