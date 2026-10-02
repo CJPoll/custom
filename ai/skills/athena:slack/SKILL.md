@@ -462,7 +462,8 @@ one conversation:
   `<topic>_q<n>_<choice>`. A click on a stale render then cannot pass for the
   current item.
 - **The queue message is the record of decisions.** If per-item messages were
-  already posted, fold their decisions into it, then delete them.
+  already posted, fold their decisions into it, then delete them
+  (`mcp__athena__slack_delete`).
 - **People's discussion replies still go in the thread.** Only the queue
   itself is edited in place.
 - **`read-inbox` can hide a repeat click (DND-1785).** A `slack.interaction`
@@ -534,7 +535,7 @@ DND-549, phase 1 runs only for a terminal button, and the table's
 | The click was… | The session sends… | Because… |
 |---|---|---|
 | **Terminal** — it settles the question (approve, reject, pick one) | `slack_update` on the posted `{channel, ts}`: the original content with the controls gone and a one-line outcome, plus a new `text` | the message must end showing the outcome, not `working…` |
-| **One step of several** | a thread reply (`slack_post` with `thread_ts` = the posted `ts`) or `slack_ephemeral` to the clicker. New controls go in a fresh post or a `slack_update` (with `inbox_name` again), which re-stamps them. A discussion queue only updates its one message (*Discussion queue*, above) | the next question needs its own place; the first message keeps its record |
+| **One step of several** | a thread reply (`slack_post` with `thread_ts` = the posted `ts`) or `slack_ephemeral` to the clicker. New controls go in a fresh post or a `slack_update` (with `inbox_name` again), which re-stamps them. A discussion queue only updates its one message (*Asking the owner for a decision* → *Discussion queue*) | the next question needs its own place; the first message keeps its record |
 | **Informational** — "show details", "why?", posted with `"athena_terminal": false` | `slack_ephemeral` only, to the clicker (`user` = the line's `actor.user_id`) | only the clicker asked; the server ran no phase 1, so the shared message is still live as it is |
 
 Rules that apply to every row:
