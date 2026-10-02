@@ -283,7 +283,7 @@ shipwright_cursors
 ct="${TMP}/ct-wt"
 printf '0 * * * * /opt/other-job\n' >"$ct"
 rc="$(INST="$WT/scripts/setup-leadtime-cron" inst "$ct" -- --install)"
-if [ "$rc" = 3 ] && grep -q 'Fix:' "${TMP}/inst.err" && grep -qF "$IR" "${TMP}/inst.err" \
+if [ "$rc" = 5 ] && grep -q 'Fix:' "${TMP}/inst.err" && grep -qF "$IR" "${TMP}/inst.err" \
    && [ "$(cat "$ct")" = '0 * * * * /opt/other-job' ] && [ ! -e "$LT" ]; then
   ok "QA8: --install from a linked worktree is refused (exit 5), Fix: names the main checkout, nothing written"
 else
@@ -291,7 +291,7 @@ else
 fi
 printf '0 * * * * /opt/other-job\n%s\n' "${ENTRY}" >"$ct"
 rc="$(INST="$WT/scripts/setup-leadtime-cron" inst "$ct" -- --remove)"
-if [ "$rc" = 3 ] && grep -qF "${ENTRY}" "$ct"; then
+if [ "$rc" = 5 ] && grep -qF "${ENTRY}" "$ct"; then
   ok "QA8: --remove from a linked worktree is refused too"
 else
   bad "QA8 worktree remove" "rc=$rc ct=$(cat "$ct") $(out)"
