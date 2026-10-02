@@ -16,6 +16,7 @@
 # (LeadTimeUnmeasurable.run_id, .repo_name), so neither can hold a "/".
 
 require "json"
+require "fileutils"
 
 class LeadTimeObserveMarkers
   class Unreadable < StandardError; end
@@ -44,7 +45,7 @@ class LeadTimeObserveMarkers
   end
 
   def write(run, repo, doc)
-    Dir.mkdir(runs_dir, 0o700) unless Dir.exist?(runs_dir)
+    FileUtils.mkdir_p(runs_dir, mode: 0o700)
     file = path(run, repo)
     tmp = File.join(runs_dir, ".#{File.basename(file)}.#{Process.pid}.tmp")
     File.open(tmp, File::WRONLY | File::CREAT | File::TRUNC, 0o600) do |f|

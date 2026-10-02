@@ -10,7 +10,7 @@
 #   notion.note(page_id, text)  -> appends one paragraph    (raises PortError)
 #   alert.send_alert(slug, record, body) -> delivered name  (raises PortError)
 #   markers: the per-run observe record (lib/unmeasurable_marker.rb,
-#   DND-1820); by default the file store under runs_dir
+#   DND-1820), the caller's LeadTimeObserveMarkers
 #
 # scripts/unmeasurable wires the real ports (lib/unmeasurable_notion.rb and
 # ai/lib/harness-alert-send.sh); test/unmeasurable_test.rb wires fakes.
@@ -34,12 +34,12 @@ class LeadTimeUnmeasurableManager
 
   U = LeadTimeUnmeasurable
 
-  def initialize(store:, runs_dir:, notion:, alert:, markers: nil)
+  def initialize(store:, runs_dir:, notion:, alert:, markers:)
     @store = store
     @runs_dir = runs_dir
     @notion = notion
     @alert = alert
-    @markers = markers || LeadTimeObserveMarkers.new(runs_dir)
+    @markers = markers
   end
 
   # Record the ticket a run handed this repo's phase off to. A different
@@ -106,8 +106,20 @@ class LeadTimeUnmeasurableManager
     :recorded
   end
 
+  # observe was called but failed before it recorded an observation (the
+  # script calls this on observe's error path). Never replaces this run's
+  # observed record: a failed retry does not unsay a success. An observe
+  # that later succeeds replaces it. -> :recorded | :kept_observed
+  def observe_failed(repo:, run:, exit_code:, reason:)
+    doc = U.observe_failed_marker(repo: repo, run: run, exit_code: exit_code, reason: reason)
+    return :kept_observed if observed?(@markers.read(run, repo), repo, run)
+
+    @markers.write(run, repo, doc)
+    :recorded
+  end
+
   # What this run recorded for repo. Read-only. -> {result: :observed |
-  # :ingest_failed | :not_recorded | :could_not_look, path:, ...}. A record
+  # :observe_failed | :ingest_failed | :not_recorded | :could_not_look, path:, ...}. A record
   # that cannot be read, or reads as another run's, is :could_not_look with
   # a reason, never :not_recorded.
   def check(repo:, run:)

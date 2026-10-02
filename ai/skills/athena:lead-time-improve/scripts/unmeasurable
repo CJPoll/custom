@@ -72,13 +72,17 @@ HELP = <<~TXT
             session. Read-only. Prints one line:
               observe: repo=R run=ID result=observed exit=E outcomes=O,...
               observe: repo=R run=ID result=ingest-failed step=S exit=N reason="T"
+              observe: repo=R run=ID result=observe-failed exit=N reason="T"
               observe: repo=R run=ID result=not-recorded record=<path>
               observe: repo=R run=ID result=could-not-look reason="T"
 
   The per-run record (DND-1820) is <state>/runs/<ID>.observe.<R>.json, mode
   0600. observe writes it (kind observed, with its exit and outcomes) after
-  the count is saved, on exit 0 or 3; a refused observe writes none.
-  ingest-failed writes kind ingest-failed. Only a missing file is
+  the count is saved, on exit 0 or 3. An observe that fails before that
+  (a refused summary, a state file it cannot read or write: exit 1, 2 or
+  3) writes kind observe-failed, with its exit and error, unless this run
+  already observed R; the session did call it, so it is never
+  not-recorded. ingest-failed writes kind ingest-failed. Only a missing file is
   not-recorded; one that cannot be read, is not JSON, or names another run
   or repo is could-not-look.
 
@@ -102,7 +106,8 @@ HELP = <<~TXT
   look (a ticket Notion could not read or promote, an alert not delivered,
   or a state file or run record that cannot be read). Exit 3 is never
   "already handed off": journal its line as could not look. check alone:
-  0 observed, 4 ingest-failed, 5 not-recorded, 3 could-not-look.
+  0 observed, 4 ingest-failed, 6 observe-failed, 5 not-recorded,
+  3 could-not-look.
 TXT
 
 SPECS = {
@@ -114,7 +119,7 @@ SPECS = {
 }.freeze
 REQUIRED = { "observe" => %w[--repo --run --summary-file], "handoff" => %w[--repo --phase --ticket], "status" => [],
              "ingest-failed" => %w[--repo --run --step --exit --reason], "check" => %w[--repo --run] }.freeze
-CHECK_EXIT = { observed: 0, ingest_failed: 4, not_recorded: 5, could_not_look: 3 }.freeze
+CHECK_EXIT = { observed: 0, ingest_failed: 4, observe_failed: 6, not_recorded: 5, could_not_look: 3 }.freeze
 
 class Refusal < StandardError
   attr_reader :code, :fix
@@ -174,7 +179,8 @@ def manager(env)
   raise Refusal.new(1, "the state dir #{state} does not exist", "run from a machine whose lead-time state dir exists, or set LEAD_TIME_STATE_DIR") unless Dir.exist?(state)
 
   M.new(store: LeadTimeUnmeasurableStore.new(File.join(state, "unmeasurable.json")), runs_dir: File.join(state, "runs"),
-        notion: LeadTimeUnmeasurableNotion.new(env: env), alert: AlertPort.new(env))
+        notion: LeadTimeUnmeasurableNotion.new(env: env), alert: AlertPort.new(env),
+        markers: LeadTimeObserveMarkers.new(File.join(state, "runs")))
 end
 
 def read_summary(path)
@@ -204,6 +210,10 @@ def print_check(repo, run, chk)
     puts "#{head} result=observed exit=#{chk[:exit]} outcomes=#{chk[:outcomes].empty? ? 'none' : chk[:outcomes].join(',')}"
   when :ingest_failed
     puts "#{head} result=ingest-failed step=#{chk[:step]} exit=#{chk[:exit]} reason=#{quote(chk[:reason])}"
+  when :observe_failed
+    puts "#{head} result=observe-failed exit=#{chk[:exit]} reason=#{quote(chk[:reason])}"
+    warn "unmeasurable: run #{run} called observe for #{repo}, and it failed (exit #{chk[:exit]}): #{chk[:reason]}"
+    warn "Fix: read the reason; fix what observe refused or could not read or write, and the next run observes again"
   when :not_recorded
     puts "#{head} result=not-recorded record=#{chk[:path]}"
     warn "unmeasurable: run #{run} recorded neither observe nor ingest-failed for #{repo}: there is no #{chk[:path]}"
@@ -220,19 +230,7 @@ def run(sub, opts, env)
   mgr = manager(env)
   case sub
   when "observe"
-    result = mgr.observe(repo: opts["--repo"], run: opts["--run"], summary: read_summary(opts["--summary-file"]))
-    result[:lines].each { |l| print_line(l) }
-    if result[:code] == 3
-      warn "unmeasurable: could not look; journal the COULD-NOT-LOOK line as written, never as already handed off"
-      warn "Fix: read the line's reason (a Notion read or write, or the harness-alerts send); the next run retries the step that failed"
-    end
-    if result[:marker_error]
-      warn "unmeasurable: the count was saved, but this run's observe record was not: #{result[:marker_error]}"
-      warn "Fix: check the state dir's runs/ is writable and the disk is not full, then run this observe again " \
-           "(the same run id counts once); until then the runner reads #{opts['--repo']} as not observed this run"
-      return 1
-    end
-    result[:code]
+    observe(mgr, opts)
   when "ingest-failed"
     mgr.ingest_failed(repo: opts["--repo"], run: opts["--run"], step: opts["--step"], exit_code: opts["--exit"], reason: opts["--reason"])
     puts "unmeasurable: ingest-failed repo=#{opts['--repo']} run=#{opts['--run']} step=#{opts['--step']} recorded"
@@ -249,6 +247,49 @@ def run(sub, opts, env)
   end
 end
 
+OBSERVE_ERRORS = [Refusal, U::Invalid, LeadTimeUnmeasurableStore::Unreadable, LeadTimeObserveMarkers::Unreadable,
+                  SystemCallError, JSON::GeneratorError].freeze
+
+# observe, and on its error path the observe-failed record (DND-1820): the
+# session did call observe, so the runner must not read it as skipped. The
+# error then reaches main's handling as before.
+def observe(mgr, opts)
+  begin
+    result = mgr.observe(repo: opts["--repo"], run: opts["--run"], summary: read_summary(opts["--summary-file"]))
+  rescue *OBSERVE_ERRORS => e
+    record_observe_failure(mgr, opts, e)
+    raise
+  end
+  result[:lines].each { |l| print_line(l) }
+  if result[:code] == 3
+    warn "unmeasurable: could not look; journal the COULD-NOT-LOOK line as written, never as already handed off"
+    warn "Fix: read the line's reason (a Notion read or write, or the harness-alerts send); the next run retries the step that failed"
+  end
+  # Exit 1 wins over 3 here: without its record the runner fails the tick,
+  # which matters more than the could-not-look the line already says.
+  if result[:marker_error]
+    warn "unmeasurable: the count was saved, but this run's observe record was not: #{result[:marker_error]}"
+    warn "Fix: check the state dir's runs/ is writable and the disk is not full, then run this observe again " \
+         "(the same run id counts once); until then the runner reads #{opts['--repo']} as not observed this run"
+    return 1
+  end
+  result[:code]
+end
+
+def record_observe_failure(mgr, opts, err)
+  code = case err
+         when Refusal then err.code
+         when U::Invalid then 2
+         when LeadTimeUnmeasurableStore::Unreadable, LeadTimeObserveMarkers::Unreadable then 3
+         else 1
+         end
+  what = mgr.observe_failed(repo: opts["--repo"], run: opts["--run"], exit_code: code.to_s, reason: err.message)
+  warn "unmeasurable: observe failed (exit #{code}); this run's record says observe-failed (#{what}), so the runner reads it as a failed observe, not a skipped one"
+rescue StandardError => e
+  warn "unmeasurable: observe failed, and its observe-failed record could not be written either (#{e.message}); " \
+       "the runner reads #{opts['--repo']} as not observed this run"
+end
+
 def main(argv, env)
   if argv.include?("--help") || argv.include?("-h")
     puts HELP
@@ -257,7 +298,7 @@ def main(argv, env)
   sub = argv.first
   unless SPECS.key?(sub)
     warn "unmeasurable: usage error: #{sub.nil? ? 'no subcommand' : "unknown subcommand #{sub.inspect}"}"
-    warn "Fix: run unmeasurable observe|handoff|status (unmeasurable --help)"
+    warn "Fix: run unmeasurable observe|handoff|status|ingest-failed|check (unmeasurable --help)"
     return 2
   end
   opts = StrictArgv.parse(argv.drop(1), SPECS[sub])
@@ -278,9 +319,13 @@ rescue U::Invalid => e
   warn "Fix: pass the summary for this repo (lead-time-phases --summary --repo R --json, on its exit 0), a DND ticket, a phase, " \
        "and for ingest-failed a step, the tool's non-zero exit and its error line, as unmeasurable --help lists; nothing was counted or recorded"
   2
-rescue LeadTimeUnmeasurableStore::Unreadable, LeadTimeObserveMarkers::Unreadable => e
+rescue LeadTimeUnmeasurableStore::Unreadable => e
   warn "unmeasurable: could not look: #{e.message}"
   warn "Fix: repair or move that file aside by hand (it holds the run counts); this tool never reads it as empty"
+  3
+rescue LeadTimeObserveMarkers::Unreadable => e
+  warn "unmeasurable: could not look: #{e.message}"
+  warn "Fix: read or move aside that observe record (runs/<run id>.observe.<repo>.json) by hand; it is never read as not recorded"
   3
 rescue SystemCallError, JSON::GeneratorError => e
   warn "unmeasurable: #{e.class}: #{e.message}"

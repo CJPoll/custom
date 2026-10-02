@@ -133,12 +133,17 @@ improve="$(printf '%s\n' "$brief" | grep -o '[A-Za-z0-9_.-]* (improve, ' | sed '
 unm="$d/repo/ai/skills/athena:lead-time-improve/scripts/unmeasurable"
 # observe_all — the skill's step 4 on every improve repo: a measurable summary,
 # so observe counts nothing and reaches no Notion.
+observe_one() { # <repo>
+  printf '{"repo":"%s","biggest":{"phase":"implement"},"phases":{"implement":{"n":14,"n_na":2},"verify":{"n":9,"n_na":1},"queue":{"n":5,"n_na":1},"integrate":{"n":15,"n_na":5},"merge":{"n":13,"n_na":7}}}\n' "$1" >"$d/sum-$1.json"
+  "$unm" observe --repo "$1" --run "$rid" --summary-file "$d/sum-$1.json" >>"$d/observe.out" 2>&1 || echo "observe-rc=$? repo=$1" >>"$d/observe.out"
+}
+ingest_failed() { # <repo>
+  "$unm" ingest-failed --repo "$1" --run "$rid" --step ingest --exit 3 \
+    --reason 'lead-time-phases: SCAN INCOMPLETE: git log failed' >>"$d/observe.out" 2>&1 || echo "ingest-rc=$? repo=$1" >>"$d/observe.out"
+}
 observe_all() {
   local r
-  for r in $improve; do
-    printf '{"repo":"%s","biggest":{"phase":"implement"},"phases":{"implement":{"n":14,"n_na":2},"verify":{"n":9,"n_na":1},"queue":{"n":5,"n_na":1},"integrate":{"n":15,"n_na":5},"merge":{"n":13,"n_na":7}}}\n' "$r" >"$d/sum-$r.json"
-    "$unm" observe --repo "$r" --run "$rid" --summary-file "$d/sum-$r.json" >>"$d/observe.out" 2>&1 || echo "observe-rc=$? repo=$r" >>"$d/observe.out"
-  done
+  for r in $improve; do observe_one "$r"; done
 }
 summary_only() { echo 'repo=custom mode=improve biggest=verify action=no-action reason="fixture"' >"$LEADTIME_SUMMARY"; }
 summary() { summary_only; observe_all; }
@@ -166,10 +171,13 @@ case "$(cat "$d/mode" 2>/dev/null || echo ok)" in
   timeout)   : >"$LEADTIME_RECEIPT"; exit 124 ;;
   nosummary) : >"$LEADTIME_RECEIPT"; exit 0 ;;
   noobserve) : >"$LEADTIME_RECEIPT"; summary_only; exit 0 ;;
-  ingestfail) : >"$LEADTIME_RECEIPT"
-             "$unm" ingest-failed --repo custom --run "$rid" --step ingest --exit 3 \
-               --reason 'lead-time-phases: SCAN INCOMPLETE: git log failed' >>"$d/observe.out" 2>&1 || echo "ingest-rc=$?" >>"$d/observe.out"
-             summary_only; exit 0 ;;
+  ingestfail) : >"$LEADTIME_RECEIPT"; ingest_failed custom; summary_only; exit 0 ;;
+  observe-fail) : >"$LEADTIME_RECEIPT"
+             # an unreadable count: observe exits 3 before counting
+             echo garbage >"$LEAD_TIME_STATE_DIR/unmeasurable.json"; summary; exit 0 ;;
+  mixed-missing) : >"$LEADTIME_RECEIPT"; observe_one custom; summary_only; exit 0 ;;
+  mixed-ingest) : >"$LEADTIME_RECEIPT"; observe_one custom; ingest_failed gen_saas; summary_only; exit 0 ;;
+  mixed-all) : >"$LEADTIME_RECEIPT"; ingest_failed custom; summary_only; exit 0 ;;
   observe-corrupt) : >"$LEADTIME_RECEIPT"; summary
              echo garbage >"$LEAD_TIME_STATE_DIR/runs/$rid.observe.custom.json"; exit 0 ;;
   blocked0)  exit 0 ;;
@@ -631,7 +639,7 @@ rc="$(run_runner "$c")"
 run="$(newest "$c" run)"; failed="$(newest "$c" failed)"; rid="$(run_id_of "$c")"
 if [ "$rc" = 76 ] && grep -q 'outcome=observe-missing exit=76' "$run" \
    && grep -q "^observe: repo=custom run=${rid} result=not-recorded record=" "$run" \
-   && [ "$(fails "$c")" = 1 ] && [ -n "$failed" ] && grep -q 'never ran unmeasurable observe' "$failed" \
+   && [ "$(fails "$c")" = 1 ] && [ -n "$failed" ] && grep -q 'recorded neither unmeasurable observe nor ingest-failed' "$failed" \
    && grep -q '^repos=custom$' "$failed" && grep -q 'Fix:' "$c/runner.err" && ! grep -q 'outcome=ok' "$run"; then
   ok "a session that skipped observe (summary written, exit 0): exit 76 observe-missing, counted, the .failed names the repo"
 else
@@ -678,6 +686,57 @@ if [ "$rc" = 77 ] && grep -q 'outcome=observe-could-not-look exit=77' "$run" \
   ok "no unmeasurable tool in the main checkout to check with: could not look (exit 77), never ok and never not-recorded"
 else
   bad "tool missing" "rc=$rc run=$(cat "$run" 2>/dev/null) err=$(cat "$c/runner.err")"
+fi
+
+c="$(new_case)"; echo observe-fail >"$c/mode"
+rc="$(run_runner "$c")"
+run="$(newest "$c" run)"; failed="$(newest "$c" failed)"
+if [ "$rc" = 74 ] && grep -q 'outcome=observe-failed exit=74' "$run" \
+   && grep -q 'result=observe-failed exit=3 reason=".*unmeasurable.json is not JSON' "$run" && [ "$(fails "$c")" = 1 ] \
+   && grep -q 'ran unmeasurable observe .* and it failed' "$failed" && ! grep -q 'result=not-recorded' "$run"; then
+  ok "an observe the session ran that failed before counting: exit 74 observe-failed with its exit and error, never read as skipped"
+else
+  bad "observe failed" "rc=$rc run=$(cat "$run" 2>/dev/null) observe=$(cat "$c/observe.out" 2>/dev/null)"
+fi
+
+# two improve repos (custom, gen_saas): every repo is checked, the lists join,
+# and a skipped observe outranks an ingest failure.
+two_improve() { # <case>
+  printf '{"repos":[{"name":"custom","path":"%s","mode":"improve"},{"name":"gen_saas","path":"%s","mode":"improve"}],"window":20,"improvement_epic":"epic-fixture"}\n' \
+    "$1/checkouts/custom" "$1/checkouts/gen_saas" >"$1/repo/ai/config/lead-time-repos.json"
+}
+c="$(new_case)"; two_improve "$c"
+rc="$(run_runner "$c")"
+run="$(newest "$c" run)"
+if [ "$rc" = 0 ] && [ "$(grep -c '^observe: repo=.* result=observed exit=0' "$run")" = 2 ]; then
+  ok "two improve repos, both observed: ok, and one observe: line each"
+else
+  bad "two observed" "rc=$rc run=$(cat "$run" 2>/dev/null) observe=$(cat "$c/observe.out" 2>/dev/null)"
+fi
+c="$(new_case)"; two_improve "$c"; echo mixed-missing >"$c/mode"
+rc="$(run_runner "$c")"
+run="$(newest "$c" run)"; failed="$(newest "$c" failed)"
+if [ "$rc" = 76 ] && grep -q '^observe: repo=custom .* result=observed' "$run" && grep -q '^observe: repo=gen_saas .* result=not-recorded' "$run" \
+   && grep -q '^repos=gen_saas$' "$failed"; then
+  ok "one of two repos skipped: exit 76 names only that repo, and both lines are in the .run"
+else
+  bad "one skipped" "rc=$rc run=$(cat "$run" 2>/dev/null) failed=$(cat "$failed" 2>/dev/null)"
+fi
+c="$(new_case)"; two_improve "$c"; echo mixed-ingest >"$c/mode"
+rc="$(run_runner "$c")"
+if [ "$rc" = 79 ] && grep -q '^observe: repo=gen_saas .* result=ingest-failed' "$(newest "$c" run)" \
+   && grep -q '^repos=gen_saas$' "$(newest "$c" failed)"; then
+  ok "one observed, one ingest-failed: exit 79 names the repo whose ingest failed"
+else
+  bad "one ingest failed" "rc=$rc run=$(cat "$(newest "$c" run)" 2>/dev/null)"
+fi
+c="$(new_case)"; two_improve "$c"; echo mixed-all >"$c/mode"
+rc="$(run_runner "$c")"
+run="$(newest "$c" run)"
+if [ "$rc" = 76 ] && grep -q '^observe: repo=custom .* result=ingest-failed' "$run" && grep -q '^observe: repo=gen_saas .* result=not-recorded' "$run"; then
+  ok "an ingest failure and a skipped observe together: the skipped observe wins (exit 76), both lines listed"
+else
+  bad "precedence" "rc=$rc run=$(cat "$run" 2>/dev/null)"
 fi
 
 c="$(new_case)"; echo noobserve >"$c/mode"

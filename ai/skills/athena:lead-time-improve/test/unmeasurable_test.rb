@@ -236,7 +236,8 @@ end
 
 def manager(dir, notion, alert)
   LeadTimeUnmeasurableManager.new(store: LeadTimeUnmeasurableStore.new(File.join(dir, "unmeasurable.json")),
-                                  runs_dir: File.join(dir, "runs"), notion: notion, alert: alert)
+                                  runs_dir: File.join(dir, "runs"), notion: notion, alert: alert,
+                                  markers: LeadTimeObserveMarkers.new(File.join(dir, "runs")))
 end
 
 def outcome(result, phase = "queue") = result[:lines].find { |l| l[:phase] == phase }
@@ -454,7 +455,8 @@ Dir.mktmpdir("unmeasurable-mgr-") do |dir|
   notion = FakeNotion.new
   alert = FakeAlert.new
   store = FailingSaveStore.new(File.join(dir, "unmeasurable.json"))
-  mgr = LeadTimeUnmeasurableManager.new(store: store, runs_dir: File.join(dir, "runs"), notion: notion, alert: alert)
+  mgr = LeadTimeUnmeasurableManager.new(store: store, runs_dir: File.join(dir, "runs"), notion: notion, alert: alert,
+                                  markers: LeadTimeObserveMarkers.new(File.join(dir, "runs")))
   mgr.handoff(repo: "custom", phase: "queue", ticket: "DND-9001")
   2.times { |i| mgr.observe(repo: "custom", run: "run-#{i}", summary: summary) }
   store.fail_when = ->(entries) { entries.dig("custom/queue", "episode", "alerted") }
@@ -497,6 +499,17 @@ check("read_marker: an ingest-failed record reads ingest_failed with its step an
   r = U.read_marker(ig, repo: "custom", run: "run-a")
   r[:result] == :ingest_failed && r[:step] == "ingest" && r[:exit] == 3 && r[:reason] == "SCAN INCOMPLETE: no ledger"
 end
+of = U.observe_failed_marker(repo: "custom", run: "run-a", exit_code: 3, reason: "could not look: unmeasurable.json is not JSON")
+check("marker: a failed observe builds its own kind, with its exit and reason") do
+  of["kind"] == "observe-failed" && of["exit"] == 3 && of["reason"].include?("not JSON")
+end
+check("marker: a failed observe with exit 0 is refused (0 is not a failure)") { raises?(U::Invalid) { U.observe_failed_marker(repo: "custom", run: "r", exit_code: 0, reason: "x") } }
+check("read_marker: an observe-failed record reads observe_failed, never observed") do
+  r = U.read_marker(of, repo: "custom", run: "run-a")
+  r[:result] == :observe_failed && r[:exit] == 3 && r[:reason].include?("not JSON")
+end
+check("read_marker: an observed record whose exit is not 0 or 3 is refused") { raises?(U::Invalid) { U.read_marker(ob.merge("exit" => 2), repo: "custom", run: "run-a") } }
+check("read_marker: an ingest-failed record with exit 0 is refused") { raises?(U::Invalid) { U.read_marker(ig.merge("exit" => 0), repo: "custom", run: "run-a") } }
 check("read_marker: a record for another run is refused, never read as this run's") { raises?(U::Invalid) { U.read_marker(ob, repo: "custom", run: "run-b") } }
 check("read_marker: a record for another repo is refused") { raises?(U::Invalid) { U.read_marker(ob, repo: "gen_saas", run: "run-a") } }
 check("read_marker: an unknown kind, a wrong version or a non-object is refused") do
@@ -583,6 +596,23 @@ Dir.mktmpdir("unmeasurable-mgr-") do |dir|
     c[:result] == :could_not_look && c[:reason].include?("run-1")
   end
   check("manager check: a bad run id is refused") { raises?(U::Invalid) { mgr.check(repo: "custom", run: "../x") } }
+  mgr.observe_failed(repo: "custom", run: "run-7", exit_code: 3, reason: "could not look: unmeasurable.json is not JSON")
+  check("manager: a failed observe records observe-failed, never not_recorded (the session did call it)") do
+    c = mgr.check(repo: "custom", run: "run-7")
+    c[:result] == :observe_failed && c[:exit] == 3
+  end
+  mgr.observe_failed(repo: "custom", run: "run-1", exit_code: 1, reason: "a later retry failed")
+  check("manager: a failed retry never replaces this run's observed record") { mgr.check(repo: "custom", run: "run-1")[:result] == :observed }
+  r8 = mgr.observe(repo: "custom", run: "run-7", summary: measurable)
+  check("manager: an observe that succeeds after a failed one replaces the failure") { r8[:marker_error].nil? && mgr.check(repo: "custom", run: "run-7")[:result] == :observed }
+end
+
+Dir.mktmpdir("unmeasurable-mgr-") do |dir|
+  File.write(File.join(dir, "unmeasurable.json"), "garbage")
+  mgr = marker_manager(dir)
+  check("manager: observe over an unreadable state file raises Unreadable (the script records observe-failed)") do
+    raises?(LeadTimeUnmeasurableStore::Unreadable) { mgr.observe(repo: "custom", run: "run-1", summary: summary) }
+  end
 end
 
 Dir.mktmpdir("unmeasurable-mgr-") do |dir|

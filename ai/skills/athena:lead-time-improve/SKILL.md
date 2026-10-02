@@ -71,6 +71,9 @@ not look" (no ledger, or a git log it could not read). Neither is "nothing
 to do". Exit 4 from either is "configured, but its checkout is not on this
 machine"
 (`ai/bin/lead-time-repos`): skip that repo this run and journal the skip.
+A repo your brief listed as an improve repo still gets its record: for a
+`lead-time-phases` exit 4 that is `unmeasurable ingest-failed` with `--exit
+4` (step 1), because the runner checks every improve repo it listed.
 
 ## For each `improve` repo, in order
 
@@ -88,7 +91,9 @@ A failed ingest leaves R with no summary to observe, so record that instead
 ingest --exit <its exit> --reason "<its error line>"`. A `--summary` that
 exits non-zero in step 3 is recorded the same way, with `--step summary`.
 The runner reads it as its own outcome, `ingest-failed`, never as a pass
-(*Escalate what stays unmeasurable*).
+(*Escalate what stays unmeasurable*). "No action" never skips that
+escalation: when the ingest and the summary read both exit 0 (an
+`experiment` fault in step 2, say), you still run `observe` on R.
 
 ### 2. Judge pending experiments
 
@@ -108,7 +113,9 @@ experiment it prints `keep`, `revert`, `pending`, `inconclusive` or
   reverts), or one with a guard it could not measure: that may be a quality
   regression, so land the revert or hand a fix-forward to an architect.
   Otherwise this run's one action is a `git revert` of that experiment's
-  commit, landed through *Landing* below. Skip steps 4 and 5. Judge records
+  commit, landed through *Landing* below. Skip steps 4 and 5, except step
+  4's *Escalate what stays unmeasurable*: still run `observe` on R (or
+  record `ingest-failed`), which the runner checks. Judge records
   `reverted` once main carries it, and until then no new change starts on
   that phase. If two reverts are owed, land the first; the second is still
   owed next run. A cross-repo experiment's line names `change_repo=C`
@@ -312,14 +319,23 @@ files it), record it the same run: `unmeasurable handoff --repo R --phase P
 --ticket DND-N`. A hand-off the journal names that `unmeasurable status`
 does not hold is recorded the same way before `observe`.
 
-**The runner checks that you did (DND-1820).** `observe` writes this run's
-record, `runs/<run id>.observe.<repo>.json`, and `ingest-failed` (step 1)
-writes it for a repo with no summary. After you exit, the cron runner runs
-`unmeasurable check` for every improve repo it covered. A repo with
-neither record fails the tick as `observe-missing`; a record it cannot read
-is `observe-could-not-look`; a recorded ingest failure is `ingest-failed`.
-Each is counted toward the wedge (the runner's `--help` has the exits). So
-every run observes every improve repo, or records `ingest-failed` for it.
+**The runner checks that you ran it (DND-1820).** `observe` writes this
+run's record, `runs/<run id>.observe.<repo>.json`, and `ingest-failed`
+(step 1) writes it for a repo with no summary. An `observe` that fails
+before counting (exit 2 refused, exit 1, or exit 3 on an unreadable
+`unmeasurable.json`) writes an `observe-failed` record with its error;
+journal its Fix:. After you exit, the cron runner runs `unmeasurable check`
+for every improve repo it covered:
+
+- no record: `observe-missing`;
+- a record it cannot read: `observe-could-not-look`;
+- `observe-failed`: its own outcome;
+- `ingest-failed`: its own outcome.
+
+Each fails the tick and is counted toward the wedge (the runner's `--help`
+has the exits). So every run observes every improve repo, or records
+`ingest-failed` for it. An `observe` that ran and exited 3 on a ticket or
+alert passes: the check proves the call, and its retry is the next run's.
 An `observe` that exits 1 after saving its count printed that its record
 was not written: run it again with the same run id, which counts once.
 

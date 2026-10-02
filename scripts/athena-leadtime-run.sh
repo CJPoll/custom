@@ -59,9 +59,12 @@
 # after a session that reached the model, the runner runs the main checkout's
 # `unmeasurable check --repo R --run <run id>` for every improve repo the tick
 # covered, lists each result in the .run, and fails the tick on a repo with no
-# record (76), a record it cannot read (77), or a repo whose ingest failed so
-# it had no summary to observe (79). Each counts toward the wedge, so the
-# existing leadtime-wedged alert reaches the owner once per episode.
+# record (76), a record it cannot read (77), an observe that failed (74), or a
+# repo whose ingest failed so it had no summary to observe (79). Each counts
+# toward the wedge, so the existing leadtime-wedged alert reaches the owner
+# once per episode. It proves observe ran; an observe that ran but could not
+# read or promote the hand-off ticket (its exit 3) passes, and its exit=3 is
+# on the observe: line.
 #
 # Thresholds. The wedge fires after 3 unsuccessful outcomes: three hourly
 # ticks, between the clustering runner's 2 (twice a day) and the shipwright's
@@ -97,11 +100,12 @@
 #                       per kept branch (below), the summary, and one
 #                       observe: line per improve repo (DND-1820: what
 #                       `unmeasurable check` read for this run id: result=
-#                       observed, ingest-failed, not-recorded or
-#                       could-not-look), or observe=none with no improve
+#                       observed, ingest-failed, observe-failed, not-recorded
+#                       or could-not-look), or observe=none with no improve
 #                       repo, or observe=not checked when the session never
 #                       reported for duty
-#   runs/run-<ts>.observe.<repo>.json  the session's observe record, written by
+#   runs/<run id>.observe.<repo>.json  the session's observe record (the run
+#                       id is run-<ts>), written by
 #                       the unmeasurable tool (DND-1820)
 #   runs/<ts>.branch-kept  one line per landed lane branch whose `git branch -D`
 #                       was refused this tick (a held ref lock, or any other refusal),
@@ -154,25 +158,25 @@
 #       config could not be created, or ai/bin/leadtime-product is missing
 #       while a product repo is listed or a product-PR store exists (a lane
 #       or config failure is counted)
+#   74  observe-failed (DND-1820): the session ran `unmeasurable observe` for
+#       an improve repo and it failed before counting (a refused summary, or
+#       a state file it could not read or write); its record says so, with
+#       observe's exit and error: counted
+#   75  WEDGED: LEADTIME_FAIL_ESCALATE unsuccessful outcomes in a row. No
+#       session runs. The tick writes runs/<ts>.wedged, and the first wedged
+#       tick of an episode sends ONE harness-alert (leadtime-wedged)
 #   76  observe-missing (DND-1820): the session exited 0 with a summary, but
 #       an improve repo the tick covered has no observe record for this run
-#       id: it ran neither `unmeasurable observe` nor `unmeasurable
-#       ingest-failed`, so the unmeasurable-phase escalation (DND-1806) did
-#       not run on it. The .failed record names the repos: counted
+#       id: the session recorded neither `unmeasurable observe` nor
+#       `unmeasurable ingest-failed` (it skipped them, or the tool could not
+#       write even a failure record), so the unmeasurable-phase escalation
+#       (DND-1806) did not run on it. The .failed record names the repos:
+#       counted
 #   77  observe-could-not-look (DND-1820): an improve repo's observe record
 #       could not be read (not JSON, unreadable, for another run or repo), or
 #       the main checkout's `unmeasurable check` is missing, failed, or
 #       printed a line that disagrees with its exit. Never read as not
 #       recorded, never ok: counted
-#   79  ingest-failed (DND-1820): every improve repo has a record, and one
-#       or more say ingest-failed: the repo had no summary to observe
-#       (lead-time-phases --ingest or --summary failed), so the run could not
-#       measure it. Neither a pass nor observe-missing; the .run's observe:
-#       line names the step, its exit and its error: counted. When several
-#       apply, 76 wins over 77, and 77 over 79
-#   75  WEDGED: LEADTIME_FAIL_ESCALATE unsuccessful outcomes in a row. No
-#       session runs. The tick writes runs/<ts>.wedged, and the first wedged
-#       tick of an episode sends ONE harness-alert (leadtime-wedged)
 #   78  the athena:lead-time-improve skill is not in the main checkout, the
 #       repo list does not resolve (ai/bin/lead-time-repos is missing or exits
 #       non-zero, zero repos included; its line and Fix: go in the .failed
@@ -185,6 +189,12 @@
 #       function the tick calls is 78 too, with a .failed record, counted
 #       like the rest (DND-1603, DND-1604). --dry-run runs the tick's own lib check, so it refuses
 #       on the same faults (DND-1728)
+#   79  ingest-failed (DND-1820): every improve repo has a record, and one
+#       or more say ingest-failed: the repo had no summary to observe
+#       (lead-time-phases --ingest or --summary failed), so the run could not
+#       measure it. Neither a pass nor observe-missing; the .run's observe:
+#       line names the step, its exit and its error: counted. When several
+#       of 74, 76, 77 and 79 apply, the order is 76, 77, 74, 79
 #   *   the session's own non-zero exit (124 on timeout): counted
 
 set -euo pipefail
@@ -1327,31 +1337,38 @@ fi
 # the runner asks the main checkout's tool what this run recorded for each
 # improve repo the tick covered (`unmeasurable check`, read-only). Its exit and
 # its line must agree: 0 observed, 4 ingest-failed (the repo had no summary to
-# observe), 5 not-recorded. Anything else, a missing tool, or a line that
-# disagrees with its exit is COULD NOT LOOK, never "not recorded" and never ok.
-# Only a tick whose session reached the model is checked.
+# observe), 6 observe-failed (the session called observe and it failed),
+# 5 not-recorded, 3 could-not-look. Any other exit, a missing tool, or a line
+# that disagrees with its exit is COULD NOT LOOK, never "not recorded" and
+# never ok. Only a tick whose session reached the model is checked, and only
+# with a resolved repo list (an unresolved one never reaches a session).
 UNMEASURABLE_TOOL="${MAIN_CHECKOUT}/ai/skills/athena:lead-time-improve/scripts/unmeasurable"
 OBSERVE_LINES="observe=not checked (the session never reported for duty)"
-OBSERVE_MISSING=""; OBSERVE_UNREADABLE=""; OBSERVE_INGEST=""
+OBSERVE_MISSING=""; OBSERVE_UNREADABLE=""; OBSERVE_FAILED=""; OBSERVE_INGEST=""
 observe_check() {
-  local name mode rest names="" out rc err want why head
+  local name mode rest out rc err want why head
+  local -a names=()
   OBSERVE_LINES=""
+  if [ "${RES_RC}" -ne 0 ]; then
+    OBSERVE_LINES="observe=not checked (the repo list did not resolve)"
+    return 0
+  fi
   while IFS=$'\x1f' read -r name mode rest; do
     [ -n "${name}" ] && [ "${mode}" = improve ] || continue
-    names="${names:+${names} }${name}"
+    names+=("${name}")
   done <<<"${RES_REPOS}"
-  if [ -z "${names}" ]; then
+  if [ "${#names[@]}" -eq 0 ]; then
     OBSERVE_LINES="observe=none (no improve repo this tick)"
     return 0
   fi
-  for name in ${names}; do
+  for name in "${names[@]}"; do
     rc=0; out=""; why=""
     if [ ! -x "${UNMEASURABLE_TOOL}" ]; then
       rc=127; why="${UNMEASURABLE_TOOL} is absent or not executable, so this run's observe record cannot be read"
     else
       err="$(mktemp 2>/dev/null)" || err=/dev/null
       out="$(timeout 120 "${UNMEASURABLE_TOOL}" check --repo "${name}" --run "${RUN_ID}" 2>"${err}" </dev/null 9>&-)" || rc=$?
-      out="$(printf '%s\n' "${out}" | head -n1)"
+      out="${out%%$'\n'*}"
       why="unmeasurable check exited ${rc}: $(grep -v '^Fix: ' "${err}" 2>/dev/null | head -n1 | tr -d '"' || true)"
       [ "${err}" = /dev/null ] || rm -f -- "${err}"
     fi
@@ -1359,6 +1376,7 @@ observe_check() {
     case "${rc}" in
       0) want=observed ;;
       4) want=ingest-failed ;;
+      6) want=observe-failed ;;
       5) want=not-recorded ;;
       3) want=could-not-look ;;
       *) want="" ;;
@@ -1375,6 +1393,7 @@ observe_check() {
     case "${want}" in
       observed) ;;
       ingest-failed) OBSERVE_INGEST="${OBSERVE_INGEST:+${OBSERVE_INGEST},}${name}" ;;
+      observe-failed) OBSERVE_FAILED="${OBSERVE_FAILED:+${OBSERVE_FAILED},}${name}" ;;
       not-recorded) OBSERVE_MISSING="${OBSERVE_MISSING:+${OBSERVE_MISSING},}${name}" ;;
       could-not-look) OBSERVE_UNREADABLE="${OBSERVE_UNREADABLE:+${OBSERVE_UNREADABLE},}${name}" ;;
       *) OBSERVE_UNREADABLE="${OBSERVE_UNREADABLE:+${OBSERVE_UNREADABLE},}${name}"
@@ -1490,10 +1509,10 @@ fi
 # The observe check (9b, DND-1820). A skipped observe first: it is the
 # definite finding, and it silently re-creates the re-noting DND-1806 ended.
 if [ -n "${OBSERVE_MISSING}" ]; then
-  record_failure "the session never ran unmeasurable observe (nor ingest-failed) for improve repo(s) ${OBSERVE_MISSING}, so the unmeasurable-phase escalation (DND-1806) did not run on them" \
+  record_failure "the session recorded neither unmeasurable observe nor ingest-failed for improve repo(s) ${OBSERVE_MISSING} (skipped, or the tool could not write even a failure record), so the unmeasurable-phase escalation (DND-1806) did not run on them" \
     "repos=${OBSERVE_MISSING}" "${observe_lines[@]}" "session_exit=0"
-  echo "${ME}: run ${ts} never ran unmeasurable observe for ${OBSERVE_MISSING}; counted as unsuccessful (observe-missing). Record: ${LOG_DIR}/${ts}.failed" >&2
-  echo "  Fix: read ${log} and the journal for why the shipwright skipped athena:lead-time-improve -> Escalate what stays unmeasurable; every run observes every improve repo, or records ingest-failed for one with no summary. ${FAIL_ESCALATE} in a row wedge the lane." >&2
+  echo "${ME}: run ${ts} has no observe record for ${OBSERVE_MISSING}; counted as unsuccessful (observe-missing). Record: ${LOG_DIR}/${ts}.failed" >&2
+  echo "  Fix: read ${log} and the journal for why the shipwright did not run athena:lead-time-improve -> Escalate what stays unmeasurable on it (every run observes every improve repo, or records ingest-failed for one with no summary); if observe ran, its stderr there says why no record was written. ${FAIL_ESCALATE} in a row wedge the lane." >&2
   finish 76 observe-missing
 fi
 if [ -n "${OBSERVE_UNREADABLE}" ]; then
@@ -1502,6 +1521,13 @@ if [ -n "${OBSERVE_UNREADABLE}" ]; then
   echo "${ME}: run ${ts} COULD NOT LOOK at the observe record for ${OBSERVE_UNREADABLE}; counted as unsuccessful (observe-could-not-look). Record: ${LOG_DIR}/${ts}.failed" >&2
   echo "  Fix: read the observe: lines in the .run record (each names its reason); restore ${UNMEASURABLE_TOOL} by fast-forwarding ${MAIN_CHECKOUT}, or read and move aside the record it names by hand. It is never read as not recorded." >&2
   finish 77 observe-could-not-look
+fi
+if [ -n "${OBSERVE_FAILED}" ]; then
+  record_failure "the session ran unmeasurable observe for improve repo(s) ${OBSERVE_FAILED} and it failed before counting (a refused summary, or a state file it could not read or write), so the escalation did not run on them" \
+    "repos=${OBSERVE_FAILED}" "${observe_lines[@]}" "session_exit=0"
+  echo "${ME}: run ${ts}: unmeasurable observe failed for ${OBSERVE_FAILED}; counted as unsuccessful (observe-failed). Record: ${LOG_DIR}/${ts}.failed" >&2
+  echo "  Fix: the observe: line in the .run record names observe's exit and error. Fix what it refused or could not read or write (unmeasurable.json in ${STATE_DIR} is never read as empty); the next run observes again. ${FAIL_ESCALATE} in a row wedge the lane." >&2
+  finish 74 observe-failed
 fi
 if [ -n "${OBSERVE_INGEST}" ]; then
   record_failure "improve repo(s) ${OBSERVE_INGEST} had no summary to observe: the session recorded ingest-failed (lead-time-phases --ingest or --summary failed), so the run could not measure them" \

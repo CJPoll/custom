@@ -385,12 +385,15 @@ Each `improve`-mode run does these steps in order:
    ingest-failed` instead, since it has no summary to observe. After the
    session, `scripts/athena-leadtime-run.sh` runs `unmeasurable check` for
    every improve repo the tick covered. A repo with no record fails the tick
-   as `observe-missing` (exit 76); a record it cannot read is
-   `observe-could-not-look` (77), never "not recorded"; a recorded ingest
-   failure is `ingest-failed` (79), neither a pass nor a skipped observe.
-   All three are counted, so the existing wedge and its one
-   `leadtime-wedged` alert per episode reach the owner. The exit list's home
-   is the runner's `--help`.
+   as `observe-missing`; a record it cannot read is
+   `observe-could-not-look`, never "not recorded"; an `observe` that failed
+   before counting writes `observe-failed`, never read as skipped; a
+   recorded ingest failure is `ingest-failed`, neither a pass nor a skipped
+   observe. All are counted, so the existing wedge and its one
+   `leadtime-wedged` alert per episode reach the owner. The check proves
+   the call, not the escalation: an `observe` that could not read or
+   promote the ticket still passes, and the next run retries it. The exit
+   list's home is the runner's `--help`.
 4. **Act once:**
    - land one small, safety-preserving harness change; or
    - land one instrumentation change; or

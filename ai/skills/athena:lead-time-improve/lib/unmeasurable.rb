@@ -212,14 +212,19 @@ module LeadTimeUnmeasurable
 
   # ── the per-run observe record (DND-1820) ───────────────────────────────
   # The escalation fires only on a run that calls observe. The record says,
-  # per run and repo, that it did, or that the repo had no summary to
-  # observe (its ingest or its summary read failed). The cron runner reads
+  # per run and repo, that it did (observed), that it did and failed before
+  # counting (observe-failed), or that the repo had no summary to observe
+  # (ingest-failed: its ingest or its summary read failed). The runner reads
   # it back after the session (unmeasurable check): a repo with no record is
   # a failed tick, never a pass.
   MARKER_VERSION = 1
-  MARKER_KINDS = %w[observed ingest-failed].freeze
+  MARKER_KINDS = %w[observed observe-failed ingest-failed].freeze
   INGEST_STEPS = %w[ingest summary].freeze
   REASON_MAX = 200
+  # The exits each kind may carry: observe ends 0 or 3 once it has counted;
+  # a failure, of observe or of the ingest, is never 0.
+  OBSERVED_EXITS = [0, 3].freeze
+  FAILED_EXITS = (1..255).freeze
 
   def observed_marker(repo:, run:, code:, outcomes:)
     { "version" => MARKER_VERSION, "kind" => "observed", "repo" => repo_name(repo), "run" => run_id(run),
@@ -232,14 +237,31 @@ module LeadTimeUnmeasurable
   def ingest_failed_marker(repo:, run:, step:, exit_code:, reason:)
     raise Invalid, "step #{step.inspect} is not one of #{INGEST_STEPS.join(', ')}" unless INGEST_STEPS.include?(step)
 
-    code = /\A[0-9]{1,3}\z/.match?(exit_code.to_s) ? exit_code.to_i : nil
-    raise Invalid, "exit #{exit_code.inspect} is not the failed tool's exit (a whole number 1..255)" unless code&.between?(1, 255)
-
-    text = reason.to_s.gsub(/[[:cntrl:]\s]+/, " ").strip
-    raise Invalid, "the reason is empty: say why there is no summary (the tool's error line)" if text.empty?
-
     { "version" => MARKER_VERSION, "kind" => "ingest-failed", "repo" => repo_name(repo), "run" => run_id(run),
-      "step" => step, "exit" => code, "reason" => text[0, REASON_MAX] }
+      "step" => step, "exit" => failed_exit(exit_code), "reason" => one_line(reason, "say why there is no summary (the tool's error line)") }
+  end
+
+  # observe itself failed before it could record an observation: a summary
+  # it refused, a state file it could not read or write. The session did
+  # call it, so this is never "not recorded"; and the count did not run, so
+  # it is never "observed".
+  def observe_failed_marker(repo:, run:, exit_code:, reason:)
+    { "version" => MARKER_VERSION, "kind" => "observe-failed", "repo" => repo_name(repo), "run" => run_id(run),
+      "exit" => failed_exit(exit_code), "reason" => one_line(reason, "say why observe failed") }
+  end
+
+  def failed_exit(exit_code)
+    code = /\A[0-9]{1,3}\z/.match?(exit_code.to_s) ? exit_code.to_i : nil
+    raise Invalid, "exit #{exit_code.inspect} is not the failed tool's exit (a whole number 1..255)" unless code && FAILED_EXITS.cover?(code)
+
+    code
+  end
+
+  def one_line(reason, what)
+    text = reason.to_s.gsub(/[[:cntrl:]\s]+/, " ").strip
+    raise Invalid, "the reason is empty: #{what}" if text.empty?
+
+    text[0, REASON_MAX]
   end
 
   # read_marker(doc, repo:, run:) -> {result: :observed, exit:, outcomes:} |
@@ -251,15 +273,17 @@ module LeadTimeUnmeasurable
     raise Invalid, "the record's kind #{doc['kind'].inspect} is not one of #{MARKER_KINDS.join(', ')}" unless MARKER_KINDS.include?(doc["kind"])
     raise Invalid, "the record is for run #{doc['run'].inspect}, not #{run}" unless doc["run"] == run
     raise Invalid, "the record is for repo #{doc['repo'].inspect}, not #{repo}" unless doc["repo"] == repo
-    raise Invalid, "the record's exit #{doc['exit'].inspect} is not a whole number" unless doc["exit"].is_a?(Integer)
+    allowed = doc["kind"] == "observed" ? OBSERVED_EXITS : FAILED_EXITS
+    raise Invalid, "the record's exit #{doc['exit'].inspect} is not one a #{doc['kind']} record carries" unless doc["exit"].is_a?(Integer) && allowed.include?(doc["exit"])
 
     if doc["kind"] == "observed"
       raise Invalid, "the record's outcomes are not a list of names" unless doc["outcomes"].is_a?(Array) && doc["outcomes"].all?(String)
 
       return { result: :observed, exit: doc["exit"], outcomes: doc["outcomes"] }
     end
-    raise Invalid, "the record's step #{doc['step'].inspect} is not one of #{INGEST_STEPS.join(', ')}" unless INGEST_STEPS.include?(doc["step"])
     raise Invalid, "the record has no reason" unless doc["reason"].is_a?(String) && !doc["reason"].empty?
+    return { result: :observe_failed, exit: doc["exit"], reason: doc["reason"] } if doc["kind"] == "observe-failed"
+    raise Invalid, "the record's step #{doc['step'].inspect} is not one of #{INGEST_STEPS.join(', ')}" unless INGEST_STEPS.include?(doc["step"])
 
     { result: :ingest_failed, step: doc["step"], exit: doc["exit"], reason: doc["reason"] }
   end

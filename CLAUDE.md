@@ -735,22 +735,26 @@ time. The design record is `ai/docs/lead-time-improver.md`.
   pushed on a recorded improver PR is awaiting landing instead. A failed
   post-merge deploy stops that repo's line until the owner re-arms it (`rm`
   its `product-line-stopped.<R>`). An improve repo with no observe record
-  for the run, an unreadable one, or a failed ingest is a counted failure
-  too (exits 76, 77, 79; DND-1820, the next bullet). Unlike the shipwright
+  for the run, an unreadable one, a failed observe or a failed ingest is a
+  counted failure too (DND-1820, the next bullet). Unlike the shipwright
   runner, it has no dirty-main-checkout yield.
 - **A phase it cannot measure escalates (DND-1806).** A phase that stays
   unmeasurable while its hand-off ticket is open gets that ticket promoted
   and ONE `leadtime-unmeasurable` alert per episode. The rule and its
   outcomes: `athena:lead-time-improve` → *Escalate what stays unmeasurable*.
   The run's session does it through that skill's `unmeasurable` tool, and
-  the runner checks that it did (DND-1820). After a session that reached the
-  model, `unmeasurable check` reads this run's record for every improve
-  repo the tick covered. No record is `observe-missing` (exit 76), a record
-  it cannot read is `observe-could-not-look` (77), and a repo whose ingest
-  failed, so it had no summary to observe, is `ingest-failed` (79). Each is
+  the runner checks that the session ran it (DND-1820). After a session
+  that reached the model, `unmeasurable check` reads this run's record for
+  every improve repo the tick covered. No record is `observe-missing`, a
+  record it cannot read is `observe-could-not-look`, an `observe` that
+  failed before counting is `observe-failed`, and a repo whose ingest
+  failed, so it had no summary to observe, is `ingest-failed`. Each is
   named in the `.run` record and counted, so three in a row wedge the lane
-  and send the `leadtime-wedged` alert. The count is `unmeasurable.json` in
-  the state dir; the per-run record is `runs/<run id>.observe.<repo>.json`.
+  and send the `leadtime-wedged` alert; the exits are in the runner's
+  `--help`. It proves the call, not the escalation: an `observe` that could
+  not read or promote the ticket passes, with `exit=3` on its `.run` line,
+  and the next run retries. The count is `unmeasurable.json` in the state
+  dir; the per-run record is `runs/<run id>.observe.<repo>.json`.
 
   **Later (2026-10-02, DND-1820):** this bullet ended "so it fires only on a
   run that calls the tool; nothing checks that it did". Superseded by the
