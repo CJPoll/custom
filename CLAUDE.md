@@ -585,11 +585,18 @@ shipwright cron never writes Notion, so this is its own runner.
   DM (`athena:epic-clustering` → *Who runs it, and when*).
   The cron's headless session is the pass's top-level session, so it posts
   each won't-fix notice (DND-1749). The `.run` record has one `notice:` line
-  per won't-fix closure: `notice: posted <channel>/<ts> DND-N`, `notice: NOT
-  POSTED DND-N <why>`, `notice: UNREADABLE`, `notice: UNKNOWN` (the session
-  ended early), or `notice: none`. No session can verify a click on a cron
-  notice, so it has no buttons: the owner vetoes by reopening the ticket
-  (`athena:epic-clustering` → *Won't-fix notices* → *On the cron*).
+  per won't-fix closure: `notice: posted <channel>/<ts> DND-N veto=<veto>`,
+  `notice: NOT POSTED DND-N <why>; veto=<veto>`, `notice: UNREADABLE`,
+  `notice: UNKNOWN` (the session ended early), or `notice: none`. No session
+  can verify a click on a cron notice, so it has no buttons. Its veto is a
+  `ticket.wontfix_veto` owner approval grant the server acts on
+  (`veto=grant <grant_id> <channel>/<ts>`), or, when the server cannot give
+  one, by hand in Notion (`veto=by-hand <reason>`); `veto=UNSTATED` is loud
+  (`athena:epic-clustering` → *Won't-fix notices* → *On the cron*, DND-1758).
+
+  **Later (2026-10-02, DND-1758):** this said the cron notice's veto was
+  always by hand, and the `notice:` lines had no `veto=`. Superseded by the
+  owner's choice of a server-side veto grant.
 
   **Later (2026-10-02, DND-1738):** the morning run also sent the daily
   digest to the owner's DM. Superseded by the owner: "I guess I found the

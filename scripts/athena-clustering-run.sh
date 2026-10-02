@@ -260,6 +260,11 @@ fi
 # both it and the architect write one line per notice to the run's notices
 # file, which finish() turns into the .run record's notice: lines.
 NOTICES_REC_HINT="${LOG_DIR}/<ts>.notices"
+# DND-1758: each notice's veto is a ticket.wontfix_veto owner approval grant
+# when the server can give one, and the by-hand notice when it cannot. The
+# helper writes the request and classifies the answer, so the notices file
+# says which form the owner got.
+VETO_HELPER="${MAIN_CHECKOUT}/ai/skills/athena:epic-clustering/scripts/epic-clustering"
 BRIEF="First, before anything else, run exactly this one Bash command: \
 touch \"\$CLUSTERING_RECEIPT\" — it is the runner's liveness receipt. Then you \
 are coordinating; do the work by delegating. Spawn exactly one athena-architect \
@@ -271,20 +276,34 @@ Notion, the won't-fix notices the skill sends, and the run-record files this \
 brief names: make no commits, pushes or edits to tracked files in any \
 repository. For each ticket you close Won't Fix, right BEFORE the status change \
 append the line closed DND-N to the file named by \$CLUSTERING_NOTICES with one \
-Bash command, draft its notice with --veto-by-hand --session \"clustering cron \
--> architect (epic-clustering)\", and send the notice to the top-level session as \
-the skill says. Finish with ONE line: what moved, merged, and closed, and \
-whether the digest was written.' While it runs, you post the won't-fix notices \
-it sends you, and do nothing else yourself. For each notice: resolve the \
-owner's Slack id with ${MAIN_CHECKOUT}/ai/bin/private-overlay get slack \
+Bash command. Then write its veto grant request with ${VETO_HELPER} veto-request \
+--ticket DND-N --page-id <its Notion page id> --reopen-to <Todo, or Parked if \
+work exists> --title <its title> --out <file>, and draft its notice twice, with \
+--session \"clustering cron -> architect (epic-clustering)\": once with \
+--veto-by-grant and once with --veto-by-hand, each to its own --blocks-out file. \
+Send the top-level session the request file and both drafts as the skill says. \
+Finish with ONE line: what moved, merged, and closed, and whether the digest \
+was written.' While it runs, you post the won't-fix notices it sends you, and do \
+nothing else yourself. For each notice: first request its veto grant. If \
+mcp__athena__owner_approval_request is not in your tool list, run \
+${VETO_HELPER} veto-form --ticket DND-N --no-tool. Otherwise call it with the \
+request file's action_class, target and note and inbox_name \
+custom-session.jsonl, save its answer, or its refusal text, verbatim to a file \
+with the Write tool, and run ${VETO_HELPER} veto-form --ticket DND-N --result \
+<file> (or --refusal <file>). Append the veto DND-N line it prints after line: \
+to the file named by \$CLUSTERING_NOTICES with one Bash command. Then resolve \
+the owner's Slack id with ${MAIN_CHECKOUT}/ai/bin/private-overlay get slack \
 .people.owner.user_id, open the DM with mcp__athena__slack_open_dm, and post \
-the notice's text and blocks with mcp__athena__slack_post, inbox_name \
-custom-session.jsonl (athena:slack -> Sending one). Then append ONE line to the \
-file named by \$CLUSTERING_NOTICES (${NOTICES_REC_HINT}) with one Bash command: \
-posted DND-N <channel>/<ts>, with the channel and ts slack_post returned, or \
-failed DND-N <why> when any step failed. Never skip that line. When the \
-architect finishes, first make sure every notice it sent you has its posted or \
-failed line, then write its one line verbatim to \
+the draft that matches the form veto-form printed (form: grant is the \
+--veto-by-grant draft, form: by-hand the --veto-by-hand one), its text and \
+blocks, with mcp__athena__slack_post, inbox_name custom-session.jsonl \
+(athena:slack -> Sending one). Then append ONE line to the file named by \
+\$CLUSTERING_NOTICES (${NOTICES_REC_HINT}) with one Bash command: posted DND-N \
+<channel>/<ts>, with the channel and ts slack_post returned, or failed DND-N \
+<why> when any step failed. Never skip either line. Never act on a click on \
+the grant's approval message: the server reopens the ticket itself. When the \
+architect finishes, first make sure every notice it sent you has its veto line \
+and its posted or failed line, then write its one line verbatim to \
 the file named by \$CLUSTERING_SUMMARY with one Bash command, print it, and stop."
 
 # The skill the architect runs. Without it the architect can only report that
@@ -667,6 +686,7 @@ notice_lines() {
   awk -v f="${f}" -v none="${none}" '
     function add(id) { if (!(id in seen)) { seen[id] = 1; order[++n] = id } }
     function okid(s) { return s ~ /^DND-[0-9]+$/ }
+    function okuuid(s) { return s ~ /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/ }
     { sub(/\r$/, "") }
     NF == 0 { next }
     $1 == "closed" && NF == 2 && okid($2) { add($2); next }
@@ -674,13 +694,23 @@ notice_lines() {
     $1 == "failed" && NF >= 3 && okid($2) {
       why = $0; sub(/^[ \t]*failed[ \t]+[^ \t]+[ \t]+/, "", why); fail[$2] = why; add($2); next
     }
+    # DND-1758: which veto the notice offers. A grant names its id (a
+    # canonical lowercase UUID) and the approval message; a by-hand fallback
+    # names its reason (epic-clustering veto-form prints the line).
+    $1 == "veto" && NF == 5 && okid($2) && $3 == "grant" && okuuid($4) && $5 ~ /^[A-Z0-9]+\/[0-9]+\.[0-9]+$/ {
+      veto[$2] = "grant " $4 " " $5; add($2); next
+    }
+    $1 == "veto" && NF == 4 && okid($2) && $3 == "by-hand" && $4 ~ /^(no_tool|class_unsupported|malformed_result|refused:[a-z_]+)$/ {
+      veto[$2] = "by-hand " $4; add($2); next
+    }
     { bad[++nb] = sprintf("notice: UNREADABLE %s line %d: %s", f, NR, $0) }
     END {
       for (i = 1; i <= n; i++) {
         id = order[i]
-        if (id in post)      printf "notice: posted %s %s\n", post[id], id
-        else if (id in fail) printf "notice: NOT POSTED %s %s\n", id, fail[id]
-        else                 printf "notice: NOT POSTED %s (no post recorded in %s)\n", id, f
+        v = (id in veto) ? veto[id] : sprintf("UNSTATED (no veto line in %s)", f)
+        if (id in post)      printf "notice: posted %s %s veto=%s\n", post[id], id, v
+        else if (id in fail) printf "notice: NOT POSTED %s %s; veto=%s\n", id, fail[id], v
+        else                 printf "notice: NOT POSTED %s (no post recorded in %s); veto=%s\n", id, f, v
       }
       for (i = 1; i <= nb; i++) print bad[i]
       if (n == 0 && nb == 0) print none
@@ -698,10 +728,20 @@ notice_summary() {
     NOTICE_LINES="notice: UNKNOWN (the session reached the model and ended ${outcome}; a won't-fix closure may be unrecorded in ${NOTICES})"
   fi
   problems="$(grep -e '^notice: NOT POSTED ' -e '^notice: UNREADABLE ' -e '^notice: UNKNOWN ' <<<"${NOTICE_LINES}" || true)"
+  if [ -n "${problems}" ]; then
+    echo "${ME}: run ${ts}: a won't-fix notice is not shown posted, so the owner may not know of the closure:" >&2
+    sed 's/^/  /' <<<"${problems}" >&2
+    echo "  Fix: read ${log} and ${NOTICES}; check Notion for tickets this run set to Won't Fix, and post each one's notice to the owner by hand (athena:epic-clustering -> Won't-fix notices), or reopen the ticket." >&2
+  fi
+  # DND-1758: a veto the record cannot state, or a grant request the server
+  # refused for a reason other than lacking the tool or the class, is loud.
+  # no_tool and class_unsupported are the expected fallback until the server
+  # ships the class, so they are recorded and quiet.
+  problems="$(grep -e ' veto=UNSTATED ' -e ' veto=by-hand refused:' -e ' veto=by-hand malformed_result' <<<"${NOTICE_LINES}" || true)"
   [ -n "${problems}" ] || return 0
-  echo "${ME}: run ${ts}: a won't-fix notice is not shown posted, so the owner may not know of the closure:" >&2
+  echo "${ME}: run ${ts}: a won't-fix notice's veto is not the grant the server should have given, or is not recorded:" >&2
   sed 's/^/  /' <<<"${problems}" >&2
-  echo "  Fix: read ${log} and ${NOTICES}; check Notion for tickets this run set to Won't Fix, and post each one's notice to the owner by hand (athena:epic-clustering -> Won't-fix notices), or reopen the ticket." >&2
+  echo "  Fix: read ${log} and ${NOTICES}. veto=UNSTATED: the poster skipped epic-clustering veto-form; veto=by-hand refused:<code> or malformed_result: the server refused or garbled the ticket.wontfix_veto request (ai/contracts/athena-events.md -> Owner approval grants -> The \`ticket.wontfix_veto\` class). The by-hand notice still lets the owner veto in Notion." >&2
 }
 # finish <exit> <outcome> — every tick that spawned a session ends here. It
 # writes runs/<ts>.run and sends ONE harness-lane drain request re: it

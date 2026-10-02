@@ -1616,8 +1616,9 @@ FIX
 # git error. A caller must read anything but 0 as not eligible.
 GRANT_CLASSES = %w[merge.pr_only_workflow].freeze
 # Classes the contract declares that no diff decides: the server executes a
-# priority.transition or a calendar.rsvp itself, and the gate never redeems one.
-NON_DIFF_GRANT_CLASSES = %w[priority.transition calendar.rsvp].freeze
+# priority.transition, a calendar.rsvp or a ticket.wontfix_veto itself, and
+# the gate never redeems one.
+NON_DIFF_GRANT_CLASSES = %w[priority.transition calendar.rsvp ticket.wontfix_veto].freeze
 GRANT_WORKFLOW_FILE = %r{\A\.github/workflows/[^/]+\.ya?ml\z}.freeze
 # The workflows rule 3 scans for a caller. Case-insensitive on purpose: a caller
 # this check fails to list is a caller it fails to see, so the listing widens.
@@ -4221,6 +4222,8 @@ def grant_self_test(tmp, check, run_br, mkrepo, wf, put, deploy_wf, pr_wf)
    ["priority.transition (a grant class no diff decides)", %w[--grant-eligible priority.transition],
     "not decided over a diff"],
    ["calendar.rsvp (a grant class no diff decides, ratified 2026-10-02)", %w[--grant-eligible calendar.rsvp],
+    "not decided over a diff"],
+   ["ticket.wontfix_veto (a grant class no diff decides, DND-1758)", %w[--grant-eligible ticket.wontfix_veto],
     "not decided over a diff"],
    ["--grant-eligible with no class", %w[--base] + [b, "--head", h, "--repo", d, "--grant-eligible"],
     "needs an owner approval grant class"],

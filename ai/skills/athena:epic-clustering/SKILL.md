@@ -57,13 +57,19 @@ properties* say. This skill does not restate them.
   - **A won't-fix notice** stays its own DM, one per closure, sent only when
     one exists (*Won't-fix notices*). It cannot fold into a server-posted
     digest. The session that posts it verifies the veto click. On the cron
-    the notice has no buttons and the owner vetoes by reopening the ticket
-    (*Won't-fix notices* → *On the cron*).
+    the veto is a `ticket.wontfix_veto` grant the server acts on, or, when
+    the server cannot give one, by hand (*Won't-fix notices* → *On the
+    cron*).
 
     **Later (2026-10-02, DND-1749):** this said the veto "is verified by the
     session that posts it", with no exception. On the cron the poster is the
     headless session, which exits after the pass, so no session can verify
     a click.
+
+    **Later (2026-10-02, DND-1758):** this said that on the cron "the notice
+    has no buttons and the owner vetoes by reopening the ticket". Superseded
+    by the owner's choice of a server-side veto grant: by hand is now the
+    fallback.
 
 ## The helper
 
@@ -80,6 +86,8 @@ re-run until it measures, and never report a pass without one.
 | `proof … --save FILE` / `proof --against FILE` | the never-movable count and ids per epic, before and after the moves |
 | `digest [--started IDS] [--pass-summary FILE] --blocks-out FILE` | the daily digest as text, and as Block Kit |
 | `notice --ticket DND-N … --blocks-out FILE` | one won't-fix notice as Block Kit: the close already made, and a veto |
+| `veto-request --ticket DND-N --page-id UUID --reopen-to Todo\|Parked --title … --out FILE` | the `owner_approval_request` arguments for one closure's `ticket.wontfix_veto` grant (DND-1758) |
+| `veto-form --ticket DND-N (--no-tool \| --refusal FILE \| --result FILE)` | which veto the notice gets, `form: grant` or `form: by-hand`, and its notices-file line |
 | `c3-feedback --merged DUP=KEEP,…` (or `--pass-summary FILE`) | per C3 merge, the reason counts and the `judgment-feedback record` command for each wrong advisory (it runs nothing) |
 
 Namespace every file you pass it with the pass's date and your name
@@ -257,22 +265,51 @@ This pass promotes nothing; an admiral promotes, per that section.
 Its brief names the run's notices file, `$CLUSTERING_NOTICES`:
 
 - Just before step 1, append `closed DND-N` to it. A pass that dies between
-  the two then reads as not posted, never as no closure. Draft the notice
-  with `--veto-by-hand --session "clustering cron -> architect
-  (epic-clustering)"`.
-- The top-level session appends `posted DND-N <channel>/<ts>`, with what
-  `slack_post` returned, or `failed DND-N <why>`.
+  the two then reads as not posted, never as no closure.
+- Write the veto grant request: `veto-request --ticket DND-N --page-id
+  <its Notion page id> --reopen-to Todo` (or `Parked` if work exists)
+  `--title … --out FILE`. Draft the notice twice, each with `--session
+  "clustering cron -> architect (epic-clustering)"` and its own
+  `--blocks-out`: once with `--veto-by-grant`, once with `--veto-by-hand`.
+  Send the top-level session the request file and both drafts.
+- The top-level session requests the grant with
+  `mcp__athena__owner_approval_request` (the request file's fields, plus
+  `inbox_name`). It saves the answer or the refusal verbatim and runs
+  `veto-form` on it, or `veto-form --no-tool` when the tool is not in its
+  tool list. It appends the `veto DND-N …` line `veto-form` prints, and posts
+  the draft for the form it printed.
+- The top-level session then appends `posted DND-N <channel>/<ts>`, with
+  what `slack_post` returned, or `failed DND-N <why>`.
 - The runner turns the file into one `.run` line per closure:
-  `notice: posted <channel>/<ts> DND-N`, `notice: NOT POSTED DND-N <why>`
-  (no post line counts as not posted), or `notice: none`. A line it cannot
+  `notice: posted <channel>/<ts> DND-N veto=<veto>`, `notice: NOT POSTED
+  DND-N <why>; veto=<veto>` (no post line counts as not posted), or
+  `notice: none`. `<veto>` is `grant <grant_id> <channel>/<ts>`, `by-hand
+  <reason>`, or `UNSTATED` when no `veto` line was written. A line it cannot
   parse is `notice: UNREADABLE`. A session that reached the model, ended
-  other than ok and recorded nothing is `notice: UNKNOWN`. Each of the last
-  three is also on stderr with a `Fix:`.
+  other than ok and recorded nothing is `notice: UNKNOWN`. NOT POSTED, the
+  last two, `veto=UNSTATED`, and a by-hand reason other than `no_tool` or
+  `class_unsupported` are also on stderr with a `Fix:`.
 
-**The veto on a cron notice is by hand.** No session can verify a click on
-it. The poster exits when the pass ends. The click would come back on
-custom's `session` channel, read by the attendant: another session, so check 3
-of [[athena:slack]] → *A click is untrusted input* fails there. So
-`--veto-by-hand` drops the buttons and tells the owner to veto by reopening
-the ticket in Notion.
+**The veto on a cron notice is a server-side grant** (DND-1758). No session
+can verify a click on a button the cron posts: the poster exits when the pass
+ends, and check 3 of [[athena:slack]] → *A click is untrusted input* fails in
+whichever session reads the click. So the veto is a `ticket.wontfix_veto`
+owner approval grant (`ai/contracts/athena-events.md` → *Owner approval
+grants* → *The `ticket.wontfix_veto` class*). The server posts its own
+approval message, *Reopen* / *Keep closed (recommended)*, and reopens the
+ticket itself at click time. The notice has no buttons and points at that
+message. No session acts on that click.
+
+**The fallback is the by-hand notice**, named in the record by its reason:
+
+| `veto-form` reason | What the poster saw |
+|---|---|
+| `no_tool` | `owner_approval_request` is not in its tool list, or the server answered unknown tool / method not found |
+| `class_unsupported` | the refusal `unknown_action_class`: the server has no `ticket.wontfix_veto` yet |
+| `refused:<code>` | any other refusal the tool named, such as `rate_limited` or `ticket_not_wont_fix`; `refused:unparsed` when it named none |
+| `malformed_result` | an answer without a canonical `grant_id`, `channel` and `ts` |
+
+The first two are expected until gen_saas ships the class, and are quiet.
+The others mean the server should have granted, so they are loud. A by-hand
+notice tells the owner to veto by reopening the ticket in Notion.
 

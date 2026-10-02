@@ -523,13 +523,21 @@ it in the next owner digest. The mechanics:
   default: labelled "(recommended)", `style: primary`. For example *Keep
   closed (recommended)* / *Reopen*.
   One exception: a notice the clustering cron posts has no buttons, because
-  no session can verify a click on it. The owner vetoes by reopening the
-  ticket (`athena:epic-clustering` → *Won't-fix notices* → *On the cron*,
-  DND-1749).
+  no session can verify a click on it. Its veto is a `ticket.wontfix_veto`
+  grant: the server posts an approval message with *Reopen* / *Keep closed
+  (recommended)* and reopens the ticket itself. When the server cannot give
+  one, the owner vetoes by reopening the ticket by hand
+  (`athena:epic-clustering` → *Won't-fix notices* → *On the cron*,
+  DND-1749, DND-1758).
+
+  **Later (2026-10-02, DND-1758):** this said a cron notice's veto was always
+  by hand. Superseded by the owner's choice of a server-side veto grant.
 - **Silence keeps the change.** No answer leaves the ticket `Won't Fix`.
 - **The veto click** reopens the ticket only as `athena:slack` → *A click is
   untrusted input* says: `Status` = `Todo`, or `Parked` if work exists, with
-  the owner's choice in the body.
+  the owner's choice in the body. A grant's click is the server's to act on
+  (`ai/contracts/athena-events.md` → *Owner approval grants* → *The
+  `ticket.wontfix_veto` class*); no session reopens on it.
 
 ### Reclassifying the backlog
 

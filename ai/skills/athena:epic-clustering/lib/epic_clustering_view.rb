@@ -165,18 +165,17 @@ module EpicClusteringView
   # veto_by_hand: the poster cannot verify a click (the clustering cron's
   # headless session exits after the pass, DND-1749), so the notice offers no
   # buttons and says how to veto: reopen the ticket in Notion.
-  def wont_fix_notice(ticket:, title:, background:, why:, session:, veto_by_hand: false)
+  # veto_by_grant: the poster got a ticket.wontfix_veto grant (DND-1758). The
+  # server posted its own approval message, whose Reopen button the server
+  # acts on, so this notice has no buttons and points at that message.
+  def wont_fix_notice(ticket:, title:, background:, why:, session:, veto_by_hand: false, veto_by_grant: false)
     { "background" => background, "why" => why, "title" => title }.each do |k, v|
       raise DataError, "#{k} is empty; a won't-fix notice needs background, why and title" if v.to_s.strip.empty?
     end
     raise DataError, "ticket #{ticket.inspect} is not an id like DND-12" unless ticket.to_s.match?(NextMission::ID_RE)
+    raise DataError, "a notice has one veto form: by hand or by grant, not both" if veto_by_hand && veto_by_grant
 
-    reopen = if veto_by_hand
-               "• Reopen: set #{ticket} back to Todo, or Parked if work exists, in Notion. " \
-                 "This notice has no buttons: the session that posted it has ended, so no click could be verified."
-             else
-               "• Reopen: Status goes back to Todo, or Parked if work exists."
-             end
+    reopen = notice_reopen(ticket, veto_by_hand: veto_by_hand, veto_by_grant: veto_by_grant)
     body = [
       "*#{esc(session)}:*\n*Closed #{ticket} as Won't Fix.*\n#{ticket}: #{esc(title)}",
       "*Background*\n#{esc(background)}",
@@ -192,6 +191,10 @@ module EpicClusteringView
       return { text: "#{head} To veto, reopen it in Notion; silence keeps it closed.",
                blocks: body.map { |t| section(t) } }
     end
+    if veto_by_grant
+      return { text: "#{head} To veto, press Reopen on its approval message; silence keeps it closed.",
+               blocks: body.map { |t| section(t) } }
+    end
 
     buttons = NOTICE_BUTTONS.map do |label, choice, primary|
       b = { "type" => "button", "text" => { "type" => "plain_text", "text" => label },
@@ -201,5 +204,17 @@ module EpicClusteringView
     end
     { text: "#{head} Reopen to veto; silence keeps it closed.",
       blocks: body.map { |t| section(t) } + [{ "type" => "actions", "elements" => buttons }] }
+  end
+
+  def notice_reopen(ticket, veto_by_hand:, veto_by_grant:)
+    if veto_by_hand
+      "• Reopen: set #{ticket} back to Todo, or Parked if work exists, in Notion. " \
+        "This notice has no buttons: the session that posted it has ended, so no click could be verified."
+    elsif veto_by_grant
+      "• Reopen: press Reopen on the approval message Athena sent for #{ticket}. The server sets it back " \
+        "to Todo, or Parked if work exists, and says so on that message."
+    else
+      "• Reopen: Status goes back to Todo, or Parked if work exists."
+    end
   end
 end

@@ -3578,18 +3578,26 @@ owner's user writing a line, is one the owner accepted.
 The allowlist is a **closed** list of named classes. The owner ratifies every
 class. `merge.pr_only_workflow` and `priority.transition` were ratified
 2026-09-25; `calendar.rsvp` was ratified 2026-10-02 at about 14:09Z by the
-owner's verified click (DND-1744 holds the record):
+owner's verified click (DND-1744 holds the record); `ticket.wontfix_veto` was
+ratified 2026-10-02 at about 15:01Z by the owner's verified click, choosing a
+server-side won't-fix veto grant class over the other options (DND-1758
+holds the record):
 
 **Later (2026-10-02, DND-1744):** this line read "The owner ratifies every
 class; ratified 2026-09-25", over the first two rows only. Superseded by the
-owner's ratification of `calendar.rsvp`, recorded above. The list stays
-closed: these three rows are the whole allowlist.
+owner's ratification of `calendar.rsvp`, recorded above.
+
+**Later (2026-10-02, DND-1758):** this line said "these three rows are the
+whole allowlist", after DND-1744. Superseded by the owner's ratification of
+`ticket.wontfix_veto`, recorded above. The list stays closed: these four
+rows are the whole allowlist.
 
 | Class | Typed target | Consumer | What one grant permits |
 | --- | --- | --- | --- |
 | `merge.pr_only_workflow` | `{repo, base_ref, head_sha}` | `integration-gate --owner-approval-grant`, the requesting machine | `integration-gate` passes its exit 4 for that one head SHA, and only when the diff is eligible (*Eligibility for `merge.pr_only_workflow`*) |
 | `priority.transition` | `{item_id, transition}` | the gen_saas server, at click time | one `promote`, `restore` or `dismiss` of one priority item (*Priority index*) |
 | `calendar.rsvp` | `{event_id, response}` | the gen_saas server, at click time | one RSVP, `response`, on one event in the owner's own primary calendar, sent with `sendUpdates=all`; the event must be in that owner's synced set for the owner-local day. Single use; its click window closes at the earlier of 12 hours after the post and the event's end (*The `calendar.rsvp` class*) |
+| `ticket.wontfix_veto` | `{ticket, page_id, reopen_to}` | the gen_saas server, at click time | one reopen of one ticket the fleet closed `Won't Fix`: its Status back to `reopen_to`, only while it is still `Won't Fix`, plus one appended paragraph recording the veto. Single use; its click window is 7 days (*The `ticket.wontfix_veto` class*) |
 
 **Later (2026-09-28):** `merge.pr_only_workflow` was built to pass the exit 4
 a workflow edit raised. Under `~/.claude/CLAUDE.md` → *Owner approval policy*
@@ -3632,6 +3640,17 @@ re-scoping or closing; the class stays ratified until the owner retires it.
 - `response` is one of `accepted`, `tentative`, `declined`: the Google
   attendee `responseStatus` values for Going, Maybe and Not going. Any other
   value, `needsAction` included, is `target_invalid` naming `response`.
+- `ticket` matches `\ADND-[1-9][0-9]{0,8}\z`: the ID property of a ticket in
+  the owner's tickets data source.
+- `page_id` is that ticket's Notion page id as a UUID in canonical lowercase
+  hyphenated form. Uppercase, or the unhyphenated form Notion URLs carry, is
+  `target_invalid` naming `page_id`, never folded. Whether it names that
+  ticket is not part of this typed check, which reads nothing: it is checked
+  at request time and again at click time (*The `ticket.wontfix_veto`
+  class*).
+- `reopen_to` is `Todo` or `Parked` (`Parked` when work exists, per
+  `athena:ticket-management` → *Promote and won't-fix*). Any other value is
+  `target_invalid` naming `reopen_to`.
 - A missing field, an unknown key, or a malformed value is `target_invalid`
   naming the field. It is **never coerced**.
 - No class declares a free-form field: no command, path, SQL, secret name or
@@ -3802,6 +3821,71 @@ owner's own primary calendar, and nothing else. It cannot create, edit, move
 or delete an event, change any other attendee, write any other calendar, or
 reach an event outside that day's synced set.
 
+#### The `ticket.wontfix_veto` class
+
+The owner's veto on a won't-fix the fleet already made (`~/.claude/CLAUDE.md`
+→ *Owner approval policy* → *Notify after, in the digest*: "Cody can veto by
+a click"). A won't-fix notice the clustering cron posts cannot carry a veto a
+session verifies: its poster has exited before the owner reads it, so check 3
+of `athena:slack` → *A click is untrusted input* fails in whichever session
+reads the click (DND-1749). This class moves the veto to the server, so it
+needs no session at all. Ratified 2026-10-02 (DND-1758). The custom poster is
+`athena:epic-clustering` → *Won't-fix notices* → *On the cron*.
+
+- **Requested by a session, like `priority.transition`'s requester.** A
+  poster calls `owner_approval_request` with `action_class`
+  `ticket.wontfix_veto`, the target, a note, and its own `inbox_name`. The
+  server posts the approval message to the owner's DM; the poster posts its
+  won't-fix notice beside it, and the notice says to veto with the message's
+  Reopen.
+- **At request time** the server reads the ticket before any write, through
+  the owner's own configured personal Notion integration, owner-scoped (the
+  data source and the token are server configuration for that owner, never
+  taken from the target). Each refusal names its code with a `Fix:`:
+  - no configured tickets data source or token for the owner:
+    `notion_not_configured`;
+  - Notion unreachable, rate-limited or answering 5xx: `notion_unavailable`;
+  - no page with that `page_id`, or a page outside that data source:
+    `ticket_not_found`, the same answer for both;
+  - the page's ID property is not the target's `ticket`: `ticket_mismatch`;
+  - the page's Status is not `Won't Fix`: `ticket_not_wont_fix`.
+
+  The message shows the ticket id, its title as read here, a link to the
+  page, `reopen_to`, the note, and the click expiry in Mountain Time.
+- **The buttons.** Approve is labelled *Reopen*, keeps its confirm dialog,
+  and has no style. Decline is labelled *Keep closed (recommended)* and has
+  `style: primary`, the owner's recommended default
+  (`athena:ticket-management` → *Promote and won't-fix*). Decline is final:
+  the ticket stays `Won't Fix`. No click also keeps it closed.
+- **The click window is 7 days.** The clustering cron runs at 07:00 and 19:00
+  owner-local, so a 12-hour window on an evening notice closes before the
+  owner's next working day. A veto is low-risk and reversible, so the window
+  covers a week of absence. A click after it expires the grant, and the update
+  says to reopen the ticket in Notion. No one asks again.
+- **It is single use, consumed by the server at click time.** It has no
+  redeem call: a redeem answers `not_consumable` (*Redeem*). After an
+  approving click the server re-reads the page as at request time. When it is
+  still `Won't Fix` with the same ID, the server sets Status to `reopen_to`
+  and appends one paragraph to the page body: "Reopened by the owner's veto
+  (grant <id>, <time>)." Success moves the grant `redeemed`. Assignee and every
+  other property are left as they are; the next admiral that scopes the ticket
+  normalises them (`athena:ticket-management` → *Status → Assignee map*).
+- **A click on a ticket no longer `Won't Fix` writes nothing.** The owner may
+  have reopened it by hand already. The grant stays `approved`, the refusal
+  is logged with a `Fix:`, and the final update names the ticket's current
+  Status. A failed Notion write is the same: nothing more is written, and the
+  update says to reopen it by hand.
+- **The routed fact is a record, not a request.** Step 5 of *The click*
+  routes the decision to the requester's inbox. The session that reads it
+  relays it and never reopens the ticket itself: the server already did, or
+  said why not. It may read `owner_approval_status` to see `redeemed`.
+
+**What it can reach.** The Status of one page in the owner's own tickets data
+source, from `Won't Fix` to `Todo` or `Parked` only, and one appended
+paragraph on that page. It cannot change any other property, page, data
+source or workspace, delete anything, or reach a ticket that is not
+`Won't Fix`.
+
 #### The approval message
 
 Only the server renders an approval message, from the grant's binding.
@@ -3819,7 +3903,9 @@ Only the server renders an approval message, from the grant's binding.
   A longer note is refused.
 - It has two buttons, **Approve** (`style: primary`, with a confirm dialog) and
   **Decline**. Each carries its own grant token (*The grant token*). Decline is
-  terminal and records the decline.
+  terminal and records the decline. A `ticket.wontfix_veto` message shows
+  them as *Reopen* and *Keep closed (recommended)*, with the primary style on
+  Decline (*The `ticket.wontfix_veto` class*).
 - **An approval message is immutable to callers.** `slack_update` and
   `slack_delete` on the `{channel, ts}` of any grant are refused with
   `approval_message_immutable`. Only the server updates it.
@@ -3876,7 +3962,7 @@ A grant is in exactly one state:
 | `pending` → `approved` | the click handler | a verified owner click on Approve, inside the click window |
 | `pending` → `declined` | the click handler | a verified owner click on Decline, inside the click window |
 | `pending` → `expired` | the click handler | a verified owner click after the click window closed |
-| `approved` → `redeemed` | the redeem API, for `merge.pr_only_workflow`; the server at click time, for `priority.transition` and `calendar.rsvp` | the first redeem that passes every check of *Redeem*, a successful priority transition, or a successful RSVP |
+| `approved` → `redeemed` | the redeem API, for `merge.pr_only_workflow`; the server at click time, for `priority.transition`, `calendar.rsvp` and `ticket.wontfix_veto` | the first redeem that passes every check of *Redeem*, a successful priority transition, a successful RSVP, or a successful reopen |
 
 - **A grant goes `redeemed` before its redeem answers 200.** The receipt DM
   comes after the transition (*Redeem* → *Success*), so a redeem whose receipt
@@ -3887,7 +3973,8 @@ A grant is in exactly one state:
   receipt and the transition does not.
 
 - **The click window** is 12 hours from the post; for `calendar.rsvp` it
-  closes earlier at the event's end (*The `calendar.rsvp` class*). It is checked on the server's
+  closes earlier at the event's end (*The `calendar.rsvp` class*), and for
+  `ticket.wontfix_veto` it is 7 days (*The `ticket.wontfix_veto` class*). It is checked on the server's
   clock against the row's `click_expires_at` AND against the token's `x`. Both
   must hold. At the boundary instant the grant is expired.
 - **The redeem window** is 2 hours from the approving click
@@ -3929,6 +4016,8 @@ A session asks for an approval with the `athena` MCP tool
   the server creates); the target validates (`target_invalid`); the app exists (`slack_not_configured`); the
   owner Slack user id is set (`owner_slack_user_id_unset`); the machine is
   under 10 requests in the past hour (`rate_limited`, with the seconds to wait).
+  A `ticket.wontfix_veto` request also reads its ticket first (*The
+  `ticket.wontfix_veto` class* → *At request time*).
 - **Order.** The grant row is inserted `pending`, then the message is posted,
   then the row gets its `{channel, ts}`. A failed post sets the row `void` and
   returns the Slack error with a `Fix:`.
@@ -3978,6 +4067,10 @@ grant stays `pending`. Then, for a version-3 token:
    success the grant goes `redeemed`. On a refusal the grant stays
    `approved`, the failure is logged, and the final update says the RSVP
    failed.
+   For an approved `ticket.wontfix_veto`, after the commit, the server reopens
+   the ticket as *The `ticket.wontfix_veto` class* states, as the grant's
+   owner. On success the grant goes `redeemed`. On a refusal the grant stays
+   `approved`, the failure is logged, and the final update says why.
 7. **Final update.** The server replaces the message with its outcome and no
    buttons: Approved or Declined, by whom, when, and for an approved merge grant
    how long it is valid for that head. The update needs no session. For
@@ -4008,7 +4101,7 @@ the body `{grant_id, action_class, target}`. The server answers in this order:
 | the grant exists **and** belongs to the machine's owner, in the query | `not_found`: the same answer as a random id, so it never reveals another owner's grant | 404 |
 | the machine is the one that requested the grant | `wrong_machine` | 422 |
 | the stored grant's class is still on the allowlist | `class_withdrawn` | 422 |
-| the class is consumable by redeem (`priority.transition` and `calendar.rsvp` are not) | `not_consumable` | 422 |
+| the class is consumable by redeem (`priority.transition`, `calendar.rsvp` and `ticket.wontfix_veto` are not) | `not_consumable` | 422 |
 | the digest of the presented binding equals the stored digest | `binding_mismatch`: the grant stays approved for its own binding | 422 |
 | the status is `approved`, or `redeemed` by this same machine for this same digest | `not_approved`, with `status` | 422 |
 | now is before `redeem_expires_at` | `redeem_expired` | 422 |
@@ -4119,12 +4212,16 @@ the body `{grant_id, action_class, target}`. The server answers in this order:
 
 #### The consumers
 
-A grant has **exactly three consumers**, one per class. No other code
+A grant has **exactly four consumers**, one per class. No other code
 redeems one.
 
 **Later (2026-10-02, DND-1744):** this said "exactly two consumers", the gate
 and `Athena.Priorities`. Superseded by the ratified `calendar.rsvp` class,
 whose consumer is the server's RSVP write (consumer 3 below).
+
+**Later (2026-10-02, DND-1758):** this said "exactly three consumers", after
+DND-1744. Superseded by the ratified `ticket.wontfix_veto` class, whose
+consumer is the server's reopen (consumer 4 below).
 
 1. **`integration-gate --owner-approval-grant <id>`**, through
    `ai/bin/owner-grant`.
@@ -4204,6 +4301,9 @@ whose consumer is the server's RSVP write (consumer 3 below).
    `calendar.rsvp` (*The `calendar.rsvp` class*). It is the owner-scoped
    respond DND-1742 adds for the `/priorities` RSVP. There is no redeem call for this
    class, and the gate refuses it.
+4. **`Athena.OwnerApprovals.WontFixVeto`**, called by the server at click
+   time (*The click*), for `ticket.wontfix_veto` (*The `ticket.wontfix_veto`
+   class*). There is no redeem call for this class, and the gate refuses it.
 
 **Why the merge consumer pins the base, and the binding does not.** The merge
 class needs the merged tree to equal the tree at `head_sha`. That holds exactly
@@ -4218,7 +4318,7 @@ Pass-2 gap 3; the decision is D27.
 
 | Operation | Who | Resource | Where checked | On denial |
 | --- | --- | --- | --- | --- |
-| Request an approval | an authenticated machine | the machine owner's own Slack app and owner DM; one allowlisted class and target | `Athena.OwnerApprovals.request/3`, before any write | `unknown_action_class`, `class_not_requestable`, `target_invalid`, `owner_slack_user_id_unset`, `slack_not_configured`, `rate_limited`, a refused derived-identity argument; each with a `Fix:` |
+| Request an approval | an authenticated machine | the machine owner's own Slack app and owner DM; one allowlisted class and target | `Athena.OwnerApprovals.request/3`, before any write | `unknown_action_class`, `class_not_requestable`, `target_invalid`, `owner_slack_user_id_unset`, `slack_not_configured`, `rate_limited`, a refused derived-identity argument, and for `ticket.wontfix_veto` its request-time reads (*The `ticket.wontfix_veto` class*); each with a `Fix:` |
 | Create `calendar.rsvp` grants | the server's own digest send, for owner O only; never a session | O's events in O's synced set for the owner-local day, not yet ended | the digest send (DND-1745), reading events owner-scoped; `Athena.OwnerApprovals.request/3` refuses the class for any machine | `class_not_requestable`, with a `Fix:`; no button for an event outside the set |
 | Decide (click) | the Slack user equal to `owner_slack_user_id`, proven by Slack's signature | the grant named in the verified token, loaded with the app owner's id in the query | `Athena.SlackInteractions.handle_click/3`, then `Athena.OwnerApprovals.decide_by_click/3` | a non-owner is relayed and changes nothing; a bad binding is logged; an expired grant is marked expired; a decided grant answers "already decided" |
 | Redeem | the requesting machine only | the grant, loaded with the machine owner's id in the query | `Athena.OwnerApprovals.redeem/3` | the refusals of *Redeem* |
@@ -4226,6 +4326,7 @@ Pass-2 gap 3; the decision is D27.
 | Update or delete an approval message | nobody but the server | the `{channel, ts}` of any grant | `Athena.Slack`, before any Slack call | `approval_message_immutable` |
 | Priority transition by grant | the server, after an approve | one item, loaded owner-scoped | the shipped `Athena.Priorities` owner functions | `not_found`; the grant stays `approved`, and the final update says so |
 | RSVP by grant | the server, after the owner's click on a digest button | one event in the grant owner's synced set for the owner-local day, read owner-scoped; only the owner's own attendee response on the owner's own primary calendar | the RSVP manager DND-1745 builds, calling the respond DND-1742 adds, re-checking the target before the write | nothing is written; the grant stays `approved`, and the final update says so |
+| Reopen a Won't Fix ticket by grant | the server, after the owner's click on Reopen | one page, in the grant owner's own configured tickets data source, whose ID is the target's `ticket` and whose Status is still `Won't Fix` | `Athena.OwnerApprovals.WontFixVeto.reopen/2`, re-reading the page owner-scoped before the write | nothing is written; the grant stays `approved`, and the final update says why |
 
 - **Deny by default.** An unknown class, target key, status or reason is
   refused, never mapped to a permissive default.
@@ -4242,10 +4343,12 @@ structural:
 
 - The allowlist is a closed list of typed classes, and no class carries a
   free-form command, path, SQL, secret name or machine.
-- A grant has exactly three consumers. The gate maps a class to its evaluator
+- A grant has exactly four consumers. The gate maps a class to its evaluator
   with a closed match, and refuses every other class before any redeem. The
-  server's consumers write one owner-scoped priority row, or the owner's own
-  response on one event in the owner's own primary calendar.
+  server's consumers write one owner-scoped priority row, the owner's own
+  response on one event in the owner's own primary calendar, or one Status
+  (and one appended paragraph) on one Won't Fix ticket in the owner's own
+  tickets data source.
 - The gate reads the **actual diff**: any `infrastructure-as-code`,
   `destructive-migration` or `owner-approval-policy` hit, and any workflow that
   is not `pull_request`-only, is NOT ELIGIBLE.
@@ -4274,7 +4377,9 @@ Stated, not hidden:
 - **The owner's Slack account is the trust root.** A compromised Slack session
   could approve an allowlisted class. The allowlist being low-risk is the
   mitigation. With `calendar.rsvp` that includes sending RSVPs that reach
-  organizers and guests, at most one per meeting in that day's digest.
+  organizers and guests, at most one per meeting in that day's digest. With
+  `ticket.wontfix_veto` it includes reopening a ticket the fleet closed Won't
+  Fix, which is reversible by closing it again.
 - **The finest binding is the machine.** Machine tokens are per machine, not
   per session, so a sibling session on the requesting machine could redeem the
   identical binding. That is the same action on the same SHA.

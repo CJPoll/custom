@@ -94,6 +94,11 @@ look like an empty one*).
   verify a click there either. A cron notice has no buttons; the owner vetoes
   by reopening the ticket (`athena:epic-clustering` → *Won't-fix notices* →
   *On the cron*).
+
+  **Later (2026-10-02, DND-1758):** the owner ratified that server-side veto,
+  the `ticket.wontfix_veto` grant class. A cron notice's veto is now that
+  grant's approval message, and by hand only when the server cannot give one.
+  The notice is still its own DM, not folded into the digest.
 - The per-domain "top N leasable" lists stay, after section 3, under "Up
   next". The owner called the current digest helpful; nothing in the ask
   removes them.

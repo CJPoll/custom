@@ -111,14 +111,27 @@ case "$(cat "$d/mode" 2>/dev/null || echo ok)" in
   nodigest)  : >"$CLUSTERING_RECEIPT"; echo "moved 0, merged 0, closed 0" >"$CLUSTERING_SUMMARY"; exit 0 ;;
   wontfix)   : >"$CLUSTERING_RECEIPT"; echo "moved 0, merged 0, closed 0, won't fix 3" >"$CLUSTERING_SUMMARY"
              printf 'closed DND-901\nclosed DND-902\nclosed DND-903\n' >>"$notices"
+             # DND-1758: the poster records which veto form each notice got.
+             printf 'veto DND-901 grant aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee D0FAKE0001/1700000000.000099\n' >>"$notices"
              printf 'posted DND-901 D0FAKE0001/1700000000.000100\n' >>"$notices"
+             printf 'veto DND-902 by-hand no_tool\n' >>"$notices"
              printf 'failed DND-902 slack_post refused the blocks\n' >>"$notices"
+             exit 0 ;;
+  fallback)  : >"$CLUSTERING_RECEIPT"; echo "moved 0, merged 0, closed 0, won't fix 2" >"$CLUSTERING_SUMMARY"
+             printf 'closed DND-906\nveto DND-906 by-hand class_unsupported\nposted DND-906 D0FAKE0001/1700000000.000400\n' >>"$notices"
+             printf 'closed DND-907\nveto DND-907 by-hand refused:rate_limited\nposted DND-907 D0FAKE0001/1700000000.000500\n' >>"$notices"
+             exit 0 ;;
+  unstated)  : >"$CLUSTERING_RECEIPT"; echo "moved 0, merged 0, closed 0, won't fix 1" >"$CLUSTERING_SUMMARY"
+             printf 'closed DND-908\nposted DND-908 D0FAKE0001/1700000000.000600\n' >>"$notices"
+             exit 0 ;;
+  badveto)   : >"$CLUSTERING_RECEIPT"; echo "moved 0, merged 0, closed 0, won't fix 1" >"$CLUSTERING_SUMMARY"
+             printf 'closed DND-909\nveto DND-909 grant NOT-A-UUID D0FAKE0001/1700000000.000700\nposted DND-909 D0FAKE0001/1700000000.000800\n' >>"$notices"
              exit 0 ;;
   badnotice) : >"$CLUSTERING_RECEIPT"; echo "moved 0, merged 0, closed 0, won't fix 1" >"$CLUSTERING_SUMMARY"
              printf 'closed DND-904\nposted nonsense\n' >>"$notices"
              exit 0 ;;
   crlf)      : >"$CLUSTERING_RECEIPT"; echo "moved 0, merged 0, closed 0, won't fix 1" >"$CLUSTERING_SUMMARY"
-             printf 'closed DND-905\r\nposted DND-905 D0FAKE0001/1700000000.000200\r\n' >>"$notices"
+             printf 'closed DND-905\r\nveto DND-905 by-hand no_tool\r\nposted DND-905 D0FAKE0001/1700000000.000200\r\n' >>"$notices"
              exit 0 ;;
   fail)      : >"$CLUSTERING_RECEIPT"; echo "the pass fell over"; exit 7 ;;
   nosummary) : >"$CLUSTERING_RECEIPT"; exit 0 ;;
@@ -200,6 +213,15 @@ notice_brief() { # <file>
     && grep -qF -- '--veto-by-hand' "$1" && grep -qF 'right BEFORE the status change' "$1" \
     && ! grep -qF 'do nothing else yourself:' "$1"
 }
+# DND-1758: a cron notice's veto is a server-side ticket.wontfix_veto grant.
+# The poster requests it with owner_approval_request, records the veto form
+# veto-form prints, and falls back to the by-hand notice when the server
+# cannot grant one, so the record says which form the owner got.
+veto_brief() { # <file>
+  grep -qF 'mcp__athena__owner_approval_request' "$1" && grep -qF 'veto-request' "$1" \
+    && grep -qF 'veto-form' "$1" && grep -qF -- '--veto-by-grant' "$1" && grep -qF -- '--no-tool' "$1" \
+    && grep -qF 'veto DND-N' "$1" && grep -qF 'form: grant' "$1" && grep -qF 'form: by-hand' "$1"
+}
 for when in MORNING EVENING; do
   rc="$(run_runner "$c" CLUSTERING_NOW="${!when}" -- --dry-run)"
   if [ "$rc" = 0 ] && notice_brief "$c/runner.out" && grep -qF "$(sd "$c")/runs/<ts>.notices" "$c/runner.out" \
@@ -207,6 +229,11 @@ for when in MORNING EVENING; do
     ok "the ${when,,} dry-run brief has the session post each won't-fix notice and record it (DND-1749)"
   else
     bad "dry-run ${when,,} notice instruction" "rc=$rc out=$(cat "$c/runner.out")"
+  fi
+  if [ "$rc" = 0 ] && veto_brief "$c/runner.out"; then
+    ok "the ${when,,} dry-run brief requests a ticket.wontfix_veto grant per notice and records its veto form (DND-1758)"
+  else
+    bad "dry-run ${when,,} veto grant instruction" "rc=$rc out=$(cat "$c/runner.out")"
   fi
 done
 
@@ -340,9 +367,9 @@ fi
 c="$(new_case)"; echo wontfix >"$c/mode"
 rc="$(run_runner "$c" CLUSTERING_NOW="$EVENING")"
 run_rec="$(newest "$c" run)"; nf="${run_rec%.run}.notices"
-if [ "$rc" = 0 ] && grep -qx 'notice: posted D0FAKE0001/1700000000.000100 DND-901' "$run_rec" \
-   && grep -qx 'notice: NOT POSTED DND-902 slack_post refused the blocks' "$run_rec" \
-   && grep -qx "notice: NOT POSTED DND-903 (no post recorded in ${nf})" "$run_rec" \
+if [ "$rc" = 0 ] && grep -qx 'notice: posted D0FAKE0001/1700000000.000100 DND-901 veto=grant aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee D0FAKE0001/1700000000.000099' "$run_rec" \
+   && grep -qx 'notice: NOT POSTED DND-902 slack_post refused the blocks; veto=by-hand no_tool' "$run_rec" \
+   && grep -qx "notice: NOT POSTED DND-903 (no post recorded in ${nf}); veto=UNSTATED (no veto line in ${nf})" "$run_rec" \
    && [ "$(grep -c '^notice: ' "$run_rec")" = 3 ]; then
   ok "a pass with three won't-fix closures writes one notice: line each: posted, NOT POSTED with its why, NOT POSTED unrecorded"
 else
@@ -359,7 +386,7 @@ c="$(new_case)"; echo badnotice >"$c/mode"
 rc="$(run_runner "$c" CLUSTERING_NOW="$EVENING")"
 run_rec="$(newest "$c" run)"; nf="${run_rec%.run}.notices"
 if [ "$rc" = 0 ] && grep -qx "notice: UNREADABLE ${nf} line 2: posted nonsense" "$run_rec" \
-   && grep -qx "notice: NOT POSTED DND-904 (no post recorded in ${nf})" "$run_rec"; then
+   && grep -qx "notice: NOT POSTED DND-904 (no post recorded in ${nf}); veto=UNSTATED (no veto line in ${nf})" "$run_rec"; then
   ok "a malformed notices line is named UNREADABLE in .run, never dropped, and its closure still reads NOT POSTED"
 else
   bad "malformed notice line" "rc=$rc run=$(cat "$run_rec" 2>&1)"
@@ -368,11 +395,50 @@ fi
 c="$(new_case)"; echo crlf >"$c/mode"
 rc="$(run_runner "$c" CLUSTERING_NOW="$EVENING")"
 run_rec="$(newest "$c" run)"
-if [ "$rc" = 0 ] && grep -qx 'notice: posted D0FAKE0001/1700000000.000200 DND-905' "$run_rec" \
+if [ "$rc" = 0 ] && grep -qx 'notice: posted D0FAKE0001/1700000000.000200 DND-905 veto=by-hand no_tool' "$run_rec" \
    && ! grep -q $'\r' "$run_rec"; then
   ok "CRLF line endings in the notices file are read, not reported UNREADABLE"
 else
   bad "crlf notices" "rc=$rc run=$(cat -A "$run_rec" 2>&1)"
+fi
+
+# DND-1758: the fallback is told apart from a grant post. A by-hand notice
+# names its reason; one the server should have granted (any refusal but
+# no_tool or class_unsupported) is loud. A posted notice with no veto line is
+# veto=UNSTATED, loud, never read as either form.
+c="$(new_case)"; echo fallback >"$c/mode"
+rc="$(run_runner "$c" CLUSTERING_NOW="$EVENING")"
+run_rec="$(newest "$c" run)"
+if [ "$rc" = 0 ] && grep -qx 'notice: posted D0FAKE0001/1700000000.000400 DND-906 veto=by-hand class_unsupported' "$run_rec" \
+   && grep -qx 'notice: posted D0FAKE0001/1700000000.000500 DND-907 veto=by-hand refused:rate_limited' "$run_rec" \
+   && ! grep -q 'veto=grant' "$run_rec"; then
+  ok "a by-hand fallback notice reads veto=by-hand <reason> in .run, never veto=grant (DND-1758)"
+else
+  bad "veto fallback lines" "rc=$rc run=$(cat "$run_rec" 2>&1)"
+fi
+if grep -q 'DND-907' "$c/runner.err" && grep -q 'refused:rate_limited' "$c/runner.err" && grep -q 'Fix:' "$c/runner.err" \
+   && ! grep -q 'DND-906' "$c/runner.err" && grep -q 'outcome=ok exit=0' "$run_rec"; then
+  ok "a refused grant request is loud with a Fix:; the expected class_unsupported fallback is not (DND-1758)"
+else
+  bad "veto refused loud" "err=$(cat "$c/runner.err")"
+fi
+c="$(new_case)"; echo unstated >"$c/mode"
+rc="$(run_runner "$c" CLUSTERING_NOW="$EVENING")"
+run_rec="$(newest "$c" run)"; nf="${run_rec%.run}.notices"
+if [ "$rc" = 0 ] && grep -qx "notice: posted D0FAKE0001/1700000000.000600 DND-908 veto=UNSTATED (no veto line in ${nf})" "$run_rec" \
+   && grep -q 'veto=UNSTATED' "$c/runner.err" && grep -q 'Fix:' "$c/runner.err"; then
+  ok "a posted notice with no veto line reads veto=UNSTATED, loud with a Fix: (DND-1758)"
+else
+  bad "veto unstated" "rc=$rc run=$(cat "$run_rec" 2>&1) err=$(cat "$c/runner.err")"
+fi
+c="$(new_case)"; echo badveto >"$c/mode"
+rc="$(run_runner "$c" CLUSTERING_NOW="$EVENING")"
+run_rec="$(newest "$c" run)"; nf="${run_rec%.run}.notices"
+if [ "$rc" = 0 ] && grep -qx "notice: UNREADABLE ${nf} line 2: veto DND-909 grant NOT-A-UUID D0FAKE0001/1700000000.000700" "$run_rec" \
+   && grep -qx "notice: posted D0FAKE0001/1700000000.000800 DND-909 veto=UNSTATED (no veto line in ${nf})" "$run_rec"; then
+  ok "a malformed veto line is UNREADABLE, and its notice reads veto=UNSTATED, never a grant (DND-1758)"
+else
+  bad "malformed veto line" "rc=$rc run=$(cat "$run_rec" 2>&1)"
 fi
 
 # A session that reached the model and failed may have closed a ticket before
