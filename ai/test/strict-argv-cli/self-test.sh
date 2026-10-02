@@ -124,7 +124,7 @@ accepted() {
 echo "strict-argv CLI suite (tools under ${BIN})"
 
 # --- Ruby checks: unknown / stray / repeated ------------------------------------
-for t in check-agent-size check-bin-help check-generic-skills check-pipefail-grep check-ruby-floor check-guard-messages check-hooks-registered check-tool-risk; do
+for t in check-agent-size check-bin-help check-forge-stub-guard check-generic-skills check-pipefail-grep check-ruby-floor check-guard-messages check-hooks-registered check-tool-risk; do
   refused "${t}: a typo of --self-test is refused, not run as the live check" "--self-tset" "${t}" --self-tset
   refused "${t}: a stray word is refused" "stray" "${t}" stray
   refused "${t}: --self-test twice is refused" "--self-test given more than once" "${t}" --self-test --self-test
@@ -135,6 +135,10 @@ refused "check-guard-messages: a valueless --root is refused" "--root needs a va
 refused "check-guard-messages: --root does not swallow --self-test" "--root needs a value" check-guard-messages --root --self-test
 refused "check-guard-messages: --root twice is refused" "--root given more than once" check-guard-messages --root "${REPO}" --root "${REPO}"
 refused "check-guard-messages: --root with --self-test is refused" "--self-test" check-guard-messages --self-test --root "${REPO}"
+
+# check-forge-stub-guard --root (DND-1666)
+refused "check-forge-stub-guard: a valueless --root is refused" "--root needs a value" check-forge-stub-guard --root
+refused "check-forge-stub-guard: --root with --self-test is refused" "--self-test" check-forge-stub-guard --self-test --root "${REPO}"
 
 # check-hooks-registered --norm
 refused "check-hooks-registered: a valueless --norm is refused, not normalised as the empty string" "--norm needs a value" check-hooks-registered --norm

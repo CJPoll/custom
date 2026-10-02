@@ -1,0 +1,673 @@
+#!/usr/bin/ruby
+# frozen_string_literal: true
+#
+# check-forge-stub-guard -- a test suite that puts a gh or glab stub on PATH
+# must source ai/lib/forge-stub-guard.sh, arm it, and verify it (DND-1666).
+#
+# WHY THIS EXISTS
+#
+# A suite stubs `gh` by writing a stub into a directory and prepending that
+# directory to PATH. When the stub is missing or lacks its execute bit, PATH
+# lookup skips it and finds the REAL gh further down: the test calls the live
+# forge with no error, and can pass against live data (measured during
+# DND-1510). DND-1647 added ai/lib/forge-stub-guard.sh and converted the 10
+# suites that stubbed gh/glab on PATH. Nothing stopped a NEW suite from
+# stubbing on PATH without the helper, so the class could come back silently.
+# This check is that backstop.
+#
+# WHICH FILES
+#
+#   Every path `git ls-files --cached` lists (committed or staged) that is a
+#   regular file, a TEST file by ai/lib/first_party.rb's `test_path?` (a
+#   `test/` directory segment, or a `*.self-test.sh` file), and shell (a .sh /
+#   .bash extension, or a shebang naming sh, bash, zsh, ksh or dash). An
+#   untracked suite is read once it is staged.
+#
+# WHAT IS FLAGGED
+#
+#   A suite STUBS A FORGE CLI ON PATH when, in code (see WHAT IS CODE), it
+#     1. writes a file whose name is one of STUBBED_TOOLS (gh, glab) into a
+#        directory D: a `>` / `>>` redirection target, or the destination
+#        (last operand) of cp, ln, install or mv, or a tee target; and
+#     2. puts D on PATH: D is an element of a `PATH=` value (`export PATH=`,
+#        `env -i PATH=`, `PATH=... cmd` all included), or of any `NAME=`
+#        value that itself holds `$PATH` (`BASE_PATH="${D}:${PATH}"`).
+#   D is compared as written, after removing quotes and spelling `${NAME}` as
+#   `$NAME`: `"${TMP}/bin"` and `$TMP/bin` are the same directory.
+#
+#   Such a suite must, in code:
+#     * source the helper: `. X` or `source X` where X's basename is
+#       forge-stub-guard.sh, or X is `$VAR` and VAR is assigned such a path in
+#       the same file;
+#     * call fsg_arm, and, when fsg_arm names its tools, name every tool the
+#       suite stubs on PATH (fsg_arm's default is gh glab);
+#     * call fsg_verify (a guard whose exit 97 the suite swallowed is caught
+#       only there).
+#   Each missing piece is reported with the stub write's line.
+#
+#   A gh stub that is never put on PATH (chosen by an env var such as
+#   ATHENA_GH_BIN) is not flagged: PATH lookup cannot fall through past it.
+#
+# WHAT IS CODE
+#
+#   Quote state is tracked across lines, as the shell does. Comments, heredoc
+#   bodies (a fixture a test writes out) and single-quoted text are data.
+#   Double-quoted text is data except for `$( ... )` inside it, and except
+#   that a redirection target or a PATH value is read whole, quotes included.
+#
+# WHAT IT DOES NOT MODEL (a lexical scan; named, not hidden)
+#
+#   * A stub whose NAME is computed: `printf ... > "$dir/$name"`, a loop
+#     `for t in gh glab; do ... > "$D/$t"`, a helper function taking the name.
+#   * A stub written to a relative path (`cd "$D"; cat > gh`), or copied into a
+#     directory operand (`cp "$SRC/gh" "$D/"`).
+#   * D put on PATH through a variable whose value does not itself hold
+#     `$PATH` (`P="$D"; PATH="$P:$PATH"`), or through `PATH+=`.
+#   * The ORDER the helper requires (fsg_arm before the suite's own PATH
+#     prepend; fsg_verify last), and whether fsg_verify's status is counted.
+#   * Code inside `bash -c '...'` (single-quoted, so read as data).
+#   * Non-shell test code (a Ruby `--self-test` that stubs gh on PATH): the
+#     helper is a shell library and such code cannot source it.
+#   * A call to the real CLI by absolute path (the helper cannot see it
+#     either).
+#
+# A file that cannot be read, or whose heredoc or quote never closes, is a
+# FAILURE ("could not scan"), never a pass. So is a discovery git cannot answer
+# (COULD NOT LOOK), and one that finds no test shell file or no suite stubbing
+# a forge CLI on PATH (FOUND NOTHING): this repo has both, so zero means the
+# scan is broken.
+#
+# THERE IS NO SUPPRESSION MARKER: an inline "ignore" comment is writable by the
+# same diff it would excuse. Source the helper.
+#
+# EXTENDING THE TOOL LIST: STUBBED_TOOLS below. DND-1667 (other tools' PATH
+# stubs, same helper) adds names there; fsg_arm takes the same names.
+#
+# Deliberately gem-free (stdlib only); run with bare `ruby`.
+
+require "open3"
+require "tmpdir"
+require "fileutils"
+require "tempfile"
+
+require_relative "../lib/first_party"
+
+REPO = File.expand_path("../..", __dir__)
+
+# The forge CLIs a suite may not stub on PATH without the helper. fsg_arm's
+# default guard set is the same list.
+STUBBED_TOOLS = %w[gh glab].freeze
+FSG_DEFAULT_TOOLS = %w[gh glab].freeze
+HELPER_BASENAME = "forge-stub-guard.sh"
+HELPER_REL = "ai/lib/#{HELPER_BASENAME}"
+
+USAGE = <<~TXT.freeze
+  Usage:
+    ai/bin/check-forge-stub-guard               scan this repo: fail (naming
+                                                file:line) on any test suite
+                                                that stubs #{STUBBED_TOOLS.join('/')} on PATH
+                                                without #{HELPER_REL}
+    ai/bin/check-forge-stub-guard --root DIR    scan the git checkout at DIR
+    ai/bin/check-forge-stub-guard --self-test   deterministic, hermetic suite
+    ai/bin/check-forge-stub-guard --help        this text
+
+  Exit 0 = every suite that stubs a forge CLI on PATH is guarded. Exit 1 = at
+  least one is not (each named), a file could not be scanned, or discovery
+  could not run or found nothing. Exit 2 = usage error.
+TXT
+
+FIX_TEXT = "Fix: in each suite named above, source the helper and use it the " \
+           "DND-1647 way: `. \"<path-to>/#{HELPER_REL}\"`, then `fsg_arm " \
+           "\"${TMP}/forge-guard\"` BEFORE the suite prepends its stub directory " \
+           "to PATH (so PATH reads stub, guard, real CLI), `fsg_require_stubs " \
+           "<stub_dir> <name>...` once the stubs exist, and `fsg_verify` at the end " \
+           "with a non-zero return counted as a failure. A suite that builds PATH " \
+           "itself must put \"${FSG_DIR}\" right behind its stub directory. See " \
+           "#{HELPER_REL}'s header and ai/test/lead-time/self-test.sh. There is no " \
+           "suppression marker."
+
+# ---------------------------------------------------------------------------
+# File classification
+
+SHELL_EXT = /\.(?:sh|bash)\z/.freeze
+SHELL_SHEBANG = %r{\A#!\s*\S*(?:/|\s)(?:env\s+)?(?:(?:ba|z|k|da)?sh)\b}.freeze
+
+def shell_file?(rel, text)
+  rel =~ SHELL_EXT || text.lines.first.to_s =~ SHELL_SHEBANG ? true : false
+end
+
+# ---------------------------------------------------------------------------
+# Lexing: which characters are code
+
+HEREDOC_AT = /\A<<(-?)\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\2/.freeze
+
+# Lexes a whole file. Returns { lines: [[lineno, text, code_flags]], open: why }
+# where code_flags[i] is true when text[i] is shell code (not a quote's
+# content, a comment, or a heredoc body) and `open` names a heredoc or quote
+# still open at end of file (nil when everything closed). Heredoc body lines
+# are not returned at all.
+def lex(text)
+  out = []
+  stack = [:code] # :code, :subst ($( ... )), :dq, :sq, :ansi ($'...')
+  docs = []       # heredocs opened on the current line, closed after it
+  open_docs = []
+  text.each_line.with_index(1) do |raw, n|
+    line = raw.chomp
+    unless open_docs.empty?
+      strip, word = open_docs.first
+      body = strip ? line.sub(/\A\t+/, "") : line
+      open_docs.shift if body == word
+      next
+    end
+    flags = Array.new(line.size, false)
+    i = 0
+    prev = nil
+    while i < line.size
+      c = line[i]
+      top = stack.last
+      case top
+      when :sq
+        stack.pop if c == "'"
+      when :ansi
+        if c == "\\"
+          i += 1
+        elsif c == "'"
+          stack.pop
+        end
+      when :dq
+        if c == "\\"
+          i += 1
+        elsif c == '"'
+          stack.pop
+        elsif c == "$" && line[i + 1] == "("
+          flags[i] = flags[i + 1] = true
+          stack.push(:subst)
+          i += 1
+        end
+      else # :code or :subst
+        flags[i] = true
+        if c == "\\"
+          flags[i + 1] = true if i + 1 < line.size
+          i += 1
+        elsif c == "'" && prev == "$"
+          stack.push(:ansi)
+        elsif c == "'"
+          stack.push(:sq)
+        elsif c == '"'
+          stack.push(:dq)
+        elsif c == "#" && (prev.nil? || prev =~ /[\s;&|(]/)
+          flags[i] = false
+          break
+        elsif c == "$" && line[i + 1] == "("
+          flags[i + 1] = true
+          stack.push(:subst)
+          i += 1
+        elsif c == "<" && line[i + 1] == "<"
+          if line[i + 2] == "<"
+            flags[i + 1] = flags[i + 2] = true
+            i += 2 # a here-STRING, not a heredoc
+          elsif (m = line[i..].match(HEREDOC_AT))
+            docs << [m[1] == "-", m[3]]
+            (i...(i + m[0].size)).each { |k| flags[k] = true }
+            i += m[0].size - 1
+          else
+            flags[i + 1] = true
+            i += 1
+          end
+        elsif c == "(" && top == :subst
+          stack.push(:subst)
+        elsif c == ")" && top == :subst
+          stack.pop
+        end
+      end
+      prev = c
+      i += 1
+    end
+    out << [n, line, flags]
+    open_docs.concat(docs)
+    docs = []
+  end
+  open = if !open_docs.empty?
+           "heredoc <<#{open_docs.first.last} never closes"
+         elsif stack.last != :code
+           "a #{{ sq: 'single quote', ansi: "$'...' quote", dq: 'double quote',
+                  subst: '$( substitution' }[stack.last]} never closes"
+         end
+  { lines: out, open: open }
+end
+
+# ---------------------------------------------------------------------------
+# Words and paths
+
+# One shell word starting at `i` (quotes and `${...}` kept whole); "" if none.
+WORD_RE = /\G(?:"(?:[^"\\]|\\.)*"|'[^']*'|\$\{[^}]*\}|\\.|[^\s;&|<>()"'\\])+/.freeze
+
+def word_at(line, i)
+  i += 1 while i < line.size && line[i] =~ /[ \t]/
+  m = WORD_RE.match(line, i)
+  m ? m[0] : ""
+end
+
+# The spelling a path is compared in: quotes removed, `${NAME}` as `$NAME`, no
+# trailing slash.
+def norm(expr)
+  s = expr.delete("\"'").gsub(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/, '$\1')
+  s.length > 1 ? s.sub(%r{/+\z}, "") : s
+end
+
+def split_path(expr)
+  norm(expr).split("/", -1).then { |parts| [parts[0..-2].join("/"), parts.last] }
+end
+
+def code_at?(flags, i)
+  flags[i] == true
+end
+
+# Matches of `re` in `line` whose first character is code.
+def code_matches(line, flags, re)
+  found = []
+  pos = 0
+  while (m = re.match(line, pos))
+    found << m if code_at?(flags, m.begin(0))
+    pos = m.begin(0) + 1
+  end
+  found
+end
+
+# ---------------------------------------------------------------------------
+# Per-file analysis
+
+FILE_CMDS = %w[cp ln install mv].freeze
+SEP_RE = /(?:&&|\|\||[;&|()]|\s)/.freeze
+
+# [[lineno, tool, dir]] for every stub of a STUBBED_TOOLS name the file writes.
+def stub_writes(lexed)
+  writes = []
+  lexed[:lines].each do |(n, line, flags)|
+    # Redirections: `>`, `>>`, `>|`, `N>` -- never `>&`.
+    code_matches(line, flags, />>?\|?/).each do |m|
+      next if m.begin(0).positive? && line[m.begin(0) - 1] == ">" # second char of >>
+      next if line[m.end(0)] == "&"
+
+      dir, base = split_path(word_at(line, m.end(0)))
+      writes << [n, base, dir] if STUBBED_TOOLS.include?(base)
+    end
+    # cp/ln/install/mv: the last operand of the command. tee: every operand.
+    code_matches(line, flags, /(?<![\w.\/-])(cp|ln|install|mv|tee)(?=[ \t])/).each do |m|
+      ops = []
+      i = m.end(0)
+      loop do
+        w = word_at(line, i)
+        break if w.empty?
+
+        ops << w unless w.start_with?("-")
+        i = line.index(w, i) + w.size
+      end
+      dests = m[1] == "tee" ? ops : [ops.last].compact
+      dests.each do |w|
+        dir, base = split_path(w)
+        writes << [n, base, dir] if STUBBED_TOOLS.include?(base)
+      end
+    end
+  end
+  writes
+end
+
+# Every directory the file puts on PATH (normalized), from `PATH=` values and
+# from any `NAME=` value that holds `$PATH`.
+def path_dirs(lexed)
+  dirs = []
+  lexed[:lines].each do |(_n, line, flags)|
+    code_matches(line, flags, /(?<![A-Za-z0-9_$])([A-Za-z_][A-Za-z0-9_]*)=/).each do |m|
+      elems = norm(word_at(line, m.end(0))).split(":")
+      dirs.concat(elems) if m[1] == "PATH" || elems.include?("$PATH")
+    end
+  end
+  dirs.uniq
+end
+
+# { sourced:, armed:, arm_tools:, verified: } for the helper's use in the file.
+def helper_use(lexed)
+  assigns = {}
+  sourced = false
+  armed = false
+  arm_tools = []
+  verified = false
+  lexed[:lines].each do |(_n, line, flags)|
+    code_matches(line, flags, /(?<![A-Za-z0-9_$])([A-Za-z_][A-Za-z0-9_]*)=/).each do |m|
+      assigns[m[1]] = norm(word_at(line, m.end(0)))
+    end
+  end
+  lexed[:lines].each do |(_n, line, flags)|
+    code_matches(line, flags, /(?<![^\s;&|(])(?:\.|source)[ \t]+/).each do |m|
+      target = norm(word_at(line, m.end(0)))
+      var = target[/\A\$([A-Za-z_][A-Za-z0-9_]*)\z/, 1]
+      target = assigns[var].to_s if var
+      sourced = true if File.basename(target) == HELPER_BASENAME
+    end
+    code_matches(line, flags, /(?<![\w-])fsg_arm(?![\w-])/).each do |m|
+      next if line[m.end(0)..] =~ /\A\s*\(\)/ # a definition, not a call
+
+      armed = true
+      i = m.end(0)
+      words = []
+      loop do
+        w = word_at(line, i)
+        break if w.empty?
+
+        words << norm(w)
+        i = line.index(w, i) + w.size
+      end
+      arm_tools.concat(words.size > 1 ? words[1..] : FSG_DEFAULT_TOOLS)
+    end
+    verified = true unless code_matches(line, flags, /(?<![\w-])fsg_verify(?![\w-])/).empty?
+  end
+  { sourced: sourced, armed: armed, arm_tools: arm_tools.uniq, verified: verified }
+end
+
+# => { on_path: [[lineno, tool, dir]], problems: [String], open: why-or-nil }
+def analyze(text)
+  lexed = lex(text)
+  dirs = path_dirs(lexed)
+  on_path = stub_writes(lexed).select { |(_n, _t, dir)| !dir.empty? && dirs.include?(dir) }
+  problems = []
+  unless on_path.empty?
+    use = helper_use(lexed)
+    tools = on_path.map { |(_n, t, _d)| t }.uniq
+    if !use[:sourced]
+      problems << "stubs #{tools.join('/')} on PATH but never sources #{HELPER_REL}"
+    else
+      problems << "sources #{HELPER_BASENAME} but never calls fsg_arm" unless use[:armed]
+      missing = use[:armed] ? tools - use[:arm_tools] : []
+      unless missing.empty?
+        problems << "stubs #{missing.join('/')} on PATH but fsg_arm guards only " \
+                    "#{use[:arm_tools].join(' ')}"
+      end
+      problems << "sources #{HELPER_BASENAME} but never calls fsg_verify" unless use[:verified]
+    end
+  end
+  { on_path: on_path, problems: problems, open: lexed[:open] }
+end
+
+# ---------------------------------------------------------------------------
+# Repository scan
+
+# => { suites: Integer, on_path: Integer, findings: [[rel, lines, problem]],
+#      unreadable: [[rel, why]] }
+def scan(root)
+  suites = 0
+  on_path = 0
+  findings = []
+  unreadable = []
+  FirstParty.git_ls(root, "--cached").sort.each do |rel|
+    next unless FirstParty.test_path?(rel)
+
+    path = File.join(root, rel)
+    next if File.symlink?(path) || !File.file?(path)
+
+    begin
+      text = File.read(path, encoding: "UTF-8")
+      text = text.scrub unless text.valid_encoding?
+    rescue SystemCallError, IOError => e
+      unreadable << [rel, e.message]
+      next
+    end
+    next unless shell_file?(rel, text)
+
+    suites += 1
+    r = analyze(text)
+    if r[:open]
+      unreadable << [rel, "#{r[:open]}; the rest of the file was not scanned"]
+      next
+    end
+    next if r[:on_path].empty?
+
+    on_path += 1
+    lines = r[:on_path].map(&:first).uniq.join(",")
+    r[:problems].each { |p| findings << [rel, lines, p] }
+  end
+  { suites: suites, on_path: on_path, findings: findings, unreadable: unreadable }
+end
+
+def run_check(root = REPO)
+  begin
+    r = scan(root)
+  rescue FirstParty::MeasureError => e
+    warn "check-forge-stub-guard: FAILED -- COULD NOT LOOK: git could not list the " \
+         "tracked files under #{root}: #{e.message}"
+    warn "  Fix: run from inside the repo's git checkout with `git` on PATH " \
+         "(`git -C #{root} ls-files --cached` must succeed); an unanswered " \
+         "discovery is not a clean scan."
+    return 1
+  end
+  unless r[:unreadable].empty?
+    warn "check-forge-stub-guard: FAILED -- could not read or fully scan " \
+         "#{r[:unreadable].size} file(s); a file never read is not a file found clean:"
+    r[:unreadable].each { |(rel, why)| warn "  - #{rel}: #{why}" }
+    warn "  Fix: make each file readable; close an unclosed heredoc or quote (or, " \
+         "if the scanner misread one, repair `lex` in ai/bin/check-forge-stub-guard) " \
+         "and re-run."
+    return 1
+  end
+  if r[:suites].zero? || r[:on_path].zero?
+    warn "check-forge-stub-guard: FAILED -- FOUND NOTHING: git lists " \
+         "#{r[:suites]} test shell suite(s) under #{root}, #{r[:on_path]} of them " \
+         "stubbing #{STUBBED_TOOLS.join('/')} on PATH; this repo has both, so the " \
+         "scan itself is broken."
+    warn "  Fix: check FirstParty.test_path?/shell_file?/stub_writes/path_dirs in " \
+         "ai/bin/check-forge-stub-guard (and that #{root} is the repo root); do " \
+         "not treat zero as clean."
+    return 1
+  end
+  if r[:findings].empty?
+    puts "check-forge-stub-guard: OK -- #{r[:suites]} test shell suite(s) " \
+         "considered, #{r[:on_path]} stubbing #{STUBBED_TOOLS.join('/')} on PATH, all guarded by " \
+         "#{HELPER_BASENAME}; 0 flagged."
+    return 0
+  end
+
+  flagged = r[:findings].map(&:first).uniq.size
+  warn "check-forge-stub-guard: FAILED -- #{flagged} of #{r[:on_path]} suite(s) " \
+       "stubbing #{STUBBED_TOOLS.join('/')} on PATH (#{r[:suites]} test shell " \
+       "suite(s) considered) are not guarded, so a missing or non-executable " \
+       "stub would fall through to the REAL forge CLI (DND-1647/DND-1666):"
+  r[:findings].each { |(rel, lines, p)| warn "  #{rel}:#{lines}: #{p}" }
+  warn "  #{FIX_TEXT}"
+  1
+end
+
+# ---------------------------------------------------------------------------
+# Self-test
+
+def run_self_test
+  ok = true
+  count = 0
+  fail_case = lambda do |name, detail|
+    warn "self-test: FAIL -- #{name}: #{detail}"
+    ok = false
+  end
+  guarded_tail = ". \"$H/ai/lib/forge-stub-guard.sh\"\nfsg_arm \"$T/g\"\nfsg_verify\n"
+
+  # [name, text, want_on_path_tools, want_problem_count]
+  cases = [
+    ["cat > \"${T}/bin/gh\" heredoc + export PATH prepend, no helper",
+     "cat > \"${T}/bin/gh\" <<'EOF'\n#!/bin/sh\nEOF\nexport PATH=\"${T}/bin:${PATH}\"\n", %w[gh], 1],
+    ["printf >\"$D/glab\" (no space) + PATH=$D:$PATH",
+     "printf '#!/bin/sh\\n' >\"$D/glab\"\nPATH=$D:$PATH\n", %w[glab], 1],
+    ["${VAR} and $VAR spell the same directory",
+     "echo x > \"$T/bin/gh\"\nPATH=\"${T}/bin:${PATH}\" run\n", %w[gh], 1],
+    ["quoted var then /gh: \"${S}\"/gh",
+     "echo x > \"${S}\"/gh\nexport PATH=\"${S}:$PATH\"\n", %w[gh], 1],
+    [">> append is a write", "echo x >> \"$B/gh\"\nPATH=\"$B:$PATH\"\n", %w[gh], 1],
+    ["cp destination", "cp \"$SRC/fake\" \"$B/gh\"\nPATH=\"$B:$PATH\"\n", %w[gh], 1],
+    ["ln -s destination", "ln -sf /x/y \"$B/glab\"\nPATH=\"$B:$PATH\"\n", %w[glab], 1],
+    ["install -m 755 destination", "install -m 755 f \"$B/gh\"\nPATH=\"$B:$PATH\"\n", %w[gh], 1],
+    ["tee target", "printf x | tee \"$B/gh\" >/dev/null\nPATH=\"$B:$PATH\"\n", %w[gh], 1],
+    ["env -i PATH= built from a BASE var holding $PATH",
+     "echo x > \"$F/gh\"\nBASE=\"${F}:${PATH}\"\nenv -i PATH=\"$BASE\" cmd\n", %w[gh], 1],
+    ["PATH= inside $( ) inside double quotes",
+     "echo x > \"$F/gh\"\nout=\"$(PATH=\"$F:$PATH\" cmd)\"\n", %w[gh], 1],
+    ["stub write inside $( ) in double quotes",
+     "v=\"$(echo x > \"$F/gh\")\"\nPATH=\"$F:$PATH\"\n", %w[gh], 1],
+    ["guarded: sourced, armed, verified", "echo x > \"$B/gh\"\nPATH=\"$B:$PATH\"\n#{guarded_tail}", %w[gh], 0],
+    ["sourced through a variable", "L=\"$H/ai/lib/forge-stub-guard.sh\"\n. \"${L}\"\nfsg_arm \"$T/g\"\n" \
+                                   "echo x > \"$B/gh\"\nPATH=\"$B:$PATH\"\nfsg_verify\n", %w[gh], 0],
+    ["source keyword", "source \"$H/ai/lib/forge-stub-guard.sh\"\nfsg_arm \"$T/g\"\n" \
+                       "echo x > \"$B/gh\"\nPATH=\"$B:$PATH\"\nfsg_verify\n", %w[gh], 0],
+    ["sourced in a subshell list", "(PATH=\"$B:$PATH\"; . \"$H/ai/lib/forge-stub-guard.sh\"; fsg_arm \"$T/g\"; " \
+                                   "echo x > \"$B/gh\"; fsg_verify)\n", %w[gh], 0],
+    ["sourced but never armed", "echo x > \"$B/gh\"\nPATH=\"$B:$PATH\"\n. \"$H/ai/lib/forge-stub-guard.sh\"\nfsg_verify\n",
+     %w[gh], 1],
+    ["sourced and armed but never verified", "echo x > \"$B/gh\"\nPATH=\"$B:$PATH\"\n" \
+                                             ". \"$H/ai/lib/forge-stub-guard.sh\"\nfsg_arm \"$T/g\"\n", %w[gh], 1],
+    ["fsg_arm naming gh only, glab stubbed", "echo x > \"$B/glab\"\nPATH=\"$B:$PATH\"\n" \
+                                             ". \"$H/ai/lib/forge-stub-guard.sh\"\nfsg_arm \"$T/g\" gh\nfsg_verify\n",
+     %w[glab], 1],
+    ["fsg_arm naming both", "echo x > \"$B/glab\"\nPATH=\"$B:$PATH\"\n" \
+                            ". \"$H/ai/lib/forge-stub-guard.sh\"\nfsg_arm \"$T/g\" gh glab\nfsg_verify\n", %w[glab], 0],
+    ["a comment mentioning the helper is not a source",
+     "echo x > \"$B/gh\"\nPATH=\"$B:$PATH\"\n# . forge-stub-guard.sh; fsg_arm x; fsg_verify\n", %w[gh], 1],
+    ["a quoted message mentioning fsg_arm/fsg_verify is not a call",
+     "echo x > \"$B/gh\"\nPATH=\"$B:$PATH\"\n. \"$H/ai/lib/forge-stub-guard.sh\"\necho 'fsg_arm fsg_verify'\n",
+     %w[gh], 2],
+    # Not on PATH: no flag.
+    ["stub chosen by env var, PATH holds another dir",
+     "printf x > \"$FAKE/gh\"\nexport TOOL_GH=\"$FAKE/gh\"\nout=\"$(PATH=\"$SHIM:$PATH\" x)\"\n", [], 0],
+    ["PATH dir but no gh/glab stub (a git shim)", "echo x > \"$B/git\"\nPATH=\"$B:$PATH\"\n", [], 0],
+    ["gh-athena is not gh", "echo x > \"$B/gh-athena\"\nPATH=\"$B:$PATH\"\n", [], 0],
+    ["2>&1 is not a write", "cmd 2>&1\nPATH=\"$B:$PATH\"\n", [], 0],
+    ["stub write inside a heredoc body is data",
+     "cat > \"$T/fixture.sh\" <<'EOF'\necho x > \"$B/gh\"\nEOF\nPATH=\"$B:$PATH\"\n", [], 0],
+    ["stub write inside single quotes is data",
+     "run_case 'printf x > \"$B/gh\"'\nPATH=\"$B:$PATH\"\n", [], 0],
+    ["multi-line single quote stays data",
+     "run_case 'a\nprintf x > \"$B/gh\"\nb'\nPATH=\"$B:$PATH\"\n", [], 0],
+    ["stub write in a double-quoted message is data",
+     "echo \"would write > $B/gh\"\nPATH=\"$B:$PATH\"\n", [], 0],
+    ["comment line is data", "# echo x > \"$B/gh\"\nPATH=\"$B:$PATH\"\n", [], 0],
+    ["MY_PATH= is not PATH and holds no $PATH", "echo x > \"$B/gh\"\nMY_PATH=\"$B\"\n", [], 0],
+    ["a relative stub (not modeled)", "cd \"$B\"; echo x > gh\nPATH=\"$B:$PATH\"\n", [], 0],
+  ]
+  cases.each do |(name, text, want_tools, want_problems)|
+    count += 1
+    r = analyze(text)
+    got_tools = r[:on_path].map { |(_n, t, _d)| t }.uniq.sort
+    if r[:open]
+      fail_case.call(name, "lexer reported #{r[:open]}")
+    elsif got_tools != want_tools.sort || r[:problems].size != want_problems
+      fail_case.call(name, "want tools #{want_tools.inspect} + #{want_problems} problem(s), " \
+                           "got #{got_tools.inspect} + #{r[:problems].inspect}")
+    end
+  end
+
+  open_cases = [
+    ["unclosed heredoc", "cat <<EOF\nnever closed\n", "heredoc"],
+    ["unclosed single quote", "echo 'never closed\n", "single quote"],
+    ["unclosed double quote", "echo \"never closed\n", "double quote"],
+  ]
+  open_cases.each do |(name, text, want)|
+    count += 1
+    got = analyze(text)[:open].to_s
+    fail_case.call(name, "want an open #{want}, got #{got.inspect}") unless got.include?(want)
+  end
+
+  # Tree scan: only tracked test shell files are read; non-test and non-shell
+  # files with the same text are not.
+  dir = Dir.mktmpdir("check-forge-stub-guard-selftest-")
+  begin
+    bad = "#!/bin/bash\necho x > \"$B/gh\"\nPATH=\"$B:$PATH\"\n"
+    good = "#!/bin/bash\necho x > \"$B/gh\"\nPATH=\"$B:$PATH\"\n#{guarded_tail}"
+    {
+      "ai/test/bad/self-test.sh" => bad,
+      "ai/hooks/x.self-test.sh" => bad,
+      "ai/test/good/self-test.sh" => good,
+      "ai/test/noext/run" => bad,             # shebang: shell
+      "ai/bin/tool" => bad,                   # not a test path
+      "ai/test/rb/self-test.rb" => "#!/usr/bin/ruby\n#{bad}", # not shell
+      "ai/test/open/self-test.sh" => "#!/bin/bash\ncat <<EOF\n",
+    }.each do |rel, body|
+      FileUtils.mkdir_p(File.dirname(File.join(dir, rel)))
+      File.write(File.join(dir, rel), body)
+    end
+    stage_fixture(dir)
+    r = scan(dir)
+    count += 1
+    got = r[:findings].map(&:first).uniq.sort
+    want = ["ai/hooks/x.self-test.sh", "ai/test/bad/self-test.sh", "ai/test/noext/run"]
+    fail_case.call("tree scan findings", "want #{want}, got #{got}") unless got == want
+    count += 1
+    unless r[:unreadable].map(&:first) == ["ai/test/open/self-test.sh"]
+      fail_case.call("tree scan unreadable", "got #{r[:unreadable].inspect}")
+    end
+    count += 1
+    unless r[:suites] == 5 && r[:on_path] == 4
+      fail_case.call("tree scan counts", "want 5 suites / 4 on PATH, got #{r[:suites]} / #{r[:on_path]}")
+    end
+    count += 1
+    code, err = run_check_captured(dir)
+    fail_case.call("run_check on an open heredoc", "exit #{code} #{err}") unless code == 1 && err.include?("could not")
+  ensure
+    FileUtils.rm_rf(dir)
+  end
+
+  if ok
+    puts "check-forge-stub-guard: self-test OK (#{count} cases)"
+    0
+  else
+    warn "check-forge-stub-guard: self-test FAILED"
+    warn "  Fix: the scanner in ai/bin/check-forge-stub-guard no longer classifies " \
+         "the cases above correctly; repair it (do not weaken a case)."
+    1
+  end
+end
+
+# `git init` + stage everything: a fixture's files are TRACKED (staged counts).
+def stage_fixture(dir)
+  [%w[init -q], %w[add -A]].each do |args|
+    _o, e, st = Open3.capture3("git", "-c", "init.defaultBranch=main", "-C", dir, *args)
+    raise "self-test fixture: git #{args.join(' ')} failed in #{dir}: #{e.strip}" unless st.success?
+  end
+end
+
+# [exit code, stderr text] of run_check against a fixture root.
+def run_check_captured(root)
+  saved = $stderr.dup
+  saved_out = $stdout.dup
+  Tempfile.create("check-forge-stub-guard-err-") do |tmp|
+    $stderr.reopen(tmp)
+    $stdout.reopen(File::NULL, "w")
+    code = run_check(root)
+    $stderr.flush
+    return [code, File.read(tmp.path)]
+  end
+ensure
+  $stderr.reopen(saved)
+  $stdout.reopen(saved_out)
+end
+
+if ARGV.include?("--help") || ARGV.include?("-h")
+  puts USAGE
+  exit 0
+end
+require_relative "../lib/strict_argv"
+
+# Parsed BEFORE any check runs (DND-813): an unrecognised argument is refused,
+# never run as the live check.
+CLI_SPEC = { "--self-test" => :switch, "--root" => :value }.freeze
+
+def parse_cli(argv)
+  [StrictArgv.parse(argv, CLI_SPEC), nil]
+rescue StrictArgv::UsageError => e
+  [nil, e.message]
+end
+
+cli, reason = parse_cli(ARGV)
+reason ||= "--root cannot be combined with --self-test" if cli && cli["--self-test"] && cli["--root"]
+if reason
+  warn "check-forge-stub-guard: usage error — #{reason}."
+  warn "  Fix: re-run with only the flags `ai/bin/check-forge-stub-guard --help` " \
+       "lists: no argument (scan this repo), --root DIR, or --self-test. An " \
+       "unrecognised argument is refused, not ignored."
+  exit 2
+end
+exit(cli["--self-test"] ? run_self_test : run_check(cli["--root"] || REPO))

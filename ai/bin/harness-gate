@@ -199,6 +199,13 @@ STATIC_CHECKS = [
   # green when negated. Hermetic (fixtures + a live 141 reproduction).
   ["check-pipefail-grep",       %w[ai/bin/check-pipefail-grep]],
   ["check-pipefail-grep self-test", %w[ai/bin/check-pipefail-grep --self-test]],
+  # DND-1666: a test suite that stubs gh/glab on PATH must source, arm and
+  # verify ai/lib/forge-stub-guard.sh (DND-1647), or a missing or
+  # non-executable stub falls through to the real forge CLI. Lexical; the
+  # shapes it does not model are named in its header. Its end-to-end suite is
+  # the discovered ai/test/check-forge-stub-guard/self-test.sh.
+  ["check-forge-stub-guard",    %w[ai/bin/check-forge-stub-guard]],
+  ["check-forge-stub-guard self-test", %w[ai/bin/check-forge-stub-guard --self-test]],
   # The harness Ruby floor, 3.4 (owner decision 2026-09-27, DND-931; it was a
   # 2.7 floor from d8885f80 until then). Every harness Ruby executable carries
   # the absolute `#!/usr/bin/ruby` shebang, so asdf's per-directory pin in
