@@ -154,9 +154,10 @@ check("landing: nothing written or sent") { path_patches == 1 && notes == 1 && s
 status = JSON.parse(tool(ENVS, "status", "--repo", "custom")[1])
 check("status: the episode is over and the ticket is marked landed") { status["custom/queue"]["episode"].nil? && status["custom/queue"]["ticket_landed"] == true }
 
+reqs_before = requests.size
 code, out, = tool(ENVS, "observe", "--repo", "custom", "--run", "run-6", "--summary-file", SUM)
 check("after landing, still unmeasurable: counts again, no Notion read, nothing sent", out) do
-  code.zero? && out.include?("runs=1") && out.include?("outcome=HANDOFF-LANDED") && sends.size == 1
+  code.zero? && out.include?("runs=1") && out.include?("outcome=HANDOFF-LANDED") && sends.size == 1 && requests.size == reqs_before
 end
 code, out, = tool(ENVS, "observe", "--repo", "custom", "--run", "run-7", "--summary-file", summary_file("meas", queue: [15, 5]))
 check("then a measurable queue: MEASURABLE, the count reset, exit 0", out) { code.zero? && out.include?("runs=0") && out.include?("outcome=MEASURABLE") }

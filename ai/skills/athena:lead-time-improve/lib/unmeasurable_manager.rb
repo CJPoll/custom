@@ -16,8 +16,10 @@
 # Every outcome is a line the run journals verbatim. A port failure is
 # COULD-NOT-LOOK (exit 3), never "already handed off"; the step it failed is
 # retried next run. The state is saved after each step that succeeds, inside
-# the store's lock, so a step done is never repeated in its episode even when
-# a later step or the process fails.
+# the store's lock, so a later step failing never repeats an earlier one.
+# The residual window is at-least-once: a process killed between a step and
+# its save, or a save that fails, lets the next run repeat that one step. A
+# failed save is reported as "<step> done, but the state was not saved".
 
 require_relative "unmeasurable"
 require_relative "unmeasurable_store"
@@ -169,24 +171,34 @@ class LeadTimeUnmeasurableManager
     done = []
     failed = []
     owed.each do |step|
-      case step
-      when :promote
-        @notion.promote(facts[:id])
-        ep["promoted"] = "yes"
-        done << "promoted #{ticket} to Path Promoted"
-      when :note
-        @notion.note(facts[:id], U.ticket_note(repo: repo, phase: phase, runs: runs, run: run, promoted: ep["promoted"]))
-        ep["noted"] = true
-        done << "noted on the ticket"
-      when :alert
-        ep["record"] = write_record(repo, phase, ticket, runs, run, ep)
-        body = U.alert_body(repo: repo, phase: phase, ticket: ticket, runs: runs, run: run, promoted: ep["promoted"], record: ep["record"])
-        ep["alerted"] = @alert.send_alert(U::SLUG, ep["record"], body)
-        done << "alerted on harness-alerts (#{ep['alerted']})"
+      begin
+        case step
+        when :promote
+          @notion.promote(facts[:id])
+          ep["promoted"] = "yes"
+          done << "promoted #{ticket} to Path Promoted"
+        when :note
+          @notion.note(facts[:id], U.ticket_note(repo: repo, phase: phase, runs: runs, run: run, promoted: ep["promoted"]))
+          ep["noted"] = true
+          done << "noted on the ticket"
+        when :alert
+          ep["record"] = write_record(repo, phase, ticket, runs, run, ep)
+          body = U.alert_body(repo: repo, phase: phase, ticket: ticket, runs: runs, run: run, promoted: ep["promoted"], record: ep["record"])
+          ep["alerted"] = @alert.send_alert(U::SLUG, ep["record"], body)
+          done << "alerted on harness-alerts (#{ep['alerted']})"
+        end
+      rescue PortError, SystemCallError => e
+        failed << "#{step} failed: #{e.message}"
+        next
       end
-      save.call
-    rescue PortError, SystemCallError => e
-      failed << "#{step} failed: #{e.message}"
+      begin
+        save.call
+      rescue SystemCallError => e
+        # The step happened; only its record did not. Say so, and stop: the
+        # next run reads the old state and may repeat this step once.
+        failed << "#{step} done, but the state was not saved (#{e.message}), so the next run may repeat it"
+        break
+      end
     end
     refresh_record(repo, phase, ticket, runs, run, ep) if ep["alerted"] && !done.empty? && !owed.include?(:alert)
     head = "#{counted(phase, repo, runs)}; hand-off #{ticket} open (Status #{facts[:status]})"

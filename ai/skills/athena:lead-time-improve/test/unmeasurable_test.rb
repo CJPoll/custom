@@ -436,6 +436,33 @@ Dir.mktmpdir("unmeasurable-mgr-") do |dir|
   check("manager: status refuses a malformed repo name rather than print nothing") { raises?(U::Invalid) { mgr.status(repo: "a/b") } }
 end
 
+# A save that fails after a step that worked: reported as done-but-unsaved,
+# never as the step failing.
+class FailingSaveStore < LeadTimeUnmeasurableStore
+  attr_accessor :fail_when
+
+  def save(entries)
+    raise Errno::ENOSPC, "simulated full disk" if fail_when&.call(entries)
+
+    super
+  end
+end
+Dir.mktmpdir("unmeasurable-mgr-") do |dir|
+  notion = FakeNotion.new
+  alert = FakeAlert.new
+  store = FailingSaveStore.new(File.join(dir, "unmeasurable.json"))
+  mgr = LeadTimeUnmeasurableManager.new(store: store, runs_dir: File.join(dir, "runs"), notion: notion, alert: alert)
+  mgr.handoff(repo: "custom", phase: "queue", ticket: "DND-9001")
+  2.times { |i| mgr.observe(repo: "custom", run: "run-#{i}", summary: summary) }
+  store.fail_when = ->(entries) { entries.dig("custom/queue", "episode", "alerted") }
+  r = mgr.observe(repo: "custom", run: "run-2", summary: summary)
+  check("manager: a save failing after the alert is COULD-NOT-LOOK naming the alert as done, not failed") do
+    j = outcome(r)[:journal]
+    outcome(r)[:outcome] == "COULD-NOT-LOOK" && r[:code] == 3 && alert.sent.size == 1 &&
+      j.include?("alert done, but the state was not saved") && !j.include?("alert failed")
+  end
+end
+
 puts "unmeasurable_test: #{$checks - $failures.size}/#{$checks} passed"
 unless $failures.empty?
   $failures.each { |f| puts "FAIL #{f}" }
