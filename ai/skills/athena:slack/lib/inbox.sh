@@ -31,6 +31,12 @@
 # there is ONE state file, derived from the log channel's `.jsonl` path by a
 # suffix swap and living under $ATHENA_INBOX_ROOT, holding a single cross-source
 # seen-set keyed on `channel + ":" + ts` (Slack's true message identity).
+# The same `seen_keys` also holds the file reader's CLICK keys
+# (`slack:interaction:<channel>:<ts>:<action_ts>:<user_id>`, DND-1785): a
+# `slack.interaction` line names its clicked message's channel:ts, so that
+# cannot be its key. This backstop never sees a click and never computes one;
+# it only has to keep those entries when it rewrites the ring (it appends, so
+# it does), and its exact-match drop never mistakes one for a message key.
 #
 # This skill (the producer-side backstop) owns exactly two keys in that file:
 # the `channels` per-conversation API watermark (moved here from the old

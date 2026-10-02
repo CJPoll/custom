@@ -30,6 +30,24 @@ logchan_dedupe_key() {
   printf '%s:%s\n' "$1" "$2"
 }
 
+# logchan_click_key <channel> <ts> <action_ts> <user_id>
+#
+# The key of a `slack.interaction` line (a Block Kit click), DND-1785. Such a
+# line carries the CLICKED MESSAGE's `channel` and `ts` and no `event_id`, so
+# `channel:ts` names the message, not the click: every click on one message
+# would share it, and the second click would be dropped as already seen. A
+# click's identity is {channel, ts, action_ts, user_id}, and this is the
+# event-level idempotency key ai/contracts/athena-events.md -> "slack.
+# interaction.received is a transient event" defines for it. Its
+# `slack:interaction:` prefix keeps it from ever equalling a message's
+# `channel:ts`, so a click and the message it sits on never suppress each
+# other. logchan_scan builds the same string in jq; this is its shell form and
+# its single statement of the shape.
+logchan_click_key() {
+  [ -n "$1" ] && [ -n "$2" ] && [ -n "$3" ] && [ -n "$4" ] || return 1
+  printf 'slack:interaction:%s:%s:%s:%s\n' "$1" "$2" "$3" "$4"
+}
+
 # logchan_split_complete
 # Reads a byte slice on stdin, writes back ONLY the complete (newline-
 # terminated) prefix. The trailing fragment of a writer that died mid-write is
@@ -65,7 +83,8 @@ logchan_split_complete() {
 # it is the channel-level marker resolved from the registry entry, not a per-line
 # field (DND-260). "slack" is the reference reader's original schema, unchanged:
 # a line's identity is `event_id` (intra-file) and `channel:ts` (cross-source),
-# and a line carrying neither is unreadable. "platform" is the event-platform
+# or for a `slack.interaction` click its tuple key (logchan_click_key), and a
+# line carrying neither is unreadable. "platform" is the event-platform
 # inbox-adapter schema: each line is a routed STATE-CHANGE event carrying
 # `entity_id` plus current fields (a delete carries `entity_id` only) and NO
 # `event_id`/`channel`/`ts`. A platform lane is KEYLESS by contract
@@ -94,7 +113,7 @@ logchan_split_complete() {
 #   * anything else   -- "", a number/object/array/false, or a string carrying a
 #                        newline/tab: a malformed key, so the line is UNREADABLE,
 #                        never read as if it were absent.
-# A "slack" channel ignores `delivery_id`; its identity is event_id/channel:ts.
+# A "slack" channel ignores `delivery_id`; its identity is event_id/channel:ts (a click: its tuple key).
 #
 # `next_offset` advances over COMPLETE LINES ONLY (D-13). That is the whole
 # crash-safety guarantee: the fragment is neither parsed nor counted, and the
@@ -248,7 +267,24 @@ logchan_scan() {
             # for the same reason: deduping on nothing means re-reporting
             # forever, and a rule that says so once should not grow a second
             # spelling. (`usable` is defined once, hoisted above the branch.)
-            (if ($o.channel // "") != "" and ($o.ts // "") != ""
+            #
+            # A CLICK IS NOT ITS MESSAGE (DND-1785). A `slack.interaction` line
+            # carries the `channel`/`ts` of the clicked message, so `channel:ts`
+            # would give every click on one message the same key and drop all
+            # but the first. Its key is the click tuple (logchan_click_key).
+            # Every member must be a non-empty string; one that is missing or
+            # mistyped leaves the line with NO key -- it never falls back to
+            # `channel:ts`, which would silently collapse it onto another
+            # click -- and with no `event_id` either it is unreadable.
+            (def nonempty: if type == "string" and . != "" then . else null end;
+             if $o.kind == "slack.interaction" then
+               [($o.channel | nonempty), ($o.ts | nonempty),
+                ($o.action_ts | nonempty),
+                (if ($o.actor | type) == "object" then ($o.actor.user_id | nonempty)
+                 else null end)] as $c
+               | if ($c | all(. != null))
+                 then ("slack:interaction:\($c | join(":"))" | usable) else null end
+             elif ($o.channel // "") != "" and ($o.ts // "") != ""
              then ("\($o.channel):\($o.ts)" | usable) else null end) as $key
             | (if ($o.event_id | type) == "null" then null
                else ($o.event_id | tostring | usable) end) as $eid

@@ -798,7 +798,11 @@ shared `seen_keys` set in `slack-inbox.state.json` (see Setup). The API scan
 drops anything whose `channel:ts` is already there, and `read-inbox` adds what
 it reports — so **neither source re-reports the other's message**. (`event_id`
 stays the file channel's intra-file key for at-least-once re-appends; the API
-poll never touches it.)
+poll never touches it.) A `slack.interaction` click on the file channel is keyed
+on its own tuple, `slack:interaction:<channel>:<ts>:<action_ts>:<user_id>`, in
+the same `seen_keys`, never on the clicked message's `channel:ts`
+(`ai/contracts/athena-inbox.md` → *Reader obligations*). The API poll never
+sees a click, and its state advance keeps those keys.
 
 The backstop labels each scanned message with the inbox contract's `kind`
 vocabulary — `im` (1:1 DM), `mpim` (group DM), or `mention` — matching the

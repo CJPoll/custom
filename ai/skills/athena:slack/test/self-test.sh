@@ -979,6 +979,28 @@ if [[ "${OUT}" == *"api delivered this one"* ]] \
 else bad "dedupe: read-inbox adds a reported message's channel:ts to the shared seen_keys" \
   "seen_keys=$(jq -c '.seen_keys' "${STATE}") out='${OUT}'"; fi
 
+# 58b. DND-1785: A CLICK IS NOT ITS MESSAGE. The file reader keys a
+#     `slack.interaction` click on its own tuple
+#     (slack:interaction:<channel>:<ts>:<action_ts>:<user_id>), never on the
+#     clicked message's channel:ts. So a click key already in the shared
+#     seen_keys must not make the API scan drop the message it sits on, and the
+#     API-side state advance must keep that click key, or the file reader would
+#     show the click again.
+setup_case
+seed_caches
+printf '{"v":1,"channels":{"D0CODY":"1000.0"},"seen_event_ids":[],"seen_keys":["slack:interaction:D0CODY:2000.5:2000.9:UFAKE00001"]}' > "${STATE}"
+fixture conversations.list '{"ok":true,"channels":[{"id":"D0CODY","user":"UFAKE00001"}],"response_metadata":{"next_cursor":""}}'
+fixture conversations.history "{\"ok\":true,\"messages\":[{\"ts\":\"2000.5\",\"user\":\"${CODY}\",\"text\":\"a message someone clicked on\"}],\"response_metadata\":{\"next_cursor\":\"\"}}"
+run_bin read-inbox
+if [[ "${OUT}" == *"a message someone clicked on"* ]]; then
+  ok "dedupe: a click key in seen_keys does not drop the message it was clicked on (DND-1785)"
+else bad "dedupe: a click key in seen_keys does not drop the message it was clicked on (DND-1785)" "out='${OUT}'"; fi
+if [[ "$(jq -r '.seen_keys | index("slack:interaction:D0CODY:2000.5:2000.9:UFAKE00001")' "${STATE}")" != "null" ]] \
+   && [[ "$(jq -r '.seen_keys | index("D0CODY:2000.5")' "${STATE}")" != "null" ]]; then
+  ok "dedupe: the API state advance keeps the reader's click key beside the message key (DND-1785)"
+else bad "dedupe: the API state advance keeps the reader's click key beside the message key (DND-1785)" \
+  "seen_keys=$(jq -c '.seen_keys' "${STATE}")"; fi
+
 # 59. THE HOOK NEVER ADDS to seen_keys -- doorbell, not door. If it did, the
 #     body would be marked seen before read-inbox ever showed it.
 setup_case

@@ -607,7 +607,7 @@ normal.
     "slack": {
       "kind": "log",
       "path": "walt_ui-slack.jsonl",
-      "dedupe": ["event_id", "channel+ts"],
+      "dedupe": ["event_id", "channel+ts", "channel+ts+action_ts+user_id"],
       "schema_v": [1]
     },
     "gen_saas-mail": {
@@ -649,7 +649,7 @@ tenants MAY use the same channel name for different surfaces.
 |---|---|---|---|
 | `kind` | yes | `"log"` | |
 | `path` | yes | string | Inbox filename, **relative to the root**. Grammar below. |
-| `dedupe` | no | array of string | **Additional** dedupe key families this channel's lines support. Recognised members: `event_id`, `channel+ts`. |
+| `dedupe` | no | array of string | **Additional** dedupe key families this channel's lines support. Recognised members: `event_id`, `channel+ts`, `channel+ts+action_ts+user_id` (a `slack.interaction` click, *Reader obligations*). |
 | `schema_v` | no | array of integer | Line versions this reader understands. Defaults to `[1]`. |
 | `producer` | no | string | Which producer's line schema feeds this channel. `"slack"` (the default when absent) is the Slack-receiver schema; `"platform"` — the event-platform state-change schema — is ingested as of DND-260 (a keyless change stream). Any other value is refused. See *The inbox as an event-platform delivery adapter*. |
 | `stale_after_s` | no | integer ≥ 0, or null | Staleness threshold in seconds: a last delivery older than this is reported `STALE`. Absent → **1800**. `0` or `null` disables it (a channel that is legitimately quiet for long stretches). Any other value is refused. |
@@ -661,8 +661,8 @@ an empty array does not disable dedupe altogether. It declares which key
 families this channel's lines actually carry, so a reader can refuse a channel
 whose lines lack the fields it needs rather than silently deduping on nothing.
 A `dedupe` listing an unrecognised member is a hard error. When the key is
-absent the reader assumes `["event_id", "channel+ts"]` and reports a line
-missing both as unreadable rather than counting it — **except on a
+absent the reader assumes `["event_id", "channel+ts", "channel+ts+action_ts+user_id"]`
+and reports a line it can key on none of them as unreadable rather than counting it — **except on a
 `producer:"platform"` channel**, whose lines carry no dedupe key and are read as
 keyless change events (*A lane `log` channel is a change stream of state-change
 events*, "except reader-side dedupe-by-carried-key"). There the reader computes
@@ -908,7 +908,8 @@ dedupe** for platform lines: platform-producer lines still carry **no** dedupe
 key, and the validator's refusal of `dedupe` on a `producer:"platform"` channel
 **stands unchanged** (*Schema*) — the earlier "registry `dedupe` names the id
 field per channel / `event_id` for both producers" proposal did **not** land.
-Slack channels keep their existing dedupe (`event_id`, `channel+ts`).
+Slack channels keep their existing dedupe (`event_id`, `channel+ts`, and the
+click key `channel+ts+action_ts+user_id`, *Reader obligations*).
 
 **Every `producer:"platform"` line carries `delivery_id`** — lane state-change
 lines and the named delivery kinds (*Platform `log` line kinds*) alike. This is
@@ -1113,6 +1114,31 @@ Consequences, all normative:
     `channel` and `ts` — so `event_id` **cannot** be the cross-source key. Both
     sources MUST share **one** seen-set, in **one** state file. Two state files
     that can disagree is a defect, not redundancy.
+  - **A click is not its message.** A `slack.interaction` line on a Slack
+    channel (a Block Kit click, *Platform `log` line kinds*) carries the
+    `channel` and `ts` of the message that was clicked, and no `event_id`, so
+    `channel:ts` names the message, not the click. Its key is the identity of
+    the click,
+    `slack:interaction:<channel>:<ts>:<action_ts>:<actor.user_id>` — the
+    idempotency key `athena-events.md` → *`slack.interaction.received` is a
+    transient event* defines — held in the same `seen_keys` set. Two clicks on
+    one message are two keys and both are delivered; one click delivered twice
+    is one key and is delivered once. The prefix keeps a click key from ever
+    equalling a message key, so a click and the message it sits on never
+    suppress each other. A click line missing any member, or carrying a
+    non-string, empty, or newline/tab-bearing one, has **no** key: it is
+    unreadable, and the reader MUST NOT fall back to `channel:ts`, which would
+    drop it silently onto another click. The registry declares this family as
+    the `dedupe` member `channel+ts+action_ts+user_id`. The API backstop never
+    sees a click, so it keeps keying messages on `channel:ts`, and it MUST keep
+    the click keys it finds in `seen_keys` when it rewrites the state file.
+
+    **Later (2026-10-02):** every Slack-channel line was keyed on `channel:ts`
+    (or `event_id`), and the recognised `dedupe` members were exactly
+    `event_id` and `channel+ts`. Superseded by DND-1785: a click carries no
+    `event_id` and shares the `channel:ts` of its message, so the second click
+    on any Block Kit message was dropped as already seen, with exit 0. Owner
+    clicks are approvals, so a dropped click was a dropped owner decision.
   - On a `producer:"platform"` channel the reader keeps one seen-set,
     `delivery_id`, which collapses repeated frames of one delivery (*Line
     format*). It is not a dedupe key across changes.
@@ -1170,7 +1196,7 @@ pairs with `walt_ui-slack.state.json`:
 |---|---|
 | `offset` | Bytes consumed. Never advances past a partial final line. |
 | `seen_event_ids` | Intra-file dedupe ring buffer, ≤ 500. |
-| `seen_keys` | Cross-source `channel:ts` dedupe ring buffer, ≤ 500. |
+| `seen_keys` | Cross-source dedupe ring buffer, ≤ 500: a message's `channel:ts`, or a click's `slack:interaction:…` key (*Reader obligations*). |
 | `seen_delivery_ids` | Platform frame-collapse ring buffer (*Line format*, `delivery_id`), ≤ 500. Absent is an empty ring. |
 | `last_api_poll_at` | Last successful backstop poll, for staleness reporting. |
 | `rotated_at` | When this channel last rotated — RFC 3339 UTC with a `Z` suffix. Absent until the first state write, which initialises it to `now` so a new channel does not rotate an almost-empty file. See *Retention*. |
@@ -1344,7 +1370,7 @@ producer. Made explicit:
   consumer's** job, not the platform's. A retry of one `(event, rule)` delivery
   is a repeated frame, which the reader collapses on `delivery_id` (*Line
   format*). The consumer absorbs anything else: for a regular (non-lane)
-  channel by reader-side dedupe over the `event_id` / `channel+ts` seen-sets
+  channel by reader-side dedupe over the `event_id` / `seen_keys` seen-sets
   (next); for a **lane** channel, whose line carries **no** dedupe key, by
   reconciling carried current state against a **source re-query**, so a
   duplicate or redelivery converges to the same set (*A lane `log` channel is a
@@ -1390,7 +1416,10 @@ section.
   `athena-events.md` → *Machine↔owner API binding and the outbound
   return-address dual*. It carries **no body of its own**
   beyond these; the click is a signal, and its `value` is Path-2 untrusted
-  (*Untrusted input*).
+  (*Untrusted input*). The same line can also reach a Slack (`producer`
+  `"slack"`) channel. There it is not read keyless: the reader keys it on the
+  click tuple, never on its `channel:ts` (*Reader obligations*, "A click is
+  not its message").
 
   **Later (2026-09-25):** DND-519. This bullet said `value` "carries the
   server-stamped tagged return address" and listed no `entity_id`. What gen_saas
@@ -1595,8 +1624,9 @@ obligation once; this subsection references it and does **not** restate it.
   and **no** distinct declarable `dedupe_key` dedupe family. `dedupe_key` remains
   only what the reference reader already computes
   (`ai/skills/athena:inbox/lib/logchan.sh` → `logchan_dedupe_key`) — for a Slack
-  line, the derived `channel:ts` (*Reader obligations*, unchanged). The recognised
-  `dedupe` members stay exactly `event_id` and `channel+ts`. `delivery_id` is not
+  line, the derived `channel:ts`, or a click's tuple key (*Reader obligations*).
+  The recognised `dedupe` members are exactly `event_id`, `channel+ts` and
+  `channel+ts+action_ts+user_id`. `delivery_id` is not
   one: it collapses repeated frames of one delivery and never distinguishes
   changes (*Line format*).
 - A **state-based** consumer (the lane case) does **not** dedupe on a carried key
@@ -2970,7 +3000,8 @@ registry no longer provides structurally; refuses any channel path escaping the 
 any channel or message name failing its grammar, and any non-regular file
 (a *registry filename* failing its grammar is skipped, not refused); never parses, counts,
 or advances past a partial final line; counts unknown `v` separately without
-failing; dedupes on `channel:ts` across sources through one shared state file;
+failing; dedupes on `channel:ts` across sources through one shared state file,
+and keys a `slack.interaction` click on its own tuple, never on `channel:ts`;
 collapses repeated frames of one platform delivery on `delivery_id`, and never
 collapses a platform line that has none (*Line format*);
 rotates only at EOF, only when the live file is non-empty, and only after

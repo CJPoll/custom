@@ -116,7 +116,8 @@ An entry looks like this:
   "repo": "/home/cjpoll/dev/<project>/.git",
   "channels": {
     "slack":     { "kind": "log",     "path": "<project>-slack.jsonl",
-                   "dedupe": ["event_id", "channel+ts"], "schema_v": [1] },
+                   "dedupe": ["event_id", "channel+ts", "channel+ts+action_ts+user_id"],
+                   "schema_v": [1] },
     "peer-mail": { "kind": "maildir", "namespace": "agent-mail/peer",
                    "read": "from-server", "write": "to-server", "identity": "athena" }
   } }

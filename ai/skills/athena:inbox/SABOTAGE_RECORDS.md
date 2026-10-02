@@ -1639,3 +1639,23 @@ A bug fix, so the evidence is the unfixed code going red, plus one mutation.
   `expected [0], got [75]`. That is the case the delivery-time comparison
   exists for: a maildir message's mtime is its write into `tmp/`, so an mtime
   comparison hides a message linked into place after the mark.
+
+## DND-1785 (2026-10-02): a second click on one message is not dropped
+
+A bug fix, so the evidence is the unfixed code going red, plus one mutation.
+
+- **Code under test:** `lib/logchan.sh` (the click branch of `logchan_scan`'s
+  key, `logchan_click_key`), `lib/descriptor.sh` (`DESCRIPTOR_DEDUPE_MEMBERS`).
+- **Suite run:** `bash test/self-test.sh` (the `DND-1785` cases in section 3,
+  the descriptor cases, and the end-to-end case after the DND-372 ring).
+- **Before the fix:** `VERDICT: FAIL (19 of 1047 cases)`. The defining
+  failure: `FAIL DND-1785 two distinct clicks on ONE message are both
+  counted` -- `expected [2], got [1]`; and `FAIL DND-1785 a click's dedupe key
+  is the click tuple, not the message's channel:ts` -- `expected
+  [slack:interaction:D01:1788.0001:1788.1001:UFAKE00001], got
+  [D01:1788.0001]`.
+- **After:** `VERDICT: PASS (1047 cases)`.
+- **Mutation, click branch off** (`if $o.kind == "slack.interaction" then` ->
+  `if false then`, so a click falls back to `channel:ts`): `VERDICT: FAIL (17
+  of 1047 cases)`, first `FAIL DND-1785 two distinct clicks on ONE message are
+  both counted`.

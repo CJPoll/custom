@@ -54,11 +54,13 @@ DESCRIPTOR_MAILDIR_KEYS='["kind","namespace","read","write","identity","stale_af
 # a negative, a fraction -- is refused, because a threshold that silently
 # failed to parse would read as "never stale", the dark-channel silence this
 # key exists to break.
-# `event_id` and `channel+ts` are the ONLY recognised dedupe members, because
-# they are the only two keys the reference reader (logchan.sh -> logchan_scan)
-# actually ingests. A dedupe member the reader does not compute is refused so a
-# reader never silently dedupes on nothing.
-DESCRIPTOR_DEDUPE_MEMBERS='["event_id","channel+ts"]'
+# `event_id`, `channel+ts` and `channel+ts+action_ts+user_id` are the ONLY
+# recognised dedupe members, because they are the only keys the reference
+# reader (logchan.sh -> logchan_scan) actually computes. The third is a
+# `slack.interaction` click's key (DND-1785, logchan_click_key). A dedupe member
+# the reader does not compute is refused so a reader never silently dedupes on
+# nothing.
+DESCRIPTOR_DEDUPE_MEMBERS='["event_id","channel+ts","channel+ts+action_ts+user_id"]'
 # `producer` is a log channel's marker for which line schema feeds it. "slack"
 # (the Slack-receiver line schema) is the default when `producer` is absent, so
 # every channel declared without it is a "slack" channel unchanged. "platform"

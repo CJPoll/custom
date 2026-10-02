@@ -453,6 +453,12 @@ assert_contains "the platform-dedupe refusal carries a Fix: clause telling the a
 # the platform lane specifically, not about the dedupe member being wrong.
 assert_ok "the same dedupe key IS accepted on a slack (default) channel, where the reader honours it" \
   descriptor_validate '{"v":1,"repo":"/r/.git","channels":{"a":{"kind":"log","path":"x.jsonl","dedupe":["event_id"]}}}'
+# DND-1785: the click family is a recognised member, because logchan_scan
+# computes it for a `slack.interaction` line.
+assert_ok "DND-1785 the click dedupe member channel+ts+action_ts+user_id is accepted on a slack channel" \
+  descriptor_validate '{"v":1,"repo":"/r/.git","channels":{"a":{"kind":"log","path":"x.jsonl","dedupe":["event_id","channel+ts","channel+ts+action_ts+user_id"]}}}'
+assert_refused "DND-1785 the click dedupe member is refused on a platform lane like any other member" \
+  descriptor_validate '{"v":1,"repo":"/r/.git","channels":{"a":{"kind":"log","path":"x.jsonl","producer":"platform","dedupe":["channel+ts+action_ts+user_id"]}}}'
 
 # read and write MUST differ -- equal ones would make every send land in the
 # directory this identity reads from, so a sender would ingest its own mail.
@@ -736,6 +742,53 @@ res="$(printf '%s\n' "${L1}" "${L2}" | logchan_scan 0 "1" "" "D01:1788.0001")"
 assert_eq "D-17 a line whose channel:ts is already seen is not counted" "1" "$(jq -r .new <<<"${res}")"
 assert_eq "D-17 the cross-source key is channel + \":\" + ts" "D01:1788.0001" \
   "$(logchan_dedupe_key D01 1788.0001)"
+
+# DND-1785: a `slack.interaction` line (a Block Kit click) carries the CLICKED
+# MESSAGE's `channel` and `ts` and no `event_id`. Keyed on `channel:ts`, every
+# click on one message shares one key, so the second click was dropped as
+# "already seen" -- exit 0, nothing reported. A click's identity is the tuple
+# {channel, ts, action_ts, user_id} (athena-events.md -> "slack.interaction.
+# received is a transient event"). Two clicks must both count; one click
+# redelivered must count once. All ids are synthetic.
+CK1='{"v":1,"kind":"slack.interaction","entity_id":"slack:D01:1788.0001","channel":"D01","ts":"1788.0001","action_id":"q1_yes","action_ts":"1788.1001","value":null,"actor":{"user_id":"UFAKE00001","is_owner":true},"delivery_id":"aaaaaaaa-0000-4000-8000-000000000001"}'
+CK2='{"v":1,"kind":"slack.interaction","entity_id":"slack:D01:1788.0001","channel":"D01","ts":"1788.0001","action_id":"q2_no","action_ts":"1788.1002","value":null,"actor":{"user_id":"UFAKE00001","is_owner":true},"delivery_id":"aaaaaaaa-0000-4000-8000-000000000002"}'
+res="$(printf '%s\n' "${CK1}" "${CK2}" | logchan_scan 0 "1" "" "")"
+assert_eq "DND-1785 two distinct clicks on ONE message are both counted" "2" "$(jq -r .new <<<"${res}")"
+assert_eq "DND-1785 two distinct clicks on ONE message are both shown, each under its own key" \
+  "slack:interaction:D01:1788.0001:1788.1001:UFAKE00001 slack:interaction:D01:1788.0001:1788.1002:UFAKE00001" \
+  "$(printf '%s\n' "${CK1}" "${CK2}" | logchan_scan 0 "1" "" "" 1 | jq -r '[.messages[].dedupe_key] | join(" ")')"
+res="$(printf '%s\n' "${CK1}" "${CK1}" | logchan_scan 0 "1" "" "")"
+assert_eq "DND-1785 one click delivered twice in one slice is counted once" "1" "$(jq -r .new <<<"${res}")"
+assert_eq "DND-1785 a click's dedupe key is the click tuple, not the message's channel:ts" \
+  "slack:interaction:D01:1788.0001:1788.1001:UFAKE00001" "$(jq -r '.messages[0].dedupe_key' <<<"${res}")"
+assert_eq "DND-1785 logchan_click_key builds the athena-events click key" \
+  "slack:interaction:D01:1788.0001:1788.1001:UFAKE00001" \
+  "$(logchan_click_key D01 1788.0001 1788.1001 UFAKE00001 2>/dev/null)"
+# A click whose key is already in seen_keys (acked on an earlier read) is a
+# true redelivery: not counted. A DIFFERENT click on that message still is.
+res="$(printf '%s\n' "${CK1}" "${CK2}" | logchan_scan 0 "1" "" "slack:interaction:D01:1788.0001:1788.1001:UFAKE00001")"
+assert_eq "DND-1785 a click already in seen_keys is not counted; the next click on that message is" \
+  "slack:interaction:D01:1788.0001:1788.1002:UFAKE00001" \
+  "$(printf '%s\n' "${CK1}" "${CK2}" | logchan_scan 0 "1" "" "slack:interaction:D01:1788.0001:1788.1001:UFAKE00001" 1 | jq -r '[.messages[].dedupe_key] | join(" ")')"
+assert_eq "DND-1785 (count agrees with the read)" "1" "$(jq -r .new <<<"${res}")"
+# The clicked MESSAGE's own channel:ts in seen_keys (recorded when the message
+# itself was read, from the file or from the API backstop) must not swallow a
+# click on it: a message and a click on it are two different things.
+res="$(printf '%s\n' "${CK1}" | logchan_scan 0 "1" "" "D01:1788.0001")"
+assert_eq "DND-1785 a seen message key (channel:ts) does not suppress a click on that message" "1" "$(jq -r .new <<<"${res}")"
+# Two users clicking the same button at the same action_ts are two clicks.
+CK1_OTHER="$(jq -c '.actor.user_id = "UFAKE00002"' <<<"${CK1}")"
+res="$(printf '%s\n' "${CK1}" "${CK1_OTHER}" | logchan_scan 0 "1" "" "")"
+assert_eq "DND-1785 the same button clicked by two users counts twice" "2" "$(jq -r .new <<<"${res}")"
+# THE MISS: a click line whose identity cannot be computed is UNREADABLE. It
+# must never fall back to channel:ts, which would collapse it onto any other
+# click or message on that message and drop it silently.
+for broken in '.action_ts = null' 'del(.action_ts)' '.action_ts = ""' '.actor.user_id = null' \
+              'del(.actor)' '.actor = "UFAKE00001"' '.action_ts = "1788.1\n001"' '.channel = ""'; do
+  res="$(printf '%s\n' "$(jq -c "${broken}" <<<"${CK1}")" | logchan_scan 0 "1" "" "")"
+  assert_eq "DND-1785 a click with no computable identity [${broken}] is unreadable, not counted" \
+    "0 1" "$(jq -r '"\(.new) \(.unreadable)"' <<<"${res}")"
+done
 
 # D-18: the seen-sets live in a file rewritten on every ack, so unbounded
 # growth is its own failure mode.
@@ -1238,6 +1291,28 @@ assert_eq "DND-372: the ring drops the OLDEST delivery_id first" \
   "d-3" "$(jq -r '.seen_delivery_ids[0]' <<<"${ring_state}")"
 assert_eq "DND-372: the ring keeps the NEWEST delivery_id" \
   "d-502" "$(jq -r '.seen_delivery_ids[-1]' <<<"${ring_state}")"
+
+# DND-1785 end to end, on a SLACK channel declared exactly as the registry
+# declares one: two clicks on one message are both counted and both read, the
+# ack records each click's own key, a click redelivered after the ack is not
+# shown again, and a third click on the same message still is.
+setup_case
+pck="$(make_repo pck)"
+register pck "${pck}" '{"slack":{"kind":"log","path":"ck.jsonl","dedupe":["event_id","channel+ts","channel+ts+action_ts+user_id"],"schema_v":[1]}}'
+printf '%s\n%s\n' "${CK1}" "${CK2}" > "${ATHENA_INBOX_ROOT}/ck.jsonl"
+ckst="$(cd "${pck}" && inbox_status_json)"
+assert_eq "DND-1785: inbox-status counts two clicks on one message as 2 (manager path)" \
+  "2" "$(jq -r '.channels[] | select(.name=="slack") | .new' <<<"${ckst}")"
+ckjs="$(cd "${pck}" && "${BIN}/read-inbox" slack --json 2>/dev/null)"
+assert_eq "DND-1785: the read shows both clicks (count and read agree)" "2" "$(jq -r '.messages | length' <<<"${ckjs}")"
+assert_eq "DND-1785: the ack recorded each click's own key in seen_keys" \
+  "slack:interaction:D01:1788.0001:1788.1001:UFAKE00001,slack:interaction:D01:1788.0001:1788.1002:UFAKE00001" \
+  "$(jq -r '.seen_keys | join(",")' "${ATHENA_INBOX_ROOT}/ck.state.json")"
+CK3="$(jq -c '.action_id = "q3_later" | .action_ts = "1788.1003" | .delivery_id = "aaaaaaaa-0000-4000-8000-000000000003"' <<<"${CK1}")"
+printf '%s\n%s\n' "${CK1}" "${CK3}" >> "${ATHENA_INBOX_ROOT}/ck.jsonl"
+ckjs="$(cd "${pck}" && "${BIN}/read-inbox" slack --json 2>/dev/null)"
+assert_eq "DND-1785: after the ack, a redelivered click is dropped and a third click is shown" \
+  "slack:interaction:D01:1788.0001:1788.1003:UFAKE00001" "$(jq -r '[.messages[].dedupe_key] | join(",")' <<<"${ckjs}")"
 
 # A malformed registry entry is a HARD error, not "this project has no
 # channels": the two are indistinguishable downstream and only one is safe.
