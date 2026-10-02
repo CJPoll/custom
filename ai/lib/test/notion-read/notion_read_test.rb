@@ -163,6 +163,16 @@ begin
     end
   end
 
+  # curl dumps one header block per response; only the final one answers.
+  interim = "HTTP/1.1 100 Continue\r\nRetry-After: 9\r\n\r\n"
+  final = "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\n\r\n"
+  check("Retry-After is read from the final header block only") do
+    NotionRead.retry_after_from(interim + final).nil? &&
+      NotionRead.retry_after_from(interim + final.sub("\r\n\r\n", "\r\nretry-after: 4\r\n\r\n")) == "4" &&
+      NotionRead.retry_after_from("HTTP/1.1 429 Too Many\nRetry-After:  2.5\n\n") == "2.5" &&
+      NotionRead.retry_after_from("").nil?
+  end
+
   check("a caller that passes no retrier gets the one process-wide policy") do
     NotionRead.default_retrier.is_a?(NotionRetry) && NotionRead.default_retrier.equal?(NotionRead.default_retrier)
   end

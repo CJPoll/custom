@@ -60,7 +60,10 @@ run(policy, [[503, "120"], [200, nil]])
 check("an over-long Retry-After is capped at #{NotionRetry::RETRY_AFTER_CAP} (waits #{waits.inspect})") do
   waits == [NotionRetry::RETRY_AFTER_CAP]
 end
-["Wed, 01 Oct 2026 12:09:00 GMT", "0", "-3", "", nil].each do |given|
+policy, waits = fresh
+run(policy, [[429, ".5"], [200, nil]])
+check("a Retry-After of \".5\" is half a second (waits #{waits.inspect})") { waits == [0.5] }
+["Wed, 01 Oct 2026 12:09:00 GMT", "0", "-3", "", "7s", nil].each do |given|
   policy, waits = fresh
   run(policy, [[429, given], [200, nil]])
   check("a Retry-After of #{given.inspect} falls back to the backoff (waits #{waits.inspect})") { waits == [1.0] }
@@ -115,9 +118,13 @@ result, asked = run(policy, [[500, nil], [200, nil]])
 check("a non-retryable failure does not degrade later calls") { result.ok? && asked == [500, 200] && waits == [1.0] }
 
 # --- the real wait is the default, and only an injection replaces it -----------------
-check("the default wait is a real sleep (Kernel#sleep), not a no-op") do
-  src = File.read(File.expand_path("../../notion_retry.rb", __dir__))
-  src.include?("wait: ->(seconds) { sleep(seconds) }") && !src.match?(/ENV\[/)
+check("the default wait is a real sleep, and no env var can shorten it") do
+  policy_src = File.read(File.expand_path("../../notion_retry.rb", __dir__))
+  read_src = File.read(File.expand_path("../../notion_read.rb", __dir__))
+  default_sleeps = policy_src.match?(/def initialize\(wait:\s*->\((\w+)\)\s*\{\s*sleep\(\1\)\s*\}/)
+  # NotionRead's one env read is FLEET_CLAUDE_JSON, where the token entry is.
+  env_reads = [policy_src, read_src].flat_map { |code| code.scan(/\bENV\b(?:\[[^\]]*\])?/) }
+  default_sleeps && env_reads.reject { |r| r == 'ENV["FLEET_CLAUDE_JSON"]' }.empty?
 end
 
 if $failures.empty?

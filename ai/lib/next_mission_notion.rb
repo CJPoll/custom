@@ -50,10 +50,6 @@ class NextMissionNotion
   # Either way the failure raises; it never reads as an empty answer.
   class HttpTransport
     BASE = URI("https://api.notion.com")
-    ATTEMPTS = NotionRetry::ATTEMPTS
-    BACKOFF = NotionRetry::BACKOFF
-    RETRY_AFTER_CAP = NotionRetry::RETRY_AFTER_CAP
-    WAIT_BUDGET = NotionRetry::WAIT_BUDGET
 
     LOOPBACK_HOSTS = %w[127.0.0.1 localhost].freeze
 
@@ -63,7 +59,7 @@ class NextMissionNotion
     def initialize(token, base: BASE, wait: ->(seconds) { sleep(seconds) })
       @token = token
       @base = self.class.checked_base(base)
-      @retry = NotionRetry.new(wait: wait)
+      @retrier = NotionRetry.new(wait: wait)
     end
 
     def self.checked_base(base)
@@ -76,7 +72,7 @@ class NextMissionNotion
     end
 
     def call(method, path, body = nil)
-      result = @retry.run do
+      result = @retrier.run do
         res = request(method, path, body)
         [res.code.to_i, res["Retry-After"], res]
       end

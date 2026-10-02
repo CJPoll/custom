@@ -86,7 +86,7 @@ begin
   server.script(err(429, "rate limited", "Retry-After" => "120"), ok)
   fresh.call.lookup("DND-1203")
   check("an over-long Retry-After is capped (waits #{waits.inspect})") do
-    waits == [NextMissionNotion::HttpTransport::RETRY_AFTER_CAP]
+    waits == [NotionRetry::RETRY_AFTER_CAP]
   end
 
   # A Retry-After that is not a number of seconds (an HTTP date) falls back to
@@ -114,12 +114,12 @@ begin
   server.script(err(503, MEMCACHED))
   outage = fresh.call
   _at, why = outage.lookup("DND-1203")
-  attempts = NextMissionNotion::HttpTransport::ATTEMPTS
+  attempts = NotionRetry::ATTEMPTS
   check("a 5xx that never clears is asked ATTEMPTS (#{attempts}) times (#{server.requests.size})") do
     server.requests.size == attempts
   end
   check("within the wait budget (waits #{waits.inspect})") do
-    waits.size == attempts - 1 && waits.sum <= NextMissionNotion::HttpTransport::WAIT_BUDGET
+    waits.size == attempts - 1 && waits.sum <= NotionRetry::WAIT_BUDGET
   end
   check("and is a failed probe naming the ticket, the status and the tries") do
     f = ProbeFailures.list.first

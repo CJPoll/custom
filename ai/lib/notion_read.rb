@@ -126,7 +126,7 @@ module NotionRead
     reply = result.reply
     raise Error.new("could not reach Notion (curl exit #{reply[:curl_rc]})", "check the network, then re-run") if reply[:curl_rc] != 0
     unless reply[:status] == 200
-      raise Error.new("Notion answered HTTP #{reply[:status]} to #{method} #{path.sub(/\?.*/, '')} #{tries(result)}",
+      raise Error.new("Notion answered HTTP #{reply[:status]} to #{method} #{path.sub(/\?.*/, '')} #{attempts_note(result)}",
                       "re-run; on 401/403 the token or the page share is the owner's to fix", status: reply[:status])
     end
     JSON.parse(reply[:body])
@@ -134,9 +134,20 @@ module NotionRead
     raise Error.new("Notion answered a body that is not JSON", "re-run")
   end
 
-  def tries(result)
+  def attempts_note(result)
     count = result.attempts == 1 ? "after 1 attempt" : "after #{result.attempts} attempts"
     result.retryable && result.degraded ? "#{count} (not retried: an earlier read exhausted its retries)" : count
+  end
+  private_class_method :attempts_note
+
+  # retry_after_from(dump) -> the raw Retry-After of the final response, or
+  # nil. curl's dump holds one header block per response it read (an interim
+  # 1xx, then the final one), split by a blank line; only the last block is
+  # the answer, so an earlier block's value never leaks into it.
+  # NotionRetry.wait_for reads the raw value.
+  def retry_after_from(dump)
+    block = dump.split(/\r?\n\r?\n/).reject { |b| b.strip.empty? }.last.to_s
+    block[/^retry-after:[ \t]*([^\r\n]*)/i, 1]
   end
 
   def request(method, url, token, body)
@@ -159,9 +170,7 @@ module NotionRead
       config << "connect-timeout = 10\nmax-time = 60\nsilent\n"
       out, _err, status = Open3.capture3("curl", "--config", "-", stdin_data: config)
       config.clear
-      # The raw value; NotionRetry.wait_for reads it. The last one wins when
-      # curl dumped more than one header block.
-      retry_after = File.exist?(hdrs) ? File.read(hdrs).scan(/^retry-after:[ \t]*([^\r\n]*)/i).flatten.last : nil
+      retry_after = File.exist?(hdrs) ? retry_after_from(File.read(hdrs)) : nil
       text = File.exist?(resp) ? File.binread(resp).force_encoding(Encoding::UTF_8) : +""
       { curl_rc: status.exitstatus, status: out.strip.to_i, body: text, retry_after: retry_after }
     end
@@ -169,7 +178,7 @@ module NotionRead
     raise Error.new("curl is not on PATH", "install curl")
   end
 
-  # query_all(origin, token, data_source, pace:, filter: nil) -> every row
+  # query_all(origin, token, data_source, pace:, filter: nil, retrier:) -> every row
   # (matching `filter`, a Notion data source filter, when given), following
   # the cursor.
   def query_all(origin, token, data_source, pace:, filter: nil, retrier: default_retrier)
@@ -190,7 +199,7 @@ module NotionRead
     rows
   end
 
-  # children_all(origin, token, page_id, pace:) -> every top-level block of
+  # children_all(origin, token, page_id, pace:, retrier:) -> every top-level block of
   # the page, following the cursor to the LAST block (a line appended to a
   # long body is on its last page).
   def children_all(origin, token, page_id, pace:, retrier: default_retrier)
@@ -209,7 +218,8 @@ module NotionRead
     blocks
   end
 
-  # page(origin, token, page_id, pace:) -> the page object (its properties).
+  # page(origin, token, page_id, pace:, retrier:) -> the page object (its
+  # properties). `retrier:` defaults to default_retrier, as for #read.
   def page(origin, token, page_id, pace:, retrier: default_retrier)
     read(origin, token, "GET", "/v1/pages/#{page_id}", pace: pace, retrier: retrier)
   end

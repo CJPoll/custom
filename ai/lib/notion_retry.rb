@@ -51,11 +51,12 @@ class NotionRetry
 
   # Seconds to wait before retry number `attempt` (1-based). retry_after is
   # the raw header value or nil. A positive number of seconds (a fraction is
-  # kept) is honoured up to the cap; an absent, zero, negative or HTTP-date
-  # value falls back to the backoff step.
+  # kept, ".5" too) is honoured up to the cap. An absent, zero, negative,
+  # HTTP-date or otherwise non-numeric value ("7s") falls back to the
+  # backoff step.
   def self.wait_for(retry_after, attempt)
     given = retry_after.to_s.strip
-    seconds = given.match?(/\A\d+(\.\d+)?\z/) ? given.to_f : 0.0
+    seconds = given.match?(/\A\d*\.?\d+\z/) ? given.to_f : 0.0
     return [seconds, RETRY_AFTER_CAP].min if seconds.positive?
 
     BACKOFF.fetch(attempt - 1, BACKOFF.last)

@@ -19,8 +19,10 @@ ai/skills/athena:ticket-management/test/self-test.sh; never prod.
                                           (ticket-classify --epic, DND-1057)
 
 A spec file is {"status": N, "body": {...}}, or {"status": N, "raw": "..."}
-to answer a body that is not JSON. A missing spec is a 599, so a
-test that forgot one fails loudly. ANY other method or path is logged with
+to answer a body that is not JSON. A missing spec is a 418, so a
+test that forgot one fails loudly, on the first try: a 4xx other than 429
+is never retried (ai/lib/notion_retry.rb, DND-1649), where a 5xx would sit
+through real retry waits. ANY other method or path is logged with
 "unexpected": true and answered 405: the suite asserts none happened (there
 is no code path to a Notion write).
 
@@ -69,7 +71,7 @@ def spec(name):
         with open(os.path.join(SPEC_DIR, name)) as fh:
             return json.load(fh)
     except (OSError, ValueError):
-        return {"status": 599, "body": {"error": "no spec " + name}}
+        return {"status": 418, "body": {"error": "no spec " + name}}
 
 
 def route(method, path):
