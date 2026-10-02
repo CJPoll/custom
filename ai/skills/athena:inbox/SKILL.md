@@ -362,6 +362,11 @@ message content. Rules, in `lib/thinking.sh`:
   ts each print a named `athena:inbox:` line on stderr with a `Fix:`, and leave
   the exit status and stdout (the `--json` document) unchanged. A batch with no
   DM/thread line from anyone looks nothing up and prints nothing.
+- **A deleted message is its own outcome (DND-1804).** When the status tool
+  exits 4 (the message no longer exists in Slack), the line reads `no thinking
+  status on <channel>/<ts>: the message no longer exists`, with a `Fix:` that
+  says there is nothing to set or retry. It never tells the reader to set the
+  status by hand.
 - **Test seam.** `ATHENA_INBOX_STATUS_BIN` replaces the status tool. The
   self-test points it at a stub and `ATHENA_PRIVATE_ROOT` at a synthetic
   overlay, so no test calls Slack or reads the machine's overlay.

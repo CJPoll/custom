@@ -195,6 +195,17 @@ for every owner DM/thread line, not only ones you will reply to. So:
   line carries one, else `owner-unresolved`, `timeout` or `malformed-target`.
   You may set the status by hand for that conversation before replying.
 
+**Later (2026-10-02, DND-1804):** a deleted message is not a status failure.
+When the owner deletes a message before the read sets its status, Slack
+answers `invalid_thread_ts`, and `bin/status` exits 4. `read-inbox` then
+prints `athena:inbox: no thinking status on <channel>/<ts>: the message no
+longer exists in Slack …`, with a `Fix:`. Do not set it by hand: there is no
+conversation to show it in. Add the ledger line `<utc-ts> <channel>:<ts>
+status-gone message-deleted`, and reply only if the deleted message still
+needs an answer. Measured: walt_ui's two `invalid_thread_ts` failures that day
+were owner DMs that no longer existed. A top-level message with no thread
+takes the status on its own ts.
+
 ## What you may do (tiers)
 
 - **Tier 0 — always, brief-authorized:** reply **only into the originating

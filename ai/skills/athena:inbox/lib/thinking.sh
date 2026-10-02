@@ -142,6 +142,15 @@ thinking_set() {
     # stdin is /dev/null: the tool must never read the remaining targets.
     err="$(timeout "${THINKING_CALL_TIMEOUT_S}" "${status_bin}" "${ch}" "${ts}" 2>&1 >/dev/null </dev/null)"; rc=$?
     [ "${rc}" -eq 0 ] && continue
+    # Exit 4: the message was deleted before the call (DND-1804). Nothing is
+    # wrong with the key or the tool, so this is named as its own outcome,
+    # never as a failure to fix by hand.
+    if [ "${rc}" -eq 4 ]; then
+      printf 'athena:inbox: no thinking status on %s/%s: the message no longer exists in Slack (deleted before the status call).\n' "${ch}" "${ts}" >&2
+      [ -z "${err}" ] || printf '%s\n' "${err}" | sed 's/^/  /' >&2
+      printf '  Fix: nothing to set or retry. The read and the ack are unaffected; reply only if the deleted message still needs an answer.\n' >&2
+      continue
+    fi
     if [ "${rc}" -eq 124 ]; then
       timed_out=1
       err="timed out after ${THINKING_CALL_TIMEOUT_S}s${err:+; ${err}}"

@@ -1284,12 +1284,12 @@ else bad "status: custom text is sent and #name resolves to the channel id" "rc=
 
 # 80. TEST THE MISS: Slack's own refusals exit non-zero with the error and a
 #     specific Fix:, and print nothing on stdout that reads as success.
-for err in invalid_thread_ts channel_not_found; do
+#     invalid_thread_ts has two causes, told apart by case 84.
+for err in channel_not_found; do
   setup_case
   fixture assistant.threads.setStatus "{\"ok\":false,\"error\":\"${err}\"}"
   run_bin status D0DMCHAN 1.2
   case "${err}" in
-    invalid_thread_ts) want="PARENT ts" ;;
     channel_not_found) want="bot must be a member" ;;
   esac
   if [[ "${RC}" != 0 ]] && [[ -z "${OUT}" ]] && [[ "${ERR}" == *"${err}"* ]] \
@@ -1332,6 +1332,87 @@ run_bin status D0DMCHAN 1.2 --help
 if [[ "${RC}" == 0 ]] && [[ "${OUT}" == *"usage"* || "${OUT}" == *"status <channel"* ]] && ! any_curl; then
   ok "status: a trailing --help prints usage, exit 0, no Slack call"
 else bad "status: a trailing --help prints usage, exit 0, no Slack call" "rc=${RC} out='${OUT}' calls=$(cat "${SHIM_DIR}/calls" 2>/dev/null)"; fi
+
+# 84. DND-1804: Slack answers invalid_thread_ts for two different keys, and
+#     the Fix: must name the right one. Measured live on 2026-10-02 in the
+#     owner DM: a top-level message with no replies, passed by its own ts,
+#     sets the status (ok:true); the SAME ts after the message is deleted
+#     answers invalid_thread_ts, and so does a reply's own ts. The two walt_ui
+#     failures were top-level owner DMs that no longer exist. So status asks
+#     conversations.replies which case it is, and never tells a caller to
+#     "pass the parent ts" when it already did.
+ST_TS="1790000417.000199"
+ST_PARENT="1790000369.000159"
+echo "-- status: invalid_thread_ts is classified (DND-1804) ---------------------"
+
+# 84a. the hit, the walt_ui shape: a top-level DM message with no thread,
+#      passed by its own ts, sets the status and makes no probe call.
+setup_case
+fixture assistant.threads.setStatus '{"ok":true}'
+run_bin status D0DMCHAN "${ST_TS}"
+B="$(body_of assistant.threads.setStatus)"
+if [[ "${RC}" == 0 ]] && [[ "$(jq -r '.thread_ts' <<<"${B}")" == "${ST_TS}" ]] \
+   && [[ "$(calls_of conversations.replies)" == 0 ]]; then
+  ok "status: a top-level message with no thread sets on its own ts, no probe"
+else bad "status: a top-level message with no thread sets on its own ts, no probe" "rc=${RC} body=${B} err='${ERR}'"; fi
+
+# 84b. a message deleted before the call: its own exit (4), the key named, a
+#      Fix: that does not send the caller after a parent ts.
+setup_case
+fixture assistant.threads.setStatus '{"ok":false,"error":"invalid_thread_ts"}'
+fixture conversations.replies '{"ok":false,"error":"thread_not_found"}'
+run_bin status D0DMCHAN "${ST_TS}"
+RURL="$(url_of conversations.replies)"
+if [[ "${RC}" == 4 ]] && [[ -z "${OUT}" ]] \
+   && [[ "${ERR}" == *"D0DMCHAN/${ST_TS} no longer exists"* ]] \
+   && [[ "${ERR}" == *"thread_not_found"* ]] && [[ "${ERR}" == *"Fix:"* ]] \
+   && [[ "${ERR}" != *"PARENT ts"* ]] \
+   && [[ "${RURL}" == *"channel=D0DMCHAN"* && "${RURL}" == *"ts=${ST_TS}"* ]]; then
+  ok "status: a deleted message exits 4, names the key, and is not told to pass a parent ts"
+else bad "status: a deleted message exits 4, names the key, and is not told to pass a parent ts" "rc=${RC} out='${OUT}' err='${ERR}' url='${RURL}'"; fi
+
+# 84c. --clear on a deleted message is the same outcome.
+setup_case
+fixture assistant.threads.setStatus '{"ok":false,"error":"invalid_thread_ts"}'
+fixture conversations.replies '{"ok":false,"error":"thread_not_found"}'
+run_bin status D0DMCHAN "${ST_TS}" --clear
+if [[ "${RC}" == 4 ]] && [[ "${ERR}" == *"no longer exists"* ]]; then
+  ok "status: --clear on a deleted message exits 4 the same way"
+else bad "status: --clear on a deleted message exits 4 the same way" "rc=${RC} err='${ERR}'"; fi
+
+# 84d. a reply's own ts: exit 1, and the Fix: names the real parent ts.
+setup_case
+fixture assistant.threads.setStatus '{"ok":false,"error":"invalid_thread_ts"}'
+fixture conversations.replies "{\"ok\":true,\"messages\":[{\"ts\":\"${ST_TS}\",\"thread_ts\":\"${ST_PARENT}\"}]}"
+run_bin status D0DMCHAN "${ST_TS}"
+if [[ "${RC}" == 1 ]] && [[ "${ERR}" == *"is a reply"* ]] \
+   && [[ "${ERR}" == *"Fix:"*"${ST_PARENT}"* ]]; then
+  ok "status: a reply's ts exits 1 and the Fix: names its parent ts"
+else bad "status: a reply's ts exits 1 and the Fix: names its parent ts" "rc=${RC} err='${ERR}'"; fi
+
+# 84e. THE MISS: a probe that fails, or answers with no message, is "could
+#      not tell", never "deleted" and never "pass the parent".
+for probe in '{"ok":false,"error":"missing_scope","needed":"im:history"}' '{"ok":true,"messages":[]}'; do
+  setup_case
+  fixture assistant.threads.setStatus '{"ok":false,"error":"invalid_thread_ts"}'
+  fixture conversations.replies "${probe}"
+  run_bin status D0DMCHAN "${ST_TS}"
+  if [[ "${RC}" == 1 ]] && [[ "${ERR}" == *"could not tell"* ]] \
+     && [[ "${ERR}" != *"no longer exists"* ]] && [[ "${ERR}" == *"Fix:"* ]]; then
+    ok "status: an unusable probe answer (${probe:0:24}…) reads as could-not-tell"
+  else bad "status: an unusable probe answer (${probe:0:24}…) reads as could-not-tell" "rc=${RC} err='${ERR}'"; fi
+done
+
+# 84f. the message exists as a top-level message and Slack still refuses it:
+#      exit 1, said plainly, no parent-ts advice.
+setup_case
+fixture assistant.threads.setStatus '{"ok":false,"error":"invalid_thread_ts"}'
+fixture conversations.replies "{\"ok\":true,\"messages\":[{\"ts\":\"${ST_TS}\"}]}"
+run_bin status D0DMCHAN "${ST_TS}"
+if [[ "${RC}" == 1 ]] && [[ "${ERR}" == *"still exists as a top-level message"* ]] \
+   && [[ "${ERR}" != *"PARENT ts"* ]] && [[ "${ERR}" == *"Fix:"* ]]; then
+  ok "status: an existing top-level message Slack refuses is named as such"
+else bad "status: an existing top-level message Slack refuses is named as such" "rc=${RC} err='${ERR}'"; fi
 
 # 76. DND-508: every bin answers --help (and -h) with its usage on STDOUT, exit
 #     0, and no Slack call. Before this, `post --help` took "--help" as the

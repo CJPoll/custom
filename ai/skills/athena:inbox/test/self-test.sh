@@ -113,7 +113,7 @@ if [ -n "${STATUS_LOCK_PROBE:-}" ]; then
   if flock -n "${STATUS_LOCK_PROBE}" true; then echo free; else echo held; fi >> "${STATUS_CALLS}.lock"
 fi
 if [ "${STATUS_STUB_RC:-0}" -ne 0 ]; then
-  printf 'athena-slack: status failed: assistant.threads.setStatus: channel_not_found\n' >&2
+  printf '%s\n' "${STATUS_STUB_ERR:-athena-slack: status failed: assistant.threads.setStatus: channel_not_found}" >&2
   printf 'Fix: synthetic stub failure.\n' >&2
   exit "${STATUS_STUB_RC}"
 fi
@@ -5112,6 +5112,25 @@ thinking_case "${OWNER_IM}"
 OUT="$(cd "${LPROJ}" && ATHENA_PRIVATE_ROOT="${BADID_ROOT}" "${BIN}/read-inbox" slack 2>&1)"
 assert_eq "T-14 a malformed owner id sets no status" "" "$(status_calls)"
 assert_contains "T-14 ... and says the value is not a Slack user id" "not a Slack user id" "${OUT}"
+
+# T-15 DND-1804: a top-level owner DM deleted before the status call. The
+#      status tool exits 4 (the message no longer exists). read-inbox names
+#      the key and says why, still exits 0 and still acks, and does not tell
+#      the attendant to set the status by hand on a message that is gone.
+thinking_case "${OWNER_IM}"
+( cd "${LPROJ}" && STATUS_STUB_RC=4 \
+  STATUS_STUB_ERR='athena-slack: status not set: message DFAKE0001/1790000001.000100 no longer exists in Slack (conversations.replies: thread_not_found).' \
+  "${BIN}/read-inbox" slack >"${CASE_DIR}/t15.out" 2>"${CASE_DIR}/t15.err" ); RC=$?
+OUT="$(cat "${CASE_DIR}/t15.out")"; ERR="$(cat "${CASE_DIR}/t15.err")"
+assert_eq "T-15 a deleted message leaves read-inbox's exit at 0" "0" "${RC}"
+assert_eq "T-15 ... the status was attempted on its own ts" "DFAKE0001 1790000001.000100" "$(status_calls)"
+assert_contains "T-15 ... the outcome names the key and says it is gone" \
+  "no thinking status on DFAKE0001/1790000001.000100: the message no longer exists in Slack" "${ERR}"
+assert_contains "T-15 ... with the status tool's own line" "thread_not_found" "${ERR}"
+assert_contains "T-15 ... and a Fix:" "Fix:" "${ERR}"
+assert_not_contains "T-15 ... which never says to resolve the tool's error" "resolve the status tool" "${ERR}"
+assert_eq "T-15 the batch was still acked" "0" \
+  "$(cd "${LPROJ}" && "${BIN}/read-inbox" slack --json --peek 2>/dev/null | jq -r '.messages | length')"
 
 echo
 if [ "${FAIL}" -eq 0 ]; then
