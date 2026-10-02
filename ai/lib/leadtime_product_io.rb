@@ -89,15 +89,26 @@ module LeadTimeProductIO
 
     # A branch's tip, or nil only when refs/heads/<branch> is absent. A ref
     # git could not read raises CouldNotLook: never read as "already gone".
+    #
+    # Absence is asked with `show-ref --exists` (git >= 2.43), never
+    # `show-ref --verify`: --verify answers a ref file holding garbage, an
+    # empty one, or an unreadable one exactly as it answers a missing ref
+    # (exit 1), so a corrupt branch read as "gone" and its lane was removed
+    # (DND-1662). --exists is 2 only for "does not exist" and 1 for a ref it
+    # could not look up; a git without --exists (exit 129) cannot tell either.
+    ABSENT = 2
+
     def branch_tip(dir, branch)
       tip = rev(dir, "refs/heads/#{branch}")
       return tip if tip
 
-      _, code = call(dir, "show-ref", "--verify", "--quiet", "refs/heads/#{branch}")
-      return nil if code == 1
+      out, code = call(dir, "show-ref", "--exists", "refs/heads/#{branch}")
+      return nil if code == ABSENT
 
-      why = code.zero? ? "it exists but does not resolve to a commit" : "git show-ref exit #{code}"
-      raise CouldNotLook.new("cannot read branch #{branch} in #{dir} (#{why})", "check the repo is intact ('git -C #{dir} show-ref #{branch}'); the branch is kept.")
+      why = code.zero? ? "it exists but does not resolve to a commit" : "git show-ref --exists exit #{code}: #{out.lines.last.to_s.strip}"
+      raise CouldNotLook.new("cannot read branch #{branch} in #{dir} (#{why})",
+                             "check the ref ('git -C #{dir} show-ref --exists refs/heads/#{branch}'; git >= 2.43) and repair or delete it by hand; " \
+                             "the lane and its branch are kept.")
     end
 
     # true / false; nil when git could not tell (never read as "not landed").

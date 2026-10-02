@@ -658,21 +658,30 @@ commit_landed() { # commit-ish
 
 # retire_lane <run-id> <context> — remove one lane's worktree, and delete its
 # branch unless its commits are not on origin/main (then keep it, say how to
-# recover, and return 1). The branch is never deleted while it holds work.
+# recover, and return 1). The branch is never deleted while it holds work. A
+# branch ref git cannot read is COULD NOT TELL: kept as found, named, return 1.
 retire_lane() {
   local rid="$1" ctx="$2" wt="${LANES_DIR}/$1" br="leadtime/$1"
   git -C "${MAIN_CHECKOUT}" worktree remove --force "${wt}" >>"${GIT_LOG}" 2>&1 || rm -rf -- "${wt}"
   git -C "${MAIN_CHECKOUT}" worktree prune >>"${GIT_LOG}" 2>&1 || true
-  if git -C "${MAIN_CHECKOUT}" show-ref --verify --quiet "refs/heads/${br}"; then
-    if commit_landed "${br}"; then
-      git -C "${MAIN_CHECKOUT}" branch -D "${br}" >>"${GIT_LOG}" 2>&1 || true
-    else
-      echo "${ME}: kept STRANDED branch ${br} (${ctx}); its commits are not on origin/main." >&2
-      echo "  Fix: the work is NOT lost. Inspect it with 'git -C ${MAIN_CHECKOUT} log origin/main..${br}', then land it through the custom landing (athena:merge-boarding -> The merge bar) or drop it, and delete it with 'git -C ${MAIN_CHECKOUT} branch -D ${br}'. It is never auto-deleted." >&2
-      return 1
-    fi
+  # `show-ref --exists` (git >= 2.43): 0 exists, 2 absent, anything else is a
+  # ref git could not look up. `--verify` reads a corrupt ref as absent
+  # (DND-1662), so a broken branch passed as "no branch" with nothing said.
+  local exists=0
+  git -C "${MAIN_CHECKOUT}" show-ref --exists "refs/heads/${br}" >>"${GIT_LOG}" 2>&1 || exists=$?
+  [ "${exists}" = 2 ] && return 0
+  if [ "${exists}" != 0 ]; then
+    echo "${ME}: COULD NOT TELL whether branch ${br} exists (${ctx}): git show-ref --exists exit ${exists}; the branch is KEPT as found." >&2
+    echo "  Fix: inspect the ref with 'git -C ${MAIN_CHECKOUT} show-ref --exists refs/heads/${br}' (git >= 2.43; git's reason is in ${GIT_LOG}). A corrupt ref file may still name recoverable commits ('git -C ${MAIN_CHECKOUT} fsck --lost-found'); repair or delete it by hand. It is never auto-deleted." >&2
+    return 1
   fi
-  return 0
+  if commit_landed "${br}"; then
+    git -C "${MAIN_CHECKOUT}" branch -D "${br}" >>"${GIT_LOG}" 2>&1 || true
+    return 0
+  fi
+  echo "${ME}: kept STRANDED branch ${br} (${ctx}); its commits are not on origin/main." >&2
+  echo "  Fix: the work is NOT lost. Inspect it with 'git -C ${MAIN_CHECKOUT} log origin/main..${br}', then land it through the custom landing (athena:merge-boarding -> The merge bar) or drop it, and delete it with 'git -C ${MAIN_CHECKOUT} branch -D ${br}'. It is never auto-deleted." >&2
+  return 1
 }
 
 # reap_dead_lanes — a lane whose lock nobody holds belongs to a run that died

@@ -328,6 +328,36 @@ if [ "$rc" = 72 ] && grep -q "COULD NOT TELL (cannot read branch $BRG" "${TMP}/o
 else bad "branch unreadable" "rc=$rc out=$(cat "${TMP}/out") err=$(cat "${TMP}/err")"; fi
 release_holders
 
+# A corrupt branch ref (DND-1662). A working git answers `show-ref --verify` on
+# a ref file holding garbage, an empty ref file and an unreadable one exactly
+# as it answers a missing ref (exit 1), so each read as "already gone" and the
+# lane was removed. Each is COULD NOT TELL: exit 72, worktree and meta kept,
+# the ref file untouched for recovery.
+for corrupt in garbage empty unreadable; do
+  [ "$corrupt" = unreadable ] && [ "$(id -u)" = 0 ] && { ok "corrupt ref ($corrupt): skipped, root reads a mode-000 file"; continue; }
+  new_repo
+  hold_lock "$LANES/$RUN_ID.lock"
+  lp cut --repo prod --phase verify >/dev/null
+  BRG="$(git -C "$LANES/$RUN_ID" rev-parse --abbrev-ref HEAD)"
+  REF="$(git -C "$R" rev-parse --path-format=absolute --git-common-dir)/refs/heads/$BRG"
+  [ -f "$REF" ] || bad "corrupt ref ($corrupt): fixture" "no loose ref file at $REF"
+  case "$corrupt" in
+    garbage) printf 'not-a-sha\n' >"$REF" ;;
+    empty) : >"$REF" ;;
+    unreadable) chmod 000 "$REF" ;;
+  esac
+  before_ref="$(stat -c '%a %s' "$REF")"
+  rc="$(lp teardown)"
+  after_ref="$(stat -c '%a %s' "$REF" 2>/dev/null)"
+  [ "$corrupt" = unreadable ] && chmod 600 "$REF"
+  if [ "$rc" = 72 ] && grep -q "COULD NOT TELL (cannot read branch $BRG" "${TMP}/out" && ! grep -q 'already gone' "${TMP}/out" \
+     && [ -d "$LANES/$RUN_ID" ] && [ -e "$LANES/$RUN_ID.meta" ] && [ "$after_ref" = "$before_ref" ]; then
+    ok "corrupt ref ($corrupt): COULD NOT TELL, exit 72, lane and meta kept, ref file untouched; never 'already gone'"
+  else bad "corrupt ref ($corrupt)" "rc=$rc ref=$before_ref->$after_ref out=$(cat "${TMP}/out") err=$(cat "${TMP}/err")"; fi
+  release_holders
+  git -C "$R" worktree remove --force "$LANES/$RUN_ID" 2>/dev/null
+done
+
 # The same with the worktree already removed: only the meta is left.
 new_repo
 hold_lock "$LANES/$RUN_ID.lock"

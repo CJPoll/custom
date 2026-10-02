@@ -913,6 +913,24 @@ else
   bad "stranded counts as failure" "counter=$(cat "$r/ai-artifacts/shipwright/consecutive-failures" 2>/dev/null)"
 fi
 
+# A lane branch whose ref is corrupt (DND-1662). `show-ref --verify` answers a
+# ref file holding garbage as it answers a missing ref, so teardown read it as
+# "no branch" and reported a clean run. It is COULD NOT TELL: named with a
+# Fix:, the ref file left as found, and counted as an unsuccessful outcome.
+r="$(new_repo)"; a="$(aux "$r")"
+stub_claude_probe "$a/stub-claude" 0 'git commit --allow-empty -qm "work"; b="$(git symbolic-ref --short HEAD)"; printf "%s\n" "$b" >"$d/corrupt-branch"; printf "not-a-sha\n" >"$(git rev-parse --path-format=absolute --git-common-dir)/refs/heads/$b"'
+rc="$(run_runner "$r")"
+cb="$(cat "$a/corrupt-branch" 2>/dev/null)"
+cref="$r/.git/refs/heads/$cb"
+if [ -n "$cb" ] && [ "$(cat "$cref" 2>/dev/null)" = "not-a-sha" ] \
+   && grep -q "COULD NOT TELL whether branch $cb exists" "$a/runner.err" \
+   && grep -q "Fix:.*show-ref --exists refs/heads/$cb" "$a/runner.err" \
+   && [ "$(cat "$r/ai-artifacts/shipwright/consecutive-failures" 2>/dev/null)" = "1" ]; then
+  ok "a corrupt lane branch ref: COULD NOT TELL with a Fix:, the ref file left as found, counted"
+else
+  bad "corrupt lane branch ref" "rc=$rc branch=$cb ref=$(cat "$cref" 2>&1) counter=$(cat "$r/ai-artifacts/shipwright/consecutive-failures" 2>/dev/null) err=$(cat "$a/runner.err")"
+fi
+
 # ---------------------------------------------------------------------------
 case_ 'athena-shipwright-run.sh — with an origin, only LANDED work reaches the main checkout (DND-1008)'
 

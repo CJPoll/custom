@@ -762,6 +762,25 @@ else
   bad "dead lane with work" "rc=$rc fails=$(fails "$c") err=$(cat "$c/runner.err")"
 fi
 
+# A dead lane whose branch ref is corrupt (DND-1662): `show-ref --verify`
+# answers it as it answers a missing ref, so the reap read it as "no branch"
+# and said nothing. It is COULD NOT TELL, named with a Fix:, and the ref file
+# is left exactly as found.
+c="$(new_case)"
+mkdir -p "$(lanes "$c")"
+git -C "$c/repo" worktree add -q -b leadtime/run-corrupt "$(lanes "$c")/run-corrupt" origin/main
+: >"$(lanes "$c")/run-corrupt.lock"
+cref="$c/repo/.git/refs/heads/leadtime/run-corrupt"
+printf 'not-a-sha\n' >"$cref"
+rc="$(run_runner "$c")"
+if [ -f "$cref" ] && [ "$(cat "$cref")" = "not-a-sha" ] \
+   && grep -q 'COULD NOT TELL whether branch leadtime/run-corrupt exists' "$c/runner.err" \
+   && grep -q 'Fix:.*show-ref --exists refs/heads/leadtime/run-corrupt' "$c/runner.err"; then
+  ok "a dead lane whose branch ref is corrupt: COULD NOT TELL with a Fix:, the ref file left as found"
+else
+  bad "corrupt lane branch" "rc=$rc ref=$(cat "$cref" 2>&1) err=$(cat "$c/runner.err")"
+fi
+
 c="$(new_case)"
 : >"$c/not-a-dir"
 rc="$(run_runner "$c" LEADTIME_LANES_DIR="$c/not-a-dir/lanes")"

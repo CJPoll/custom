@@ -465,7 +465,8 @@ commit_published() { # commit-ish
 
 # Remove one lane's worktree, and delete its branch unless the branch is
 # stranded (then keep it and say how to recover). Used by both the reaper (for a
-# dead predecessor) and normal teardown.
+# dead predecessor) and normal teardown. A branch ref git cannot read is COULD
+# NOT TELL: kept as found, named, and counted like a stranded one (return 1).
 retire_lane() { # run-id worktree-path context-label
   local rid="$1" wt="$2" ctx="$3" br="shipwright/$1" tip=""
   if [ -e "${wt}/.git" ]; then
@@ -473,16 +474,24 @@ retire_lane() { # run-id worktree-path context-label
   fi
   git -C "${MAIN_CHECKOUT}" worktree remove --force "${wt}" >>"${log}" 2>&1 || rm -rf "${wt}"
   git -C "${MAIN_CHECKOUT}" worktree prune >>"${log}" 2>&1 || true
-  if git -C "${MAIN_CHECKOUT}" show-ref --verify --quiet "refs/heads/${br}"; then
-    if commit_reachable "${br}" || commit_published "${br}"; then
-      git -C "${MAIN_CHECKOUT}" branch -D "${br}" >>"${log}" 2>&1 || true
-    else
-      echo "athena-shipwright: kept stranded branch ${br} (${ctx}); its commits are neither landed (origin/main; ${MAIN_BRANCH} when there is no origin) nor on any origin branch." >&2
-      echo "  Fix: the work is NOT lost. Inspect it ('git -C ${MAIN_CHECKOUT} log ${MAIN_BRANCH}..${br}'), then land it ('git -C ${MAIN_CHECKOUT} merge --ff-only ${br}', or cherry-pick) and delete it ('git -C ${MAIN_CHECKOUT} branch -D ${br}'). It is deliberately not auto-deleted so a failed push never silently discards a run's work." >&2
-      return 1
-    fi
+  # `show-ref --exists` (git >= 2.43): 0 exists, 2 absent, anything else is a
+  # ref git could not look up. `--verify` reads a corrupt ref as absent
+  # (DND-1662), so a broken lane branch passed as "no branch" and a clean run.
+  local exists=0
+  git -C "${MAIN_CHECKOUT}" show-ref --exists "refs/heads/${br}" >>"${log}" 2>&1 || exists=$?
+  [ "${exists}" = 2 ] && return 0
+  if [ "${exists}" != 0 ]; then
+    echo "athena-shipwright: COULD NOT TELL whether branch ${br} exists (${ctx}): git show-ref --exists exit ${exists}; the branch is KEPT as found." >&2
+    echo "  Fix: inspect the ref with 'git -C ${MAIN_CHECKOUT} show-ref --exists refs/heads/${br}' (git >= 2.43; git's reason is in ${log}). A corrupt ref file may still name recoverable commits ('git -C ${MAIN_CHECKOUT} fsck --lost-found'); repair or delete it by hand. It is never auto-deleted." >&2
+    return 1
   fi
-  return 0
+  if commit_reachable "${br}" || commit_published "${br}"; then
+    git -C "${MAIN_CHECKOUT}" branch -D "${br}" >>"${log}" 2>&1 || true
+    return 0
+  fi
+  echo "athena-shipwright: kept stranded branch ${br} (${ctx}); its commits are neither landed (origin/main; ${MAIN_BRANCH} when there is no origin) nor on any origin branch." >&2
+  echo "  Fix: the work is NOT lost. Inspect it ('git -C ${MAIN_CHECKOUT} log ${MAIN_BRANCH}..${br}'), then land it ('git -C ${MAIN_CHECKOUT} merge --ff-only ${br}', or cherry-pick) and delete it ('git -C ${MAIN_CHECKOUT} branch -D ${br}'). It is deliberately not auto-deleted so a failed push never silently discards a run's work." >&2
+  return 1
 }
 
 # Reap dead lanes left by crashed predecessors (rate-limit / power-loss killed
