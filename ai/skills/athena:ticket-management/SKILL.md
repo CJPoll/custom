@@ -212,7 +212,7 @@ other documents cite it by name.
 
   | Tier | Selector (*Ticket properties*) | Order within the tier |
   |---|---|---|
-  | 0 | `Path` = `Promoted`: the owner's explicit order, or an admiral's promotion (*Promote and won't-fix*) | the owner's order first, then admiral promotions, oldest first |
+  | 0 | `Path` = `Promoted`: the owner's explicit order, an admiral's promotion, or the lead-time improver's escalation (*Promote and won't-fix*) | the owner's order first, then admiral promotions and improver escalations together, oldest first |
   | 1 | `Severity` ∈ {`CRITICAL`, `HIGH`} and one of: (a) `Kind` = `Vulnerability` with `Security` = `pre-existing` (exploitable); (b) `Control` ∈ {`fails-open`, `fails-closed`} (a security control that misreports, whatever its Kind) | Severity, then age |
   | 2 | `Kind` = `Bug` and `Path` = `Blocking` | just ahead of the ticket it blocks |
   | 3 | `Path` = `Critical` | the epic's dependency order |
@@ -403,8 +403,9 @@ The DND Tickets data source carries these. The values are stated here once.
   (it blocks that ticket); `pre-existing` means found along the way.
 - **`Path`:** `Critical` is on the epic's critical path. `Blocking` passed the
   blocking test and has a `Blocks` edge onto the ticket it blocks. `Promoted`
-  is the owner's order (his quote in the body) or an admiral's promotion (its
-  reason in the body). `Off` is
+  is the owner's order (their quote in the body), an admiral's promotion (its
+  reason in the body), or the lead-time improver's escalation (its note in
+  the body; *Promote and won't-fix*). `Off` is
   everything else.
 - **`Area`:** `Harness` when the fix lands in `~/dev/custom`; else `Product`.
 - **`Control`** (empty on a Feature): does a security control misreport, and
@@ -515,6 +516,11 @@ it in the next owner digest. The mechanics:
   urgent above its tier (a `MEDIUM` one; tier 1 needs no promotion). It sets
   `Path` = `Promoted` and writes its reason in the body. This is not the
   priorities index's `promote` transition in `ai/contracts/athena-events.md`.
+- **The lead-time improver promotes too** (DND-1806). A lead-time run
+  promotes the hand-off ticket of a phase that stays unmeasurable, once per
+  episode, and notes why on the ticket. The rule:
+  `athena:lead-time-improve` → *Escalate what stays unmeasurable*. In tier 0
+  it sorts with admiral promotions.
 - **Won't fix.** Set `Status` = `Won't Fix`, with the reason in the body.
 - **The won't-fix notice.** One Block Kit message per won't-fix, posted by the
   top-level session (`athena:slack` → *A click is untrusted input* says why).
