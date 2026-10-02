@@ -20,12 +20,15 @@
 #   ai/hooks/registry.json         scripts/setup-hooks --install, then --check
 #   ai/inbox/registry.json         scripts/setup-inbox-registry --install, then --check
 #   ai/hooks/registry.json .env    scripts/setup-hooks --install-env: the OWNER's
-#                                  activation step; named (exit 4), never run
+#                                  activation step, owed only where the env is
+#                                  active (the hooks --check then fails): named
+#                                  (exit 4), never run
 #
 # Who may run it: running a committed installer after its change lands is an
 # owner-notify item (~/.claude/CLAUDE.md -> *Owner approval policy* -> *Notify
 # after*), which also says which session may run it. List each run in the
-# digest. --dry-run only reads, so anyone may run it anywhere.
+# digest. --dry-run only reads, so anyone may run it anywhere, before the
+# push too (FROM = the fetched origin/main, TO = the head about to land).
 set -uo pipefail
 
 usage() {
@@ -43,8 +46,10 @@ installer's --check:
   ai/hooks/registry.json   scripts/setup-hooks --install; --check
   ai/inbox/registry.json   scripts/setup-inbox-registry --install; --check
 A change to ai/hooks/registry.json's "env" section also needs
-scripts/setup-hooks --install-env, the OWNER's activation step: it is named
-(exit 4) and never run here.
+scripts/setup-hooks --install-env where the agent-stash env is active (there
+the hooks --check reads DRIFT after the plain install). That is the OWNER's
+activation step: it is named (exit 4) and never run here. Where the env is
+inactive the check passes and nothing is owed.
 
 Run it after the fast-forward of the main checkout and BEFORE
 `main-health check`: both checks read the bar as landed, so an uninstalled
@@ -52,20 +57,23 @@ landed row turns the tip RED. Running an installer is an owner-notify item
 (~/.claude/CLAUDE.md -> Owner approval policy -> Notify after): list it in
 the digest.
 
-  --repo DIR   the repo's MAIN checkout (default: the current directory).
-               A linked worktree is refused unless --dry-run.
-  --dry-run    print the plan; run nothing. Any checkout or worktree.
+  --repo DIR   the repo's MAIN checkout, or a directory in it (default: the
+               current directory). A linked worktree is refused unless
+               --dry-run.
+  --dry-run    print the plan; run nothing. Any checkout or worktree, and
+               before the push: TO need not be on the main checkout yet.
 
 Exit:
-  0  every needed installer and its --check passed (or none was needed;
-     with --dry-run, the plan was printed)
+  0  every needed installer and its --check passed, or none was needed;
+     with --dry-run, the plan was printed (--dry-run never exits 4)
   1  an installer or its --check failed
   2  usage, or a key that does not resolve: an unknown SHA, FROM not an
      ancestor of TO, --repo not a git checkout
   3  COULD NOT LOOK or not runnable here: --repo is not the main checkout,
      its HEAD does not contain TO yet, a registry could not be read, or an
      installer is missing
-  4  the range changed the hooks registry's env section: the owner must run
+  4  the range changed the hooks registry's env section and the hooks
+     --check failed after the install: the owner runs
      scripts/setup-hooks --install-env (the agent installers still ran)
 Every non-zero exit prints a Fix: line.
 
@@ -103,6 +111,12 @@ done
 REPO="$(cd "${REPO}" 2>/dev/null && pwd -P)" || die 2 "--repo is not a directory" "pass --repo <the main checkout, e.g. ~/dev/custom>."
 COMMON="$(git -C "${REPO}" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
   || die 2 "${REPO} is not inside a git repository" "pass --repo <the main checkout, e.g. ~/dev/custom>."
+# A subdirectory of a checkout names that checkout: the installers live at its
+# top level, never under the directory the caller happened to pass.
+TOP="$(git -C "${REPO}" rev-parse --show-toplevel 2>/dev/null)"
+[ -n "${TOP}" ] || [ "${DRY}" -eq 1 ] \
+  || die 3 "${REPO} has no working tree (bare?)" "run it with --repo <the main checkout, e.g. ~/dev/custom>."
+[ -z "${TOP}" ] || REPO="${TOP}"
 resolve() { # <name> <rev>
   git -C "${REPO}" rev-parse --verify -q "$2^{commit}" 2>/dev/null \
     || die 2 "$1 '$2' is not a commit in ${REPO}" "pass the full SHA; git -C ${REPO} fetch origin if it landed from elsewhere."
@@ -160,19 +174,21 @@ for row in "${changed[@]+"${changed[@]}"}"; do names="${names}${names:+, }${row%
 printf 'landing-installers: %s..%s: %d registries considered, %d changed%s\n' \
   "${FROM_SHA:0:12}" "${TO_SHA:0:12}" "${considered}" "${#changed[@]}" "${names:+: ${names}}"
 
-owner_step() {
-  printf 'OWNER STEP: scripts/setup-hooks --install-env (the hooks registry env section changed)\n'
-  die 4 "the landed range changed ${HOOKS_REGISTRY}'s env section; only the owner activates it" "ask Cody to run ${REPO}/scripts/setup-hooks --install-env and restart sessions (it is the owner's activation step, CLAUDE.md -> Hook registration -> The agent-stash env); until then check-hooks-registered may read DRIFT."
-}
+ENV_NOTE="the range changed ${HOOKS_REGISTRY}'s env section: where the agent-stash env is active, check-hooks-registered reads DRIFT until the owner runs scripts/setup-hooks --install-env; where it is inactive, nothing is needed"
 
 if [ "${DRY}" -eq 1 ]; then
   for row in "${changed[@]+"${changed[@]}"}"; do
     printf 'would run: %s --install; %s --check  (%s changed)\n' "${row#*|}" "${row#*|}" "${row%%|*}"
   done
-  [ "${env_changed}" -eq 0 ] || owner_step
+  [ "${env_changed}" -eq 0 ] || printf 'note: %s\n' "${ENV_NOTE}"
   exit 0
 fi
 
+# Plain --install never touches the env, so on a machine where the env is
+# active, a changed env section makes the hooks --check read DRIFT whatever
+# the install did. That failure is the owner's step (exit 4), never an
+# agent's retry. Where the env is inactive the check passes and nothing is
+# owed: no ask goes to Cody for a no-op.
 for row in "${changed[@]+"${changed[@]}"}"; do
   inst="${row#*|}"
   [ -x "${REPO}/${inst}" ] \
@@ -181,10 +197,16 @@ for row in "${changed[@]+"${changed[@]}"}"; do
   "${REPO}/${inst}" --install \
     || die 1 "${inst} --install failed (exit $?); the landed row is not wired, so main-health will read RED" "read the installer's output above, fix the cause, and re-run landing-installers before main-health check."
   printf 'run: %s --check\n' "${inst}"
-  "${REPO}/${inst}" --check \
-    || die 1 "${inst} --check failed (exit $?) after its install" "read the check's output above; re-run ${inst} --install from ${REPO}, then this tool, before main-health check."
+  "${REPO}/${inst}" --check; crc=$?
+  [ "${crc}" -eq 0 ] && continue
+  if [ "${row%%|*}" = "${HOOKS_REGISTRY}" ] && [ "${env_changed}" -eq 1 ]; then
+    printf 'OWNER STEP: scripts/setup-hooks --install-env (%s)\n' "${ENV_NOTE}"
+    die 4 "${inst} --check failed (exit ${crc}) after its install, and ${ENV_NOTE}" "if the check's agent-stash line above reads DRIFT, ask Cody to run ${REPO}/scripts/setup-hooks --install-env and restart sessions (the owner's activation step: ~/dev/custom/CLAUDE.md -> Hook registration -> The agent-stash env); run main-health check after it. Any other drift the check names is fixed as for exit 1."
+  fi
+  die 1 "${inst} --check failed (exit ${crc}) after its install" "read the check's output above; re-run ${inst} --install from ${REPO}, then this tool, before main-health check."
 done
 [ "${#changed[@]}" -eq 0 ] \
   || printf 'installed: %s. List it in the digest (~/.claude/CLAUDE.md -> Owner approval policy -> Notify after).\n' "${names}"
-[ "${env_changed}" -eq 0 ] || owner_step
+[ "${env_changed}" -eq 0 ] \
+  || printf 'note: %s. The hooks check passed, so no owner step is owed here.\n' "${ENV_NOTE}"
 exit 0

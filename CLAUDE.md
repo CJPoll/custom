@@ -1002,8 +1002,9 @@ it per `athena:merge-boarding` (the no-CI rule there names the steps):
 3. confirm it landed (`ai/bin/confirm-merged`);
 4. fast-forward the main checkout (`git merge --ff-only`);
 5. run the landing's installers from the main checkout
-   (`ai/bin/landing-installers`; its `--help` says which, and the
-   merge-boarding step says who may run them);
+   (`ai/bin/landing-installers`; its `--help` says which, and
+   `~/.claude/CLAUDE.md` → *Owner approval policy* → *Notify after* says
+   who may run them);
 6. check the new `main`: `ai/bin/main-health check` (outside the lock; it is
    detection, not a merge gate).
 

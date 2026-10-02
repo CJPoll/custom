@@ -15,7 +15,10 @@
 #   1  a range that adds a hook row runs setup-hooks --install, then its --check
 #   2  a range that touches the inbox registry runs setup-inbox-registry
 #   3  a range touching neither runs nothing, and says how many it considered
-#   4  a changed `env` section is the owner's --install-env: exit 4, named
+#   4  a changed `env` section: where the env is active (the hooks --check
+#      fails) the owner's --install-env is named, exit 4, never run; where it
+#      is inactive nothing is owed (exit 0); a failed check with no env change
+#      is exit 1
 #   5  --dry-run names the installers and runs none
 #   6  a wrongly computed key (unknown SHA, reversed range) is exit 2, not "none"
 #   7  a main checkout that has not fast-forwarded to --to is exit 3, ran none
@@ -24,6 +27,9 @@
 #  10  --help is stdout, exit 0, and runs nothing
 #  11  the landing procedure orders landing-installers between the fast-forward
 #      and main-health check (merge-boarding's no-CI landing, CLAUDE.md)
+#  12  --repo inside the main checkout resolves to its top level
+#  13  an unparseable hooks registry is exit 3, never "env unchanged"
+#  14  a missing installer is exit 3, never a pass
 #
 # Hermetic: fixture repos only, the global git config replaced; the installers
 # are stubs committed INTO the fixture (the tool runs the main checkout's own
@@ -89,6 +95,11 @@ run() { # <args...> ; sets RC OUT ERR, clears ran.log first
   RAN="$(cat "${T}/ran.log")"
 }
 
+
+has() { # <pattern> <text> ; grep -q on a here-string (no pipe under pipefail)
+  grep -q -- "$1" <<<"$2"
+}
+
 # --- 1 ------------------------------------------------------------------------
 run --repo "${R}" --from "${BASE}" --to "${HOOKS}"
 if [ "${RC}" -eq 0 ] \
@@ -110,40 +121,66 @@ fi
 # --- 3 ------------------------------------------------------------------------
 run --repo "${R}" --from "${INBOX}" --to "${PLAIN}"
 if [ "${RC}" -eq 0 ] && [ -z "${RAN}" ] \
-   && printf '%s' "${OUT}" | grep -q '2 registries considered, 0 changed'; then
+   && has '2 registries considered, 0 changed' "${OUT}"; then
   ok "3 neither registry touched: nothing runs, and the count is printed"
 else
   bad "3 neither registry touched" "rc=${RC} ran=[${RAN}] out=[${OUT}]"
 fi
 
 # --- 4 ------------------------------------------------------------------------
+# 4a: env changed, the env is INACTIVE here (the hooks --check passes): the
+#     agent installer runs, nothing is owed, no ask for a no-op.
 run --repo "${R}" --from "${PLAIN}" --to "${ENV}"
+if [ "${RC}" -eq 0 ] \
+   && [ "${RAN}" = "$(printf 'setup-hooks --install\nsetup-hooks --check')" ] \
+   && has 'note: .*env section' "${OUT}" && ! has 'OWNER STEP' "${OUT}"; then
+  ok "4a env changed, env inactive (check passes): installer runs, exit 0, a note and no owner step"
+else
+  bad "4a env changed, env inactive" "rc=${RC} ran=[${RAN}] out=[${OUT}] err=[${ERR}]"
+fi
+# 4b: env changed, the env is ACTIVE here (the hooks --check reads DRIFT after
+#     the plain install): exit 4 names --install-env as the owner's; never runs it.
+LI_FAIL="setup-hooks:--check" run --repo "${R}" --from "${PLAIN}" --to "${ENV}"
 if [ "${RC}" -eq 4 ] \
    && [ "${RAN}" = "$(printf 'setup-hooks --install\nsetup-hooks --check')" ] \
-   && printf '%s' "${OUT}${ERR}" | grep -q 'install-env' \
-   && printf '%s' "${ERR}" | grep -q '^Fix:' \
-   && ! printf '%s' "${RAN}" | grep -q 'install-env'; then
-  ok "4 an env change: the agent installer runs, --install-env is named as the owner's (exit 4), never run"
+   && has 'OWNER STEP: scripts/setup-hooks --install-env' "${OUT}" \
+   && has '^Fix:.*install-env' "${ERR}" \
+   && ! has 'install-env' "${RAN}"; then
+  ok "4b env changed, env active (check fails): exit 4 names the owner's --install-env, never runs it"
 else
-  bad "4 an env change" "rc=${RC} ran=[${RAN}] out=[${OUT}] err=[${ERR}]"
+  bad "4b env changed, env active" "rc=${RC} ran=[${RAN}] out=[${OUT}] err=[${ERR}]"
+fi
+# 4c: the same failing check on a range that did NOT change env is exit 1:
+#     exit 4 is reserved for the owner's step.
+LI_FAIL="setup-hooks:--check" run --repo "${R}" --from "${BASE}" --to "${HOOKS}"
+if [ "${RC}" -eq 1 ] && ! has 'OWNER STEP' "${OUT}" && has '^Fix:' "${ERR}"; then
+  ok "4c a failed hooks --check with no env change is exit 1, not an owner step"
+else
+  bad "4c failed check, no env change" "rc=${RC} out=[${OUT}] err=[${ERR}]"
 fi
 
 # --- 5 ------------------------------------------------------------------------
 run --dry-run --repo "${R}" --from "${BASE}" --to "${INBOX}"
 if [ "${RC}" -eq 0 ] && [ -z "${RAN}" ] \
-   && printf '%s' "${OUT}" | grep -q 'scripts/setup-hooks --install' \
-   && printf '%s' "${OUT}" | grep -q 'scripts/setup-inbox-registry --install'; then
+   && has 'scripts/setup-hooks --install' "${OUT}" \
+   && has 'scripts/setup-inbox-registry --install' "${OUT}"; then
   ok "5 --dry-run names both installers and runs none"
 else
   bad "5 --dry-run" "rc=${RC} ran=[${RAN}] out=[${OUT}] err=[${ERR}]"
+fi
+run --dry-run --repo "${R}" --from "${PLAIN}" --to "${ENV}"
+if [ "${RC}" -eq 0 ] && [ -z "${RAN}" ] && has 'note: .*install-env' "${OUT}"; then
+  ok "5b --dry-run over an env change notes the possible owner step, exit 0"
+else
+  bad "5b --dry-run env change" "rc=${RC} ran=[${RAN}] out=[${OUT}] err=[${ERR}]"
 fi
 
 # --- 6 ------------------------------------------------------------------------
 run --repo "${R}" --from deadbeefdeadbeefdeadbeefdeadbeefdeadbeef --to "${HOOKS}"
 rc_a="${RC}"; ran_a="${RAN}"; err_a="${ERR}"
 run --repo "${R}" --from "${HOOKS}" --to "${BASE}"
-if [ "${rc_a}" -eq 2 ] && [ -z "${ran_a}" ] && printf '%s' "${err_a}" | grep -q '^Fix:' \
-   && [ "${RC}" -eq 2 ] && [ -z "${RAN}" ] && printf '%s' "${ERR}" | grep -q '^Fix:'; then
+if [ "${rc_a}" -eq 2 ] && [ -z "${ran_a}" ] && has '^Fix:' "${err_a}" \
+   && [ "${RC}" -eq 2 ] && [ -z "${RAN}" ] && has '^Fix:' "${ERR}"; then
   ok "6 an unknown SHA or a reversed range is exit 2 with Fix:, never an empty plan"
 else
   bad "6 wrong key" "unknown: rc=${rc_a} ran=[${ran_a}] err=[${err_a}]; reversed: rc=${RC} ran=[${RAN}] err=[${ERR}]"
@@ -153,7 +190,7 @@ fi
 git -C "${R}" checkout -q "${BASE}"
 run --repo "${R}" --from "${BASE}" --to "${HOOKS}"
 git -C "${R}" checkout -q main
-if [ "${RC}" -eq 3 ] && [ -z "${RAN}" ] && printf '%s' "${ERR}" | grep -q '^Fix:.*ff-only'; then
+if [ "${RC}" -eq 3 ] && [ -z "${RAN}" ] && has '^Fix:.*ff-only' "${ERR}"; then
   ok "7 a main checkout behind --to is exit 3, ran nothing, Fix: names the fast-forward"
 else
   bad "7 checkout behind --to" "rc=${RC} ran=[${RAN}] err=[${ERR}]"
@@ -162,7 +199,7 @@ fi
 # --- 8 ------------------------------------------------------------------------
 git -C "${R}" worktree add -q --detach "${T}/wt" "${ENV}"
 run --repo "${T}/wt" --from "${BASE}" --to "${HOOKS}"
-if [ "${RC}" -eq 3 ] && [ -z "${RAN}" ] && printf '%s' "${ERR}" | grep -q '^Fix:'; then
+if [ "${RC}" -eq 3 ] && [ -z "${RAN}" ] && has '^Fix:' "${ERR}"; then
   ok "8 a linked worktree is refused (exit 3): installers run from the main checkout"
 else
   bad "8 linked worktree" "rc=${RC} ran=[${RAN}] err=[${ERR}]"
@@ -179,9 +216,9 @@ fi
 LI_FAIL="setup-hooks:--install" run --repo "${R}" --from "${BASE}" --to "${INBOX}"
 rc_i="${RC}"; ran_i="${RAN}"; err_i="${ERR}"
 LI_FAIL="setup-inbox-registry:--check" run --repo "${R}" --from "${BASE}" --to "${INBOX}"
-if [ "${rc_i}" -eq 1 ] && printf '%s' "${err_i}" | grep -q '^Fix:' \
-   && ! printf '%s' "${ran_i}" | grep -q 'setup-hooks --check' \
-   && [ "${RC}" -eq 1 ] && printf '%s' "${ERR}" | grep -q '^Fix:'; then
+if [ "${rc_i}" -eq 1 ] && has '^Fix:' "${err_i}" \
+   && ! has 'setup-hooks --check' "${ran_i}" \
+   && [ "${RC}" -eq 1 ] && has '^Fix:' "${ERR}"; then
   ok "9 a failed installer (its --check skipped) or a failed --check is exit 1 with Fix:"
 else
   bad "9 failures" "install: rc=${rc_i} ran=[${ran_i}] err=[${err_i}]; check: rc=${RC} ran=[${RAN}] err=[${ERR}]"
@@ -190,7 +227,7 @@ fi
 # --- 10 -----------------------------------------------------------------------
 : > "${T}/ran.log"
 help_out="$("${TOOL}" --help 2>/dev/null)"; help_rc=$?
-if [ "${help_rc}" -eq 0 ] && printf '%s' "${help_out}" | grep -q 'landing-installers' \
+if [ "${help_rc}" -eq 0 ] && has 'landing-installers' "${help_out}" \
    && [ ! -s "${T}/ran.log" ]; then
   ok "10 --help is stdout, exit 0, runs nothing"
 else
@@ -199,28 +236,68 @@ fi
 
 # --- 11 -----------------------------------------------------------------------
 # The procedure itself: in each statement of the no-CI landing, the installer
-# step comes after the fast-forward and before main-health check.
-order_ok() { # <file> <start-pattern> <end-pattern>
+# COMMAND comes after the fast-forward command and before the main-health
+# COMMAND. Each pattern names the ai/bin/ path, so prose mentioning
+# "main-health check" cannot satisfy it. The installer pattern is per file:
+# merge-boarding also runs a --dry-run before the push (step 3), so there the
+# installing call is the one with --repo.
+order_ok() { # <file> <start-pattern> <end-pattern> <installer-run pattern>
   awk -v s="$2" -v e="$3" '
     index($0, s) { on = 1 }
     on && index($0, e) { exit }
     on { print }' "$1" > "${T}/section"
   local ff li mh
-  ff="$(grep -n -- 'ff-only' "${T}/section" | head -n 1 | cut -d: -f1)"
-  li="$(grep -n -- 'landing-installers' "${T}/section" | head -n 1 | cut -d: -f1)"
-  mh="$(grep -n -- 'main-health check' "${T}/section" | head -n 1 | cut -d: -f1)"
+  ff="$(grep -n -- 'merge --ff-only' "${T}/section" | head -n 1 | cut -d: -f1)"
+  li="$(grep -n -- "$4" "${T}/section" | head -n 1 | cut -d: -f1)"
+  mh="$(grep -n -- 'ai/bin/main-health check' "${T}/section" | head -n 1 | cut -d: -f1)"
   [ -n "${ff}" ] && [ -n "${li}" ] && [ -n "${mh}" ] && [ "${ff}" -lt "${li}" ] && [ "${li}" -lt "${mh}" ]
 }
 MB="${REPO_ROOT}/ai/skills/athena:merge-boarding/SKILL.md"
-if order_ok "${MB}" 'The landing, as Cody confirmed it' '**Later (2026-10-01, DND-1482):**'; then
+if order_ok "${MB}" 'The landing, as Cody confirmed it' 'Stop the line' 'ai/bin/landing-installers --repo'; then
   ok "11a merge-boarding's no-CI landing: fast-forward, landing-installers, then main-health check"
 else
-  bad "11a merge-boarding order" "$(cat "${T}/section" | head -n 60)"
+  bad "11a merge-boarding order" "$(head -n 60 "${T}/section")"
 fi
-if order_ok "${REPO_ROOT}/CLAUDE.md" '**An admiral merges that PR; nobody waits for the owner.**' 'A red `main` or a failed deploy stops the line'; then
+if order_ok "${REPO_ROOT}/CLAUDE.md" '**An admiral merges that PR; nobody waits for the owner.**' 'A red `main` or a failed deploy stops the line' 'ai/bin/landing-installers'; then
   ok "11b CLAUDE.md's landing steps: fast-forward, landing-installers, then main-health check"
 else
   bad "11b CLAUDE.md order" "$(cat "${T}/section")"
+fi
+
+# --- 12 -----------------------------------------------------------------------
+# A directory inside the main checkout names that checkout: the installers are
+# found at its top level, not reported missing.
+mkdir -p "${R}/ai/sub"
+run --repo "${R}/ai/sub" --from "${BASE}" --to "${HOOKS}"
+if [ "${RC}" -eq 0 ] \
+   && [ "${RAN}" = "$(printf 'setup-hooks --install\nsetup-hooks --check')" ]; then
+  ok "12 --repo inside the main checkout resolves to its top level"
+else
+  bad "12 subdirectory --repo" "rc=${RC} ran=[${RAN}] err=[${ERR}]"
+fi
+
+# --- 13 -----------------------------------------------------------------------
+# A hooks registry that does not parse at TO: COULD NOT LOOK (exit 3), never a
+# silent "env unchanged".
+printf '{not json\n' > "${R}/ai/hooks/registry.json"
+BADJSON="$(commit 'break the hooks registry')"
+run --repo "${R}" --from "${ENV}" --to "${BADJSON}"
+if [ "${RC}" -eq 3 ] && [ -z "${RAN}" ] && has 'does not parse' "${ERR}" && has '^Fix:' "${ERR}"; then
+  ok "13 an unparseable hooks registry is exit 3 with Fix:, nothing run"
+else
+  bad "13 unparseable registry" "rc=${RC} ran=[${RAN}] err=[${ERR}]"
+fi
+
+# --- 14 -----------------------------------------------------------------------
+# An installer the landed tree lacks: exit 3, named, not a pass.
+git -C "${R}" rm -q scripts/setup-inbox-registry
+printf '{"_meta":{},"v":1,"projects":[{"file":"q.json"}]}\n' > "${R}/ai/inbox/registry.json"
+NOINST="$(commit 'inbox change, installer gone')"
+run --repo "${R}" --from "${BADJSON}" --to "${NOINST}"
+if [ "${RC}" -eq 3 ] && [ -z "${RAN}" ] && has 'setup-inbox-registry is missing' "${ERR}" && has '^Fix:' "${ERR}"; then
+  ok "14 a missing installer is exit 3 with Fix:"
+else
+  bad "14 missing installer" "rc=${RC} ran=[${RAN}] err=[${ERR}]"
 fi
 
 printf '\nlanding-installers self-test: %d passed, %d failed\n' "${PASS}" "${FAIL}"

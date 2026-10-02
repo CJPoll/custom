@@ -77,12 +77,17 @@ The landing, as Cody confirmed it (2026-10-01):
 1. The report names a head with `INTEGRATION OK` and a critic PASS on it.
    That is the head the merge bar checks.
 2. Under the lock, `git fetch origin`, then rebase that head onto
-   `origin/main` if main moved.
+   `origin/main` if main moved. Record the fetched `origin/main` SHA: it is
+   the landed range's base in steps 3 and 5.
 3. A **clean** rebase lands with no re-gate: push the rebased head
    fast-forward (`gh-athena git push origin <sha>:main`), still under the
    lock, then release it. The pushed SHA is not the reported one; the clean
    rebase carries the reported head's gate and verdict. Hold the lock around
-   the fetch, rebase and push only, never around a gate.
+   the fetch, rebase and push only, never around a gate. Before the push, run
+   `~/dev/custom/ai/bin/landing-installers --dry-run --from <step 2's SHA>
+   --to <the head>`. If it names an installer and nothing authorizes you to
+   run it (step 5), do not push: release the lock, hold the landing, and
+   report the install as the step awaiting authorization.
 4. A **conflicted** rebase is the one case that needs a full re-gate: release
    the lock, resolve the conflict, run `integration-gate --with-critic` on the
    new head, and start again.
@@ -91,26 +96,32 @@ The landing, as Cody confirmed it (2026-10-01):
    - Fast-forward the main checkout: `git -C ~/dev/custom merge --ff-only
      origin/main` (after `git fetch origin`). A refusal is reported, never
      forced (`~/dev/custom/CLAUDE.md` → *Agents work in worktrees, not the
-     main checkout* → *Publishing by fast-forward*).
+     main checkout* → *Publishing by fast-forward*). Until it is cleared,
+     the installers cannot run (exit 3), so hold the health check too.
    - Run the landing's installers from that main checkout:
-     `~/dev/custom/ai/bin/landing-installers --repo ~/dev/custom --from <the
-     origin/main step 2 rebased onto> --to <the SHA step 3 pushed>`. It
-     installs what the landed range needs, keyed on the diff touching a
-     landed-bar registry; its `--help` is the one list of which. Skip it and
-     a landed hook or inbox row reads as drift, so the tip gates RED
-     (DND-1664). Exit 4 names an owner step (`setup-hooks --install-env`):
-     ask Cody for it per *Only Cody can run*. Running an installer is an
-     owner-notify item, and that item says which session may run it:
-     `~/.claude/CLAUDE.md` → *Owner approval policy* → *Notify after*. A
-     session it does not authorize hands the install to the one it does,
-     and runs `main-health check` only after that install.
+     `~/dev/custom/ai/bin/landing-installers --repo ~/dev/custom --from
+     <step 2's SHA> --to <the SHA step 3 pushed>`. It installs what the
+     landed range needs, keyed on the diff touching a landed-bar registry;
+     its `--help` is the one list of which. Skip it and a landed hook or
+     inbox row reads as drift, so the tip gates RED (DND-1664). Running an
+     installer is an owner-notify item, and that item says which session
+     may run it: `~/.claude/CLAUDE.md` → *Owner approval policy* → *Notify
+     after* (step 3's dry run kept an unauthorized landing from reaching
+     here). Exit 4 names the owner's `setup-hooks --install-env`: ask Cody
+     for it per *Only Cody can run*, and run the health check after it.
    - Then `~/dev/custom/ai/bin/main-health check --repo ~/dev/custom` (it
-   queues its own gate in test-slot; never wrap it in test-slot). A landing that pushed
-   the gated head unchanged is green from its receipt with no gate run; only a
-   clean rebase onto a moved `main` costs one `harness-gate` of the new tip.
-   Run it in the background if you have more to land; it is detection, not a
-   merge gate, so it never holds the next push. The hourly shipwright cron
-   runs the same check as the backstop for landings made by anyone else.
+     queues its own gate in test-slot; never wrap it in test-slot). A
+     landing that pushed the gated head unchanged is green from its receipt
+     with no gate run; only a clean rebase onto a moved `main` costs one
+     `harness-gate` of the new tip. Run it in the background if you have
+     more to land; it is detection, not a merge gate, so it never holds the
+     next push. The hourly shipwright cron runs the same check as the
+     backstop for landings made by anyone else.
+
+   A cron lane (the shipwright and lead-time runs) stops after step 3: its
+   runner fast-forwards the main checkout, and nothing on the cron path
+   authorizes an installer. So a cron run whose step-3 dry run names one
+   does not push (`athena:shipwright-lane` → *Sync up*).
 6. **Stop the line** on a red main or a failed deploy: land nothing more until
    it is fixed, and fix it first. In `~/dev/custom`, `main-health` exit 1 (or
    a `main-red` message on harness-alerts) means `main` is red. While it is,
@@ -128,7 +139,8 @@ The landing, as Cody confirmed it (2026-10-01):
 and ran `main-health check` first, with no fast-forward or installer before
 it. A landing that added a hook or inbox registry row then gated RED, because
 both checks read the bar as landed (DND-1653's landing e4eed785, 01:17Z).
-Superseded by the fast-forward and `landing-installers` sub-steps above.
+Superseded by the fast-forward and `landing-installers` sub-steps above, and
+step 3's dry run, which holds a landing no one here may install.
 
 **Later (2026-10-01, DND-1482):** step 5 said "In `~/dev/custom` nothing gates
 `main` after a landing, so the next `integration-gate` is the detector … When

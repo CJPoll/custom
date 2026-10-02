@@ -156,6 +156,13 @@ journal it and leave the commits local for the owner rather than forcing.
 If the wrapper refuses with exit 3 and `RED MAIN`, `origin/main` is red
 (`ai/bin/main-health`, DND-1482) and only a gated fix may land: journal it,
 leave the commits local, and do not retry this run.
+Before the push, run `~/dev/custom/ai/bin/landing-installers --dry-run
+--from origin/main --to HEAD`. If it names an installer, do not push: no cron
+session may run an installer (`~/.claude/CLAUDE.md` → *Owner approval
+policy* → *Notify after*), and a landed hook or inbox row reads as drift
+until one runs, so `main` would go RED (DND-1664). Journal it and leave the
+commits local; the runner keeps the stranded branch, and an admiral lands it
+by `athena:merge-boarding`'s no-CI landing.
 **Never `git push --force`** on this repo. Push only `~/dev/custom` — never a
 product repo through this skill. (A lead-time run's product-repo change is
 pushed by `ai/bin/leadtime-product`, not here: `athena:lead-time-improve` →
