@@ -7511,9 +7511,11 @@ or the approval page exists yet (gen_saas `origin/main` `613aedb9`, read
 2026-10-02). Every sentence about them is an obligation on its implementer.
 
 **The calendar is not the index.** These tools write the owner's primary
-Google calendar and the `calendar_changes` log. None of them writes an index
-row. A `meeting` item changes only through the server's own calendar sync
-(DND-447), mapped through *The storage boundary*.
+Google calendar and the `calendar_changes` log. No tool writes an index row
+from its arguments. A write applied to an event in the owner's local today
+triggers the server's own calendar sync for that owner (DND-447, *Rules every
+tool shares* → *Today stays current*). That sync writes only `meeting` items,
+read back from Google and mapped through *The storage boundary*.
 
 #### The tools
 
@@ -7647,8 +7649,12 @@ OD-2, and nothing else is added without amending this subsection.
 ```
 
 `approval_url` appears only in the answer to the write that proposed it, never
-from `calendar_change`. `state` is `proposed`, `applying`, `applied`,
-`rejected`, `expired`, `stale` or `failed`.
+from `calendar_change`. In that answer `summary` may name the guest count and
+start time; from `calendar_change` it is built from the row's columns only
+(`kind`, `event_title`, `reaches`). `state` is `proposed`, `applying`,
+`applied`, `rejected`, `expired`, `stale` or `failed`. A `failed` change also
+carries `"failure_cause"` (*The approval path*); every other state carries
+none.
 
 #### Refusals
 
@@ -7724,7 +7730,9 @@ approval link.
   closed list: `id`, `owner_id`, `kind`, `event_id`, `event_title`,
   `html_link`, `reaches` (a count), `state`, `claude_session_id`,
   `machine_id`, `token_digest` (SHA-256 of the token), `failure_cause` (a
-  closed code, `null` unless `failed`), `proposed_at` and `decided_at`. No
+  closed code, `null` unless `failed`: `event_gone`, or one of `google_error`'s
+  closed causes, which `Athena.Calendar.Refusal` lists), `proposed_at` and
+  `decided_at`. No
   guest address, no proposed value, no location and no description. `kind` is
   `create`, `update`, `invite`, `uninvite`, `attach_zoom` or `rsvp`. A
   directly applied write gets a row too, stored `applied`.
@@ -7734,7 +7742,9 @@ approval link.
   `not_found`: a token for another owner, a row for another owner, a digest
   that does not match, a bad or expired token. It shows the event, the full
   diff and each address reached, and marks an address outside the
-  organizer's email domain as **external**.
+  organizer's email domain as **external**. It answers with
+  `Referrer-Policy: no-referrer`, so following its Google link never sends
+  the token in a `Referer` header.
 - **Live means unexpired.** Approve and Reject each decrypt the token again
   with its 24-hour max age, and require the row's computed state to be
   `proposed`: stored `proposed` and `now < proposed_at + 24h` on the injected
@@ -7743,7 +7753,8 @@ approval link.
   to `applying` and stamped `decided_at`; the transaction commits. No
   database lock is held across a Google call. The server then reads the event
   again and checks that the owner is still the organizer and that the etag
-  still matches. A changed event marks the row `stale` and applies nothing
+  still matches. An event gone on that read (Google 404 or 410) marks the row
+  `failed` with `event_gone`. A changed event marks the row `stale` and applies nothing
   (Fix: ask the session to propose it again). Otherwise it PATCHes or inserts
   with `sendUpdates=all` and marks the row `applied`. A Google failure marks
   it `failed` with its `failure_cause`. A second Approve finds no live
@@ -7753,7 +7764,8 @@ approval link.
 - **Reject** marks a live row `rejected` and stamps `decided_at`.
 - **Read-only states.** Nothing is scheduled. A row stored `proposed` past
   `proposed_at + 24h` reads `expired`. A row stored `applying` more than 5
-  minutes after its `decided_at` reads `failed (interrupted)`, and is never
+  minutes after its `decided_at` reads `failed` with cause `interrupted`
+  (computed, never stored), and is never
   retried by itself, because the write may have reached Google. The stored
   state does not change.
 - **`decided_at`** is the owner's Approve or Reject time. A direct apply's
@@ -7783,7 +7795,7 @@ approval link.
 | Read the last digest day | the logged-in owner | the owner's own `digest_sends` rows | `Athena.Digest.latest_send/1`: an `owner_id` = viewer filter in the query | none shown ("none yet") |
 | `priority_next`, `priority_release`, `priority_complete` | a machine token | the machine owner's `active`, non-`owner_only` items, through a session bound to that machine; release and complete by the lease holder only | `Athena.Priorities` lease functions, in one transaction: an `owner_id` = the machine's owner filter in the query, and the session's machine binding | `not_found`, `session_ended`, `session_draining`, `none` with counts, `not_lease_holder`, `not_leased` |
 | `calendar_events`, `calendar_event` (*Calendar management*) | a machine token | the machine owner's primary calendar | `Athena.Calendar.Management` `list/3`, `get/3`: the owner from the calling machine; the Google call uses only that owner's credentials | `not_configured`, `not_connected`, `revoked`; `not_found` |
-| Owner-only writes (`calendar_create`, `calendar_update`, `calendar_attach_zoom` reaching nobody) and `calendar_rsvp` | a machine token and a fleet session bound to that machine | an event on the owner's primary calendar; the owner as organizer (writes) or as guest (RSVP) | `Athena.Calendar.Management` write functions, all before any write: the session binding, then the event read, then the organizer or guest check, then `Audience` | `not_found`, `not_organizer`, `not_an_attendee` |
+| Owner-only writes (`calendar_create`, `calendar_update`, `calendar_attach_zoom` reaching nobody) and `calendar_rsvp` | a machine token and a fleet session bound to that machine | an event on the owner's primary calendar; the owner as organizer (writes) or as guest (RSVP) | `Athena.Calendar.Management` write functions, all before any write: the session binding, then the event read, then the organizer or guest check, then `Audience` (for `calendar_create`: the session binding, then `Audience` from `guests`) | `not_found`, `not_organizer`, `not_an_attendee` |
 | Writes that reach others (`calendar_create`, `calendar_update`, `calendar_attach_zoom` with other guests; `calendar_invite`, `calendar_uninvite`) | the same caller proposes; only the logged-in owner applies | as above | proposal: `Athena.Calendar.Management`, as above; apply: `approve_change/3`, the row loaded by `id` and `owner_id` in the query under lock, the token digest compared, the event re-read and its etag compared | proposal: the refusals above; apply: `not_found` (existence never disclosed), `stale`, `failed` |
 | View, approve or reject a calendar change on `/calendar/changes/:id` | the logged-in owner: web session, CSRF | the owner's own `calendar_changes` row and its token | `Athena.UI.Pages.CalendarChange` → `Management.show_change/3`, `approve_change/3`, `reject_change/3`: the token decrypted, the row loaded by `id` and the viewer's `owner_id` in the query | `not_found` for every mismatch: another owner's row or token, a bad digest, a bad or expired token, a logged-in non-owner |
 | `calendar_change` | a machine token | the machine owner's `calendar_changes` rows | `Management.change/3`: an `owner_id` = the machine's owner filter in the query | `not_found` |
@@ -7792,17 +7804,25 @@ approval link.
   lease tools. No machine-token path promotes, restores, dismisses, overrides,
   lists, or reads a `proposed` item, a failure or another owner's item. The
   calendar tools (*Calendar management*) write the owner's Google calendar and
-  the `calendar_changes` log, never the index. No calendar argument selects an
+  the `calendar_changes` log, never the index. A calendar write may trigger
+  the server's own calendar sync for that owner's today, which writes only
+  `meeting` items read back from Google, never a value from the tool's
+  arguments. No calendar argument selects an
   owner, a calendar or a `sendUpdates` value, and an event not on the owner's
   primary calendar is `not_found`.
 
   **Later (2026-10-02, DND-1764):** this bullet ended at "another owner's
   item", when the lease tools were the machine token's only reach into the
   owner's data in this section. The calendar tools add a second reach, into
-  the calendar and not the index, so the bullet now says where each one ends.
-- **Negative tests for every calendar row:** another owner's machine, an
-  unbound session, a non-organizer, another owner's change id and token, and
-  a logged-in non-owner.
+  the calendar, and a write there can trigger the server's meeting sync. The
+  bullet now says where each reach ends, and that the sync is the only index
+  write a calendar call causes.
+- **Negative tests for every calendar row,** one per `On denial` cell:
+  another owner's machine, an unbound session, an event not on the owner's
+  primary calendar, a non-organizer, a non-guest RSVP, another owner's change
+  id and token, a mismatched token digest, an expired token, a page loaded
+  before expiry and submitted after, a second Approve with a spent token, and
+  a logged-in non-owner. No machine-token path reaches Approve or Reject.
 - **Every query is owner-scoped in the query itself, not by RBAC alone.** An
   aggregate RBAC `read` or `update` admits anyone holding a role on the row,
   so it never replaces the `owner_id` filter (gen_saas DND-434 and DND-441
