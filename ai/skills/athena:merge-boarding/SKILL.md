@@ -587,7 +587,10 @@ owner-click verifier reads the owner's id through
 (`ai/lib/private_overlay_resolver.rb`, `ai/lib/private_overlay.rb`), or the
 critic verdict producer
 (`ai/bin/critic-review`, `ai/lib/critic_carry.rb`,
-`ai/lib/critic_verdict_stores.rb`) is `owner-approval-policy`, hold `always`:
+`ai/lib/critic_verdict_stores.rb`), or the declared merge gate and what it loads
+(`ai/bin/harness-gate`, `ai/lib/first_party.rb`, `ai/lib/landed.rb`,
+`ai/lib/reap_tags.rb`, `ai/lib/scratch_home_sentinel.rb`, and `ai/lib/harness_tools.rb`,
+the scope table `check-bin-help` reads) is `owner-approval-policy`, hold `always`:
 exit 4, cleared by the owner's verified decision (*Owner approval policy* ->
 *Asking, and what counts as approval*). The gate judges with the manifest as
 landed on the target, so a new hold binds after it lands, never in the PR that
@@ -626,16 +629,17 @@ held file loads) and fails, with a `Fix:`, on one that neither holds nor sits in
 the manifest's `enforcers.excluded` with a reason, or that is both.
 
 **Later (2026-10-03, DND-1895):** the declared merge gate `ai/bin/harness-gate`
-was in neither list, so a diff that dropped a check from it read COLD: a
-lowered bar (item 5) with no owner hold. It sits in the same class from
-DND-1895, with `ai/lib/first_party.rb`, `ai/lib/harness_tools.rb` and
-`ai/lib/landed.rb`, which it loads to discover its checks and to read their
-bar from what landed. The walk also reads `IR_DECLARED_GATES` in
+was in neither the held list nor `enforcers.excluded`, so a diff that dropped a
+check from it read COLD: a lowered bar (item 5) with no owner hold. It sits in
+the same class from DND-1895. So do the libraries it loads that discover its
+checks, read their bar from what landed, or can fail a check (`first_party.rb`,
+`landed.rb`, `reap_tags.rb`, `scratch_home_sentinel.rb`), and `harness_tools.rb`,
+the scope table `check-bin-help` reads through `first_party.rb`. The
+`blast-radius --self-test` walk also reads `IR_DECLARED_GATES` in
 `ai/lib/integration-receipt.sh`, so the gate the target declares is a
-candidate whatever its path and a renamed gate cannot fall out. The gate's
-other loaded libraries (`reap_tags.rb`, `proc_state.rb`,
-`scratch_home_sentinel.rb`, `athena_telemetry.rb`) are in `enforcers.excluded`
-with reasons.
+candidate whatever its path: a renamed gate fails the self-test until it is
+held or excluded. The gate's other loaded libraries (`proc_state.rb`,
+`athena_telemetry.rb`) are in `enforcers.excluded` with reasons.
 
 **The gate comes from the landed target, not from you.** The first of
 `bin/prep-commit.sh` (gen_saas) and `ai/bin/harness-gate` (`~/dev/custom`) that
