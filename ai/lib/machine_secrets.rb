@@ -26,7 +26,7 @@ module MachineSecrets
   NAME_RE = /TOKEN|SECRET|PASSWORD|PASSWD|BEARER|API_?KEY|PRIVATE_KEY|ACCESS_KEY|SESSION_TOKEN|CREDENTIAL|(?:\A|_)PAT(?:\z|_)/i.freeze
 
   # An env or config VALUE: the prefix alone, at the start.
-  VALUE_START_RE = /\A(?:sk-ant-|xox[abp]-|gh[opsu]_|github_pat_|glpat-|ntn_|(?:AKIA|ASIA)[A-Z0-9]{16}|-----BEGIN|re_[A-Za-z0-9]{20,})/.freeze
+  VALUE_START_RE = /\A(?:sk-ant-|xox[abp]-|gh[opsu]_|github_pat_|glpat-|glrt-|ntn_|(?:AKIA|ASIA)[A-Z0-9]{16}|-----BEGIN|re_[A-Za-z0-9]{20,})/.freeze
 
   # FILE CONTENTS: at a word boundary, with a minimum length after the prefix,
   # because prose names a prefix without a value. One pattern per prefix, each
@@ -37,7 +37,7 @@ module MachineSecrets
   CONTENT_PATTERNS = [
     /sk-ant-[A-Za-z0-9_-]{20,}/, /xoxa-[A-Za-z0-9-]{10,}/, /xoxb-[A-Za-z0-9-]{10,}/, /xoxp-[A-Za-z0-9-]{10,}/,
     /ghp_[A-Za-z0-9]{30,}/, /gho_[A-Za-z0-9]{30,}/, /ghs_[A-Za-z0-9]{30,}/, /ghu_[A-Za-z0-9]{30,}/,
-    /github_pat_[A-Za-z0-9_]{30,}/, /glpat-[A-Za-z0-9_-]{20,}/, /ntn_[A-Za-z0-9]{30,}/,
+    /github_pat_[A-Za-z0-9_]{30,}/, /glpat-[A-Za-z0-9_-]{20,}/, /glrt-[A-Za-z0-9_-]{20,}/,/ntn_[A-Za-z0-9]{30,}/,
     /AKIA[A-Z0-9]{16}(?![A-Za-z0-9])/, /ASIA[A-Z0-9]{16}(?![A-Za-z0-9])/, /re_[A-Za-z0-9]{20,}/
   ].map(&:freeze).freeze
   PEM_RE = /-----BEGIN [A-Z ]*PRIVATE KEY-----/.freeze

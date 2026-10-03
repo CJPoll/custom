@@ -493,6 +493,33 @@ expect "with-secret: a malformed overlay refuses even a public name (uniqueness 
 has_fix "with-secret: a malformed overlay refuses even a public name (uniqueness unknown)"
 rm -rf "${FHOME}/.config/athena"
 
+# ---------------------------------------------------------------- glrt- (DND-1965)
+# A GitLab runner authentication token is a credential beside glpat-. Synthetic,
+# assembled at runtime. Ruby reads the pattern lists directly.
+P_GLRT="gl""rt-"
+SYN_R="${P_GLRT}SYNTHrrrrrrrrrrrrrrrrrrrr5"
+SYN_R_SHORT="${P_GLRT}short"
+glrt_out="$(SRC="${SRC}" V="${SYN_R}" S="${SYN_R_SHORT}" ruby -e '
+  require File.join(ENV.fetch("SRC"), "ai/lib/machine_secrets")
+  v = ENV.fetch("V")
+  s = ENV.fetch("S")
+  m = MachineSecrets
+  puts "value=#{m.credential_value?(v)}"
+  puts "content=#{m.credential_content?("token: " + v + "\n")}"
+  puts "short=#{m.credential_content?("see " + s + " in prose")}"
+  puts "embedded=#{m.credential_content?("xx" + v)}"
+' 2>&1)"
+for want in value=true content=true short=false embedded=false; do
+  if printf '%s\n' "${glrt_out}" | grep -qx "${want}"; then ok "glrt-: ${want}"
+  else bad "glrt-: ${want}" "${glrt_out}"; fi
+done
+mask_out="$(SRC="${SRC}" V="${SYN_R}" ruby -e '
+  require File.join(ENV.fetch("SRC"), "ai/lib/merge_role_io")
+  puts MergeRoleIO.mask("curl x " + ENV.fetch("V") + " y")
+' 2>&1)"
+if [ "${mask_out}" = "curl x *** y" ]; then ok "glrt-: merge_role_io mask redacts a runner token"
+else bad "glrt-: merge_role_io mask redacts a runner token" "${mask_out}"; fi
+
 # ---------------------------------------------------------------- no value, ever
 leaked=0
 for v in "${ALL_SYN[@]}"; do

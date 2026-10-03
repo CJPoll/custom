@@ -46,7 +46,7 @@ module MergeRoleIO
   def mask(text)
     text.to_s
         .gsub(/((?:Authorization|PRIVATE-TOKEN|JOB-TOKEN)\s*:\s*)(?:(?:token|bearer|basic)\s+)?\S+/i, '\1***')
-        .gsub(/\b(?:gh[pousr]_|github_pat_|glpat-)[A-Za-z0-9_-]+/, "***")
+        .gsub(/\b(?:gh[pousr]_|github_pat_|glpat-|glrt-)[A-Za-z0-9_-]+/, "***")
         .gsub(/((?:token|password|secret|passwd)=)[^\s&]+/i, '\1***')
   end
 

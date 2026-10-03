@@ -321,6 +321,7 @@ word boundary (file contents, probe (d)) one of:
 | `ghp_`, `gho_`, `ghs_`, `ghu_` | 30 `[A-Za-z0-9]` |
 | `github_pat_` | 30 `[A-Za-z0-9_]` |
 | `glpat-` | 20 `[A-Za-z0-9_-]` |
+| `glrt-` | 20 `[A-Za-z0-9_-]` (a GitLab runner authentication token) |
 | `ntn_` | 30 `[A-Za-z0-9]` |
 | `AKIA`, `ASIA` | exactly 16 `[A-Z0-9]` |
 | `-----BEGIN` … `PRIVATE KEY-----` | the whole header |
