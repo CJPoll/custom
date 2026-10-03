@@ -19,7 +19,8 @@
 #   gitlab-runner-<sfx>    gitlab-runner.<sfx>      docker-rootless-gitlab-runner.<sfx>
 #
 # Subordinate ids. The default user keeps the DND-177 block 296608:65536. Any
-# other user gets a deterministic 65536-id block: slot = CRC32(name) mod 4096,
+# other user gets a deterministic 65536-id block: slot = (POSIX `cksum` CRC of
+# the name, not zlib's CRC32) mod 4096,
 # start = 1000000000 + slot * 65536. The region sits above shadow's default
 # SUB_UID_MAX (600100000), so `useradd` never auto-allocates into it, and the
 # same name maps to the same block on every host. Two names can share a slot;
@@ -155,9 +156,9 @@ grk_parse_runner() {
       "pass --runner NAME:TAG[:LIMIT] with NAME like personal-ci"
     return 1
   fi
-  if [[ ! "${tag}" =~ ^[a-z0-9][a-z0-9_.-]{0,62}$ ]]; then
+  if [ "${tag}" != "-" ] && [[ ! "${tag}" =~ ^[a-z0-9][a-z0-9_.-]{0,62}$ ]]; then
     grk_refuse "--runner '${name}' tag '${tag}' is not one lowercase tag" \
-      "pass exactly one tag per runner: --runner ${name}:<tag>, e.g. ci or deploy"
+      "pass exactly one tag per runner: --runner ${name}:<tag>, e.g. ci or deploy (or - for an untagged runner)"
     return 1
   fi
   if [[ ! "${limit}" =~ ^[1-9][0-9]{0,2}$ ]]; then
@@ -179,11 +180,11 @@ grk_valid_url() {
   [[ "${1-}" =~ ^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?/?$ ]]
 }
 
-# grk_config_has_runner FILE NAME -> 0 when FILE already holds a [[runners]]
-# entry named NAME (the exact line grk_render_runner writes, or register's).
+# grk_config_has_runner NAME < CONFIG -> 0 when the config text on stdin already
+# holds a [[runners]] entry named NAME (the line grk_render_runner writes, or
+# register's). It reads stdin, so the caller decides who reads the file.
 grk_config_has_runner() {
-  [ -e "$1" ] || return 1
-  grep -Eq "^[[:space:]]*name[[:space:]]*=[[:space:]]*\"$2\"[[:space:]]*$" "$1"
+  grep -Eq "^[[:space:]]*name[[:space:]]*=[[:space:]]*\"$1\"[[:space:]]*$"
 }
 
 # grk_render_header CONCURRENT -> the top of a new config.toml.
@@ -200,8 +201,13 @@ grk_render_header() {
 grk_render_runner() {
   printf '\n[[runners]]\n'
   printf '  name = "%s"\n' "$1"
-  printf '  # tags = ["%s"], run_untagged = false: set on the runner in GitLab when it\n' "$2"
-  printf '  # was created (POST user/runners tag_list=%s run_untagged=false). A runner\n' "$2"
+  if [ "$2" = "-" ]; then
+    printf '  # untagged: no tags, run_untagged = true, set on the runner in GitLab when it\n'
+    printf '  # was created ("Run untagged jobs" ON, tags empty). A runner\n'
+  else
+    printf '  # tags = ["%s"], run_untagged = false: set on the runner in GitLab when it\n' "$2"
+    printf '  # was created (POST user/runners tag_list=%s run_untagged=false). A runner\n' "$2"
+  fi
   printf '  # authentication token carries them server-side; config.toml has no field.\n'
   printf '  url = "%s"\n' "$4"
   printf '  token = "%s"\n' "$6"
@@ -214,17 +220,29 @@ grk_render_runner() {
   printf '    volumes = ["%s/cache:/cache"]\n' "$5"
 }
 
+# OpenRC sources /etc/conf.d/<base> BEFORE /etc/conf.d/<base>.<suffix> for an
+# instance, so anything the default user's (base) conf.d sets is inherited by
+# every instance that does not set it again. The base conf.d therefore names no
+# user, home or config path: the initd derives those from RC_SVCNAME. An
+# instance's conf.d names all of them, and each initd refuses an instance whose
+# resolved user is not its own (grk_render_* and *.initd start_pre).
+
 # grk_render_docker_confd NAME -> /etc/conf.d/<docker service> for a new install.
 grk_render_docker_confd() {
   printf '# Written by scripts/setup-gitlab-runner-docker (DND-1937) for %s.\n' "$1"
   printf '# The rootless dockerd of this runner user; data root under its own 0700 CI dir.\n'
-  printf 'DOCKER_ROOTLESS_USER="%s"\n' "$1"
+  if [ "$1" != "${GRK_DEFAULT_USER}" ]; then printf 'DOCKER_ROOTLESS_USER="%s"\n' "$1"; fi
   printf 'DOCKERD_ROOTLESS_OPTS="--data-root %s/docker"\n' "$(grk_ci_dir "$1")"
 }
 
 # grk_render_runner_confd NAME HOME -> /etc/conf.d/<runner service> for a new install.
 grk_render_runner_confd() {
   printf '# Written by scripts/setup-gitlab-runner (DND-1937) for %s.\n' "$1"
+  if [ "$1" = "${GRK_DEFAULT_USER}" ]; then
+    printf '# The default user: the initd derives RUNNER_USER, RUNNER_HOME and\n'
+    printf '# RUNNER_CONFIG. Setting them here would leak into every instance.\n'
+    return 0
+  fi
   printf 'RUNNER_USER="%s"\n' "$1"
   printf 'RUNNER_HOME="%s"\n' "$2"
   printf 'RUNNER_CONFIG="%s/.gitlab-runner/config.toml"\n' "$2"

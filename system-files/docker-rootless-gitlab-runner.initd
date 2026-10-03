@@ -73,7 +73,34 @@ depend() {
 	after elogind firewall
 }
 
+# DND-1937: OpenRC sources /etc/conf.d/docker-rootless-gitlab-runner before
+# the instance's conf.d, so an instance inherits whatever the base sets and its
+# own does not. An instance refuses to start unless it resolved to its OWN user
+# and, when a --data-root is set, one inside that user's /srv/ci/<user>/.
+_instance_guard() {
+	case "${RC_SVCNAME}" in
+		docker-rootless-gitlab-runner.?*) ;;
+		*) return 0 ;;
+	esac
+	if [ "${DOCKER_ROOTLESS_USER}" != "${_default_user}" ]; then
+		eerror "${RC_SVCNAME} resolved DOCKER_ROOTLESS_USER=${DOCKER_ROOTLESS_USER}, not ${_default_user} (inherited from /etc/conf.d/docker-rootless-gitlab-runner?)"
+		eerror "Fix: set DOCKER_ROOTLESS_USER=\"${_default_user}\" in /etc/conf.d/${RC_SVCNAME}, or re-run scripts/setup-gitlab-runner-docker --user ${_default_user}"
+		return 1
+	fi
+	case "${DOCKERD_ROOTLESS_OPTS}" in
+		*--data-root*)
+			case "${DOCKERD_ROOTLESS_OPTS}" in
+				*"--data-root /srv/ci/${_default_user}/"*|*"--data-root=/srv/ci/${_default_user}/"*) ;;
+				*)
+					eerror "${RC_SVCNAME} resolved DOCKERD_ROOTLESS_OPTS=${DOCKERD_ROOTLESS_OPTS}: its --data-root is not under /srv/ci/${_default_user}/"
+					eerror "Fix: set DOCKERD_ROOTLESS_OPTS=\"--data-root /srv/ci/${_default_user}/docker\" in /etc/conf.d/${RC_SVCNAME}"
+					return 1 ;;
+			esac ;;
+	esac
+}
+
 start_pre() {
+	_instance_guard || return 1
 	# start_pre runs as root; pre-create the logfile owned by the daemon user,
 	# because start-stop-daemon opens stdout/stderr AFTER dropping to that user
 	# and /var/log is not user-writable. Uses coreutils only (not checkpath),

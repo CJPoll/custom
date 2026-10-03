@@ -115,8 +115,18 @@ for want in '[[runners]]' 'name = "alpha-ci"' 'tags = ["ci"], run_untagged = fal
   case "${render}" in *"${want}"*) ok "lib: a rendered entry has ${want%% =*}" ;; *) bad "lib: a rendered entry has ${want%% =*}" "${render}" ;; esac
 done
 printf '%s\n' "${render}" > "${TMP}/cfg"
-check "lib: config_has_runner finds a rendered entry" grk_config_has_runner "${TMP}/cfg" alpha-ci
-if grk_config_has_runner "${TMP}/cfg" alpha; then bad "lib: config_has_runner matches whole names only"; else ok "lib: config_has_runner matches whole names only"; fi
+if grk_config_has_runner alpha-ci < "${TMP}/cfg"; then ok "lib: config_has_runner finds a rendered entry"; else bad "lib: config_has_runner finds a rendered entry"; fi
+if grk_config_has_runner alpha < "${TMP}/cfg"; then bad "lib: config_has_runner matches whole names only"; else ok "lib: config_has_runner matches whole names only"; fi
+eq "lib: --runner NAME:- is an untagged runner" "$(grk_parse_runner walt-ui:-:3)" "walt-ui - 3"
+case "$(grk_render_runner walt-ui - 3 https://gitlab.com /srv/ci/gitlab-runner "${TOK_A}")" in
+  *"untagged: no tags, run_untagged = true"*) ok "lib: an untagged entry says so, not run_untagged = false" ;;
+  *) bad "lib: an untagged entry says so, not run_untagged = false" ;; esac
+case "$(grk_render_runner_confd gitlab-runner /home/gitlab-runner)" in
+  *RUNNER_USER=*|*RUNNER_HOME=*|*RUNNER_CONFIG=*) bad "lib: the default user's runner conf.d sets no user/home/config (instances inherit it)" ;;
+  *) ok "lib: the default user's runner conf.d sets no user/home/config (instances inherit it)" ;; esac
+case "$(grk_render_docker_confd gitlab-runner)" in
+  *DOCKER_ROOTLESS_USER=*) bad "lib: the default user's docker conf.d sets no user (instances inherit it)" ;;
+  *) ok "lib: the default user's docker conf.d sets no user (instances inherit it)" ;; esac
 
 # =========================================================== 2. the scripts
 ROOT="${TMP}/root"
@@ -133,20 +143,21 @@ printf '#!/bin/sh\necho "Version: 0.0.0-selftest"\n' > "${ROOT}/usr/local/bin/gi
 chmod 755 "${ROOT}/usr/local/bin/gitlab-runner"
 
 # Logging shims: each real tool logs its argv, then runs.
-for tool in awk cksum mkdir chmod mv mktemp cat grep ln rm cut head tr sed dirname basename tail wc sort env cp stat touch sha256sum; do
-  real="$(command -v "${tool}")" || { echo "FAIL: ${tool} not on PATH"; exit 1; }
+for tool in sh test awk cksum mkdir chmod mv mktemp cat grep ln rm cut head tr sed dirname basename tail wc sort env cp stat touch sha256sum; do
+  real="$(type -P "${tool}")" && [ -n "${real}" ] || { echo "FAIL: ${tool} has no executable on PATH"; exit 1; }  # a path, never a builtin: a builtin name would exec the shim itself
   printf '#!/bin/sh\nprintf "%%s\\n" "%s $*" >> "%s"\nexec "%s" "$@"\n' "${tool}" "${ARGV_LOG}" "${real}" > "${SHIMS}/${tool}"
   chmod 755 "${SHIMS}/${tool}"
 done
 REAL_INSTALL="$(command -v install)"
 REAL_BASH="$(command -v bash)"
+REAL_UID="$(id -u)"
 stub() { # <name> <body>: a stub that logs its argv, then runs body
-  printf '#!%s\nprintf "%%s\\n" "%s $*" >> "%s"\nROOT="%s"\n%s\n' "${REAL_BASH}" "$1" "${ARGV_LOG}" "${ROOT}" "$2" > "${STUBS}/$1"
+  printf '#!%s\nprintf "%%s\\n" "%s $*" >> "%s"\nROOT="%s"\nREAL_UID="%s"\n%s\n' "${REAL_BASH}" "$1" "${ARGV_LOG}" "${ROOT}" "${REAL_UID}" "$2" > "${STUBS}/$1"
   chmod 755 "${STUBS}/$1"
 }
 stub id '
 if [ "$1" = "-u" ] && [ $# -eq 1 ]; then echo 0; exit 0; fi
-if [ "$1" = "-u" ]; then awk -F: -v u="$2" '"'"'$1==u{print $3; f=1} END{exit !f}'"'"' "${ROOT}/etc/passwd"; exit; fi
+if [ "$1" = "-u" ]; then grep -q "^$2:" "${ROOT}/etc/passwd" && { echo "${REAL_UID}"; exit 0; }; exit 1; fi
 if [ "$1" = "-nG" ]; then
   if [ -f "${ROOT}/fake-groups/$2" ]; then cat "${ROOT}/fake-groups/$2"; else echo "$2"; fi; exit 0
 fi
@@ -156,7 +167,7 @@ stub getent '
 grep "^$2:" "${ROOT}/etc/passwd" || exit 2'
 stub useradd '
 home=""; name=""
-while [ $# -gt 0 ]; do case "$1" in -d) home="$2"; shift ;; -s) shift ;; -m) ;; *) name="$1" ;; esac; shift; done
+while [ $# -gt 0 ]; do case "$1" in -d) home="$2"; shift ;; -s|-K) shift ;; -m) ;; *) name="$1" ;; esac; shift; done
 uid=$(( 2000 + $(wc -l < "${ROOT}/etc/passwd") ))
 printf "%s:x:%s:%s::%s:/bin/bash\n" "${name}" "${uid}" "${uid}" "${home}" >> "${ROOT}/etc/passwd"
 mkdir -p "${ROOT}${home}"; chmod 0755 "${ROOT}${home}"'
@@ -165,6 +176,10 @@ args=()
 while [ \$# -gt 0 ]; do case \"\$1\" in -o|-g) shift ;; *) args+=(\"\$1\") ;; esac; shift; done
 exec ${REAL_INSTALL} \"\${args[@]}\""
 stub chown ':'
+# runuser -u USER -- CMD...: the test runs as one account, so it just runs CMD.
+stub runuser '
+[ "$1" = "-u" ] && [ "$3" = "--" ] || { echo "runuser stub: unexpected argv" >&2; exit 2; }
+shift 3; exec "$@"'
 stub loginctl 'case "$1" in show-user) echo "Linger=no" ;; esac'
 stub emerge ':'
 stub rc-update ':'
@@ -200,7 +215,7 @@ for s in setup-gitlab-runner-user setup-gitlab-runner-docker setup-gitlab-runner
   case "${OUT}" in *"--user <name>"*) ok "${s} --help is on stdout and names --user" ;; *) bad "${s} --help is on stdout and names --user" "${OUT}" ;; esac
   eq "${s} --help writes nothing to stderr" "${ERR}" ""
   eq "${s} --help changes no file" "$(snapshot)" "${before}"
-  if grep -vE '^(awk|dirname) ' "${ARGV_LOG}" | grep -q .; then bad "${s} --help runs no host command" "$(cat "${ARGV_LOG}")"
+  if grep -q . <<<"$(grep -vE '^(awk|dirname) ' "${ARGV_LOG}")"; then bad "${s} --help runs no host command" "$(cat "${ARGV_LOG}")"
   else ok "${s} --help runs no host command"; fi
 done
 
@@ -216,9 +231,13 @@ kit setup-gitlab-runner-user --user gitlab-runner-alpha "${NOIN}"
 expect_rc "user alpha: setup-gitlab-runner-user succeeds" 0
 check "user alpha: passwd entry created" grep -q '^gitlab-runner-alpha:' "${ROOT}/etc/passwd"
 eq "user alpha: home is 0700" "$(mode_of "${ROOT}/home/gitlab-runner-alpha")" "700"
-for d in "" /docker /cache; do
+eq "user alpha: /srv/ci/gitlab-runner-alpha is 0710 (root-owned; the user only traverses)" "$(mode_of "${ROOT}/srv/ci/gitlab-runner-alpha")" "710"
+check "user alpha: /srv/ci/gitlab-runner-alpha is created root-owned" \
+  grep -q "^install -d -m 0710 -o root -g gitlab-runner-alpha ${ROOT}/srv/ci/gitlab-runner-alpha\$" "${ARGV_LOG}"
+for d in /docker /cache; do
   eq "user alpha: /srv/ci/gitlab-runner-alpha${d} is 0700" "$(mode_of "${ROOT}/srv/ci/gitlab-runner-alpha${d}")" "700"
 done
+check "user alpha: useradd allocates no subid block itself" grep -q '^useradd .*-K SUB_UID_COUNT=0 -K SUB_GID_COUNT=0 gitlab-runner-alpha$' "${ARGV_LOG}"
 check "user alpha: the CI dirs are created owned by the user" \
   grep -q "^install -d -m 0700 -o gitlab-runner-alpha -g gitlab-runner-alpha ${ROOT}/srv/ci/gitlab-runner-alpha/cache\$" "${ARGV_LOG}"
 kit setup-gitlab-runner-user --user gitlab-runner-alpha "${NOIN}"
@@ -252,12 +271,23 @@ check "two users on one host get disjoint subuid blocks" disjoint "${A_START}" "
 eq "user bravo: home is 0700 (alpha cannot read it)" "$(mode_of "${ROOT}/home/gitlab-runner-bravo")" "700"
 eq "user alpha: home still 0700 (bravo cannot read it)" "$(mode_of "${ROOT}/home/gitlab-runner-alpha")" "700"
 
+# --- root never follows a symlink a runner user planted -------------------------
+mkdir -p "${TMP}/elsewhere"; chmod 755 "${TMP}/elsewhere"
+mkdir -p "${ROOT}/srv/ci"; ln -s "${TMP}/elsewhere" "${ROOT}/srv/ci/gitlab-runner-echo"
+kit setup-gitlab-runner-user --user gitlab-runner-echo "${NOIN}"
+expect_rc "user echo: a symlinked /srv/ci/<user> is refused" 1
+case "${ERR}" in *symlink*Fix:*) ok "the symlink refusal carries Fix:" ;; *) bad "the symlink refusal carries Fix:" "${ERR}" ;; esac
+eq "user echo: the symlink's target is untouched" "$(mode_of "${TMP}/elsewhere")" "755"
+rm -f "${ROOT}/srv/ci/gitlab-runner-echo"
+
 # --- the default user keeps today's values -----------------------------------
 kit setup-gitlab-runner-user "${NOIN}"; expect_rc "default user: succeeds" 0
 kit setup-gitlab-runner-docker "${NOIN}"; expect_rc "default docker: succeeds" 0
 eq "default user: keeps the 296608 block" "$(grep '^gitlab-runner:' "${ROOT}/etc/subuid")" "gitlab-runner:296608:65536"
 check "default user: service is docker-rootless-gitlab-runner, no instance" grep -qx 'rc-update add docker-rootless-gitlab-runner default' "${ARGV_LOG}"
 if [ -e "${ROOT}/etc/init.d/docker-rootless-gitlab-runner." ]; then bad "default user: no dotted instance file"; else ok "default user: no dotted instance file"; fi
+check "default user: a new docker conf.d names no user (instances would inherit it)" \
+  bash -c '! grep -q "^DOCKER_ROOTLESS_USER=" "$1"' _ "${ROOT}/etc/conf.d/docker-rootless-gitlab-runner"
 printf 'DOCKER_ROOTLESS_USER="gitlab-runner"\n# owner-edited\n' > "${ROOT}/etc/conf.d/docker-rootless-gitlab-runner"
 kit setup-gitlab-runner-docker "${NOIN}"; expect_rc "default docker: a re-run succeeds" 0
 check "default user: an existing conf.d is kept as is" grep -qx '# owner-edited' "${ROOT}/etc/conf.d/docker-rootless-gitlab-runner"
@@ -281,6 +311,27 @@ kit setup-gitlab-runner-docker --user gitlab-runner-delta "${NOIN}"
 expect_rc "docker delta: a malformed /etc/subuid is refused, never read as empty" 1
 case "${ERR}" in *Fix:*) ok "the malformed-file refusal carries Fix:" ;; *) bad "the malformed-file refusal carries Fix:" "${ERR}" ;; esac
 sed -i '/^not-a-subid-line$/d' "${ROOT}/etc/subuid"
+
+# subuid/subgid stay paired, and an append survives a missing final newline.
+kit setup-gitlab-runner-user --user gitlab-runner-foxtrot "${NOIN}"
+printf 'gitlab-runner-foxtrot:%s:65536\n' "$(( 1268435456 - 2 * 65536 ))" >> "${ROOT}/etc/subgid"
+kit setup-gitlab-runner-docker --user gitlab-runner-foxtrot "${NOIN}"
+expect_rc "docker foxtrot: a block present only in subgid is reused for subuid" 0
+eq "docker foxtrot: subuid gets subgid's block" "$(grep '^gitlab-runner-foxtrot:' "${ROOT}/etc/subuid")" \
+  "gitlab-runner-foxtrot:$(( 1268435456 - 2 * 65536 )):65536"
+printf 'tail-no-newline:1:1' >> "${ROOT}/etc/subuid"; printf 'tail-no-newline:1:1' >> "${ROOT}/etc/subgid"
+kit setup-gitlab-runner-user --user gitlab-runner-golf "${NOIN}"
+kit setup-gitlab-runner-docker --user gitlab-runner-golf --subid-start $(( 1268435456 - 3 * 65536 )) "${NOIN}"
+expect_rc "docker golf: succeeds after a line with no final newline" 0
+check "docker golf: the unterminated line is kept whole" grep -qx 'tail-no-newline:1:1' "${ROOT}/etc/subuid"
+check "docker golf: its own line is whole" grep -qx "gitlab-runner-golf:$(( 1268435456 - 3 * 65536 )):65536" "${ROOT}/etc/subuid"
+
+# A kept instance conf.d that names another user is refused.
+printf 'DOCKER_ROOTLESS_USER="gitlab-runner"\n' > "${ROOT}/etc/conf.d/docker-rootless-gitlab-runner.golf"
+kit setup-gitlab-runner-docker --user gitlab-runner-golf "${NOIN}"
+expect_rc "docker golf: a kept conf.d naming another user is refused" 1
+case "${ERR}" in *DOCKER_ROOTLESS_USER=gitlab-runner*Fix:*) ok "the kept-conf.d refusal names the user, with Fix:" ;; *) bad "the kept-conf.d refusal names the user, with Fix:" "${ERR}" ;; esac
+rm -f "${ROOT}/etc/conf.d/docker-rootless-gitlab-runner.golf"
 
 # --- no runner user may be in the docker group -------------------------------
 printf 'gitlab-runner-bravo docker\n' > "${ROOT}/fake-groups/gitlab-runner-bravo"
@@ -306,7 +357,7 @@ check "runner alpha: the deploy entry has its own limit" grep -qx '  limit = 2' 
 eq "runner alpha: the instance is a symlink to the base initd" "$(readlink "${ROOT}/etc/init.d/gitlab-runner.alpha")" "gitlab-runner"
 check "runner alpha: conf.d names the config" \
   grep -qx 'RUNNER_CONFIG="/home/gitlab-runner-alpha/.gitlab-runner/config.toml"' "${ROOT}/etc/conf.d/gitlab-runner.alpha"
-check "runner alpha: the config is chowned to the user" grep -q '^chown gitlab-runner-alpha:gitlab-runner-alpha ' "${ARGV_LOG}"
+check "runner alpha: the config is written as the user, not by root" grep -q '^runuser -u gitlab-runner-alpha -- sh -c' "${ARGV_LOG}"
 if grep -q '^rc-service .* start' "${ARGV_LOG}"; then bad "runner alpha: the service is not started"; else ok "runner alpha: the service is not started"; fi
 
 cfg_before="$(cat "${CFG}")"
@@ -342,6 +393,23 @@ kit setup-gitlab-runner --user gitlab-runner-bravo --runner "${TOK_B}" "${NOIN}"
 expect_rc "a token pasted as a --runner spec is refused" 1
 case "${ERR}" in *"glrt-<not shown>"*) ok "the refusal shows glrt-<not shown> in the token's place" ;; *) bad "the refusal shows glrt-<not shown> in the token's place" "${ERR}" ;; esac
 
+# A config.toml symlink planted by the user is replaced, never written through.
+mkdir -p "${ROOT}/home/gitlab-runner-bravo/.gitlab-runner"
+printf 'sentinel\n' > "${TMP}/link-target"
+ln -s "${TMP}/link-target" "${ROOT}/home/gitlab-runner-bravo/.gitlab-runner/config.toml"
+kit setup-gitlab-runner --user gitlab-runner-bravo --runner bravo-ci:ci "${TMP}/tokens-c"
+expect_rc "runner bravo: a symlinked config.toml is replaced by a regular file" 0
+eq "runner bravo: the symlink's target is untouched" "$(cat "${TMP}/link-target")" "sentinel"
+if [ -L "${ROOT}/home/gitlab-runner-bravo/.gitlab-runner/config.toml" ]; then bad "runner bravo: config.toml is no longer a symlink"
+else ok "runner bravo: config.toml is no longer a symlink"; fi
+check "runner bravo: the config is written as the user (runuser)" grep -q '^runuser -u gitlab-runner-bravo -- sh -c' "${ARGV_LOG}"
+
+# A kept runner conf.d that names another user is refused.
+printf 'RUNNER_USER="gitlab-runner"\n' > "${ROOT}/etc/conf.d/gitlab-runner.bravo"
+kit setup-gitlab-runner --user gitlab-runner-bravo --runner bravo-ci:ci "${NOIN}"
+expect_rc "runner bravo: a kept conf.d naming another user is refused" 1
+rm -f "${ROOT}/etc/conf.d/gitlab-runner.bravo"
+
 # --- a token never reaches argv or any output --------------------------------
 leaked=""
 for t in "${ALL_TOK[@]}"; do
@@ -376,6 +444,36 @@ got="$(initd_vars docker-rootless-gitlab-runner docker-rootless-gitlab-runner)"
 case "${got}" in "|||gitlab-runner"*) ok "initd: the default docker service keeps user gitlab-runner" ;; *) bad "initd: the default docker service keeps user gitlab-runner" "${got}" ;; esac
 got="$(initd_vars docker-rootless-gitlab-runner docker-rootless-gitlab-runner.alpha)"
 case "${got}" in "|||gitlab-runner-alpha"*) ok "initd: docker-rootless-gitlab-runner.alpha runs as gitlab-runner-alpha" ;; *) bad "initd: docker-rootless-gitlab-runner.alpha runs as gitlab-runner-alpha" "${got}" ;; esac
+
+# OpenRC sources the base conf.d, then the instance's, then the initd. An
+# instance that inherits another user from the base conf.d refuses to start.
+instance_guard() { # <initd> <RC_SVCNAME> <base conf text> <instance conf text>
+  printf '%s\n' "$3" > "${TMP}/base.conf"; printf '%s\n' "$4" > "${TMP}/inst.conf"
+  env -i PATH=/usr/bin:/bin RC_SVCNAME="$2" sh -c '
+    eerror() { printf "%s\n" "$*"; }
+    . "$1"; . "$2"; . "$3" >/dev/null 2>&1
+    _instance_guard' sh "${TMP}/base.conf" "${TMP}/inst.conf" "${SRC}/system-files/$1.initd"
+}
+out="$(instance_guard gitlab-runner gitlab-runner.alpha 'RUNNER_USER="gitlab-runner"
+RUNNER_HOME="/home/gitlab-runner"
+RUNNER_CONFIG="/home/gitlab-runner/.gitlab-runner/config.toml"' '')"; rc=$?
+eq "initd: an instance inheriting the base conf.d's user refuses to start" "${rc}" "1"
+case "${out}" in *"Fix: set RUNNER_USER=\"gitlab-runner-alpha\""*) ok "initd: the refusal's Fix: names the instance's own user" ;; *) bad "initd: the refusal's Fix: names the instance's own user" "${out}" ;; esac
+instance_guard gitlab-runner gitlab-runner.alpha 'RUNNER_USER="gitlab-runner"' \
+  "$(grk_render_runner_confd gitlab-runner-alpha /home/gitlab-runner-alpha)" >/dev/null
+eq "initd: an instance with its own rendered conf.d starts" "$?" "0"
+instance_guard gitlab-runner gitlab-runner.alpha "$(grk_render_runner_confd gitlab-runner /home/gitlab-runner)" '' >/dev/null
+eq "initd: an instance under the kit's default base conf.d starts (it derives its user)" "$?" "0"
+instance_guard gitlab-runner gitlab-runner 'RUNNER_USER="gitlab-runner"' '' >/dev/null
+eq "initd: the default service is not an instance and is not guarded" "$?" "0"
+out="$(instance_guard docker-rootless-gitlab-runner docker-rootless-gitlab-runner.alpha 'DOCKER_ROOTLESS_USER="gitlab-runner"' '')"; rc=$?
+eq "initd: a docker instance inheriting the base user refuses to start" "${rc}" "1"
+instance_guard docker-rootless-gitlab-runner docker-rootless-gitlab-runner.alpha \
+  "$(grk_render_docker_confd gitlab-runner)" '' >/dev/null; rc=$?
+eq "initd: a docker instance inheriting the default user's data root refuses to start" "${rc}" "1"
+instance_guard docker-rootless-gitlab-runner docker-rootless-gitlab-runner.alpha \
+  "$(grk_render_docker_confd gitlab-runner)" "$(grk_render_docker_confd gitlab-runner-alpha)" >/dev/null
+eq "initd: a docker instance with its own rendered conf.d starts" "$?" "0"
 
 echo "gitlab-runner-kit self-test: ${PASS} passed, ${FAIL} failed"
 [ "${FAIL}" -eq 0 ]

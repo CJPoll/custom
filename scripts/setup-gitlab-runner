@@ -123,15 +123,27 @@ getent passwd "${USER_NAME}" >/dev/null \
 USER_HOME="$(getent passwd "${USER_NAME}" | cut -d: -f6)"
 [[ "${USER_HOME}" == /* ]] || die "${USER_NAME}'s home '${USER_HOME}' is not an absolute path" \
   "set it with: usermod -d /home/${USER_NAME} ${USER_NAME}, then re-run"
+command -v runuser >/dev/null || die "runuser (util-linux) not found" "emerge sys-apps/util-linux, then re-run"
 CONFIG_DIR="${USER_HOME}/.gitlab-runner"
 CONFIG="${CONFIG_DIR}/config.toml"
+
+# The user owns ~/.gitlab-runner, so every read and write of the config runs AS
+# the user (runuser): root never follows a symlink the user planted there.
+EXISTING_CFG=""
+HAVE_CFG=false
+if [ "${#R_NAMES[@]}" -gt 0 ] && runuser -u "${USER_NAME}" -- test -e "${R}${CONFIG}"; then
+  EXISTING_CFG="$(runuser -u "${USER_NAME}" -- cat "${R}${CONFIG}")" \
+    || die "${CONFIG} exists but ${USER_NAME} cannot read it" \
+           "check it as root (ls -l ${CONFIG}): it must be a regular file owned by ${USER_NAME}; fix or move it, then re-run"
+  HAVE_CFG=true
+fi
 
 # --- 1. read the tokens (before any change, so a bad one changes nothing) ----
 # A token lives only in shell variables and reaches the config through the
 # printf builtin: no process ever has it in argv, and nothing prints it.
 NEW_IDX=()
 for i in "${!R_NAMES[@]}"; do
-  if grk_config_has_runner "${R}${CONFIG}" "${R_NAMES[$i]}"; then
+  if grk_config_has_runner "${R_NAMES[$i]}" <<<"${EXISTING_CFG}"; then
     log "config already has runner ${R_NAMES[$i]} — keeping it (its token is not read)"
   else
     NEW_IDX+=("${i}")
@@ -185,6 +197,12 @@ if [ "${SERVICE_NAME}" != "${SERVICE_BASE}" ]; then
 fi
 CONFD="${R}/etc/conf.d/${SERVICE_NAME}"
 if [ -e "${CONFD}" ]; then
+  # A kept conf.d must not run this service as another user (trust domains).
+  kept_user="$(RUNNER_USER=""; . "${CONFD}" >/dev/null 2>&1; printf '%s' "${RUNNER_USER:-}")"
+  if [ -n "${kept_user}" ] && [ "${kept_user}" != "${USER_NAME}" ]; then
+    die "/etc/conf.d/${SERVICE_NAME} sets RUNNER_USER=${kept_user}, not ${USER_NAME}" \
+        "set RUNNER_USER=\"${USER_NAME}\" there (or delete the line for the default user), then re-run"
+  fi
   log "keeping existing /etc/conf.d/${SERVICE_NAME}"
 else
   log "writing /etc/conf.d/${SERVICE_NAME}"
@@ -199,10 +217,14 @@ run rc-update add "${SERVICE_NAME}" default
 
 # --- 4. the config.toml ([[runners]] entries) ---------------------------------
 if [ "${#R_NAMES[@]}" -gt 0 ]; then
-  run install -d -m 0700 -o "${USER_NAME}" -g "${USER_NAME}" "${R}${CONFIG_DIR}"
-  if [ -e "${R}${CONFIG}" ]; then
-    content="$(cat "${R}${CONFIG}")"$'\n'
-    [ -z "${CONCURRENT}" ] || log "${CONFIG} exists: its concurrent setting is kept as is"
+  run runuser -u "${USER_NAME}" -- sh -c 'umask 077; mkdir -p "$1" && chmod 0700 "$1"' sh "${R}${CONFIG_DIR}"
+  if $HAVE_CFG; then
+    content="${EXISTING_CFG}"$'\n'
+    kept_cc="$(sed -n '/^concurrent[[:space:]]*=/{s/^concurrent[[:space:]]*=[[:space:]]*\([0-9]*\).*/\1/p;q;}' <<<"${EXISTING_CFG}")"
+    log "${CONFIG} exists: its concurrent setting (${kept_cc:-unset}) is kept as is"
+    if [ -n "${kept_cc}" ] && [ "${kept_cc}" -lt "${LIMIT_SUM}" ]; then
+      warn "existing concurrent ${kept_cc} is below these runners' summed limit ${LIMIT_SUM}: one runner's job can queue behind another's"
+    fi
   else
     content="$(grk_render_header "${CONCURRENT}")"$'\n'
   fi
@@ -215,14 +237,23 @@ if [ "${#R_NAMES[@]}" -gt 0 ]; then
     printf '    + write %s (mode 0600, owner %s; %s new entr(ies); would read %s token(s) on stdin)\n' \
       "${R}${CONFIG}" "${USER_NAME}" "${#NEW_IDX[@]}" "${#NEW_IDX[@]}"
   else
-    # mktemp creates 0600; the rename makes the write atomic.
-    tmpcfg="$(mktemp "${R}${CONFIG_DIR}/.config.toml.XXXXXX")"
-    printf '%s' "${content}" > "${tmpcfg}"
+    # As the user: mktemp creates 0600, the rename makes the write atomic, and a
+    # failure removes the temp copy. The content (tokens included) goes on
+    # stdin through the printf builtin, never argv.
+    printf '%s' "${content}" | runuser -u "${USER_NAME}" -- sh -c '
+      umask 077
+      t="$(mktemp "$1/.config.toml.XXXXXX")" || exit 1
+      if cat > "$t" && chmod 0600 "$t" && mv -f "$t" "$2"; then exit 0; fi
+      rm -f "$t"; exit 1' sh "${R}${CONFIG_DIR}" "${R}${CONFIG}" \
+      || die "writing ${CONFIG} as ${USER_NAME} failed" "check that ${CONFIG_DIR} is a directory ${USER_NAME} owns (ls -ld ${CONFIG_DIR}), then re-run"
     unset content TOKENS
-    chmod 0600 "${tmpcfg}"
-    chown "${USER_NAME}:${USER_NAME}" "${tmpcfg}"
-    mv -f "${tmpcfg}" "${R}${CONFIG}"
-    log "wrote ${CONFIG} (mode 0600, owner ${USER_NAME})"
+    # Assert what the registry entry (ai/secrets/registry.json) claims: a regular
+    # file, mode 0600, owned by the runner user. stat does not follow a symlink.
+    got="$(stat -c '%a %u %F' "${R}${CONFIG}")"
+    want="600 $(id -u "${USER_NAME}") regular file"
+    [ "${got}" = "${want}" ] || die "${CONFIG} reads '${got}', not '${want}' (mode, owner uid, type)" \
+      "inspect it (ls -l ${CONFIG}); it must be a regular 0600 file owned by ${USER_NAME}; remove anything else and re-run"
+    log "wrote ${CONFIG} (checked: regular file, mode 0600, owner ${USER_NAME})"
   fi
 fi
 

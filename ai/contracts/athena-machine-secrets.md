@@ -253,8 +253,12 @@ owned by that account, mode `0600`/`0400`, in a directory that is not group- or
 world-writable. The account missing on a machine reads `not provisioned here`.
 A file the checking account cannot stat (it sits in that account's `0700`
 home) reads `not checked as this account: NAME …; run as root or USER to check
-it`: named per entry, never `ok`, and not a finding. `with-secret` refuses such
-an entry: a session never loads another account's secret.
+it`: named per entry, never `ok`, and not a finding. That is the usual state of
+a runner user's `config.toml`, whose home is `0700`. Two instruments do check it:
+`scripts/setup-gitlab-runner` asserts a regular `0600` file owned by the runner
+user after every write, and `sudo ai/bin/check-machine-secrets --probe c` on the
+runner host checks it at any time. `with-secret` refuses such an entry: a
+session never loads another account's secret.
 
 ## The env allowlist
 
@@ -433,8 +437,8 @@ because it carries the process environ.
 only. The value never goes in argv, and nothing is printed from it. One
 trailing newline is dropped. It refuses, with a `Fix:` line and no exec: an
 unknown name, a malformed registry, a `dotenv` entry, an entry held by
-another account (`user`), a name that is not an env identifier, a missing, empty, or mis-permissioned file, and a missing
-command.
+another account (`user`), a name that is not an env identifier, a missing,
+empty, or mis-permissioned file, and a missing command.
 
 ## secret-env-warn
 

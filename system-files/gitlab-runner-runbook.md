@@ -46,8 +46,9 @@ script's `--help` has the flags.
 create the runner with its tag and "Run untagged jobs" set in GitLab, then
 `sudo scripts/setup-gitlab-runner --user <user> --runner <name>:<tag>` with
 the token on stdin. It writes the `[[runners]]` entry with the
-`[runners.docker]` block below into a `0600` config.toml. The walt_ui runner's
-untagged design is set in GitLab, so its `<tag>` is only the entry's record.
+`[runners.docker]` block below into a `0600` config.toml. The walt_ui runner is
+untagged (set in GitLab), and step 3's `concurrent = 3` is its job limit, so its
+spec is `--runner <name>:-:3`; `-` records "untagged" in the entry.
 
 1. GitLab: **walt_ui → Settings → CI/CD → Runners → New project runner**. Turn ON
    **"Run untagged jobs"**, leave **Tags empty**, copy the `glrt-…` token.

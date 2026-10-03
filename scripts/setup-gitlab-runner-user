@@ -7,8 +7,9 @@
 #
 #   * user <name> (default gitlab-runner), home /home/<name> at mode 0700,
 #     shell /bin/bash, NO sudo/wheel/docker group
-#   * /srv/ci/<name>, /srv/ci/<name>/docker (its rootless docker data root) and
-#     /srv/ci/<name>/cache (the job cache), each 0700 and owned by <name>
+#   * /srv/ci/<name>/docker (its rootless docker data root) and
+#     /srv/ci/<name>/cache (the job cache), each 0700 and owned by <name>,
+#     inside /srv/ci/<name> at 0710 root:<name> (the user cannot replace them)
 #   * CI job code executes as this user (inside rootless-docker containers), so
 #     it deliberately has no root, and no runner user can read another's files.
 #
@@ -66,7 +67,11 @@ if getent passwd "${USER_NAME}" >/dev/null; then
   log "user ${USER_NAME} already exists — skipping useradd"
 else
   log "creating user ${USER_NAME} (home=/home/${USER_NAME}, shell=${USER_SHELL}, no sudo)"
-  run useradd -m -d "/home/${USER_NAME}" -s "${USER_SHELL}" "${USER_NAME}"
+  # SUB_*_COUNT=0: useradd must not auto-allocate a subuid/subgid block in
+  # shadow's default range; setup-gitlab-runner-docker assigns the user's
+  # deterministic block (scripts/lib/gitlab-runner-kit.sh).
+  run useradd -m -d "/home/${USER_NAME}" -s "${USER_SHELL}" \
+    -K SUB_UID_COUNT=0 -K SUB_GID_COUNT=0 "${USER_NAME}"
 fi
 
 # Guard rail: the runner user must never have root.
@@ -83,14 +88,24 @@ if getent passwd "${USER_NAME}" >/dev/null; then
     "set it with: usermod -d /home/${USER_NAME} ${USER_NAME}, then re-run"
 fi
 
+# Root never follows a symlink here: chmod/install -d act on a link's target,
+# and a runner user could plant one to make root chown /etc to it.
+CI_DIR="$(grk_ci_dir "${USER_NAME}")"
+for p in "${USER_HOME}" /srv/ci "${CI_DIR}" "${CI_DIR}/docker" "${CI_DIR}/cache"; do
+  [ ! -L "${R}${p}" ] || die "${p} is a symlink, so root would act on its target" \
+    "remove the symlink (rm ${p}) after checking what it points at, then re-run"
+done
+
 # Neither runner user can read the other's home.
 log "home ${USER_HOME}: mode 0700"
 run chmod 0700 "${R}${USER_HOME}"
 
-CI_DIR="$(grk_ci_dir "${USER_NAME}")"
-log "CI dirs ${CI_DIR}{,/docker,/cache}: mode 0700, owned by ${USER_NAME}"
+# /srv/ci/<user> is root-owned (0710 root:<user>: the user may only traverse),
+# so the user cannot swap docker/ or cache/ for a symlink before a re-run.
+log "CI dirs ${CI_DIR} (0710 root:${USER_NAME}), ${CI_DIR}/{docker,cache} (0700 ${USER_NAME})"
 run install -d -m 0755 -o root -g root "${R}/srv/ci"
-for d in "${CI_DIR}" "${CI_DIR}/docker" "${CI_DIR}/cache"; do
+run install -d -m 0710 -o root -g "${USER_NAME}" "${R}${CI_DIR}"
+for d in "${CI_DIR}/docker" "${CI_DIR}/cache"; do
   run install -d -m 0700 -o "${USER_NAME}" -g "${USER_NAME}" "${R}${d}"
 done
 

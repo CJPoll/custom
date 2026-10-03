@@ -80,7 +80,34 @@ depend() {
 	after elogind firewall docker-rootless-${RC_SVCNAME}
 }
 
+# DND-1937: OpenRC sources /etc/conf.d/gitlab-runner before
+# /etc/conf.d/gitlab-runner.<suffix>, so an instance inherits whatever the base
+# conf.d sets and its own does not. An instance therefore refuses to start
+# unless it resolved to its OWN user, that user's home, and a config inside it:
+# one trust domain never runs as, or with the token of, another.
+_instance_guard() {
+	case "${RC_SVCNAME}" in
+		gitlab-runner.?*) ;;
+		*) return 0 ;;
+	esac
+	_want_home="$(getent passwd "${_default_user}" 2>/dev/null | cut -d: -f6)"
+	: "${_want_home:=/home/${_default_user}}"
+	if [ "${RUNNER_USER}" != "${_default_user}" ] || [ "${RUNNER_HOME}" != "${_want_home}" ]; then
+		eerror "${RC_SVCNAME} resolved RUNNER_USER=${RUNNER_USER} RUNNER_HOME=${RUNNER_HOME}, not ${_default_user} ${_want_home} (inherited from /etc/conf.d/gitlab-runner?)"
+		eerror "Fix: set RUNNER_USER=\"${_default_user}\", RUNNER_HOME=\"${_want_home}\" and RUNNER_CONFIG in /etc/conf.d/${RC_SVCNAME}, or re-run scripts/setup-gitlab-runner --user ${_default_user}"
+		return 1
+	fi
+	case "${RUNNER_CONFIG}" in
+		"${RUNNER_HOME}"/*) ;;
+		*)
+			eerror "${RC_SVCNAME} resolved RUNNER_CONFIG=${RUNNER_CONFIG}, outside ${RUNNER_HOME}"
+			eerror "Fix: set RUNNER_CONFIG=\"${RUNNER_HOME}/.gitlab-runner/config.toml\" in /etc/conf.d/${RC_SVCNAME}"
+			return 1 ;;
+	esac
+}
+
 start_pre() {
+	_instance_guard || return 1
 	# start_pre runs as root; pre-create the logfile owned by the runner user,
 	# because start-stop-daemon opens stdout/stderr AFTER dropping to that user
 	# and /var/log is not user-writable. Uses coreutils only (not checkpath),

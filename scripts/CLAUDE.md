@@ -504,9 +504,11 @@ host, one per trust domain. Every script takes `--user gitlab-runner-<suffix>`
 services are the OpenRC instances `gitlab-runner.<suffix>` and
 `docker-rootless-gitlab-runner.<suffix>`: symlinks inside `/etc/init.d` to the
 installed copies, so the copy-not-symlink rule still holds. A named user's
-subuid/subgid block is `1000000000 + (CRC32(name) mod 4096) * 65536`; an overlap
-with any other line is refused with a `Fix:` naming `--subid-start`. Its home
-and `/srv/ci/<user>/{docker,cache}` are `0700`. `setup-gitlab-runner --runner
+subuid/subgid block is `1000000000 + (cksum(name) mod 4096) * 65536` (the POSIX
+`cksum` CRC); an overlap with any other line is refused with a `Fix:` naming
+`--subid-start`. Its home and `/srv/ci/<user>/{docker,cache}` are `0700`, inside
+a root-owned `/srv/ci/<user>` (`0710`). Root never writes through a path the
+runner user owns: the config and `.bashrc` are written as the user (`runuser`). `setup-gitlab-runner --runner
 NAME:TAG[:LIMIT]` writes the `[[runners]]` entries into a `0600` config.toml,
 reading one `glrt-` token per entry on stdin, never argv. The rules live in
 `scripts/lib/gitlab-runner-kit.sh`; the tests in `scripts/test/gitlab-runner-kit/`.

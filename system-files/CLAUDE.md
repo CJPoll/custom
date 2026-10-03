@@ -102,9 +102,13 @@ is never committed; `gitlab-runner-config.toml.example` is the non-secret shape.
 
 **Later (2026-10-03, DND-1937):** both initd files also serve named runner users.
 An instance `gitlab-runner.<suffix>` / `docker-rootless-gitlab-runner.<suffix>`
-(a symlink in `/etc/init.d` to the base file) derives its user,
-`gitlab-runner-<suffix>`, from `RC_SVCNAME`; `/etc/conf.d/<instance>` may
-override it. The runner instance starts after its own docker instance. The
+is a symlink inside `/etc/init.d` to the installed copy, so the copy-not-symlink
+rule above still holds: nothing in `/etc/init.d` points into the repo. Its user,
+`gitlab-runner-<suffix>`, comes from `RC_SVCNAME` or `/etc/conf.d/<instance>`.
+OpenRC sources the base `/etc/conf.d/<service>` first, so an instance inherits
+what the base sets. The kit's base conf.d names no user, and each initd's
+`start_pre` refuses an instance whose resolved user, home or data root is not
+its own, with a `Fix:`. The runner instance starts after its own docker instance. The
 config.toml is written by `scripts/setup-gitlab-runner --runner …` (tokens on
 stdin), not by `gitlab-runner register --token` in argv; the registry declares
 each runner user's config.toml (`ai/secrets/registry.json`, field `user`).

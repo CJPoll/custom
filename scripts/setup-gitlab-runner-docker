@@ -62,7 +62,8 @@ warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
 run()  { if $DRY_RUN; then printf '    + %s\n' "$*"; else "$@"; fi; }
 
 grk_validate_user "${USER_NAME}" || exit 1
-if [ -n "${SUBID_START}" ]; then grk_validate_subid_start "${SUBID_START}" || exit 1
+SUBID_GIVEN=false
+if [ -n "${SUBID_START}" ]; then grk_validate_subid_start "${SUBID_START}" || exit 1; SUBID_GIVEN=true
 else SUBID_START="$(grk_subid_start "${USER_NAME}")"; fi
 SUBID_COUNT="${GRK_SUBID_COUNT}"
 SERVICE_NAME="$(grk_docker_service "${USER_NAME}")"
@@ -94,6 +95,14 @@ if grep -qx docker <<<"$(id -nG "${USER_NAME}" | tr ' ' '\n')"; then
 fi
 
 # --- 1. subuid / subgid block: judged for BOTH files before either is written -
+# When one file already holds the user's block, the other gets the same block,
+# so uid and gid maps never diverge.
+if ! $SUBID_GIVEN; then
+  for f in subuid subgid; do
+    existing="$(grk_subid_entry "${R}/etc/${f}" "${USER_NAME}")"
+    if [ -n "${existing}" ]; then SUBID_START="${existing%%:*}"; break; fi
+  done
+fi
 declare -A SUBID_ADD=()
 for f in subuid subgid; do
   file="${R}/etc/${f}"
@@ -139,7 +148,11 @@ for f in subuid subgid; do
   [ -n "${SUBID_ADD[${f}]:-}" ] || continue
   log "adding ${USER_NAME}:${SUBID_START}:${SUBID_COUNT} to /etc/${f}"
   if $DRY_RUN; then printf '    + append %s:%s:%s to %s\n' "${USER_NAME}" "${SUBID_START}" "${SUBID_COUNT}" "${R}/etc/${f}"
-  else printf '%s:%s:%s\n' "${USER_NAME}" "${SUBID_START}" "${SUBID_COUNT}" >> "${R}/etc/${f}"; fi
+  else
+    # A last line with no newline would swallow the new entry into it.
+    if [ -s "${R}/etc/${f}" ] && [ -n "$(tail -c 1 "${R}/etc/${f}")" ]; then printf '\n' >> "${R}/etc/${f}"; fi
+    printf '%s:%s:%s\n' "${USER_NAME}" "${SUBID_START}" "${SUBID_COUNT}" >> "${R}/etc/${f}"
+  fi
 done
 
 # --- 5. persistent runtime dir via linger ------------------------------------
@@ -164,6 +177,12 @@ if [ "${SERVICE_NAME}" != "${SERVICE_BASE}" ]; then
 fi
 CONFD="${R}/etc/conf.d/${SERVICE_NAME}"
 if [ -e "${CONFD}" ]; then
+  # A kept conf.d must not run this service as another user (trust domains).
+  kept_user="$(DOCKER_ROOTLESS_USER=""; . "${CONFD}" >/dev/null 2>&1; printf '%s' "${DOCKER_ROOTLESS_USER:-}")"
+  if [ -n "${kept_user}" ] && [ "${kept_user}" != "${USER_NAME}" ]; then
+    die "/etc/conf.d/${SERVICE_NAME} sets DOCKER_ROOTLESS_USER=${kept_user}, not ${USER_NAME}" \
+        "set DOCKER_ROOTLESS_USER=\"${USER_NAME}\" there (or delete the line for the default user), then re-run"
+  fi
   log "keeping existing /etc/conf.d/${SERVICE_NAME}"
 else
   log "writing /etc/conf.d/${SERVICE_NAME} (data root ${CI_DIR}/docker)"
@@ -180,15 +199,17 @@ elif rc-service "${SERVICE_NAME}" status >/dev/null 2>&1; then rc-service "${SER
 else rc-service "${SERVICE_NAME}" start || warn "not started yet — check: rc-service ${SERVICE_NAME} status"; fi
 
 # --- 7. user's shell env (so its `docker` CLI targets its rootless socket) ----
+# The user owns its home, so the read and the append run AS the user: root never
+# follows a symlink the user planted there.
 BASHRC="${R}${USER_HOME}/.bashrc"
 MARKER="# >>> rootless docker (setup-gitlab-runner-docker) >>>"
-if [ -e "${BASHRC}" ] && grep -qF "${MARKER}" "${BASHRC}"; then
+if runuser -u "${USER_NAME}" -- grep -qF "${MARKER}" "${BASHRC}" 2>/dev/null; then
   log "rootless docker env already present in ${USER_HOME}/.bashrc"
 else
   log "adding rootless docker env to ${USER_HOME}/.bashrc"
   if $DRY_RUN; then printf '    + append DOCKER_HOST/PATH block to %s\n' "${BASHRC}"
   else
-    cat >> "${BASHRC}" <<'EOF'
+    runuser -u "${USER_NAME}" -- sh -c 'cat >> "$1"' sh "${BASHRC}" <<'EOF'
 
 # >>> rootless docker (setup-gitlab-runner-docker) >>>
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
@@ -196,7 +217,6 @@ export DOCKER_HOST="unix://${XDG_RUNTIME_DIR}/docker.sock"
 export PATH="/usr/sbin:/usr/bin:$PATH"
 # <<< rootless docker (setup-gitlab-runner-docker) <<<
 EOF
-    chown "${USER_NAME}:${USER_NAME}" "${BASHRC}"
   fi
 fi
 
