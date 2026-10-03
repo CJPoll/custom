@@ -108,14 +108,6 @@ sd_measure() {
   return "${rc}"
 }
 
-# sd_state_get <state-file> <key> — a value from the key=value state file.
-# scripts/athena-shipwright-run.sh keeps a copy, wedge_state_get, so the wedge
-# record works when this library is missing (DND-1603). Keep the two alike.
-sd_state_get() {
-  [ -r "$1" ] || return 0
-  sed -n "s/^$2=//p" "$1" 2>/dev/null | head -n 1
-}
-
 # sd_next_streak <prev-sig> <prev-streak> <sig> <stale 0|1> — the new streak.
 # Pure: the whole counting rule in one place.
 sd_next_streak() {

@@ -2593,11 +2593,11 @@ fi
 # every function the tick calls is checked, not only the first (DND-1725).
 r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 0
 RUNNER="$(sx_runner "$a")"
-printf 'unset -f sd_state_get\n' >>"$a/sx/scripts/lib/shipwright-stale-dirt.sh"
+printf 'unset -f sd_next_streak\n' >>"$a/sx/scripts/lib/shipwright-stale-dirt.sh"
 rc="$(run_runner "$r")"
 rec="$(find "$(sd "$r")/runs" -maxdepth 1 -name '*.failed' 2>/dev/null | sort | tail -n1)"
-if [ "$rc" = 78 ] && [ ! -e "$a/claude-was-invoked" ] && [ -n "$rec" ] && grep -q 'shipwright-stale-dirt.sh (does not define sd_state_get)' "$rec"; then
-  ok "a stale-dirt lib missing sd_state_get: exit 78, a .failed record naming the function, no session"
+if [ "$rc" = 78 ] && [ ! -e "$a/claude-was-invoked" ] && [ -n "$rec" ] && grep -q 'shipwright-stale-dirt.sh (does not define sd_next_streak)' "$rec"; then
+  ok "a stale-dirt lib missing sd_next_streak: exit 78, a .failed record naming the function, no session"
 else
   bad "partial stale-dirt lib" "rc=$rc rec=$( [ -n "$rec" ] && cat "$rec") err=$(cat "$a/runner.err")"
 fi
@@ -2658,7 +2658,7 @@ for lib in dbus-env.sh shipwright-stale-dirt.sh lane-own-commits.sh; do
   dry_case "$lib carries a merge-conflict marker" "$lib" 'could not be loaded' conflicted
 done
 dry_case "dbus-env.sh loads but defines nothing" dbus-env.sh 'does not define athena_dbus_env_setup' empty
-dry_case "shipwright-stale-dirt.sh loads but defines nothing" shipwright-stale-dirt.sh 'does not define sd_measure sd_state_get sd_next_streak sd_display_paths' empty
+dry_case "shipwright-stale-dirt.sh loads but defines nothing" shipwright-stale-dirt.sh 'does not define sd_measure sd_next_streak sd_display_paths' empty
 dry_case "shipwright-stale-dirt.sh lacks sd_display_paths" shipwright-stale-dirt.sh 'does not define sd_display_paths' partial
 dry_case "lane-own-commits.sh loads but defines nothing" lane-own-commits.sh 'does not define lane_own_commits' empty
 

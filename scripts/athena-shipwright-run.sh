@@ -385,7 +385,7 @@ done
 __wrapper_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd -P)"
 RUNNER_LIBS=(
   "dbus-env.sh:athena_dbus_env_setup"
-  "shipwright-stale-dirt.sh:sd_measure sd_state_get sd_next_streak sd_display_paths"
+  "shipwright-stale-dirt.sh:sd_measure sd_next_streak sd_display_paths"
   "lane-own-commits.sh:lane_own_commits"
 )
 LIB_FAULTS=""
@@ -743,11 +743,11 @@ wedge_send() {
   return "${rc}"
 }
 
-# wedge_state_get <state-file> <key> — a value from the key=value state file.
-# The runner's own copy, not scripts/lib/shipwright-stale-dirt.sh's: the wedge
-# record and its alert must work when that library is the missing file
-# (DND-1603).
-wedge_state_get() {
+# state_get <state-file> <key> — a value from a key=value state file. The one
+# reader, for the wedge and the stale-dirt state alike. It lives in the runner,
+# not in scripts/lib/shipwright-stale-dirt.sh: the wedge record and its alert
+# must work when that library is the missing file (DND-1603).
+state_get() {
   [ -r "$1" ] || return 0
   sed -n "s/^$2=//p" "$1" 2>/dev/null | head -n 1
 }
@@ -758,9 +758,9 @@ wedge_state_get() {
 wedge_track() {
   local tick="$1" failures="$2" record episode first alerted mt last_log name="" err tmp
   record="${LOG_DIR}/${tick}.wedged"
-  episode="$(wedge_state_get "${WEDGE_STATE}" episode)"
-  first="$(wedge_state_get "${WEDGE_STATE}" first_wedged)"
-  alerted="$(wedge_state_get "${WEDGE_STATE}" alerted)"
+  episode="$(state_get "${WEDGE_STATE}" episode)"
+  first="$(state_get "${WEDGE_STATE}" first_wedged)"
+  alerted="$(state_get "${WEDGE_STATE}" alerted)"
   # An older runner stored "exit 0, no delivered line" as sent under `?`. It
   # was never confirmed, so it is retried (DND-1513).
   [ "${alerted}" != '?' ] || alerted=""
@@ -1021,10 +1021,10 @@ stale_dirt_track() {
   now="$(date +%s)"; age=$(( now - newest ))
   if [ "${age}" -ge "${STALE_DIRT_AGE_S}" ]; then stale=1; label=STALE; else label=LIVE; fi
 
-  prev_sig="$(sd_state_get "${STALE_DIRT_STATE}" signature)"
-  prev_streak="$(sd_state_get "${STALE_DIRT_STATE}" streak)"
-  first="$(sd_state_get "${STALE_DIRT_STATE}" first_seen)"
-  alerted="$(sd_state_get "${STALE_DIRT_STATE}" alerted)"
+  prev_sig="$(state_get "${STALE_DIRT_STATE}" signature)"
+  prev_streak="$(state_get "${STALE_DIRT_STATE}" streak)"
+  first="$(state_get "${STALE_DIRT_STATE}" first_seen)"
+  alerted="$(state_get "${STALE_DIRT_STATE}" alerted)"
   # An older runner stored "exit 0, no delivered line" as sent under `?`. It
   # was never confirmed, so it is retried (DND-1513).
   [ "${alerted}" != '?' ] || alerted=""
