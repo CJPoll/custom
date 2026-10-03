@@ -4013,8 +4013,22 @@ def self_test
         end
       end
     end
+    # DND-1895: the merge gate the target DECLARES is a candidate whatever its path, so a renamed gate
+    # cannot fall out of the walk. integration-gate resolves it from IR_DECLARED_GATES in
+    # ai/lib/integration-receipt.sh (held), so the walk reads the same list.
+    declared_gates = lambda do |text|
+      text.scan(/^IR_DECLARED_GATES=\(([^)]*)\)/).flat_map { |(body)| body.split }
+    end
+    gate_list = declared_gates.call(File.read(File.join(repo_root, "ai/lib/integration-receipt.sh")))
+    check.call("policy: the declared-gate list is read from integration-receipt.sh (an unreadable list would pass for nothing)",
+               !gate_list.empty? && gate_list.include?("ai/bin/harness-gate"),
+               "gate_list=#{gate_list.inspect}. Fix: IR_DECLARED_GATES in ai/lib/integration-receipt.sh changed shape; repair the declared-gate read in the enforcer walk of ai/bin/blast-radius --self-test, never drop it.")
+    check.call("policy: the declared-gate read finds a renamed gate",
+               declared_gates.call("x=1\nIR_DECLARED_GATES=( bin/prep-commit.sh ai/tools/renamed-gate )\n") == %w[bin/prep-commit.sh ai/tools/renamed-gate],
+               "Fix: the declared-gate read in the enforcer walk no longer parses IR_DECLARED_GATES; repair it.")
+    candidates += gate_list.select { |g| File.file?(File.join(repo_root, g)) }
     candidates = candidates.reject { |f| f.include?("/test/") || f.end_with?(".md") }.uniq.sort
-    anchors = %w[ai/hooks/forge-identity-guard.sh ai/hooks/merge-role-guard.sh ai/agent-bin/git ai/lib/forge-git-passthrough.sh
+    anchors = %w[ai/bin/harness-gate ai/hooks/forge-identity-guard.sh ai/hooks/merge-role-guard.sh ai/agent-bin/git ai/lib/forge-git-passthrough.sh
                  ai/bin/receipt-seal ai/lib/gh-outbound-scan.sh]
     check.call("policy: the enforcer walk finds the known enforcers (an empty walk would pass for nothing)",
                (anchors - candidates).empty?,

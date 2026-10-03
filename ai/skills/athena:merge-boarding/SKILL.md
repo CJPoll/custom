@@ -625,6 +625,18 @@ named for forge, merge, receipt, seal, agent or push; and every `ai/lib` file a
 held file loads) and fails, with a `Fix:`, on one that neither holds nor sits in
 the manifest's `enforcers.excluded` with a reason, or that is both.
 
+**Later (2026-10-03, DND-1895):** the declared merge gate `ai/bin/harness-gate`
+was in neither list, so a diff that dropped a check from it read COLD: a
+lowered bar (item 5) with no owner hold. It sits in the same class from
+DND-1895, with `ai/lib/first_party.rb`, `ai/lib/harness_tools.rb` and
+`ai/lib/landed.rb`, which it loads to discover its checks and to read their
+bar from what landed. The walk also reads `IR_DECLARED_GATES` in
+`ai/lib/integration-receipt.sh`, so the gate the target declares is a
+candidate whatever its path and a renamed gate cannot fall out. The gate's
+other loaded libraries (`reap_tags.rb`, `proc_state.rb`,
+`scratch_home_sentinel.rb`, `athena_telemetry.rb`) are in `enforcers.excluded`
+with reasons.
+
 **The gate comes from the landed target, not from you.** The first of
 `bin/prep-commit.sh` (gen_saas) and `ai/bin/harness-gate` (`~/dev/custom`) that
 exists on `origin/main` is the repo's declared gate, and it always runs. Omit
