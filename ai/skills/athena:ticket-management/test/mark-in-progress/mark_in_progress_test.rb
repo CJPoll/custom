@@ -474,6 +474,39 @@ check("R6 DND-1877 with no telemetry store it writes, and says it could not chec
     !out.include?("no recorded dispatch")
 end
 
+def store_file(day)
+  File.join(ENV["ATHENA_TELEMETRY_DIR"], "#{day}.jsonl")
+end
+
+fresh_store
+record_dispatch("DND-9002", "2026-10-03T07:03:31Z")
+File.open(store_file("2026-10-03"), "a") { |f| f.puts "not json" }
+garbled = FakeNotion.new(page("2026-09-30T23:49:00.000Z", status: "Done"))
+code, out, = run(["--ref", "DND-9001", "--backfill", "--restart", "--at", "2026-10-01T07:04:00Z"], garbled)
+check("R7 DND-1877 a malformed line and no event: it says it could not check, never 'no recorded dispatch'") do
+  code == 0 && out.include?("could not check") && out.include?("1 malformed line(s)") &&
+    !out.include?("no recorded dispatch")
+end
+record_dispatch("DND-9001", "2026-09-30T07:00:00Z")
+code, out, = run(["--ref", "DND-9001", "--backfill", "--restart", "--at", "2026-10-01T07:04:00Z"], garbled)
+check("R7 DND-1877 a malformed line beside an earlier event: the check is named partial") do
+  code == 0 && out.include?("checked against") && out.include?("partial: 1 malformed line(s)")
+end
+
+fresh_store
+record_dispatch("DND-9001", "2026-10-03T07:03:31Z")
+File.chmod(0o000, store_file("2026-10-03"))
+unread = FakeNotion.new(page("2026-09-30T23:49:00.000Z", status: "Done"))
+begin
+  code, out, = run(["--ref", "DND-9001", "--backfill", "--restart", "--at", "2026-10-01T07:04:00Z", "--dry-run"],
+                   unread)
+ensure
+  File.chmod(0o600, store_file("2026-10-03"))
+end
+check("R8 DND-1877 an unreadable day file: it says it could not check, naming the file") do
+  code == 0 && out.include?("could not check") && out.include?("2026-10-03.jsonl")
+end
+
 fresh_store
 run(["--ref", "ZQ-12"], FakeNotion.new(work_page(nil)))
 r = dispatched

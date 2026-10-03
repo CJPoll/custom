@@ -541,9 +541,10 @@ the admiral's state log, then run, with `--dry-run` first:
 
 `--restart` refuses an `--at` earlier than the ticket's latest local
 `ticket.dispatched` with `backfill` false, and its `Fix:` names that event's
-time (DND-1877). The printed line says what it checked against, or that it
-could not check (no store, or no event on this machine). The check sees only
-this machine's telemetry.
+time (DND-1877); use that time. The printed line names the dispatch it
+checked against, says this machine recorded none, or says it could not check
+(no store, or a store it could not fully read). The check sees only this
+machine's telemetry.
 
 `--backfill` leaves the status alone. The rows DND-1838 found (DND-1095,
 DND-1438) and their exact commands are on that ticket.

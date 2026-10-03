@@ -93,7 +93,7 @@ module MarkInProgress
                     ticket.dispatched (backfill false) is refused (exit 2),
                     naming that event (DND-1877). The line says what it
                     checked against, or that it could not check.
-      --dry-run    print what would be written; write nothing
+      --dry-run     print what would be written; write nothing
       --help        this text
 
     After a Notion write it also records one local ticket.dispatched
@@ -167,28 +167,35 @@ module MarkInProgress
 
   # What the local telemetry store gave for a ticket's ticket.dispatched
   # events. status: :ok, :ok_empty (looked, none), :incomplete (some day file
-  # unreadable) or :no_store (could not look); reason says why.
-  Recorded = Struct.new(:status, :events, :reason, keyword_init: true)
+  # unreadable) or :no_store (could not look); reason says why. malformed is
+  # the store's count of lines it could not parse: any one of them could be
+  # this ticket's dispatch.
+  Recorded = Struct.new(:status, :events, :reason, :malformed, keyword_init: true)
 
   # DOMAIN. --backfill --restart --at T claims T is the ticket's re-dispatch.
   # A non-backfill ticket.dispatched recorded for the ticket after T is a real
   # dispatch the stamp would predate, so T cannot be it (DND-1877). Backfill
   # events are typed times, not dispatches, and are not checked against.
-  # -> the clause the stdout line carries, which keeps "checked" and "could
-  # not check" apart; or raises BadUsage naming the later event and its Fix.
+  # -> the clause the stdout line carries, which keeps "checked", "looked and
+  # found none" and "could not check" apart; or raises BadUsage naming the
+  # later event and its Fix. The reader returns only events whose `at` parses.
   def restart_check(ref, at, recorded)
     real = recorded.events.reject { |e| e.dig("attrs", "backfill") == true }
-    latest = real.filter_map { |e| [Time.iso8601(e["at"]), e["at"]] rescue nil }.max_by(&:first)
+    latest = real.map { |e| [Time.iso8601(e["at"]), e["at"]] }.max_by(&:first)
     if latest && latest.first > Time.iso8601(at)
       raise BadUsage, "--restart --at #{at} predates #{ref}'s recorded dispatch at #{latest.last} " \
                       "(a local ticket.dispatched, backfill false), so it cannot be the re-dispatch time. " \
                       "Fix: pass --at #{latest.last}, the latest recorded dispatch."
     end
-    partial = recorded.status == :incomplete ? " (partial: #{recorded.reason})" : ""
-    return "checked against its latest recorded dispatch, #{latest.last}#{partial}" if latest
-    return "no recorded dispatch of #{ref} to check against" if %i[ok ok_empty].include?(recorded.status)
+    gaps = [recorded.status == :incomplete ? recorded.reason : nil,
+            recorded.malformed.to_i.positive? ? "#{recorded.malformed} malformed line(s) skipped" : nil].compact
+    if latest
+      return "checked against its latest recorded dispatch, #{latest.last}" \
+             "#{gaps.empty? ? '' : " (partial: #{gaps.join('; ')})"}"
+    end
+    return "no recorded dispatch of #{ref} to check against" if %i[ok ok_empty].include?(recorded.status) && gaps.empty?
 
-    "could not check against a recorded dispatch: #{recorded.reason}"
+    "could not check against a recorded dispatch: #{(gaps.empty? ? [recorded.reason] : gaps).join('; ')}"
   end
 
   # EFFECTS. The ticket's local ticket.dispatched events. Never raises: a
@@ -196,9 +203,10 @@ module MarkInProgress
   def recorded_dispatches(ref)
     require_relative "../../../lib/athena_telemetry"
     r = AthenaTelemetry.read(events: ["ticket.dispatched"], unit: ref)
-    Recorded.new(status: r.status, events: r.events, reason: r.reason)
+    Recorded.new(status: r.status, events: r.events, reason: r.reason, malformed: r.malformed)
   rescue ScriptError, StandardError => e
-    Recorded.new(status: :no_store, events: [], reason: "the telemetry store could not be read (#{e.class})")
+    Recorded.new(status: :no_store, events: [], reason: "the telemetry store could not be read (#{e.class})",
+                 malformed: 0)
   end
 
   ZONED_RE = /T.*(Z|[+-]\d\d:?\d\d)\z/.freeze
