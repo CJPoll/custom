@@ -3891,13 +3891,31 @@ def self_test
      ["the blast-radius manifest", "ai/blast-radius/surfaces.json", "[owner-approval-policy]"],
      ["the blast-radius classifier", "ai/bin/blast-radius", "[owner-approval-policy]"],
      ["the owner-turn verifier", "ai/lib/owner_turn.rb", "[owner-approval-policy]"],
-     ["the owner-click verifier", "ai/lib/owner_click.rb", "[owner-approval-policy]"]].each do |label, path, cls|
+     ["the owner-click verifier", "ai/lib/owner_click.rb", "[owner-approval-policy]"],
+     # DND-1807: the files whose code decides whether a receipt is accepted
+     ["the integration-gate script", "ai/skills/athena:merge-boarding/scripts/integration-gate", "[owner-approval-policy]"],
+     ["the integration-gate shim", "ai/bin/integration-gate", "[owner-approval-policy]"],
+     ["the integration receipt reader", "ai/lib/integration-receipt.sh", "[owner-approval-policy]"],
+     ["the receipt seal library", "ai/lib/receipt_seal.rb", "[owner-approval-policy]"],
+     ["the receipt-seal CLI", "ai/bin/receipt-seal", "[owner-approval-policy]"],
+     ["the merge guard", "ai/lib/gh-merge-guard.sh", "[owner-approval-policy]"],
+     ["the push guard", "ai/lib/forge-git-passthrough.sh", "[owner-approval-policy]"],
+     ["the gh-athena entry point", "ai/bin/gh-athena", "[owner-approval-policy]"],
+     ["locked-merge", "ai/skills/athena:merge-boarding/scripts/locked-merge", "[owner-approval-policy]"]].each do |label, path, cls|
       dd = File.join(tmp, "policy-#{path.tr('/.', '__')}")
       bb, hh = mkrepo.call(dd) { |r| FileUtils.mkdir_p(File.dirname(File.join(r, path))); File.write(File.join(r, path), "x\n") }
       out, _, code = run_br.call(["--base", bb, "--head", hh, "--repo", dd] + real)
       check.call("policy: #{label} holds (exit 4) with no merge automation at all",
                  code == 4 && out.include?("BLAST-RADIUS HOT") && out.include?(cls) && out.include?("hold: yes, always"),
                  "exit=#{code} out=#{out}")
+    end
+    # DND-1807: the receipt chain's non-trust neighbours stay COLD
+    %w[ai/bin/confirm-merged ai/lib/main-health.sh ai/bin/test-slot ai/lib/glab-merge-guard.sh ai/lib/proc-stat.sh].each do |path|
+      dd = File.join(tmp, "policy-cold-#{path.tr('/.', '__')}")
+      bb, hh = mkrepo.call(dd) { |r| FileUtils.mkdir_p(File.dirname(File.join(r, path))); File.write(File.join(r, path), "x\n") }
+      out, _, code = run_br.call(["--base", bb, "--head", hh, "--repo", dd] + real)
+      check.call("policy: #{path} is not a receipt-trust surface and stays COLD",
+                 code.zero? && out.include?("BLAST-RADIUS COLD"), "exit=#{code} out=#{out}")
     end
     # the approval table: only its SECTION holds
     claude = lambda do |extra_policy, extra_other, dup: false|
