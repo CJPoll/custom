@@ -55,7 +55,9 @@
 # PARSED: `;` `&&` `||` `|` `&` newlines, subshells, `$( )` and backticks,
 # reserved words (`if/then/do/{/!`), heredocs, `sh|bash|zsh|dash -c SCRIPT`
 # (recursively), cd/pushd/popd, git `--output`/`-o` files, and these
-# wrappers, each with its whole option table in WRAPPER_OPTS: env, timeout,
+# wrappers, each with its whole option table in ai/lib/wrapper-opts.tsv
+# (shared with ai/hooks/git-stash-guard.sh since DND-1898; a table that
+# cannot be loaded leaves a Bash call unchecked, loudly): env, timeout,
 # nice, stdbuf, time, command, exec, builtin, nohup, sudo, sudoedit, doas,
 # test-slot. Their value-taking options (short, clustered, attached, long,
 # `--long=v`, unique long prefixes) are skipped with their values; `env -C` /
@@ -481,76 +483,62 @@ RESERVED = {"if", "then", "else", "elif", "fi", "do", "done", "while", "until", 
 SHELLS = {"sh", "bash", "zsh", "dash"}
 ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
-# Every wrapper command_words strips, with its WHOLE option table. An option
-# that takes a value must be listed as one, or its value is read as the
-# command word (critic round 13: `env -u X git ...` ran "X"). Each spec:
+# Every wrapper command_words strips, with its WHOLE option table. The table
+# lives in ai/lib/wrapper-opts.tsv (DND-1898), shared with
+# ai/hooks/git-stash-guard.sh; its header gives the row format and sources.
+# An option that takes a value must be listed as one, or its value is read as
+# the command word (critic round 13: `env -u X git ...` ran "X"). Each spec:
 #   short: {letter: True if it takes a value}
 #   long:  {--name: (key, True value | False switch | "opt" only as --name=v)}
 #   stop:  keys after which option parsing stops (env -S splices its value)
 #   numeric: `-N` is a switch (nice's legacy adjustment)
+#   operands: non-option words before the command (timeout's DURATION)
 # Keys are the short letter where one exists. GNU long options may be
 # abbreviated to any unique prefix, so an abbreviation resolves too.
-# Sources: GNU coreutils 9 env/timeout/nice/stdbuf, GNU time, bash builtins
-# (command/exec/builtin/time), sudo 1.9, OpenBSD doas, ai/bin/test-slot.
-WRAPPER_OPTS = {
-    "env": {"short": {"i": False, "0": False, "v": False, "u": True, "C": True, "S": True},
-            "long": {"--ignore-environment": ("i", False), "--null": ("0", False), "--debug": ("v", False),
-                     "--unset": ("u", True), "--chdir": ("C", True), "--split-string": ("S", True),
-                     "--block-signal": ("block-signal", "opt"), "--default-signal": ("default-signal", "opt"),
-                     "--ignore-signal": ("ignore-signal", "opt"),
-                     "--list-signal-handling": ("list-signal-handling", False),
-                     "--help": ("help", False), "--version": ("version", False)},
-            "stop": {"S"}},
-    "timeout": {"short": {"s": True, "k": True, "v": False, "p": False},
-                "long": {"--signal": ("s", True), "--kill-after": ("k", True), "--verbose": ("v", False),
-                         "--preserve-status": ("p", False), "--foreground": ("foreground", False),
-                         "--help": ("help", False), "--version": ("version", False)}},
-    "nice": {"short": {"n": True},
-             "long": {"--adjustment": ("n", True), "--help": ("help", False), "--version": ("version", False)},
-             "numeric": True},
-    "stdbuf": {"short": {"i": True, "o": True, "e": True},
-               "long": {"--input": ("i", True), "--output": ("o", True), "--error": ("e", True),
-                        "--help": ("help", False), "--version": ("version", False)}},
-    "time": {"short": {"p": False, "a": False, "v": False, "q": False, "o": True, "f": True},
-             "long": {"--portability": ("p", False), "--append": ("a", False), "--verbose": ("v", False),
-                      "--quiet": ("q", False), "--output": ("o", True), "--format": ("f", True),
-                      "--help": ("help", False), "--version": ("version", False)}},
-    "command": {"short": {"p": False, "v": False, "V": False}, "long": {}},
-    "exec": {"short": {"c": False, "l": False, "a": True}, "long": {}},
-    "builtin": {"short": {}, "long": {}},
-    "nohup": {"short": {}, "long": {"--help": ("help", False), "--version": ("version", False)}},
-    "sudo": {"short": {"A": False, "b": False, "B": False, "E": False, "e": False, "H": False, "i": False,
-                       "K": False, "k": False, "l": False, "n": False, "N": False, "P": False, "S": False,
-                       "s": False, "V": False, "v": False, "h": "opt",
-                       "C": True, "D": True, "g": True, "p": True, "R": True, "r": True, "T": True,
-                       "t": True, "U": True, "u": True},
-             "long": {"--askpass": ("A", False), "--background": ("b", False), "--bell": ("B", False),
-                      "--preserve-env": ("E", "opt"), "--edit": ("e", False), "--set-home": ("H", False),
-                      "--login": ("i", False), "--remove-timestamp": ("K", False),
-                      "--reset-timestamp": ("k", False), "--list": ("l", False),
-                      "--non-interactive": ("n", False), "--no-update": ("N", False),
-                      "--preserve-groups": ("P", False), "--stdin": ("S", False), "--shell": ("s", False),
-                      "--version": ("V", False), "--validate": ("v", False), "--help": ("help", False),
-                      "--host": ("h", True), "--close-from": ("C", True), "--chdir": ("D", True),
-                      "--group": ("g", True), "--prompt": ("p", True), "--chroot": ("R", True),
-                      "--role": ("r", True), "--command-timeout": ("T", True), "--type": ("t", True),
-                      "--other-user": ("U", True), "--user": ("u", True)}},
-    "doas": {"short": {"n": False, "s": False, "L": False, "u": True, "C": True}, "long": {}},
-    "test-slot": {"short": {},
-                  "long": {"--label": ("label", True), "--wait-timeout": ("wait-timeout", True),
-                           "--outcome-file": ("outcome-file", True), "--exclusive": ("exclusive", False),
-                           "--weight": ("weight", True), "--pool": ("pool", True),
-                           "--status": ("status", False), "--json": ("json", False),
-                           "--weight-of": ("weight-of", False),
-                           "--help": ("help", False), "--self-test": ("self-test", False)}},
-}
-WRAPPER_OPTS["sudoedit"] = WRAPPER_OPTS["sudo"]
+# A table that cannot be read, has a malformed row, or names no wrapper
+# raises: main reports it as a crash (allowed loudly, logged `crashed`),
+# never as "no wrappers".
+TAKES = {"value": True, "switch": False, "opt": "opt"}
+
+def load_wrapper_opts(path):
+    table, same = {}, {}
+    with open(path) as f:
+        for n, line in enumerate(f, 1):
+            line = line.rstrip("\n")
+            if not line.strip() or line.startswith("#"):
+                continue
+            row = line.split("\t")
+            spec = table.setdefault(row[0], {"short": {}, "long": {}})
+            kind = row[1] if len(row) > 1 else ""
+            if kind == "short" and len(row) == 5 and row[4] in TAKES:
+                spec["short"][row[2]] = TAKES[row[4]]
+            elif kind == "long" and len(row) == 5 and row[4] in TAKES:
+                spec["long"][row[2]] = (row[3], TAKES[row[4]])
+            elif kind == "stop" and len(row) == 3:
+                spec.setdefault("stop", set()).add(row[2])
+            elif kind == "numeric" and len(row) == 2:
+                spec["numeric"] = True
+            elif kind == "operands" and len(row) == 3 and row[2].isdigit():
+                spec["operands"] = int(row[2])
+            elif kind == "same" and len(row) == 3:
+                same[row[0]] = row[2]
+            else:
+                raise ValueError("%s line %d is malformed: %r" % (path, n, line))
+    for name, other in same.items():
+        if other not in table:
+            raise ValueError("%s: %s is the same as %s, which has no rows" % (path, name, other))
+        table[name] = table[other]
+    if "env" not in table:
+        raise ValueError("%s names no env wrapper, so it is not the wrapper table" % path)
+    return table
+
+WRAPPER_OPTS = {}
 
 def unknown_option(base, opt, cmd):
     msg = ("`%s` option %s is not in its option table, so it was read as a switch; if it takes "
            "a value, the command word after it was misread and this call may NOT have been checked "
-           "for a main-checkout write. Fix: add %s to WRAPPER_OPTS[%r] in "
-           "ai/hooks/worktree-escape-guard.sh, or drop it from the command" % (base, opt, opt, base))
+           "for a main-checkout write. Fix: add a %r row for %s to ai/lib/wrapper-opts.tsv "
+           "(its header gives the row format), or drop it from the command" % (base, opt, base, opt))
     log("unparsed", "%s in: %s" % (msg, cmd[:300]))
     WARNINGS.append(msg)
 
@@ -664,9 +652,8 @@ def command_words(seg, env=None, cwd=UNKNOWN, cmd=""):
             continue
         opts, words = parse_opts(base, words, cmd)
         keys = dict(opts)
-        if base == "timeout":
-            words = words[1:]  # the DURATION
-        elif base == "time" and "o" in keys:
+        words = words[WRAPPER_OPTS[base].get("operands", 0):]  # timeout's DURATION
+        if base == "time" and "o" in keys:
             writes.append((keys["o"], cwd))
         elif base == "test-slot" and "outcome-file" in keys:
             writes.append((keys["outcome-file"], cwd))
@@ -951,6 +938,12 @@ def main():
                 check_path(ti["notebook_path"], "NotebookEdit of %s" % ti["notebook_path"], data, act)
         elif tool == "Bash":
             if isinstance(ti.get("command"), str):
+                try:
+                    WRAPPER_OPTS.update(load_wrapper_opts(sys.argv[1] if len(sys.argv) > 1 else ""))
+                except (OSError, ValueError) as e:
+                    allow_warn("the wrapper option table could not be loaded (%s), so this call was NOT checked "
+                               "for a main-checkout write. Fix: restore ai/lib/wrapper-opts.tsv beside ai/hooks "
+                               "(its header gives the row format)." % str(e)[:200])
                 check_bash(ti["command"], data, act)
     except Unresolved as e:
         allow_warn("%s -- so this call was NOT checked for a main-checkout write. "
@@ -972,7 +965,10 @@ PYEOF
 
 # A non-zero python3 exit (a crash before or outside main's own catch) must
 # never read as a silent allow: log it and warn, still exit 0.
-OUT=$(printf '%s' "${INPUT}" | python3 -c "${PY}" 2>/dev/null)
+# The wrapper option table (DND-1898) sits beside ai/hooks, resolved through
+# the hook's real path so a symlinked hook still finds it.
+WEG_WRAPPER_OPTS="$(dirname -- "$(readlink -f -- "$0" 2>/dev/null || printf '%s' "$0")")/../lib/wrapper-opts.tsv"
+OUT=$(printf '%s' "${INPUT}" | python3 -c "${PY}" "${WEG_WRAPPER_OPTS}" 2>/dev/null)
 RC=$?
 if [ "${RC}" -ne 0 ]; then
   WEG_LOG="${XDG_STATE_HOME:-${HOME}/.local/state}/athena/worktree-escape-guard.log"

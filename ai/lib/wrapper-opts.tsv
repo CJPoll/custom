@@ -1,0 +1,183 @@
+# ai/lib/wrapper-opts.tsv -- the option table of every command wrapper the
+# Bash-reading guards see through (DND-1898). One home, two readers:
+#   * ai/hooks/worktree-escape-guard.sh (python): strips each wrapper and its
+#     options to reach the command it runs (WRAPPER_OPTS).
+#   * ai/hooks/git-stash-guard.sh (awk): skips each wrapper's options so the
+#     word the wrapper runs keeps command position.
+# An option that takes a value must be listed as one, or its value is read as
+# the command word (worktree-escape-guard critic round 13: `env -u X git ...`
+# ran "X"). Each reader treats an option NOT listed here conservatively and
+# says so in its own header.
+#
+# Rows are TAB-separated. Blank lines and lines starting with # are ignored.
+#   <wrapper> short   <letter> <key> <takes>   a short option, -<letter>
+#   <wrapper> long    <--name> <key> <takes>   a long option; GNU unique
+#                                              prefixes resolve to it
+#   <wrapper> stop    <key>                    option parsing stops after the
+#                                              option with this key (env -S
+#                                              splices its value as words)
+#   <wrapper> numeric                          `-N` / `--N` is a switch
+#                                              (nice's legacy adjustment)
+#   <wrapper> operands <count>                 non-option words before the
+#                                              command (timeout's DURATION)
+#   <wrapper> same    <other>                  same table as <other>
+# <takes>: value (takes the next word, or an attached one), switch (takes
+# none), opt (takes a value only attached: -hHOST, --name=v).
+# <key> is the short letter where one exists, so a reader can ask "was -u
+# given" whatever spelling the command used.
+#
+# Sources: GNU coreutils 9 env/timeout/nice/stdbuf, GNU time, bash builtins
+# (command/exec/builtin/time), sudo 1.9, OpenBSD doas, ai/bin/test-slot.
+
+env	short	i	i	switch
+env	short	0	0	switch
+env	short	v	v	switch
+env	short	u	u	value
+env	short	C	C	value
+env	short	S	S	value
+env	long	--ignore-environment	i	switch
+env	long	--null	0	switch
+env	long	--debug	v	switch
+env	long	--unset	u	value
+env	long	--chdir	C	value
+env	long	--split-string	S	value
+env	long	--block-signal	block-signal	opt
+env	long	--default-signal	default-signal	opt
+env	long	--ignore-signal	ignore-signal	opt
+env	long	--list-signal-handling	list-signal-handling	switch
+env	long	--help	help	switch
+env	long	--version	version	switch
+env	stop	S
+
+timeout	short	s	s	value
+timeout	short	k	k	value
+timeout	short	v	v	switch
+timeout	short	p	p	switch
+timeout	long	--signal	s	value
+timeout	long	--kill-after	k	value
+timeout	long	--verbose	v	switch
+timeout	long	--preserve-status	p	switch
+timeout	long	--foreground	foreground	switch
+timeout	long	--help	help	switch
+timeout	long	--version	version	switch
+timeout	operands	1
+
+nice	short	n	n	value
+nice	long	--adjustment	n	value
+nice	long	--help	help	switch
+nice	long	--version	version	switch
+nice	numeric
+
+stdbuf	short	i	i	value
+stdbuf	short	o	o	value
+stdbuf	short	e	e	value
+stdbuf	long	--input	i	value
+stdbuf	long	--output	o	value
+stdbuf	long	--error	e	value
+stdbuf	long	--help	help	switch
+stdbuf	long	--version	version	switch
+
+time	short	p	p	switch
+time	short	a	a	switch
+time	short	v	v	switch
+time	short	q	q	switch
+time	short	o	o	value
+time	short	f	f	value
+time	long	--portability	p	switch
+time	long	--append	a	switch
+time	long	--verbose	v	switch
+time	long	--quiet	q	switch
+time	long	--output	o	value
+time	long	--format	f	value
+time	long	--help	help	switch
+time	long	--version	version	switch
+
+command	short	p	p	switch
+command	short	v	v	switch
+command	short	V	V	switch
+
+exec	short	c	c	switch
+exec	short	l	l	switch
+exec	short	a	a	value
+
+builtin	operands	0
+
+nohup	long	--help	help	switch
+nohup	long	--version	version	switch
+
+sudo	short	A	A	switch
+sudo	short	b	b	switch
+sudo	short	B	B	switch
+sudo	short	E	E	switch
+sudo	short	e	e	switch
+sudo	short	H	H	switch
+sudo	short	i	i	switch
+sudo	short	K	K	switch
+sudo	short	k	k	switch
+sudo	short	l	l	switch
+sudo	short	n	n	switch
+sudo	short	N	N	switch
+sudo	short	P	P	switch
+sudo	short	S	S	switch
+sudo	short	s	s	switch
+sudo	short	V	V	switch
+sudo	short	v	v	switch
+sudo	short	h	h	opt
+sudo	short	C	C	value
+sudo	short	D	D	value
+sudo	short	g	g	value
+sudo	short	p	p	value
+sudo	short	R	R	value
+sudo	short	r	r	value
+sudo	short	T	T	value
+sudo	short	t	t	value
+sudo	short	U	U	value
+sudo	short	u	u	value
+sudo	long	--askpass	A	switch
+sudo	long	--background	b	switch
+sudo	long	--bell	B	switch
+sudo	long	--preserve-env	E	opt
+sudo	long	--edit	e	switch
+sudo	long	--set-home	H	switch
+sudo	long	--login	i	switch
+sudo	long	--remove-timestamp	K	switch
+sudo	long	--reset-timestamp	k	switch
+sudo	long	--list	l	switch
+sudo	long	--non-interactive	n	switch
+sudo	long	--no-update	N	switch
+sudo	long	--preserve-groups	P	switch
+sudo	long	--stdin	S	switch
+sudo	long	--shell	s	switch
+sudo	long	--version	V	switch
+sudo	long	--validate	v	switch
+sudo	long	--help	help	switch
+sudo	long	--host	h	value
+sudo	long	--close-from	C	value
+sudo	long	--chdir	D	value
+sudo	long	--group	g	value
+sudo	long	--prompt	p	value
+sudo	long	--chroot	R	value
+sudo	long	--role	r	value
+sudo	long	--command-timeout	T	value
+sudo	long	--type	t	value
+sudo	long	--other-user	U	value
+sudo	long	--user	u	value
+sudoedit	same	sudo
+
+doas	short	n	n	switch
+doas	short	s	s	switch
+doas	short	L	L	switch
+doas	short	u	u	value
+doas	short	C	C	value
+
+test-slot	long	--label	label	value
+test-slot	long	--wait-timeout	wait-timeout	value
+test-slot	long	--outcome-file	outcome-file	value
+test-slot	long	--exclusive	exclusive	switch
+test-slot	long	--weight	weight	value
+test-slot	long	--pool	pool	value
+test-slot	long	--status	status	switch
+test-slot	long	--json	json	switch
+test-slot	long	--weight-of	weight-of	switch
+test-slot	long	--help	help	switch
+test-slot	long	--self-test	self-test	switch

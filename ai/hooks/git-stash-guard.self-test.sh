@@ -1718,6 +1718,157 @@ d2 "AQ40. a read verb followed by prose in parens" allow <<'EOF'
 git stash list (read-only)
 EOF
 
+echo "== WO: command position after a wrapper's options (DND-1898) =="
+# A literal wrapper followed by options used to lose command position: only
+# the word right after the wrapper was a command word, so a glob, group or
+# substitution-built git word after `-i`, `5` or `-u root` was never judged.
+# Each wrapper's options are now skipped from the shared option table
+# (ai/lib/wrapper-opts.tsv), and an option the table does not know keeps
+# command position on the words after it.
+d2 "WO1. env -i, then a glob git word" deny <<'EOF'
+env -i ./g?t stash pop
+EOF
+d2 "WO2. timeout DURATION, then a glob git word" deny <<'EOF'
+timeout 5 ./g?t stash pop
+EOF
+d2 "WO3. nice -n N, then a group git word" deny <<'EOF'
+nice -n 5 ./(x|g)it stash pop
+EOF
+d2 "WO4. sudo -u USER, then a glob git word" deny <<'EOF'
+sudo -u root ./g?t stash pop
+EOF
+d2 "WO5. timeout DURATION, then a substitution-built git word" deny <<'EOF'
+timeout 5 ./g$(:)it stash pop
+EOF
+d2 "WO6. env -u NAME (a value option), then a glob git word" deny <<'EOF'
+env -u X ./g?t stash pop
+EOF
+d2 "WO7. env --unset=NAME, then a glob git word" deny <<'EOF'
+env --unset=X ./g?t stash pop
+EOF
+d2 "WO8. timeout -s SIG DURATION, then a glob git word" deny <<'EOF'
+timeout -s KILL 5 ./g?t stash pop
+EOF
+d2 "WO9. timeout --signal SIG (an abbreviated long option), then a glob git word" deny <<'EOF'
+timeout --sig KILL 5 ./g?t stash pop
+EOF
+d2 "WO10. nice -N (legacy adjustment), then a glob git word" deny <<'EOF'
+nice -5 ./g?t stash pop
+EOF
+d2 "WO11. stdbuf -oL, then a glob git word" deny <<'EOF'
+stdbuf -oL ./g?t stash pop
+EOF
+d2 "WO12. doas -u USER, then a glob git word" deny <<'EOF'
+doas -u root ./g?t stash pop
+EOF
+d2 "WO13. test-slot --label L --, then a glob git word" deny <<'EOF'
+test-slot --label x -- ./g?t stash pop
+EOF
+d2 "WO14. a path-qualified wrapper with an option" deny <<'EOF'
+/usr/bin/env -i ./g?t stash pop
+EOF
+d2 "WO15. nested wrappers, each with options" deny <<'EOF'
+nice -n 5 timeout -k 1 5 env -i ./g?t stash pop
+EOF
+d2 "WO16. an option the table does not know may take a value" deny <<'EOF'
+sudo --no-such-opt root ./g?t stash pop
+EOF
+d2 "WO17. a wrapper with no option table (xargs -0)" deny <<'EOF'
+xargs -0 ./g?t stash pop
+EOF
+d2 "WO18. a wrapper with no option table (xargs -I R)" deny <<'EOF'
+xargs -I R ./g?t stash pop
+EOF
+d2 "WO19. an option slot built by expansion" deny <<'EOF'
+env $OPTS ./g?t stash pop
+EOF
+d2 "WO20. a paren-opened group git word after env -i" deny <<'EOF'
+env -i (git) stash pop
+EOF
+d2 "WO21. an assignment after env's options" deny <<'EOF'
+env -i A=1 ./g?t stash pop
+EOF
+d2 "WO22. a stash alias through a glob git word after sudo -u" deny <<'EOF'
+sudo -u root ./g?t sp
+EOF
+d2 "WO23. setsid -f, then a glob git word" deny <<'EOF'
+setsid -f ./g?t stash pop
+EOF
+d2 "WO24. flock LOCKFILE (an operand), then a glob git word" deny <<'EOF'
+flock /tmp/l ./g?t stash pop
+EOF
+d2 "WO25. ionice -c3 (no table), then a glob git word" deny <<'EOF'
+ionice -c3 ./g?t stash pop
+EOF
+d2 "WO26. timeout -- DURATION, then a glob git word" deny <<'EOF'
+timeout -- 5 ./g?t stash pop
+EOF
+d2 "WO27. sudo --user=USER (attached long value), then a glob git word" deny <<'EOF'
+sudo --user=root ./g?t stash pop
+EOF
+d2 "WO28. a shell alias for a stash write after timeout's DURATION" deny <<'EOF'
+timeout 5 gstp
+EOF
+d2 "WO29. a paren-opened group git word after timeout's DURATION (self-review)" deny <<'EOF'
+timeout 5 (x|g)it stash pop
+EOF
+d2 "WO29a. a paren-opened group git word after env -i (self-review)" deny <<'EOF'
+env -i (x|g)it stash pop
+EOF
+d2 "WO29b. a paren-opened group word after timeout's DURATION, a builtin" allow <<'EOF'
+timeout 5 (x|g)it status
+EOF
+# No false positives: each wrapper form running a non-stash git command, or
+# a program that is not git, stays allowed.
+d2 "WO30. env -i git status" allow <<'EOF'
+env -i git status
+EOF
+d2 "WO31. timeout 5 git log" allow <<'EOF'
+timeout 5 git log
+EOF
+d2 "WO32. nice -n 5 git status" allow <<'EOF'
+nice -n 5 git status
+EOF
+d2 "WO33. sudo -u root git status" allow <<'EOF'
+sudo -u root git status
+EOF
+d2 "WO34. env -i, a glob git word, a builtin" allow <<'EOF'
+env -i ./g?t status
+EOF
+d2 "WO35. timeout 5, a glob git word, a builtin" allow <<'EOF'
+timeout 5 ./g?t log
+EOF
+d2 "WO36. nice -n 5, a group git word, a builtin" allow <<'EOF'
+nice -n 5 ./(x|g)it status
+EOF
+d2 "WO37. xargs -0, a glob git word, a builtin" allow <<'EOF'
+xargs -0 ./g?t status
+EOF
+d2 "WO38. a grep pattern after timeout's options" allow <<'EOF'
+timeout -s KILL 5 grep -E 'tests?, .*failures?' log
+EOF
+d2 "WO39. a jq filter after env's options" allow <<'EOF'
+env -u X jq '.[] | .a' f
+EOF
+d2 "WO40. test-slot running a gate" allow <<'EOF'
+test-slot --label 'x prep' -- timeout 1500 bin/prep-commit.sh
+EOF
+d2 "WO41. sudo -u root ls" allow <<'EOF'
+sudo -u root ls -l /tmp
+EOF
+d2 "WO42. flock LOCKFILE make" allow <<'EOF'
+flock /tmp/l make test
+EOF
+d2 "WO43. a read-only stash verb through a glob git word after env -i" allow <<'EOF'
+env -i ./g?t stash list
+EOF
+d2 "WO44. an abbreviated long switch, then grep for an alias name" allow <<'EOF'
+env --ignore-env grep gstp notes.txt
+EOF
+d2 "WO45. nice's legacy -N adjustment, then grep for an alias name" allow <<'EOF'
+nice -5 grep gstp notes.txt
+EOF
+
 echo "== F: fail-open =="
 run ''
 check "F1. empty stdin" allow
@@ -1770,6 +1921,25 @@ else
 fi
 OUT=$(json "$WT" 'git stash pop' | GIT_CONFIG_GLOBAL="$TMP/badconfig" sh "$HOOK" 2>/dev/null); STATUS=$?
 fault_check "F12. an unreadable global git config fails closed on a stash write" deny
+# F14-F17 (DND-1898): the wrapper option table is read from ai/lib beside the
+# hook. A hook with no table, or a malformed one, is a fault, never "no
+# wrappers": it fails closed on stash text and allows the rest with a notice.
+mkdir -p "$TMP/notab/hooks" "$TMP/badtab/hooks" "$TMP/badtab/lib"
+cp "$HOOK" "$TMP/notab/hooks/git-stash-guard.sh"
+cp "$HOOK" "$TMP/badtab/hooks/git-stash-guard.sh"
+printf 'env\tshort\ti\n' > "$TMP/badtab/lib/wrapper-opts.tsv"
+OUT=$(json "$WT" 'env -i git stash pop' | sh "$TMP/notab/hooks/git-stash-guard.sh" 2>/dev/null); STATUS=$?
+fault_check "F14. no wrapper option table fails closed on a stash write" deny
+OUT=$(json "$WT" 'git status' | sh "$TMP/notab/hooks/git-stash-guard.sh" 2>/dev/null); STATUS=$?
+if is_fault_allow && printf '%s' "$OUT" | grep -q 'wrapper option table'; then
+  record "F15. no wrapper option table allows a non-stash command, naming the table" PASS
+else
+  record "F15. no wrapper option table allows a non-stash command, naming the table" FAIL
+fi
+OUT=$(json "$WT" 'timeout 5 ./g?t stash pop' | sh "$TMP/badtab/hooks/git-stash-guard.sh" 2>/dev/null); STATUS=$?
+fault_check "F16. a malformed wrapper option table fails closed on a stash write" deny
+OUT=$(json "$WT" 'git status' | sh "$TMP/badtab/hooks/git-stash-guard.sh" 2>/dev/null); STATUS=$?
+fault_check "F17. a malformed wrapper option table allows a non-stash command with a notice" allow
 # F13: the hook work dir is removed on every exit path (deny, allow, fault).
 mkdir -p "$TMP/hooktmp"
 for _c in 'git stash pop' 'git status' 'ls'; do

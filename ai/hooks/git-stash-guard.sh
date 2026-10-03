@@ -65,13 +65,18 @@
 #   * a command word the shell rewrites by glob or brace (`/usr/bin/g?t`,
 #     `git-st*sh`), in command position (a simple command's first word, or
 #     after env/command/sudo/exec/nohup/xargs/time/eval/nice/setsid or a
-#     VAR=value), judged both as git and as git-stash (no verb, a writing
-#     verb, or an expanded verb is denied) when it may expand to git or
-#     git-stash (see PRECISION (DND-1095 D2)). Accepted false positive: such
-#     a word with no arguments or only options (`/usr/bin/g*`).
-#     Not caught: a glob command word after a prefix that takes its own
-#     argument (`timeout 5 /usr/bin/g?t stash pop`, `sudo -u x ...`, a glob
-#     wrapper `./x* -u root /usr/bin/g?t stash pop`);
+#     VAR=value, or the word a wrapper runs past its options and operands:
+#     see WRAPPER OPTIONS), judged both as git and as git-stash (no verb, a
+#     writing verb, or an expanded verb is denied) when it may expand to git
+#     or git-stash (see PRECISION (DND-1095 D2)). Accepted false positive:
+#     such a word with no arguments or only options (`/usr/bin/g*`).
+#     Not caught: a glob wrapper whose option takes a value
+#     (`./x* -u root /usr/bin/g?t stash pop`), and a wrapper WRAPPER
+#     OPTIONS does not name;
+#     **Later (2026-10-03, DND-1898):** this said "Not caught: a glob
+#     command word after a prefix that takes its own argument (`timeout 5
+#     /usr/bin/g?t stash pop`, `sudo -u x ...`, ...)". Superseded: a literal
+#     wrapper's options and operands are skipped (WRAPPER OPTIONS);
 #   * a git ALIAS that resolves to a mutating stash (its value parsed like a
 #     command line, global options included, and resolved through chains,
 #     from the global config and the repo config of the cwd and every `-C` /
@@ -215,9 +220,13 @@
 # its own paren is in command position only through the word before it
 # (env, sudo, ...). A word that also holds a glob character is judged by
 # globcat first, as before (a joined group makes it may be git), so the
-# "Still denied" groups stay denied. Not caught, as for glob command
-# words: a group word after a prefix that takes its own argument
-# (`timeout 5 ./(x|g)it stash pop`). Accepted false positive: code in a
+# "Still denied" groups stay denied. A group word after a wrapper's
+# options (`timeout 5 ./(x|g)it stash pop`, `env -i (git) stash pop`) keeps
+# command position (see WRAPPER OPTIONS).
+# **Later (2026-10-03, DND-1898):** this said "Not caught, as for glob
+# command words: a group word after a prefix that takes its own argument
+# (`timeout 5 ./(x|g)it stash pop`)". Superseded by WRAPPER OPTIONS.
+# Accepted false positive: code in a
 # payload or heredoc whose call is qualifier-shaped and holds an expansion
 # or a `:`, in command position (awk `length($0) > 80`, ruby
 # `printf("%3d", $.)`).
@@ -341,6 +350,32 @@
 # script (`sh <<<"$X"`) it is not caught, the pipe class under NOT
 # CATCHABLE. Not caught either: a program not in these lists that runs
 # its stdin (`python3 -`, `perl`).
+#
+# WRAPPER OPTIONS (DND-1898): a literal wrapper in command position (by
+# its last path component, so `/usr/bin/env` counts) passes command
+# position past its own options and operands to the word it runs. Before
+# DND-1898 only the word right after the wrapper kept it, so `env -i
+# ./g?t stash pop`, `timeout 5 ./g?t ...`, `nice -n 5 ./(x|g)it ...` and
+# `sudo -u root ./g?t ...` ran uncaught. The options come from
+# ai/lib/wrapper-opts.tsv, the table ai/hooks/worktree-escape-guard.sh
+# also reads (env, timeout, nice, stdbuf, time, command, exec, builtin,
+# nohup, sudo, doas, test-slot; short, clustered, attached, long, `--x=v`
+# and unique long prefixes; `--` ends the options; timeout's DURATION is
+# an operand). wwalk in the evaluator marks every word it passes and the
+# command word, which can only add denials. Wrappers with no table
+# (xargs, setsid, eval, noglob, nocorrect, flock, chrt, taskset, ionice,
+# unshare, unbuffer, coproc; flock, chrt and taskset take one operand)
+# have every option unknown. What the table does not settle is read the
+# way git_verdict reads an unknown git option, as one that may take a
+# value: an unknown option, an option that stops parsing (env -S), or a
+# word built by expansion in an option slot (`env $OPTS ./g?t`) keeps
+# command position on the next word too. A table that cannot be read, or
+# a malformed one, is an evaluation fault (see AN EVALUATION FAULT IS NOT
+# "NOTHING FOUND"), never "no wrappers". Accepted false positive: a word
+# in a wrapper option's value slot is judged as a command word too, so a
+# stash alias or a glob git word there followed by a stash write is
+# denied. Not caught: a wrapper not named here (`watch`,
+# `nsenter`, a script), whose options still end command position.
 #
 # ZSH: the Bash tool runs zsh, so zsh-only word rewrites count too: EQUALS
 # (`=git` is git's path), global aliases (`alias -g`, any word position),
@@ -757,8 +792,13 @@ done
 
 # ---- git stash, through every head the header lists -------------------------
 # Its inputs are files (BOUNDED HAND-OFF): argv carries only their paths.
+# The wrapper option table (WRAPPER OPTIONS in the header) sits beside
+# ai/hooks, found through the hook's real path. One the evaluator cannot read
+# exits it 3, a fault (fault_verdict), never "no wrappers".
+WOPTS="$(dirname -- "$(readlink -f -- "$0" 2>/dev/null || printf '%s' "$0")")/../lib/wrapper-opts.tsv"
+[ -f "$WOPTS" ] && [ -r "$WOPTS" ] || { FAULT="the wrapper option table ai/lib/wrapper-opts.tsv cannot be read beside the hook"; fault_verdict; }
 VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/shaliases" \
-  -v cfgov="$UNREAD_CONFIG" -v bif="$GSG_TMP/builtins" -v go="$GLOBOPT" '
+  -v cfgov="$UNREAD_CONFIG" -v bif="$GSG_TMP/builtins" -v go="$GLOBOPT" -v wof="$WOPTS" '
   # slurp(f): the whole file, lines joined by newlines. An unreadable file
   # exits 3, which the caller reads as a fault.
   function slurp(f,   s, l, n, rc) {
@@ -1751,6 +1791,87 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
     # `{\001` is the brace-group keyword as the tokenizer marks it (DND-780).
     return is_assign(t) || t ~ /^(env|command|sudo|exec|nohup|xargs|time|eval|builtin|nice|setsid|noglob|nocorrect|-|then|do|else|if|while|until|!|\{\001)$/
   }
+  # wload(f) (DND-1898): the shared wrapper option table,
+  # ai/lib/wrapper-opts.tsv (its header gives the row format). WTAB: the
+  # wrappers it has a table for; WSH[b, letter] and WLO[b, --name] the takes
+  # of each option (value, switch, opt); WLK[b, --name] its key; WLL[b, i]
+  # (WLC[b] of them) the long names, for GNU prefix matching; WST[b, key] an
+  # option that stops option parsing; WNU[b] a `-N` switch; WOP[b] the
+  # operands before the command; WSAME[b] a wrapper sharing another table.
+  # A table that cannot be read, has a malformed row, or names no env
+  # wrapper exits 3: a fault, never "no wrappers".
+  function wload(f,    l, a, nf, rc) {
+    while ((rc = (getline l < f)) > 0) {
+      if (l ~ /^#/ || l ~ /^[ \t]*$/) continue
+      nf = split(l, a, "\t")
+      if (a[2] == "short" && nf == 5 && a[5] ~ /^(value|switch|opt)$/) WSH[a[1], a[3]] = a[5]
+      else if (a[2] == "long" && nf == 5 && a[5] ~ /^(value|switch|opt)$/) { WLO[a[1], a[3]] = a[5]; WLK[a[1], a[3]] = a[4]; WLL[a[1], ++WLC[a[1]]] = a[3] }
+      else if (a[2] == "stop" && nf == 3) WST[a[1], a[3]] = 1
+      else if (a[2] == "numeric" && nf == 2) WNU[a[1]] = 1
+      else if (a[2] == "operands" && nf == 3 && a[3] ~ /^[0-9]+$/) WOP[a[1]] = a[3] + 0
+      else if (a[2] == "same" && nf == 3) WSAME[a[1]] = a[3]
+      else exit 3
+      WTAB[a[1]] = 1
+    }
+    if (rc < 0) exit 3
+    close(f)
+    if (!("env" in WTAB)) exit 3
+    for (l in WSAME) if (!(WSAME[l] in WTAB)) exit 3
+  }
+  # wwalk(W, k, e, b, WCP, ZP) (DND-1898): word k is wrapper b in command
+  # position, and e ends its simple command. Marks in WCP every later word
+  # that may be the command b runs, so it keeps command position past b'"'"'s
+  # options: the walk skips each option from the table (a value option
+  # also skips its value; `--` ends the options) and b'"'"'s operands
+  # (timeout'"'"'s DURATION), and stops after the first word left, which is
+  # the command. Every word it passes is marked too, which can only add
+  # denials. What the table does not settle keeps command position on the
+  # word after it as well (the git_verdict rule for an unknown git option):
+  # an option b'"'"'s table lacks, any option of a wrapper with no table
+  # (xargs, setsid, flock, ...), an option that stops parsing (env -S), and
+  # a word built by expansion (`env $OPTS ./g?t`), which may be options.
+  function wwalk(W, k, e, b, WCP, ZP,    tb, j, t, pend, ops, extra, done, i, c, nm, hits, hn) {
+    tb = (b in WSAME) ? WSAME[b] : b
+    ops = (tb in WOP) ? WOP[tb] : 0
+    pend = 0; extra = 0; done = 0
+    for (j = k + 1; j <= e; j++) {
+      WCP[j] = 1
+      t = W[j]; gsub(/\001/, "", t)
+      if (pend > 0) { pend--; continue }
+      if (!done && t == "--") { done = 1; continue }
+      if (!done && t ~ /^-./) {
+        if (!(tb in WTAB) || t ~ /[$`\003]/) { extra = 1; continue }
+        if ((tb in WNU) && t ~ /^--?[0-9]+$/) continue
+        if (t ~ /^--/) {
+          nm = t; sub(/=.*/, "", nm)
+          hits = 0; hn = ""
+          if ((tb, nm) in WLO) { hits = 1; hn = nm }
+          else for (i = 1; i <= WLC[tb]; i++) if (index(WLL[tb, i], nm) == 1) { hits++; hn = WLL[tb, i] }
+          if (hits != 1) { extra = 1; continue }
+          if (WLO[tb, hn] == "value" && t !~ /=/) pend = 1
+          if ((tb, WLK[tb, hn]) in WST) extra = 1
+          continue
+        }
+        for (i = 2; i <= length(t); i++) {
+          c = substr(t, i, 1)
+          if (!((tb, c) in WSH)) { extra = 1; continue }
+          if (WSH[tb, c] == "switch") continue
+          if (WSH[tb, c] == "value" && i == length(t)) pend = 1
+          if ((tb, c) in WST) extra = 1
+          break
+        }
+        continue
+      }
+      if (ops > 0) { ops--; continue }
+      if (extra > 0) { extra--; continue }
+      if (W[j] ~ /[$`\003]/) { extra = 1; continue }
+      break
+    }
+    # The simple command ended with the command still to come: a zsh word
+    # that opens with its group paren (`timeout 5 (x|g)it`) starts the next
+    # piece the tokenizer made, and it is the command.
+    if (j > e && ((e + 1) in ZP) && ZP[e + 1]) WCP[e + 1] = 1
+  }
   # squote(w): w as one single-quoted shell word.
   function squote(w) { gsub(/\047/, "\047\\\047\047", w); return "\047" w "\047" }
   # note(c, W, k, e, depth, force): remember WHAT matched finding c, so the
@@ -1836,7 +1957,7 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   }
   # analyze(text, depth): the most specific finding in text (see rank), or
   # "" when it runs no stash write. It stops early only on a literal stash.
-  function analyze(text, depth,    W, QF, SB, UX, PQ, AS, SC, QM, AD, ZV, ZA, ZB, ZP, HT, HI, HA, PB, h, hf, hc, n, k, e, r, sw, m, i, cp, rs, prs, ap, pap, asgw, t, j, x, best, gc, ra, tbe, pgc, so, ne, pcp, zcp, xw, xn, ZT, ga, gn, gz, ZN) {
+  function analyze(text, depth,    W, QF, SB, UX, PQ, AS, SC, QM, AD, ZV, ZA, ZB, ZP, HT, HI, HA, PB, h, hf, hc, n, k, e, r, sw, m, i, cp, rs, prs, ap, pap, asgw, t, j, x, best, gc, ra, tbe, pgc, so, ne, pcp, zcp, xw, xn, ZT, ga, gn, gz, ZN, WCP, wb) {
     # Past the nesting bound, text that still names stash is a deny.
     if (depth > 8) {
       if (!mentions_stash(text)) return ""
@@ -1886,7 +2007,8 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       # (env, xargs, a script), so its first non-option argument (pgc) is in
       # command position too (DND-1095).
       pcp = cp
-      cp = SB[k] || k == pgc || (cp && k > 1 && cmd_prefix(W[k - 1]))
+      # DND-1898: or wwalk marked it, as a word a wrapper before it may run.
+      cp = SB[k] || k == pgc || (cp && k > 1 && cmd_prefix(W[k - 1])) || (k in WCP)
       # ap: word k is where the SHELL itself reads NAME=value as an
       # assignment: it really starts a simple command (rs), follows a shell
       # keyword that itself really started one, or follows an assignment
@@ -1901,6 +2023,9 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       # substitution in the value is still read, as its own simple command.
       asgw = ap && AS[k]
       for (e = k; e < n && !SB[e + 1]; e++) ;
+      # DND-1898: a literal wrapper in command position (env, timeout, sudo,
+      # a path to one) passes command position past its options (wwalk).
+      if (cp && !asgw && W[k] !~ /[\001\003$`]/) { wb = W[k]; sub(/^.*\//, "", wb); if (wb in WWR) wwalk(W, k, e, wb, WCP, ZP) }
       # A shell alias in command position: read its value, followed by the
       # rest of this simple command, as a command of its own. The name is
       # looked up without glob marks: an alias named `gs?` expands before
@@ -1986,7 +2111,7 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       # wrapper), never through the SB its own paren gave word k: prose
       # `HANDOFF (written 2026-10-02 ...)` is an argument (zcp).
       so = k; ne = e
-      zcp = (k in ZP) && ZP[k] ? (k == pgc || (pcp && k > 1 && cmd_prefix(W[k - 1]))) : cp
+      zcp = (k in ZP) && ZP[k] ? (k == pgc || (pcp && k > 1 && cmd_prefix(W[k - 1])) || (k in WCP)) : cp
       if (zcp && !asgw && gc != "git" && (k in ZV) && (ZV[k] == "git" || (ZV[k] == "glob" && gc == ""))) {
         gc = ZV[k]; delete sw; m = 0; ne = k
         if (ZA[k] > 0) { for (i = ZA[k]; i <= ZB[k]; i++) sw[++m] = W[i]; so = ZA[k] - 1; ne = ZB[k] }
@@ -2044,6 +2169,15 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   }
   BEGIN {
     GO = (go != "0")
+    # DND-1898: the wrappers wwalk sees through. Every one with a table but
+    # sudoedit (it edits files, it runs no command), and the cmd_prefix and
+    # hsfeed wrappers that have none, whose options are all unknown;
+    # flock, chrt and taskset take one operand before the command.
+    wload(wof)
+    for (l in WTAB) if (l != "sudoedit") WWR[l] = 1
+    nw = split("xargs setsid eval noglob nocorrect flock chrt taskset ionice unshare unbuffer coproc", wl, " ")
+    for (k = 1; k <= nw; k++) WWR[wl[k]] = 1
+    WOP["flock"] = 1; WOP["chrt"] = 1; WOP["taskset"] = 1
     na = split(slurp(alf), lines, "\n")
     for (k = 1; k <= na; k++) {
       l = lines[k]

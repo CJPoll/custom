@@ -327,6 +327,16 @@ expect "the checker crashing -> allow, exit 0" allow
 case "${OUT}" in *systemMessage*"worktree-escape-guard"*) ok "a checker crash carries a visible warning" ;; *) bad "a checker crash carries a visible warning" "${OUT}" ;; esac
 grep -q 'crashed' "${LOG}" && ok "a checker crash is logged" || bad "a checker crash is logged" "$(cat "${LOG}")"
 rm -rf "${PYCRASH}"
+# The wrapper option table is ai/lib/wrapper-opts.tsv (DND-1898). A hook
+# copy with no table beside it must say so loudly, never read as "no
+# wrappers" (that would read `timeout 5 rm x` as running a program `5`).
+NOTAB="$(mktemp -d)"; mkdir -p "${NOTAB}/hooks"; cp "${HOOK}" "${NOTAB}/hooks/worktree-escape-guard.sh"
+: > "${LOG}"
+OUT="$(printf '%s' "$(payload a1 Bash "$(jq -n -c --arg c "timeout 5 rm -f ${MAIN}/a.txt" '{command: $c}')")" | CLAUDE_CODE_SESSION_ATTENDED=0 CLAUDE_PROJECT_DIR="${MAIN}" "${NOTAB}/hooks/worktree-escape-guard.sh" 2>/dev/null)"; RC=$?
+expect "no wrapper option table -> allow, exit 0" allow
+case "${OUT}" in *systemMessage*"wrapper option table"*"Fix:"*) ok "a missing wrapper option table carries a visible warning with Fix:" ;; *) bad "a missing wrapper option table carries a visible warning with Fix:" "${OUT}" ;; esac
+grep -q 'wrapper option table' "${LOG}" && ok "a missing wrapper option table is logged" || bad "a missing wrapper option table is logged" "$(cat "${LOG}")"
+rm -rf "${NOTAB}"
 bash_sub "unparseable command (unclosed quote) with a write -> allow" allow "echo 'oops > ${MAIN}/a.txt"
 grep -q 'unparsed' "${LOG}" && ok "unparseable command is logged" || bad "unparseable command is logged" "$(cat "${LOG}")"
 run 0 "${MAIN}" "not json at all"
