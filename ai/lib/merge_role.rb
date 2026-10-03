@@ -50,8 +50,10 @@ module MergeRole
   #   push_dests  where a push with no refspec goes: [:current] by default,
   #               [:all] for push.default=matching, or the names set by
   #               remote.<r>.push / push.default=upstream
-  Facts = Struct.new(:resolved, :current, :default, :push_dests, keyword_init: true)
-  UNRESOLVED = Facts.new(resolved: false, current: nil, default: nil, push_dests: [:current])
+  #   remotes     the repo's remote names; [] only when git answered and the
+  #               repo has none, nil when it could not be read
+  Facts = Struct.new(:resolved, :current, :default, :push_dests, :remotes, keyword_init: true)
+  UNRESOLVED = Facts.new(resolved: false, current: nil, default: nil, push_dests: [:current], remotes: nil)
 
   # Matched on the whole command, whatever the method: a merge.
   API_MERGE_PATTERNS = [
@@ -258,8 +260,8 @@ module MergeRole
 
   def git_sub_intents(sub, args, dir, cfg)
     case sub
-    when "push", "send-pack" then [push_intent(args, dir, cfg)]
-    when "subtree" then args[0] == "push" ? [push_intent(args[1..], dir, cfg)] : []
+    when "push", "send-pack" then [push_intent(args, dir, cfg)].compact
+    when "subtree" then args[0] == "push" ? [push_intent(args[1..], dir, cfg)].compact : []
     when *LOCAL_SUBS then local_intents(sub, args, dir)
     when "update-ref" then update_ref_intents(args, dir)
     when "branch" then branch_intents(args, dir)
@@ -306,8 +308,8 @@ module MergeRole
     out
   end
 
-  def force(dir, text, dests)
-    Intent.new(kind: :force_ref, text: text, dests: dests, dir: dir)
+  def force(dir, text, dests, sub: nil)
+    Intent.new(kind: :force_ref, text: text, dests: dests, dir: dir, sub: sub)
   end
 
   # A branch name as written in a ref argument: refs/heads/x and heads/x are
@@ -324,10 +326,10 @@ module MergeRole
   end
 
   def update_ref_intents(args, dir)
-    return [force(dir, "git update-ref --stdin", [:unresolved])] if args.include?("--stdin")
+    return [force(dir, "git update-ref --stdin", [:unresolved], sub: "update-ref")] if args.include?("--stdin")
 
     name = branch_name(positionals(args).first)
-    name.nil? ? [] : [force(dir, "git update-ref", [name])]
+    name.nil? ? [] : [force(dir, "git update-ref", [name], sub: "update-ref")]
   end
 
   def branch_intents(args, dir)
@@ -373,6 +375,8 @@ module MergeRole
     skip = nil
     ended = false
     args.each do |a|
+      return nil if push_help?(a, pos, skip, ended)
+
       if skip
         remote_opt = a if skip == "--repo"
         skip = nil
@@ -390,6 +394,13 @@ module MergeRole
     dests = pos.map { |r| refspec_dest(r) }.compact
     Intent.new(kind: :push, text: "git push", dir: dir, remote: remote, dests: dests, all: all, args: pos,
                cfg_unresolved: cfg)
+  end
+
+  # `git push -h` / `--help` before any refspec prints usage and exits before it
+  # reads a remote or sends a ref; an option's separate value (`-o -h`) and
+  # anything after `--` or a refspec is not help.
+  def push_help?(arg, positionals, skip, ended)
+    !ended && skip.nil? && positionals.empty? && %w[-h --help].include?(arg)
   end
 
   # The branch a push refspec writes on the remote: :current for HEAD/@, the
@@ -424,10 +435,20 @@ module MergeRole
   def finding(it, facts)
     case it.kind
     when :cli_merge, :api_merge, :wt_merge, :mcp_merge, :spawn_admiral then found(it, "the target branch")
-    when :force_ref then dests_finding(it, facts, it.dests, "the branch it writes")
+    when :force_ref then force_ref_finding(it, facts)
     when :push then push_finding(it, facts)
     when :local then local_finding(it, facts)
     end
+  end
+
+  # A ref update in a resolved work tree whose repo has no remote at all lands
+  # on no forge's main: scratch work. Only update-ref. A repo with remotes,
+  # whose remotes could not be read, or that is not a work tree (a bare origin)
+  # keeps the full check; "no remote" is never read from a failed lookup.
+  def force_ref_finding(it, facts)
+    return nil if it.sub == "update-ref" && facts.resolved && facts.remotes == []
+
+    dests_finding(it, facts, it.dests, "the branch it writes")
   end
 
   def push_finding(it, facts)

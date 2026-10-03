@@ -77,7 +77,13 @@ module MergeRoleIO
     # A missing remote HEAD is an unknown default, never "no default".
     default = head.nil? || head.empty? ? :unknown : head.delete_prefix("#{r}/")
     MergeRole::Facts.new(resolved: true, current: current, default: default,
-                         push_dests: push_dests(dir, r, current))
+                         push_dests: push_dests(dir, r, current), remotes: remotes(dir))
+  end
+
+  # The repo's remote names: [] only when `git remote` ran and printed none,
+  # nil when it failed (a failed read is never "no remote").
+  def remotes(dir)
+    git(dir, "remote")&.split
   end
 
   # Where `git push [<remote>]` with no refspec sends commits, from config:

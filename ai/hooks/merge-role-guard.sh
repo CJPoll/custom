@@ -52,6 +52,10 @@
 #   6. an MCP tool whose name says merge or enqueue;
 #   7. an Agent/Task spawn of athena-admiral: an admiral a non-admiral spawns
 #      could merge on its behalf. Only top-level sessions start admirals.
+# Two harmless shapes pass (DND-1865): a `git update-ref` in a resolved work
+# tree whose repo has no remote at all (a scratch repo; a repo with remotes, a
+# bare repo, or a failed `git remote` read keeps the full check), and
+# `git push -h|--help` before any refspec (usage only; nothing is sent).
 # Anything it cannot resolve (a `cd "$VAR"`, a cd in a subshell or after `||`,
 # --git-dir/GIT_DIR, a destination in a variable, a path that is not a repo)
 # is never read as "not main": a non-admiral is denied, naming what it could
