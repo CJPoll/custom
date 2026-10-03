@@ -20,6 +20,7 @@ require_relative "lead_time_config"
 require_relative "lead_time_config_io"
 require_relative "critic_verdict_stores"
 require_relative "athena_telemetry"
+require_relative "since_rule"
 
 module LeadTimePhasesIO
   Source = LeadTimePhases::Source
@@ -348,23 +349,13 @@ module LeadTimePhasesIO
     end
   end
 
-  # ai/bin/lead-time's own --since rule, loaded WRAPPED in its own module so
-  # the two tools accept exactly the same WHEN.
+  # The --since rule, shared with ai/bin/lead-time through ai/lib/since_rule.rb
+  # so the two tools accept exactly the same WHEN (DND-1524).
   module LeadTimeLib
-    PATH = File.expand_path("../bin/lead-time", __dir__)
-
     module_function
 
-    def lead_time
-      @lead_time ||= begin
-        wrap = Module.new
-        load(PATH, wrap)
-        wrap::LeadTime
-      end
-    end
-
     # -> [utc iso, nil] or [nil, reason]
-    def parse_since(text) = lead_time.parse_since(text)
+    def parse_since(text) = SinceRule.parse_since(text)
   end
 
   # ai/bin/lead-time --since --json --meta (DND-1009), as a subprocess.

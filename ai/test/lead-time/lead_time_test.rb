@@ -1015,6 +1015,13 @@ check("'yesterday' is refused, naming the accepted forms") do
   at, why = LeadTime.parse_since("yesterday")
   at.nil? && why.include?("YYYY-MM-DD") && why.include?("RFC 3339")
 end
+check("lead-time holds no --since rule of its own: it is ai/lib/since_rule.rb (DND-1524)") do
+  !LeadTime.const_defined?(:DATE_ONLY_RE, false) &&
+    LeadTime::ZONED_RE.equal?(SinceRule::ZONED_RE) &&
+    ["2026-09-30", "2026-09-30T22:00:00+02:00", "yesterday", "2026-02-31", "2026-09-30T22:00:00"].all? do |v|
+      LeadTime.parse_since(v) == SinceRule.parse_since(v)
+    end
+end
 check("a time with no zone is refused, not read as local time") { LeadTime.parse_since("2026-09-30T22:00:00")[0].nil? }
 check("an impossible date is refused, not rolled over") { LeadTime.parse_since("2026-02-31")[0].nil? }
 

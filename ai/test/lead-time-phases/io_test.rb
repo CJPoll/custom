@@ -205,6 +205,19 @@ Dir.mktmpdir("ltp-io-") do |tmp|
   check("I8 --since uses lead-time's own rule") { IO_::LeadTimeLib.parse_since("2026-10-01") == ["2026-10-01T00:00:00Z", nil] }
   check("I8 an impossible date is refused with a reason") { v, why = IO_::LeadTimeLib.parse_since("2026-02-30"); v.nil? && why.include?("not a date") }
 
+  check("I8 the rule is ai/lib/since_rule.rb and loading it pulls in no lead-time CLI (DND-1524)") do
+    IO_::LeadTimeLib.parse_since("2026-10-01T07:00:00Z") == SinceRule.parse_since("2026-10-01T07:00:00Z") &&
+      !IO_::LeadTimeLib.respond_to?(:lead_time) &&
+      !IO_::LeadTimeLib.const_defined?(:PATH, false)
+  end
+  check("I8 a fresh process that parses --since defines none of lead-time's classes (DND-1524)") do
+    lib = File.expand_path("../../lib/lead_time_phases_io.rb", __dir__)
+    probe = "require #{lib.inspect}; LeadTimePhasesIO::LeadTimeLib.parse_since('2026-10-01'); " \
+            "puts %w[LeadTime GitHubForge GitLabForge NotionStart TicketStarts].select { |c| Object.const_defined?(c) }.join(',')"
+    out, _err, st = Open3.capture3(RbConfig.ruby, "-e", probe)
+    st.success? && out.strip.empty?
+  end
+
   # ── RevertCounter ──
   repo = File.join(tmp, "gitrepo")
   check("I9 a path with no repo: could not look") { IO_::RevertCounter.count(repo, "2026-01-01", "2027-01-01").status == :could_not_look }
