@@ -983,6 +983,117 @@ def bin_bar(bin, root, tip_sha, landed_bin:, newer_bin:, branch_bin:)
   [files, bar, ahead, notes]
 end
 
+# THE AGENT PATH LINE IS WHAT LANDED (DND-1861, the DND-1842 class). The
+# CLAUDE_ENV_FILE script is the MAIN checkout's ai/agent-env/session-env.sh,
+# machine state that follows the newest landing. So the lines it must run are
+# the lines that file runs in the tree of the same landed tip the env bar came
+# from, read from git, never a constant in the diff under check. A live script
+# that does not run exactly those lines is retried against a newer origin/main
+# (Landed.newer_tip): when it runs exactly that commit's lines, it is named
+# ahead of the pinned bar and passes; anything else still fails. A landed
+# script that is missing, unreadable or runs nothing cannot say what the live
+# one should run: Landed::Unreadable, so COULD NOT MEASURE, never a pass. The
+# branch's own copy of the script is never read.
+#
+# The lines ai/agent-env/session-env.sh runs at commit sha.
+def env_lines_at(root, sha, label)
+  rel = AgentStashEnv::ENV_SCRIPT_REL
+  raise Landed::Unreadable.new([[label, "no landed commit to read #{rel} at"]]) if sha.to_s.empty?
+
+  text = Landed.file_at(root, sha, rel, label)
+  if text.nil?
+    raise Landed::Unreadable.new([[label, "#{sha[0, 12]}: #{rel} does not exist, so it cannot say what line the " \
+                                          "live script must run"]])
+  end
+  lines = AgentStashEnv.code_lines(text)
+  raise Landed::Unreadable.new([[label, "#{sha[0, 12]}: #{rel} runs no line"]]) if lines.empty?
+
+  lines
+end
+
+# The landed lines as [description, lines] for the landed tip sha.
+def landed_env_lines(root, sha)
+  ["#{AgentStashEnv::ENV_SCRIPT_REL} @ #{sha.to_s[0, 12]}",
+   env_lines_at(root, sha, "landed #{AgentStashEnv::ENV_SCRIPT_REL}")]
+end
+
+# The newer origin/main's lines as [description, lines], or nil when there is
+# no pin or origin's main is the pin. Raises Landed::Unreadable or
+# Landed::Mismatch as Landed.newer_tip does.
+def newer_env_lines(root)
+  tip = Landed.newer_tip(root)
+  return nil unless tip
+
+  label, sha = tip
+  ["#{AgentStashEnv::ENV_SCRIPT_REL} @ newer origin/main #{sha[0, 12]}", env_lines_at(root, sha, label)]
+end
+
+# The lines the live CLAUDE_ENV_FILE script is judged against, as
+# [lines, bar, ahead, notes], like bin_bar. ahead is set only when the live
+# script runs exactly the newer main's lines; the caller prints it only after
+# a passing verdict (DND-1599). A live script that cannot be read is judged
+# against the pinned bar, and env_file_problems reports the read failure.
+#
+# A pinned tip whose script cannot be read (the env landed after the pin, so
+# the script did too) is judged against the newer origin/main alone, as the
+# env section is (DND-1570). With no newer main, or one that cannot be read
+# either, the pinned Landed::Unreadable stands: COULD NOT MEASURE.
+def env_line_bar(file, root, tip_sha, landed_lines:, newer_lines:)
+  live = live_env_lines(file)
+  begin
+    bar, lines = landed_lines.call(root, tip_sha)
+  rescue Landed::Unreadable => e
+    return env_line_newer_only(file, live, root, newer_lines) || raise(e)
+  end
+  return [lines, bar, nil, []] if live.nil? || AgentStashEnv.same_code?(live, lines)
+
+  begin
+    got = newer_lines.call(root)
+    return [lines, bar, nil, []] unless got
+
+    ndesc, nlines = got
+    unless AgentStashEnv.same_code?(live, nlines)
+      return [lines, bar, nil, ["the live #{AgentStashEnv::ENV_FILE} script is not ahead of the pinned bar either: " \
+                                "it does not run exactly the line #{ndesc} lands"]]
+    end
+    [nlines, "#{ndesc}, ahead of the pinned bar (#{bar})", env_line_ahead(file, ndesc), []]
+  rescue Landed::Unreadable, Landed::Mismatch => e
+    [lines, bar, nil, ["could not read a newer origin/main to tell whether the live #{AgentStashEnv::ENV_FILE} " \
+                       "script is ahead of the pinned bar (#{e.message}); it is measured against the pinned bar alone"]]
+  end
+end
+
+# The code lines of the live script, or nil when it cannot be read.
+def live_env_lines(file)
+  AgentStashEnv.code_lines(File.read(file))
+rescue SystemCallError
+  nil
+end
+
+def env_line_ahead(file, ndesc)
+  "agent PATH line ahead of the pinned bar — #{file} runs the line #{ndesc} lands, a commit that landed after " \
+    "harness-gate pinned origin/main (not drift)."
+end
+
+# The pinned tip's script could not be read: the newer origin/main's bar as
+# [lines, bar, ahead, notes], or nil when there is no newer main or it cannot
+# be read either (the caller then re-raises the pinned failure).
+def env_line_newer_only(file, live, root, newer_lines)
+  got = begin
+    newer_lines.call(root)
+  rescue Landed::Unreadable, Landed::Mismatch
+    nil
+  end
+  return nil unless got
+
+  ndesc, nlines = got
+  bar = "#{ndesc} (the pinned tip's #{AgentStashEnv::ENV_SCRIPT_REL} could not be read)"
+  return [nlines, bar, env_line_ahead(file, ndesc), []] if live && AgentStashEnv.same_code?(live, nlines)
+
+  [nlines, bar, nil, ["the pinned tip's #{AgentStashEnv::ENV_SCRIPT_REL} could not be read, so the live " \
+                      "#{AgentStashEnv::ENV_FILE} script is measured against #{ndesc} alone"]]
+end
+
 # AHEAD OF THE PINNED BAR (DND-1570), the agent-stash env's counterpart of the
 # hook rows' (DND-1552). The newer origin/main's env section as
 # [description, section], or nil when there is no pin or origin's main is the
@@ -1039,6 +1150,8 @@ def run_agent_stash_env(path: settings_path, main: nil, root: REPO_DIR,
                         landed_bin: ->(r, sha) { landed_bin_files(r, sha) },
                         newer_bin: ->(r) { newer_bin_files(r) },
                         branch_bin: ->(r) { branch_bin_files(r) },
+                        landed_lines: ->(r, sha) { landed_env_lines(r, sha) },
+                        newer_lines: ->(r) { newer_env_lines(r) },
                         proc_env: ENV,
                         session_snapshot: ->(now) { AgentStashEnv.session_snapshot(now: now) },
                         now: -> { Time.now }, out: $stdout, err: $stderr)
@@ -1147,31 +1260,52 @@ def run_agent_stash_env(path: settings_path, main: nil, root: REPO_DIR,
              "readable (`chmod u+r`), then re-run."
     return EXIT_UNMEASURED
   end
+  # DND-1861: the agent PATH line is read as landed. A landed env with no
+  # CLAUDE_ENV_FILE needs no line: env_file_problems fails it on its own.
+  env_lines = []
+  env_desc = nil
+  ahead_line_env = nil
+  env_other = []
+  env_script = exp[:vars][AgentStashEnv::ENV_FILE].to_s
+  unless env_script.empty?
+    begin
+      env_lines, env_desc, ahead_line_env, env_other = env_line_bar(env_script, root, tip_sha,
+                                                                    landed_lines: landed_lines,
+                                                                    newer_lines: newer_lines)
+    rescue Landed::Unreadable => e
+      err.puts "#{tag}: COULD NOT MEASURE — this is not a pass. The agent PATH line the " \
+               "#{AgentStashEnv::ENV_FILE} script must run could not be read as landed."
+      Landed.unreadable_lines("agent PATH line (#{AgentStashEnv::ENV_SCRIPT_REL})", e.probes).each { |l| err.puts l }
+      return EXIT_UNMEASURED
+    end
+  end
   # DND-1599: an ahead line is printed only after a passing verdict.
-  bin_ahead = [ahead_bin].compact
-  problems = AgentStashEnv.runtime_problems(env, exp, main: main, bin_files: bin_files, bin_bar: bin_desc)
+  late_ahead = [ahead_bin, ahead_line_env].compact
+  other_notes = bin_other + env_other
+  problems = AgentStashEnv.runtime_problems(env, exp, main: main, bin_files: bin_files, bin_bar: bin_desc,
+                                                      env_lines: env_lines, env_bar: env_desc)
   notes, session, path_problem = AgentStashEnv.session_state(exp, proc_env: proc_env)
   problems += session
   if problems.empty? && path_problem.nil?
     out.puts "#{tag}: ACTIVE — settings values match #{bar}; hook script, `git hook list` (agentstash), " \
              "wrapper and CLAUDE_ENV_FILE PATH line verified. OK."
     out.puts "  note: #{ahead_line}" if ahead_line
-    (bin_ahead + bin_other + notes).each { |n| out.puts "  note: #{n}" }
+    (late_ahead + other_notes + notes).each { |n| out.puts "  note: #{n}" }
     return EXIT_OK
   end
   unless problems.empty?
     err.puts "#{tag}: FAIL — the settings values match (active), but:"
     (problems + [path_problem].compact).each { |l| err.puts "  - #{l}" }
-    bin_other.each { |n| err.puts "  note: #{n}" }
+    other_notes.each { |n| err.puts "  note: #{n}" }
     return EXIT_FAIL
   end
   code = report_session_path(path_problem, env, tag: tag, main: main, snapshot: session_snapshot, now: now.call,
                                                 out: out, err: err)
   out.puts "  note: #{ahead_line}" if ahead_line && code == EXIT_OK
   if code == EXIT_OK
-    (bin_ahead + bin_other).each { |n| out.puts "  note: #{n}" }
+    (late_ahead + other_notes).each { |n| out.puts "  note: #{n}" }
   else
-    bin_other.each { |n| err.puts "  note: #{n}" }
+    other_notes.each { |n| err.puts "  note: #{n}" }
   end
   code
 rescue JSON::ParserError, SystemCallError => e
@@ -1240,8 +1374,14 @@ def agent_stash_env_self_test(check)
   # Claude Code's own PATH, so a profile PATH change is discarded).
   env_rel = "ai/agent-env/session-env.sh"
   tracked = File.join(REPO_DIR, env_rel)
-  check.call("env: the tracked #{env_rel} carries the agent PATH line",
-             File.exist?(tracked) && File.readlines(tracked).map(&:strip).include?(AgentStashEnv::ENV_LINE))
+  # The branch's own script: one line, which puts ATHENA_AGENT_BIN first on
+  # PATH. A shape check of this tree's file, never the live bar (DND-1861).
+  tracked_lines = File.exist?(tracked) ? AgentStashEnv.code_lines(File.read(tracked)) : []
+  check.call("env: the tracked #{env_rel} runs one line, which prepends ATHENA_AGENT_BIN to PATH",
+             tracked_lines.size == 1 && tracked_lines.first.include?('PATH="$ATHENA_AGENT_BIN:$PATH"'))
+  check.call("env: #{env_rel} is AgentStashEnv::ENV_SCRIPT_REL", AgentStashEnv::ENV_SCRIPT_REL == env_rel)
+  # A synthetic line no checker version carries: the bar is whatever landed.
+  fx_line = 'PATH="$ATHENA_AGENT_BIN:$PATH"; export PATH # fixture landed line'
   check.call("env: the registry env points CLAUDE_ENV_FILE at {{MAIN}}/#{env_rel}",
              registry.dig("env", "vars", AgentStashEnv::ENV_FILE) == "{{MAIN}}/#{env_rel}")
   profile = File.join(REPO_DIR, "dotfiles", ".zshrc")
@@ -1254,7 +1394,7 @@ def agent_stash_env_self_test(check)
     FileUtils.cp(File.join(REPO_DIR, AgentStashEnv::HOOK_REL), File.join(main, AgentStashEnv::HOOK_REL))
     FileUtils.cp(File.join(REPO_DIR, "ai", "agent-bin", "git"), File.join(main, "ai", "agent-bin", "git"))
     env_file = File.join(main, env_rel)
-    File.write(env_file, "# fixture\n#{AgentStashEnv::ENV_LINE}\n")
+    File.write(env_file, "# fixture\n#{fx_line}\n")
     reg = File.join(dir, "registry.json")
     File.write(reg, JSON.generate(registry))
     exp = AgentStashEnv.expected(registry, main)
@@ -1272,13 +1412,17 @@ def agent_stash_env_self_test(check)
     # DND-1842: the agent-bin allowlist is injected as landed; the default
     # fixture bar lands git, gh and glab, with no newer main and no branch adds.
     landed_bin = ->(_root, _sha) { ["fixture landed ai/agent-bin/", %w[gh git glab]] }
+    # DND-1861: the agent PATH line is injected as landed too.
+    landed_line = ->(_root, _sha) { ["fixture landed #{env_rel}", [fx_line]] }
     run = lambda do |env, proc_env: {}, landed_env: landed, snapshot: snap_old, newer_env: ->(_root) { nil },
-                     landed_bin_bar: landed_bin, newer_bin: ->(_root) { nil }, branch_bin: ->(_root) { [] }|
+                     landed_bin_bar: landed_bin, newer_bin: ->(_root) { nil }, branch_bin: ->(_root) { [] },
+                     landed_lines: landed_line, newer_lines: ->(_root) { nil }|
       File.write(settings, JSON.generate(env.nil? ? {} : { "env" => env }))
       o = StringIO.new
       e = StringIO.new
       code = run_agent_stash_env(path: settings, main: main, landed_env: landed_env, newer_env: newer_env,
                                  landed_bin: landed_bin_bar, newer_bin: newer_bin, branch_bin: branch_bin,
+                                 landed_lines: landed_lines, newer_lines: newer_lines,
                                  proc_env: proc_env, session_snapshot: snapshot, now: -> { now }, out: o, err: e)
       [code, o.string + e.string]
     end
@@ -1382,20 +1526,106 @@ def agent_stash_env_self_test(check)
     check.call("bin: the allowlist is read at the same landed tip the env bar came from", sha_seen == "f" * 40)
     check.call("bin: no allowlist constant is left in ai/lib/agent_stash_env.rb (it was in the diff it judged)",
                !defined?(AgentStashEnv::BIN_FILES))
+
+    # DND-1861: the agent PATH line is what LANDED, never a constant.
+    v2 = 'PATH="$ATHENA_AGENT_BIN:$PATH"; export PATH # fixture newer line'
+    v3 = 'PATH="$ATHENA_AGENT_BIN:$PATH" # fixture unlanded line'
+    newer_v2 = ->(_root) { ["fixture newer #{env_rel}", [v2]] }
+    File.write(env_file, "# fixture\n#{v2}\n")
+    code, text = run.call(full)
+    check.call("line: live script runs a line the landed tip lacks, no newer main -> FAIL naming the landed bar",
+               code == EXIT_FAIL && text.include?("does not carry the agent PATH line fixture landed") &&
+               text.include?("Fix:"))
+    code, text = run.call(full, newer_lines: newer_v2)
+    check.call("line: older pinned tip, live script runs the line a newer main landed -> ACTIVE, named ahead, exit 0",
+               code.zero? && text.index("ACTIVE") && text.include?("agent PATH line ahead of the pinned bar") &&
+               text.index("ACTIVE") < text.index("agent PATH line ahead"))
+    File.write(env_file, "# fixture\n#{v3}\n")
+    code, text = run.call(full, newer_lines: newer_v2)
+    check.call("line: live script runs a line neither bar landed -> FAIL, says not ahead either, never ahead",
+               code == EXIT_FAIL && text.include?("does not carry the agent PATH line") &&
+               text.include?("not ahead of the pinned bar either") && !text.include?("line ahead of the pinned bar"))
+    File.write(env_file, "# fixture\n#{v2}\n#{v3}\n")
+    code, text = run.call(full, newer_lines: newer_v2)
+    check.call("line: the newer line plus a foreign one -> FAIL, never ahead (exactly the landed lines)",
+               code == EXIT_FAIL && !text.include?("line ahead of the pinned bar"))
+    File.write(env_file, "# fixture\n#{v2}\n")
+    code, text = run.call(full, newer_lines: ->(_root) { raise Landed::Unreadable.new([["fixture probe", "unreachable"]]) })
+    check.call("line: newer main unreadable -> the pinned FAIL stands, says it could not judge",
+               code == EXIT_FAIL && text.include?("could not read a newer origin/main to tell whether the live CLAUDE_ENV_FILE"))
+    File.write(env_file, "# fixture\n#{fx_line}\n")
+    code, text = run.call(full, landed_lines: ->(_r, _s) { raise Landed::Unreadable.new([["fixture probe", "no such path"]]) })
+    check.call("line: landed line unreadable -> COULD NOT MEASURE, exit 3, with a Fix:, never ACTIVE",
+               code == EXIT_UNMEASURED && text.include?("agent PATH line") && text.include?("Fix:") &&
+               !text.include?("ACTIVE —"))
+    # The env (and so its script) landed after the pin: the newer main alone.
+    pinned_gone = ->(_r, _s) { raise Landed::Unreadable.new([["fixture probe", "no such path at the pin"]]) }
+    code, text = run.call(full, landed_lines: pinned_gone,
+                                newer_lines: ->(_root) { raise Landed::Unreadable.new([["fixture probe", "unreachable"]]) })
+    check.call("line: pinned and newer line both unreadable -> COULD NOT MEASURE, exit 3, never ACTIVE",
+               code == EXIT_UNMEASURED && !text.include?("ACTIVE —"))
+    File.write(env_file, "# fixture\n#{v2}\n")
+    code, text = run.call(full, landed_lines: pinned_gone, newer_lines: newer_v2)
+    check.call("line: pin lacks the script, live runs the newer main's line -> ACTIVE, named ahead, exit 0",
+               code.zero? && text.include?("agent PATH line ahead of the pinned bar"))
+    File.write(env_file, "# fixture\n#{v3}\n")
+    code, text = run.call(full, landed_lines: pinned_gone, newer_lines: newer_v2)
+    check.call("line: pin lacks the script, live runs a line the newer main lacks -> FAIL, never ahead",
+               code == EXIT_FAIL && text.include?("does not carry the agent PATH line fixture newer") &&
+               !text.include?("line ahead of the pinned bar"))
+    File.write(env_file, "# fixture\n#{fx_line}\n")
+    line_sha = nil
+    run.call(full, landed_env: ->(_root) { ["fixture landed", registry["env"], "e" * 40] },
+                   landed_lines: ->(_root, sha) { line_sha = sha; ["fixture", [fx_line]] })
+    check.call("line: the line is read at the same landed tip the env bar came from", line_sha == "e" * 40)
+    check.call("line: no agent PATH line constant is left in ai/lib/agent_stash_env.rb (it was in the diff it judged)",
+               !defined?(AgentStashEnv::ENV_LINE))
+    Dir.mktmpdir("envline-landed") do |r|
+      git = ->(*a) { Open3.capture2e("git", "-C", r, "-c", "user.name=fx", "-c", "user.email=fx@example.invalid", *a) }
+      git.call("init", "-q")
+      FileUtils.mkdir_p(File.join(r, "ai", "agent-env"))
+      File.write(File.join(r, env_rel), "# header\n\n#{v2}\n")
+      git.call("add", "-A")
+      git.call("commit", "-q", "-m", "fx")
+      sha = git.call("rev-parse", "HEAD").first.strip
+      desc, lines = landed_env_lines(r, sha)
+      check.call("line: landed_env_lines reads the script's code lines at the commit",
+                 lines == [v2] && desc.include?(sha[0, 12]))
+      File.write(File.join(r, env_rel), "# only a comment\n")
+      git.call("commit", "-q", "-am", "empty")
+      empty_sha = git.call("rev-parse", "HEAD").first.strip
+      ok = begin
+        landed_env_lines(r, empty_sha)
+        false
+      rescue Landed::Unreadable
+        true
+      end
+      check.call("line: a landed script that runs no line is unreadable, never an empty bar", ok)
+      git.call("rm", "-q", env_rel)
+      git.call("commit", "-q", "-m", "gone")
+      gone_sha = git.call("rev-parse", "HEAD").first.strip
+      ok = begin
+        landed_env_lines(r, gone_sha)
+        false
+      rescue Landed::Unreadable
+        true
+      end
+      check.call("line: a landed tip without the script is unreadable, never an empty bar", ok)
+    end
     File.write(env_file, "# fixture\n")
     code, text = run.call(full)
-    File.write(env_file, "# fixture\n#{AgentStashEnv::ENV_LINE}\n")
+    File.write(env_file, "# fixture\n#{fx_line}\n")
     check.call("env: CLAUDE_ENV_FILE script without the PATH line -> FAIL", code == 1 && text.include?("agent PATH line"))
     File.delete(env_file)
     code, text = run.call(full)
-    File.write(env_file, "# fixture\n#{AgentStashEnv::ENV_LINE}\n")
+    File.write(env_file, "# fixture\n#{fx_line}\n")
     check.call("env: CLAUDE_ENV_FILE script missing -> FAIL, never ACTIVE",
                code == 1 && text.include?("cannot be read") && !text.include?("ACTIVE —"))
     code, text = run.call({ AgentStashEnv::ENV_FILE => "/owner/own-env.sh", "OTHER" => "x" })
     check.call("env: CLAUDE_ENV_FILE alone is not the guard -> INACTIVE", code.zero? && text.include?("INACTIVE"))
-    File.write(env_file, "# fixture\n#{AgentStashEnv::ENV_LINE}\nexport FOO=appended\n")
+    File.write(env_file, "# fixture\n#{fx_line}\nexport FOO=appended\n")
     code, text = run.call(full)
-    File.write(env_file, "# fixture\n#{AgentStashEnv::ENV_LINE}\n")
+    File.write(env_file, "# fixture\n#{fx_line}\n")
     check.call("env: CLAUDE_ENV_FILE script running a line besides the PATH line -> FAIL naming it",
                code == 1 && text.include?("besides the agent PATH line") && text.include?("export FOO=appended"))
     code, text = run.call(full.merge(AgentStashEnv::ENV_FILE => "/owner/own-env.sh"))
@@ -1431,7 +1661,7 @@ def agent_stash_env_self_test(check)
                code == 1 && !text.include?("PENDING"))
     File.write(env_file, "# fixture\n")
     code, text = run.call(installed, proc_env: stale)
-    File.write(env_file, "# fixture\n#{AgentStashEnv::ENV_LINE}\n")
+    File.write(env_file, "# fixture\n#{fx_line}\n")
     check.call("pending: a runtime problem beside the stale PATH -> FAIL naming both, never pending",
                code == 1 && text.include?("agent PATH line") && text.include?("first git on PATH") &&
                !text.include?("PENDING"))

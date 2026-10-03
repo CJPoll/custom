@@ -188,3 +188,41 @@ Fail-first, against the unfixed checker at cd05293d (52 passed, 5 failed):
 - `a branch that adds a wrapper -> ACTIVE, the wrapper named pending, exit 0`:
   `output lacks` the pending pattern (no pending line existed).
 After the fix: 57 passed, 0 failed.
+
+## DND-1861: the agent PATH line is what landed
+
+The DND-1842 class for `ai/agent-env/session-env.sh`. The checker judged the
+main checkout's script against `AgentStashEnv::ENV_LINE`, a constant in its own
+tree. An older pinned tip then failed a script a newer landing had changed, a
+live script still running the constant passed after main landed another line,
+and a branch could rewrite the line it was judged by. Section 19 of
+self-test.sh pins it with synthetic lines no checker version carries. The
+fixture `env_fixture` now lands `session-env.sh` with the env, since the fixed
+checker reads it from git.
+
+Fail-first, against the unfixed checker at 0ba8a9e5 (58 passed, 8 failed):
+- `older pinned tip, live session-env.sh runs the line a NEWER origin/main
+  landed -> ACTIVE, exit 0`: `exit 1, want 0; ... agent-stash env: FAIL ...
+  does not carry the agent PATH line`.
+- `...and it names the agent PATH line as ahead of the pinned bar`: the same
+  `exit 1`.
+- `...and it says the line is not ahead of the pinned bar either`: `output
+  lacks /not ahead of the pinned bar either/` (the exit was already 1).
+- `unpinned: live session-env.sh runs the line that landed on origin/main ->
+  ACTIVE`: `exit 1, want 0; ... does not carry the agent PATH line`.
+- `live session-env.sh runs the checker's old line, main landed another -> FAIL
+  (the checker's own copy is not the bar)`: `exit 0, want 1; ... agent-stash
+  env: ACTIVE`.
+- `a branch that rewrites session-env.sh (and any in-tree copy of the line)
+  cannot pass its unlanded line -> FAIL`: `exit 0, want 1; ... agent-stash env:
+  ACTIVE`.
+- `the landed session-env.sh cannot be read -> COULD NOT MEASURE, exit 3, never
+  ACTIVE` and `...and it carries a Fix:`: `exit 0, want 3; ... agent-stash env:
+  ACTIVE`.
+After the fix: 66 passed, 0 failed.
+
+| Mutation (in `ai/bin/check-hooks-registered`) | Caught by |
+|---|---|
+| `newer-never`: `env_line_bar` never reads the newer origin/main | `older pinned tip ... NEWER origin/main landed -> ACTIVE`; `...names ... ahead`; `...not ahead ... either` (3 failed) |
+| `branch-bar`: `env_lines_at` reads the branch's working tree instead of git | `a branch that rewrites session-env.sh ... -> FAIL`, plus the two ahead rows (3 failed) |
+| `unreadable-empty`: an unreadable landed script reads as no line | `the landed session-env.sh cannot be read -> COULD NOT MEASURE`; `...carries a Fix:` (2 failed) |

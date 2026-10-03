@@ -44,7 +44,8 @@
 # ~/.zshrc, but it ENDS with `export PATH=<Claude Code's own process PATH>`, so
 # a PATH change made in ~/.zshrc never reaches the tool shell. The
 # CLAUDE_ENV_FILE text runs after the snapshot: ai/agent-env/session-env.sh
-# carries ENV_LINE, which prepends ATHENA_AGENT_BIN. The settings env sets
+# carries the agent PATH line (the one it runs as landed, DND-1861), which
+# prepends ATHENA_AGENT_BIN. The settings env sets
 # CLAUDE_ENV_FILE to that file. It is PENDING RESTART
 # (exit 0) only when ALL of these hold: the settings values match the landed
 # env, every runtime check passes, the session's ATHENA_AGENT_BIN is the right
@@ -79,10 +80,14 @@ require "tmpdir"
 module AgentStashEnv
   PLACEHOLDER = "{{MAIN}}"
   HOOK_REL    = "ai/git-hooks/agent-stash-guard.sh"
-  # The PATH line ai/agent-env/session-env.sh carries (DND-1080). Claude Code
-  # runs that file's text after the shell snapshot, so this is the one place a
-  # PATH change reaches the Bash tool's shell.
-  ENV_LINE    = 'if [ -n "${ATHENA_AGENT_BIN:-}" ] && [ -x "$ATHENA_AGENT_BIN/git" ]; then PATH="$ATHENA_AGENT_BIN:$PATH"; export PATH; fi'
+  # The CLAUDE_ENV_FILE script (DND-1080). Claude Code runs its text after the
+  # shell snapshot, so it is the one place a PATH change reaches the Bash
+  # tool's shell. The line it must run is read from this path AS LANDED
+  # (DND-1861): ai/bin/check-hooks-registered reads it from git at the landed
+  # tip, never from a constant here. A constant in this file is in the diff it
+  # judges, and an older pinned tree's constant misjudges a main checkout that
+  # a newer landing has already changed (the DND-1842 class).
+  ENV_SCRIPT_REL = "ai/agent-env/session-env.sh"
   ENV_FILE    = "CLAUDE_ENV_FILE"
   # The files ATHENA_AGENT_BIN may hold are those ai/agent-bin/ holds AS LANDED
   # (DND-1842): each shadows the real command on agent PATH on purpose, and
@@ -214,10 +219,23 @@ module AgentStashEnv
     []
   end
 
+  # The lines a shell script runs: stripped, comments and blanks dropped.
+  def code_lines(text)
+    text.lines.map(&:strip).reject { |l| l.empty? || l.start_with?("#") }
+  end
+
+  # Does a script running `live` run exactly the landed `lines`: every one of
+  # them, and nothing else?
+  def same_code?(live, lines)
+    (lines - live).empty? && (live - lines).empty?
+  end
+
   # Runtime problems of an ACTIVE install: [] when all hold. bin_files is the
   # wrapper directory's allowlist, and bin_bar names where it was read (the
-  # landed ai/agent-bin/, or a newer origin/main's).
-  def runtime_problems(env, exp, main:, bin_files:, bin_bar:)
+  # landed ai/agent-bin/, or a newer origin/main's). env_lines are the lines
+  # the CLAUDE_ENV_FILE script runs as landed, and env_bar names where they
+  # were read (DND-1861).
+  def runtime_problems(env, exp, main:, bin_files:, bin_bar:, env_lines:, env_bar:)
     out = []
     hook = File.join(main, HOOK_REL)
     unless File.file?(hook) && File.executable?(hook)
@@ -243,14 +261,15 @@ module AgentStashEnv
              "shadows a real command on agent PATH. Fix: move it out of #{bin}, or land it in #{BIN_REL}/ on " \
              "main first."
     end
-    out.concat(env_file_problems(exp, main))
+    out.concat(env_file_problems(exp, main, env_lines: env_lines, env_bar: env_bar))
     out
   end
 
-  # The CLAUDE_ENV_FILE script the landed env names must carry ENV_LINE, and
-  # nothing else but comments: it is the only thing that puts the wrapper on
-  # the Bash tool's PATH (DND-1080).
-  def env_file_problems(exp, main)
+  # The CLAUDE_ENV_FILE script the landed env names must run the landed
+  # agent PATH line (env_lines, read from env_bar), and nothing else but
+  # comments: it is the only thing that puts the wrapper on the Bash tool's
+  # PATH (DND-1080). The line is never a constant here (DND-1861).
+  def env_file_problems(exp, main, env_lines:, env_bar:)
     file = exp[:vars][ENV_FILE].to_s
     if file.empty?
       return ["the landed env sets no #{ENV_FILE}, so nothing puts the wrapper on the Bash tool's PATH (the " \
@@ -261,20 +280,20 @@ module AgentStashEnv
     restore = "Fix: restore ai/agent-env/session-env.sh in #{main} (git -C #{main} checkout -- " \
               "ai/agent-env/session-env.sh), then restart sessions."
     begin
-      code = File.read(file).lines.map(&:strip).reject { |l| l.empty? || l.start_with?("#") }
-      unless code.include?(ENV_LINE)
-        return ["#{ENV_FILE} #{file} does not carry the agent PATH line, so the wrapper never reaches the Bash " \
-                "tool's PATH. #{restore}"]
+      code = code_lines(File.read(file))
+      unless (env_lines - code).empty?
+        return ["#{ENV_FILE} #{file} does not carry the agent PATH line #{env_bar} runs, so the wrapper never " \
+                "reaches the Bash tool's PATH. #{restore}"]
       end
       # The text runs before every Bash command in every session, and every
       # such process sees CLAUDE_ENV_FILE pointing here, so a stray
-      # `>> "$CLAUDE_ENV_FILE"` would land here. Anything but ENV_LINE is
-      # foreign: it runs in every session, and one that fails breaks the `&&`
-      # chain Claude Code builds around the command.
-      extra = code - [ENV_LINE]
+      # `>> "$CLAUDE_ENV_FILE"` would land here. Anything the landed script
+      # does not run is foreign: it runs in every session, and one that fails
+      # breaks the `&&` chain Claude Code builds around the command.
+      extra = code - env_lines
       return [] if extra.empty?
 
-      ["#{ENV_FILE} #{file} runs #{extra.size} line(s) besides the agent PATH line (first: " \
+      ["#{ENV_FILE} #{file} runs #{extra.size} line(s) besides the agent PATH line #{env_bar} runs (first: " \
        "#{extra.first[0, 80].inspect}); they run before every Bash command in every session. #{restore}"]
     rescue SystemCallError => e
       ["#{ENV_FILE} #{file} cannot be read (#{e.class}), so the wrapper never reaches the Bash tool's PATH. " \

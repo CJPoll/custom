@@ -11,8 +11,9 @@
 # `return`, no `exit`, and it must end with status 0. POSIX sh, since the tool
 # shell is zsh or bash. The owner's terminal never sets ATHENA_AGENT_BIN, so
 # the line is inert there. Disable: scripts/setup-hooks --remove-env, then
-# restart sessions. ai/bin/check-hooks-registered asserts the line below is
-# present verbatim (AgentStashEnv::ENV_LINE).
+# restart sessions. ai/bin/check-hooks-registered asserts the main checkout's
+# copy runs exactly the line this file runs AS LANDED on origin/main (DND-1861),
+# so a change to the line takes effect for the check when it lands.
 #
 # Nothing writes here, and check-hooks-registered FAILs an ACTIVE install when
 # this file runs any line but the one below (comments and blanks aside). Claude Code hands SessionStart, CwdChanged and

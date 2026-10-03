@@ -917,7 +917,11 @@ and pronoun-guard; nothing detected it. The durable fix:
   registry AS LANDED, like the hooks' bar. So is what `ATHENA_AGENT_BIN` may
   hold: the entries of `ai/agent-bin/` at the landed tip, never a list in the
   checker. A live file only a newer origin/main lands is *ahead of the pinned
-  bar*; one a branch adds is *pending*.
+  bar*; one a branch adds is *pending*. So is the line the main checkout's
+  `ai/agent-env/session-env.sh` must run: exactly the lines that file runs at
+  the landed tip (DND-1861). A live script that runs only a newer origin/main's
+  line is *ahead of the pinned bar*, a branch's copy is never read, and a
+  landed script that cannot be read is COULD NOT MEASURE.
 
   **Later (2026-10-03, DND-1842):** the files `ATHENA_AGENT_BIN` may hold were
   a constant in `ai/lib/agent_stash_env.rb` (`BIN_FILES`: git, gh, glab).

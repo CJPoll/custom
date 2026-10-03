@@ -332,12 +332,14 @@ env_fixture() { # env_fixture <name>: new_fixture plus the env landed on origin
     src = JSON.parse(File.read(ENV["REG_SRC"]))
     dst = JSON.parse(File.read(ENV["REG_DST"]))
     File.write(ENV["REG_DST"], JSON.pretty_generate(dst.merge("env" => src.fetch("env"))) + "\n")'
+  # The CLAUDE_ENV_FILE script the settings env names (DND-1080), verbatim. It
+  # lands with the env: the checker reads the line it must carry as landed
+  # (DND-1861), so a fixture main whose script never landed has no bar.
+  cp "${SRC_ROOT}/ai/agent-env/session-env.sh" "${d}/main/ai/agent-env/session-env.sh"
   commit "${d}/main" land-env
   git -C "${d}/main" push -q origin HEAD:refs/heads/main >/dev/null 2>&1
   git -C "${d}/main" fetch -q origin >/dev/null 2>&1
   git -C "${d}/wt" "${GITC[@]}" rebase -q origin/main >/dev/null 2>&1
-  # The CLAUDE_ENV_FILE script the settings env names (DND-1080), verbatim.
-  cp "${SRC_ROOT}/ai/agent-env/session-env.sh" "${d}/main/ai/agent-env/session-env.sh"
   printf '%s\n' "${d}"
 }
 
@@ -637,6 +639,93 @@ env_settings "${D}" "${INSTALL_AFTER}"
 session_check "${D}" "${SNAP_OLD}" wrapper
 expect "a branch that adds a wrapper -> ACTIVE, the wrapper named pending, exit 0" 0 \
   "agent-bin.*tea.*pending|pending.*tea" "agent-stash env: (FAIL|DRIFT)"
+
+# 19. THE AGENT PATH LINE IS WHAT LANDED (DND-1861, the DND-1842 class for
+#     ai/agent-env/session-env.sh). The CLAUDE_ENV_FILE script in the MAIN
+#     checkout is machine state that follows the newest landing. The pre-fix
+#     checker judged it against AgentStashEnv::ENV_LINE, a constant in the
+#     checker's own tree, so (a) an older pinned tip failed a live script a
+#     newer origin/main had already changed, (b) a live script still carrying
+#     the constant passed after main landed a different line, and (c) a branch
+#     could rewrite the line it is judged by. The fix reads the line from
+#     ai/agent-env/session-env.sh AS LANDED, retries a miss against a newer
+#     origin/main (ahead of the pinned bar), and a landed script it cannot read
+#     is COULD NOT MEASURE. ENVLINE_V2 and ENVLINE_V3 are synthetic lines no
+#     checker version carries.
+ENVLINE_V1="$(grep -v '^[[:space:]]*#' "${SRC_ROOT}/ai/agent-env/session-env.sh" | grep -v '^[[:space:]]*$')"
+ENVLINE_V2='[ -x "${ATHENA_AGENT_BIN:-/nonexistent}/git" ] && PATH="$ATHENA_AGENT_BIN:$PATH" && export PATH || :'
+ENVLINE_V3='PATH="$ATHENA_AGENT_BIN:$PATH"; export PATH'
+envline() { # envline <dir> <line>: the main checkout's session-env.sh runs <line>
+  mkdir -p "$1/main/ai/agent-env"
+  printf '# fixture session-env.sh\n%s\n' "$2" > "$1/main/ai/agent-env/session-env.sh"
+}
+land_main() { # land_main <dir> <msg>: commit main, push it, rebase the worktree onto it
+  commit "$1/main" "$2"
+  git -C "$1/main" push -q origin HEAD:refs/heads/main >/dev/null 2>&1; git -C "$1/main" fetch -q origin >/dev/null 2>&1
+  git -C "$1/wt" "${GITC[@]}" rebase -q origin/main >/dev/null 2>&1
+}
+envline_ahead_fixture() { # envline_ahead_fixture <name>: env landed and pinned, then a newer main lands ENVLINE_V2
+  D="$(env_fixture "$1")"
+  PIN="$(git -C "${D}/main" rev-parse HEAD)"
+  KEY="$(cd "$(git -C "${D}/main" rev-parse --path-format=absolute --git-common-dir)" && pwd -P)"
+  envline "${D}" "${ENVLINE_V2}"
+  commit "${D}/main" newer-envline
+  git -C "${D}/main" push -q origin HEAD:refs/heads/main >/dev/null 2>&1
+  git -C "${D}/main" fetch -q origin >/dev/null 2>&1
+  env_settings "${D}" "${INSTALL_AFTER}"
+}
+
+if [ -z "${ENVLINE_V1}" ] || [ "$(printf '%s\n' "${ENVLINE_V1}" | wc -l)" -ne 1 ]; then
+  bad "19 fixture: the tracked session-env.sh runs exactly one line" "got: ${ENVLINE_V1}"
+fi
+
+envline_ahead_fixture envline-ahead
+pinned_session "${D}" "${SNAP_OLD}" wrapper
+expect "older pinned tip, live session-env.sh runs the line a NEWER origin/main landed -> ACTIVE, exit 0" 0 \
+  "agent-stash env: ACTIVE" "agent-stash env: FAIL|does not carry"
+expect "...and it names the agent PATH line as ahead of the pinned bar" 0 "agent PATH line ahead of the pinned bar"
+
+envline_ahead_fixture envline-ahead-miss
+envline "${D}" "${ENVLINE_V3}"
+pinned_session "${D}" "${SNAP_OLD}" wrapper
+expect "live session-env.sh runs a line neither the pinned nor the newer main landed -> FAIL with its Fix:" 1 \
+  "does not carry the agent PATH line.*Fix:" "agent-stash env: ACTIVE|line ahead of the pinned bar"
+expect "...and it says the line is not ahead of the pinned bar either" 1 "not ahead of the pinned bar either"
+
+D="$(env_fixture envline-unpinned-landed)"
+envline "${D}" "${ENVLINE_V2}"; land_main "${D}" land-envline
+env_settings "${D}" "${INSTALL_AFTER}"
+session_check "${D}" "${SNAP_OLD}" wrapper
+expect "unpinned: live session-env.sh runs the line that landed on origin/main -> ACTIVE" 0 \
+  "agent-stash env: ACTIVE" "does not carry"
+
+D="$(env_fixture envline-constant-not-bar)"
+envline "${D}" "${ENVLINE_V2}"; land_main "${D}" land-envline
+envline "${D}" "${ENVLINE_V1}"
+env_settings "${D}" "${INSTALL_AFTER}"
+session_check "${D}" "${SNAP_OLD}" wrapper
+expect "live session-env.sh runs the checker's old line, main landed another -> FAIL (the checker's own copy is not the bar)" 1 \
+  "does not carry the agent PATH line" "agent-stash env: ACTIVE"
+
+D="$(env_fixture envline-branch-loosens)"
+printf '# branch session-env.sh\n%s\n' "${ENVLINE_V2}" > "${D}/wt/ai/agent-env/session-env.sh"
+OLD_LINE="${ENVLINE_V1}" NEW_LINE="${ENVLINE_V2}" LIBF="${D}/wt/ai/lib/agent_stash_env.rb" /usr/bin/ruby -e '
+  f = ENV["LIBF"]; File.write(f, File.read(f).gsub(ENV["OLD_LINE"], ENV["NEW_LINE"]))'
+commit "${D}/wt" branch-rewrites-envline
+envline "${D}" "${ENVLINE_V2}"
+env_settings "${D}" "${INSTALL_AFTER}"
+session_check "${D}" "${SNAP_OLD}" wrapper
+expect "a branch that rewrites session-env.sh (and any in-tree copy of the line) cannot pass its unlanded line -> FAIL" 1 \
+  "does not carry the agent PATH line" "agent-stash env: ACTIVE"
+
+D="$(env_fixture envline-unlanded-script)"
+git -C "${D}/main" rm -q ai/agent-env/session-env.sh >/dev/null 2>&1; land_main "${D}" drop-envline
+envline "${D}" "${ENVLINE_V1}"
+env_settings "${D}" "${INSTALL_AFTER}"
+session_check "${D}" "${SNAP_OLD}" wrapper
+expect "the landed session-env.sh cannot be read -> COULD NOT MEASURE, exit 3, never ACTIVE" 3 \
+  "agent-stash env: COULD NOT MEASURE" "agent-stash env: ACTIVE"
+expect "...and it carries a Fix:" 3 "Fix:"
 
 # Unpinned, there is no newer origin/main to be ahead of.
 D="$(new_fixture unpinned-unwired)"
