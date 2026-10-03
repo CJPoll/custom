@@ -234,6 +234,17 @@ repo "${TMP}/nowhere.git"
 printf '[submodule "s"]\n\tpath = s\n\turl = https://github.com/synth-owner/synth-sub.git\n' > "${R}/.gitmodules"
 run "${R}" git -c submodule.recurse=true push origin HEAD
 refused "F8. submodule.recurse=true in a repo with submodules (each submodule push is unchecked)" git 'no-recurse-submodules' 'REAL-GIT'
+# DND-1841: git applies the LAST recursion flag, and the LAST of the two config
+# keys (push.recurseSubmodules, submodule.recurse) in config order; an earlier
+# "no" does not switch off a later "on".
+run "${R}" git push --no-recurse-submodules --recurse-submodules=on-demand origin HEAD
+refused "F9. --no-recurse-submodules then --recurse-submodules=on-demand (the last flag wins)" git 'no-recurse-submodules' 'REAL-GIT'
+"${REAL_G}" -C "${R}" config push.recurseSubmodules no
+run "${R}" git -c submodule.recurse=true push origin HEAD
+refused "F10. push.recurseSubmodules=no in the repo, then -c submodule.recurse=true (the later key wins)" git 'no-recurse-submodules' 'REAL-GIT'
+"${REAL_G}" -C "${R}" config --unset push.recurseSubmodules
+run "${R}" git -c submodule.recurse=true push --no-recurse-submodules origin HEAD
+passed "F11. submodule.recurse=true with --no-recurse-submodules to a local remote passes" 'REAL-GIT'
 mkdir -p "${TMP}/not-isolated"
 run "${R}" env GH_TOKEN=forged GH_HOST=github.com GH_CONFIG_DIR="${TMP}/not-isolated" gh pr create --title t --body b
 refused "F5. gh with a config dir that is not gh-athena's" gh gh-athena 'REAL-GH'

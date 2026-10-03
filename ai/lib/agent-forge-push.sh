@@ -92,7 +92,7 @@ git() { "$AFP_REAL" "$@"; }
 
 AFP_LIB="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/forge-git-passthrough.sh"
 # shellcheck source=forge-git-passthrough.sh
-if ! . "$AFP_LIB" 2>/dev/null || ! declare -F fg_refuse_non_https >/dev/null; then
+if ! . "$AFP_LIB" 2>/dev/null || ! declare -F fg_refuse_non_https >/dev/null || ! declare -F fg_push_recurses >/dev/null; then
   afp_refuse "git push: cannot load $AFP_LIB, so whether this push goes to a forge is unknown." \
     "restore ai/lib/forge-git-passthrough.sh beside ai/lib/agent-forge-push.sh in the checkout that holds ai/agent-bin; to push to a forge meanwhile, use ~/dev/custom/ai/bin/gh-athena git push … or ~/dev/custom/ai/bin/glab-athena git push …."
 fi
@@ -144,31 +144,9 @@ afp_reaches() {
   return 0
 }
 
-# afp_recurses : 0 when this push pushes submodules too, in a repository that
-# has them (submodule.recurse=true means on-demand when push.recurseSubmodules
-# is unset; the passthrough's resolver reads only the argument and
-# push.recurseSubmodules).
-afp_recurses() {
-  local a mode="" top
-  for a in "$@"; do
-    case "$a" in
-      --no-recurse-submodules | --recurse-submodules=no | --recurse-submodules=check) return 1 ;;
-      --recurse-submodules | --recurse-submodules=*) mode=on ;;
-    esac
-  done
-  if [ -z "$mode" ]; then
-    case "$(git "${AFP_GLOB[@]}" config --get push.recurseSubmodules 2>/dev/null)" in
-      no | check) return 1 ;;
-      on-demand | only) mode=on ;;
-    esac
-  fi
-  if [ -z "$mode" ]; then
-    [ "$(git "${AFP_GLOB[@]}" config --type=bool --get submodule.recurse 2>/dev/null)" = true ] || return 1
-  fi
-  git "${AFP_GLOB[@]}" config --get-regexp '^submodule\..*\.url$' >/dev/null 2>&1 && return 0
-  top="$(git "${AFP_GLOB[@]}" rev-parse --show-toplevel 2>/dev/null)" || return 1
-  [ -n "$top" ] && [ -f "$top/.gitmodules" ]
-}
+# afp_g <git args...> : the real git with the push's own global options; the
+# probe fg_push_recurses runs every config read through.
+afp_g() { git "${AFP_GLOB[@]}" "$@"; }
 
 # afp_routed <host> : 0 when the push carries the passthrough's isolation for <host>.
 afp_routed() {
@@ -191,8 +169,10 @@ afp_routed() {
   [ "$found" = 1 ]
 }
 
-if afp_recurses "$@"; then
-  afp_refuse "this git push: it pushes submodules too (--recurse-submodules, push.recurseSubmodules or submodule.recurse), and each submodule push runs through git's exec-path, where no check sees which forge it reaches or as whom (DND-1803)." \
+# Push recursion: the passthrough's fg_push_recurses, the one copy both routes
+# share (DND-1841). It reads every source git does, in git's order.
+if fg_push_recurses afp_g "$@"; then
+  afp_refuse "this git push: it pushes submodules too ($FG_RECURSE_SRC), and each submodule push runs through git's exec-path, where no check sees which forge it reaches or as whom (DND-1803, DND-1841)." \
     "push with --no-recurse-submodules, and push each submodule separately from its own directory; a push to github.com or gitlab.com goes through ~/dev/custom/ai/bin/gh-athena git push … or ~/dev/custom/ai/bin/glab-athena git push …."
 fi
 for host in github.com gitlab.com; do

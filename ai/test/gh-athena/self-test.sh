@@ -263,6 +263,86 @@ if [ "${RC}" = 0 ] && [[ "${OUT}" == *"GIT_CONFIG_KEY_${N}=[http.https://github.
 else bad "18. append after injected entries" "rc=${RC} rc2=${RC2} n=${N} out='${OUT}' real='$(cat "${TMP}/out")' err='$(cat "${TMP}/err")'"; fi
 
 echo
+echo "--- DND-1841: a push that recurses into submodules is REFUSED, from every source ---"
+# A real superproject with a real submodule, both pushing to local bare
+# repositories (no network). Every recursion source git reads is tried: the
+# flag (and its abbreviation and separate-value form), push.recurseSubmodules,
+# submodule.recurse, from repo config, from -c and from the environment config
+# channel, and the order git applies them in (the LAST of the two config keys
+# wins). Each submodule push would run through git's exec-path, outside this
+# wrapper's checks, so a recursing push is refused, not half-checked.
+SUBBARE="${TMP}/sm-sub.git"; SUPBARE="${TMP}/sm-super.git"
+git init -q --bare "${SUBBARE}"; git init -q --bare "${SUPBARE}"
+git init -q "${TMP}/sm-seed" && git -C "${TMP}/sm-seed" commit -q --allow-empty -m s1 \
+  && git -C "${TMP}/sm-seed" push -q "${SUBBARE}" HEAD:refs/heads/main
+SM="$(new_repo sm-super "${SUPBARE}")"
+git -C "${SM}" -c protocol.file.allow=always submodule -q add "${SUBBARE}" s >/dev/null 2>&1
+git -C "${SM}" commit -q -m 'add submodule'
+git -C "${SM}/s" commit -q --allow-empty -m s2
+git -C "${SM}" add s && git -C "${SM}" commit -q -m 'bump submodule'
+[ -f "${SM}/.gitmodules" ] && [ -d "${SM}/s" ] || bad "S0. submodule fixture" "no submodule in ${SM}"
+
+# sm_refused <label> : exit 3, a Fix: naming the separate submodule push, and git never ran.
+sm_refused() {
+  if is_refusal && [[ "${ERR}" == *"submodule"* ]] && [[ "${ERR}" == *"--no-recurse-submodules"* ]] \
+    && [[ "${OUT}" != *"dry-run: exec git"* ]]; then ok "$1"
+  else bad "$1" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+}
+# sm_passed <label> : exit 0, no refusal, git would run.
+sm_passed() {
+  if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: exec git"* ]] && [[ "${ERR}" != *"REFUSING"* ]]; then ok "$1"
+  else bad "$1" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+}
+
+gha "${SM}" -c submodule.recurse=true push origin HEAD:refs/heads/feat
+sm_refused "S1. -c submodule.recurse=true -> refused"
+git -C "${SM}" config submodule.recurse true
+gha "${SM}" push origin HEAD:refs/heads/feat
+sm_refused "S2. submodule.recurse=true in the repo config -> refused"
+gha "${SM}" -c alias.pp=push pp origin HEAD:refs/heads/feat
+sm_refused "S3. an alias to push, submodule.recurse=true in the repo config -> refused"
+gha "${SM}" subtree push -P s "${SUBBARE}" feat
+sm_refused "S4. subtree push (its inner git push reads submodule.recurse too) -> refused"
+git -C "${SM}" config --unset submodule.recurse
+git -C "${SM}" config push.recurseSubmodules no
+gha "${SM}" -c submodule.recurse=true push origin HEAD:refs/heads/feat
+sm_refused "S5. push.recurseSubmodules=no in the repo, then -c submodule.recurse=true (the later key wins) -> refused"
+git -C "${SM}" config --unset push.recurseSubmodules
+gha "${SM}" -c push.recurseSubmodules=on-demand push origin HEAD:refs/heads/feat
+sm_refused "S6. -c push.recurseSubmodules=on-demand -> refused"
+( cd "${SM}" && GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=submodule.recurse GIT_CONFIG_VALUE_0=yes \
+    GH_ATHENA_GIT_DRY_RUN=1 "${WRAPPER}" git push origin HEAD:refs/heads/feat ) >"${TMP}/out" 2>"${TMP}/err"
+RC=$?; OUT="$(cat "${TMP}/out")"; ERR="$(cat "${TMP}/err")"
+sm_refused "S7. submodule.recurse=yes from the environment config channel -> refused"
+gha "${SM}" push --recurse-submodules=on-demand origin HEAD:refs/heads/feat
+sm_refused "S8. --recurse-submodules=on-demand -> refused"
+gha "${SM}" push --recurse-submodules only origin HEAD:refs/heads/feat
+sm_refused "S9. --recurse-submodules only (the value as a separate word) -> refused"
+gha "${SM}" push --recu=on-demand origin HEAD:refs/heads/feat
+sm_refused "S10. the abbreviation --recu=on-demand -> refused"
+gha "${SM}" push --no-recurse-submodules --recurse-submodules=on-demand origin HEAD:refs/heads/feat
+sm_refused "S11. --no-recurse-submodules then --recurse-submodules=on-demand (the last flag wins) -> refused"
+gha "${SM}" -c submodule.recurse=true push -o --no-recurse-submodules origin HEAD:refs/heads/feat
+sm_refused "S12. --no-recurse-submodules as the VALUE of -o is not the flag -> refused"
+
+gha "${SM}" push origin HEAD:refs/heads/feat
+sm_passed "S13. no recursion configured: a push from the superproject is unchanged"
+gha "${SM}" -c submodule.recurse=true push --no-recurse-submodules origin HEAD:refs/heads/feat
+sm_passed "S14. -c submodule.recurse=true with --no-recurse-submodules (the flag wins) passes"
+gha "${SM}" -c submodule.recurse=true push --recurse-submodules=check origin HEAD:refs/heads/feat
+sm_passed "S15. --recurse-submodules=check (checks, pushes no submodule) passes"
+git -C "${SM}" config submodule.recurse true
+gha "${SM}" -c push.recurseSubmodules=no push origin HEAD:refs/heads/feat
+sm_passed "S16. submodule.recurse=true in the repo, then -c push.recurseSubmodules=no (the later key wins) passes"
+git -C "${SM}" config --unset submodule.recurse
+R="$(new_repo sm-none "${SUPBARE}")"
+gha "${R}" -c submodule.recurse=true push origin HEAD:refs/heads/plain
+sm_passed "S17. submodule.recurse=true in a repo with no submodules: the push is unchanged"
+git -C "${R}" update-index --add --cacheinfo "160000,$(git -C "${SM}/s" rev-parse HEAD),lib"
+gha "${R}" -c submodule.recurse=true push origin HEAD:refs/heads/plain
+sm_refused "S18. a gitlink in the index with no .gitmodules still counts as a submodule -> refused"
+
+echo
 echo "--- DND-1475: a push that moves the remote's default branch is merge.landed ---"
 # Real pushes to local bare origins. Each case has its own store.
 landed() { cat "$1"/*.jsonl 2>/dev/null | jq -c 'select(.event == "merge.landed")'; }
