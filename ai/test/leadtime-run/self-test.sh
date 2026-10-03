@@ -98,7 +98,7 @@ new_case() {
   for f in ${UNMEASURABLE_LIBS}; do cp -- "${REPO_ROOT}/ai/lib/$f" "$seed/ai/lib/"; done
   # The checkouts the configs point at: temp repos named as the repos are.
   for r in custom gen_saas walt_ui; do git "${G[@]}" init -q "$c/checkouts/$r"; done
-  printf '{"repos":[{"name":"custom","path":"%s","mode":"improve"}],"window":20,"improvement_epic":"epic-fixture"}\n' \
+  printf '{"repos":[{"name":"custom","path":"%s","mode":"improve","idle_workflow":"none"}],"window":20,"improvement_epic":"epic-fixture"}\n' \
     "$c/checkouts/custom" >"$seed/ai/config/lead-time-repos.json"
   printf 'ai-artifacts/\n' >"$seed/.gitignore"
   git -C "$seed" add -A
@@ -462,7 +462,7 @@ else
 fi
 
 c="$(new_case)"
-override "$c" "{\"repos\":[{\"name\":\"gen_saas\",\"path\":\"$c/checkouts/gen_saas\",\"mode\":\"improve\"}],\"window\":20,\"improvement_epic\":\"epic-fixture\"}"
+override "$c" "{\"repos\":[{\"name\":\"gen_saas\",\"path\":\"$c/checkouts/gen_saas\",\"mode\":\"improve\",\"idle_workflow\":\"none\"}],\"window\":20,\"improvement_epic\":\"epic-fixture\"}"
 rc="$(run_runner "$c" ATHENA_LEADTIME_CONFIG="$c/override.json")"
 run="$(newest "$c" run)"
 if [ "$rc" = 0 ] && grep -qF "(config=override $c/override.json): gen_saas (improve, $c/checkouts/gen_saas)." "$c/claude-args" \
@@ -487,7 +487,7 @@ else
 fi
 
 c="$(new_case)"
-override "$c" "{\"repos\":[{\"name\":\"custom\",\"path\":\"$c/checkouts/custom\",\"mode\":\"improve\"},{\"name\":\"walt_ui\",\"path\":\"$c/absent/walt_ui\",\"mode\":\"watch\"}],\"window\":20,\"improvement_epic\":\"epic-fixture\"}"
+override "$c" "{\"repos\":[{\"name\":\"custom\",\"path\":\"$c/checkouts/custom\",\"mode\":\"improve\",\"idle_workflow\":\"none\"},{\"name\":\"walt_ui\",\"path\":\"$c/absent/walt_ui\",\"mode\":\"watch\"}],\"window\":20,\"improvement_epic\":\"epic-fixture\"}"
 rc="$(run_runner "$c" ATHENA_LEADTIME_CONFIG="$c/override.json")"
 run="$(newest "$c" run)"
 if [ "$rc" = 0 ] && grep -qxF "config=override repos=custom skipped=walt_ui(no such path $c/absent/walt_ui)" "$run" \
@@ -511,7 +511,7 @@ else
 fi
 
 c="$(new_case)"
-override "$c" "{\"repos\":[{\"name\":\"custom\",\"path\":\"$c/absent/custom\",\"mode\":\"improve\"}],\"window\":20,\"improvement_epic\":\"epic-fixture\"}"
+override "$c" "{\"repos\":[{\"name\":\"custom\",\"path\":\"$c/absent/custom\",\"mode\":\"improve\",\"idle_workflow\":\"none\"}],\"window\":20,\"improvement_epic\":\"epic-fixture\"}"
 rc="$(run_runner "$c" ATHENA_LEADTIME_CONFIG="$c/override.json")"
 if [ "$rc" = 78 ] && [ "$(fails "$c")" = 1 ] && [ "$(invoked "$c")" = 0 ] && grep -q 'lead-time-repos exit 4' "$c/runner.err" \
    && grep -q 'no configured repo is checked out' "$c/runner.err" && grep -q 'Fix:' "$c/runner.err"; then
@@ -742,7 +742,7 @@ fi
 # two improve repos (custom, gen_saas): every repo is checked, the lists join,
 # and a skipped observe outranks an ingest failure.
 two_improve() { # <case>
-  printf '{"repos":[{"name":"custom","path":"%s","mode":"improve"},{"name":"gen_saas","path":"%s","mode":"improve"}],"window":20,"improvement_epic":"epic-fixture"}\n' \
+  printf '{"repos":[{"name":"custom","path":"%s","mode":"improve","idle_workflow":"none"},{"name":"gen_saas","path":"%s","mode":"improve","idle_workflow":"none"}],"window":20,"improvement_epic":"epic-fixture"}\n' \
     "$1/checkouts/custom" "$1/checkouts/gen_saas" >"$1/repo/ai/config/lead-time-repos.json"
 }
 c="$(new_case)"; two_improve "$c"
@@ -1368,7 +1368,7 @@ product_case() {
   rm -rf "$c/checkouts/gen_saas"
   git "${G[@]}" init -q "$s"; echo one >"$s/a.txt"; git -C "$s" add -A; git "${G[@]}" -C "$s" commit -q -m seed
   git clone -q --bare "$s" "$c/gen-origin.git"; git clone -q "$c/gen-origin.git" "$c/checkouts/gen_saas"
-  override "$c" "{\"repos\":[{\"name\":\"custom\",\"path\":\"$c/checkouts/custom\",\"mode\":\"improve\"},{\"name\":\"gen_saas\",\"path\":\"$c/checkouts/gen_saas\",\"mode\":\"improve\"},{\"name\":\"walt_ui\",\"path\":\"$c/checkouts/walt_ui\",\"mode\":\"watch\"}],\"window\":20,\"improvement_epic\":\"epic-fixture\"}"
+  override "$c" "{\"repos\":[{\"name\":\"custom\",\"path\":\"$c/checkouts/custom\",\"mode\":\"improve\",\"idle_workflow\":\"none\"},{\"name\":\"gen_saas\",\"path\":\"$c/checkouts/gen_saas\",\"mode\":\"improve\",\"idle_workflow\":\"none\"},{\"name\":\"walt_ui\",\"path\":\"$c/checkouts/walt_ui\",\"mode\":\"watch\"}],\"window\":20,\"improvement_epic\":\"epic-fixture\"}"
   # The skill opts into the product lane by naming its command (DND-1542).
   printf 'Product repos: leadtime-product cut, then leadtime-product pr.\n' >>"$c/repo/ai/skills/athena:lead-time-improve/SKILL.md"
 }

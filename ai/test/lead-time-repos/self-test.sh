@@ -119,9 +119,9 @@ eq "inherits_from names the tracked default" "$(jq_r 'j["inherits_from"]')" "${R
 eq "a repo the override drops does not come back" "$(jq_r 'j["repos"].map { |r| r["name"] }.join(",")')" "custom,gen_saas"
 run --
 has "the table names the inherited field and where it came from" "${OUT}" "idle_workflow=none (tracked default)"
-GOOD_ENV="$(cfg envonly.json "{\"repos\":[{\"name\":\"custom\",\"path\":\"~/dev/custom\",\"mode\":\"improve\"}],\"window\":20,\"improvement_epic\":\"e\"}")"
+GOOD_ENV="$(cfg envonly.json "{\"repos\":[{\"name\":\"gen_saas\",\"path\":\"~/dev/gen_saas\",\"mode\":\"improve\",\"idle_workflow\":\"none\"}],\"window\":20,\"improvement_epic\":\"e\"}")"
 run ATHENA_LEADTIME_CONFIG="${GOOD_ENV}" -- --json
-eq "ATHENA_LEADTIME_CONFIG stays authoritative: nothing inherited" "$(jq_r '[j["repos"][0]["idle_workflow"].inspect, j["repos"][0]["inherited"].size, j["inherits_from"].inspect].join(",")')" "nil,0,nil"
+eq "ATHENA_LEADTIME_CONFIG stays authoritative: nothing inherited" "$(jq_r '[j["repos"][0]["idle_workflow"].inspect, j["repos"][0]["inherited"].size, j["inherits_from"].inspect].join(",")')" "\"none\",0,nil"
 rm -f "${OVR}"
 run -- --json
 eq "no override: inherits_from is null" "$(jq_r 'j["inherits_from"].inspect')" "nil"
@@ -175,7 +175,7 @@ has "... naming HOME, with Fix:" "${OUT}" "HOME is unset or empty"
 run HOME=relative/home -- ; refused "a relative HOME" "HOME is relative"
 
 echo "== presence: missing checkouts are skipped by name and counted"
-PART="$(cfg part.json "{\"repos\":[{\"name\":\"custom\",\"path\":\"${H}/dev/custom\",\"mode\":\"improve\"},{\"name\":\"gen_saas\",\"path\":\"${TMP}/gone/gen_saas\",\"mode\":\"watch\"}],\"window\":20,\"improvement_epic\":\"e\"}")"
+PART="$(cfg part.json "{\"repos\":[{\"name\":\"custom\",\"path\":\"${H}/dev/custom\",\"mode\":\"improve\",\"idle_workflow\":\"none\"},{\"name\":\"gen_saas\",\"path\":\"${TMP}/gone/gen_saas\",\"mode\":\"watch\"}],\"window\":20,\"improvement_epic\":\"e\"}")"
 run ATHENA_LEADTIME_CONFIG="${PART}" -- --json
 eq "a missing checkout: exit 0" "${CODE}" "0"
 eq "the rest resolve" "$(jq_r 'j["repos"].map { |r| r["name"] }.join(",")')" "custom"
@@ -187,7 +187,7 @@ run ATHENA_LEADTIME_CONFIG="${PART}" --
 has "the table prints the skip" "${OUT}" "skipped  gen_saas"
 has "the table counts the skip" "${OUT}" "2 considered, 1 resolved, 1 skipped"
 
-ALLGONE="$(cfg allgone.json "{\"repos\":[{\"name\":\"custom\",\"path\":\"${TMP}/gone/custom\",\"mode\":\"improve\"}],\"window\":20,\"improvement_epic\":\"e\"}")"
+ALLGONE="$(cfg allgone.json "{\"repos\":[{\"name\":\"custom\",\"path\":\"${TMP}/gone/custom\",\"mode\":\"improve\",\"idle_workflow\":\"none\"}],\"window\":20,\"improvement_epic\":\"e\"}")"
 run ATHENA_LEADTIME_CONFIG="${ALLGONE}" --
 eq "zero repos left: exit 4" "${CODE}" "4"
 has "... saying so" "${ERR}" "no configured repo is checked out on this machine"
@@ -196,20 +196,20 @@ eq "... and nothing on stdout" "${OUT}" ""
 
 echo "== presence: an existing path that is wrong is an error, not a skip"
 mkdir -p "${TMP}/plain/custom"
-NOTGIT="$(cfg notgit.json "{\"repos\":[{\"name\":\"custom\",\"path\":\"${TMP}/plain/custom\",\"mode\":\"improve\"}],\"window\":20,\"improvement_epic\":\"e\"}")"
+NOTGIT="$(cfg notgit.json "{\"repos\":[{\"name\":\"custom\",\"path\":\"${TMP}/plain/custom\",\"mode\":\"improve\",\"idle_workflow\":\"none\"}],\"window\":20,\"improvement_epic\":\"e\"}")"
 run ATHENA_LEADTIME_CONFIG="${NOTGIT}" -- ; refused "a directory that is not a git repository" "is not a git repository"
 "${GENV[@]}" git init -q -b main "${TMP}/other"
-MISMATCH="$(cfg mismatch.json "{\"repos\":[{\"name\":\"custom\",\"path\":\"${TMP}/other\",\"mode\":\"improve\"}],\"window\":20,\"improvement_epic\":\"e\"}")"
+MISMATCH="$(cfg mismatch.json "{\"repos\":[{\"name\":\"custom\",\"path\":\"${TMP}/other\",\"mode\":\"improve\",\"idle_workflow\":\"none\"}],\"window\":20,\"improvement_epic\":\"e\"}")"
 run ATHENA_LEADTIME_CONFIG="${MISMATCH}" -- ; refused "a name/basename mismatch" 'main checkout is named "other"'
 mkdir -p "${H}/dev/custom/sub"
-SUB="$(cfg sub.json "{\"repos\":[{\"name\":\"custom\",\"path\":\"${H}/dev/custom/sub\",\"mode\":\"improve\"}],\"window\":20,\"improvement_epic\":\"e\"}")"
+SUB="$(cfg sub.json "{\"repos\":[{\"name\":\"custom\",\"path\":\"${H}/dev/custom/sub\",\"mode\":\"improve\",\"idle_workflow\":\"none\"}],\"window\":20,\"improvement_epic\":\"e\"}")"
 run ATHENA_LEADTIME_CONFIG="${SUB}" -- ; refused "a path inside a checkout but not its top" "not the top of its git checkout"
 printf 'x\n' >"${TMP}/afile"
 AFILE="$(cfg afile.json "{\"repos\":[{\"name\":\"afile\",\"path\":\"${TMP}/afile\",\"mode\":\"watch\"}],\"window\":20,\"improvement_epic\":\"e\"}")"
 run ATHENA_LEADTIME_CONFIG="${AFILE}" -- ; refused "a path that is a file" "not a directory"
 mkdir -p "${TMP}/locked"
 "${GENV[@]}" git init -q -b main "${TMP}/locked/custom"
-LOCKED="$(cfg locked.json "{\"repos\":[{\"name\":\"custom\",\"path\":\"${TMP}/locked/custom\",\"mode\":\"improve\"}],\"window\":20,\"improvement_epic\":\"e\"}")"
+LOCKED="$(cfg locked.json "{\"repos\":[{\"name\":\"custom\",\"path\":\"${TMP}/locked/custom\",\"mode\":\"improve\",\"idle_workflow\":\"none\"}],\"window\":20,\"improvement_epic\":\"e\"}")"
 chmod 000 "${TMP}/locked"
 run ATHENA_LEADTIME_CONFIG="${LOCKED}" --
 chmod 755 "${TMP}/locked"

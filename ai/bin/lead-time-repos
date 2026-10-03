@@ -57,6 +57,11 @@ HELP = <<~TXT
   (lead-time-phases --summary, DND-1614): a file means the repo has it, so a
   0 tail with no post-merge run is n/a; "none" means it has none, so a 0
   tail is measured; absent, the summary infers it from the window.
+  An "improve" repo MUST declare idle_workflow (DND-1927): inference per
+  ingested batch can write two lead definitions into one ledger, so an
+  improve entry without it (after the override inherits the tracked
+  default's) is refused by name, with a Fix: naming the key. A "watch" repo
+  may omit it.
 
   Presence: a configured path that does not exist is SKIPPED, named with its
   reason, and counted. A path that exists but is not the top of a git

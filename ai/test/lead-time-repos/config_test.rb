@@ -128,7 +128,7 @@ check("D3 a 0600 override passes") { C.locate(XDG, facts(mode: 0o100600), tracke
 def parse(text, home: "/home/u") = C.parse(text, home: home, path: "/x.json")
 
 check("S1 a valid doc parses, ~/ expands") do
-  p = parse(doc([repo("custom", "improve", path: "~/dev/custom")]))
+  p = parse(doc([repo("custom", "improve", path: "~/dev/custom", idle_workflow: "none")]))
   p.repos.first.path == "/home/u/dev/custom" && p.window == 20 && p.improvement_epic == "epic-id"
 end
 check("S2 malformed JSON is an error naming the file") do
@@ -169,6 +169,11 @@ end
 check("S5 an idle_workflow with a path, or blank, or not .yml, is an error") do
   ["../x.yml", " ", "deploy", 7].all? { |v| raised { parse(doc([repo("a", idle_workflow: v)])) }&.message.to_s.include?("idle_workflow") }
 end
+check("S6 an improve repo that does not declare idle_workflow is refused by name, with a Fix: naming the key (DND-1927)") do
+  e = raised { parse(doc([repo("a", "improve")])) }
+  e && e.message.include?("\"a\"") && e.message.include?("improve") && e.message.include?("idle_workflow") && e.fix.include?("idle_workflow")
+end
+check("S6 a watch repo without idle_workflow still resolves") { parse(doc([repo("a", "watch")])).repos.first.idle_workflow.nil? }
 
 seed = C.parse(File.read(File.expand_path("../../config/lead-time-repos.json", __dir__)), home: "/home/u", path: "seed")
 check("S4 the tracked default parses unchanged") { seed.repos.map { |r| [r.name, r.mode] } == [%w[custom improve], %w[gen_saas watch], %w[walt_ui watch]] }
@@ -256,7 +261,7 @@ check("P4 repo_label is the main checkout's basename") { C.repo_label("/home/u/d
 # ── resolve ─────────────────────────────────────────────────────────────────
 
 LOC = C::Location.new(path: TRACKED, source: "default")
-three = parse(doc([repo("custom", "improve"), repo("gen_saas"), repo("walt_ui")]))
+three = parse(doc([repo("custom", "improve", idle_workflow: "none"), repo("gen_saas"), repo("walt_ui")]))
 all_here = three.repos.to_h { |r| [r.name, probe(r.path, r.name)] }
 
 check("R1 every repo present: all resolve, none skipped") do
@@ -312,7 +317,7 @@ check("O2 own_repo: no common dir (git failed) carries the reason") do
   o.path.nil? && o.error == "git rev-parse failed"
 end
 
-laptop = C.resolve(LOC, parse(doc([repo("gen_saas", "improve")])), { "gen_saas" => probe("/src/gen_saas", "gen_saas") })
+laptop = C.resolve(LOC, parse(doc([repo("gen_saas", "improve", idle_workflow: "none")])), { "gen_saas" => probe("/src/gen_saas", "gen_saas") })
 check("C1 a configured, present repo resolves to its configured path") { res.path_for("gen_saas", own) == "/src/gen_saas" }
 check("C2 the runner's own repo resolves on a machine that does not configure it") do
   laptop.path_for("custom", own) == "/home/u/dev/custom"

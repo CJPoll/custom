@@ -73,7 +73,7 @@ for f in strict_argv.rb lead_time_config.rb lead_time_config_io.rb; do cp "${REP
 CO="${TMP}/checkouts"
 for r in custom gen_saas walt_ui; do git init -q "$CO/$r" >&2; done
 CO="$(cd -- "$CO" && pwd -P)"
-TRACKED_JSON="{\"repos\":[{\"name\":\"custom\",\"path\":\"$CO/custom\",\"mode\":\"improve\"},{\"name\":\"gen_saas\",\"path\":\"$CO/gen_saas\",\"mode\":\"watch\"},{\"name\":\"walt_ui\",\"path\":\"$CO/walt_ui\",\"mode\":\"watch\"}],\"window\":20,\"improvement_epic\":\"epic-id\"}"
+TRACKED_JSON="{\"repos\":[{\"name\":\"custom\",\"path\":\"$CO/custom\",\"mode\":\"improve\",\"idle_workflow\":\"none\"},{\"name\":\"gen_saas\",\"path\":\"$CO/gen_saas\",\"mode\":\"watch\"},{\"name\":\"walt_ui\",\"path\":\"$CO/walt_ui\",\"mode\":\"watch\"}],\"window\":20,\"improvement_epic\":\"epic-id\"}"
 printf '%s\n' "${TRACKED_JSON}" >"$IR/ai/config/lead-time-repos.json"
 git -C "$IR" init -q -b main >&2
 git -C "$IR" add -A >&2
@@ -563,7 +563,7 @@ fi
 
 # A repo not checked out on this machine: skipped by name, no cursor seeded.
 shipwright_cursors
-( umask 077; printf '{"repos":[{"name":"custom","path":"%s","mode":"improve"},{"name":"walt_ui","path":"%s","mode":"watch"}],"window":20,"improvement_epic":"epic-id"}\n' \
+( umask 077; printf '{"repos":[{"name":"custom","path":"%s","mode":"improve","idle_workflow":"none"},{"name":"walt_ui","path":"%s","mode":"watch"}],"window":20,"improvement_epic":"epic-id"}\n' \
     "$CO/custom" "${TMP}/absent/walt_ui" >"${TMP}/override-skip.json" )
 printf '0 * * * * /opt/other-job\n' >"$ct"
 rc="$(inst "$ct" ATHENA_LEADTIME_CONFIG="${TMP}/override-skip.json" -- --install)"
@@ -599,7 +599,7 @@ fi
 
 # Zero repos checked out: the resolver's exit 4 is refused, not an empty install.
 shipwright_cursors
-( umask 077; printf '{"repos":[{"name":"custom","path":"%s","mode":"improve"}],"window":20,"improvement_epic":"epic-id"}\n' \
+( umask 077; printf '{"repos":[{"name":"custom","path":"%s","mode":"improve","idle_workflow":"none"}],"window":20,"improvement_epic":"epic-id"}\n' \
     "${TMP}/absent/custom" >"${TMP}/override-none.json" )
 printf '0 * * * * /opt/other-job\n' >"$ct"
 rc="$(inst "$ct" ATHENA_LEADTIME_CONFIG="${TMP}/override-none.json" -- --install)"

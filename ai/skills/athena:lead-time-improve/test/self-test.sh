@@ -110,7 +110,7 @@ CONFIG="${TMP}/repos.json"
 # (DND-1526), so the watch repo is a real (empty) checkout named gen_saas.
 mkdir -p "${TMP}/gen_saas"
 env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "${TMP}/gen_saas" init -q -b main
-printf '%s\n' "{\"repos\":[{\"name\":\"custom\",\"path\":\"${REPO}\",\"mode\":\"improve\"},{\"name\":\"gen_saas\",\"path\":\"${TMP}/gen_saas\",\"mode\":\"watch\"}],\"window\":20,\"improvement_epic\":\"epic-id\"}" >"${CONFIG}"
+printf '%s\n' "{\"repos\":[{\"name\":\"custom\",\"path\":\"${REPO}\",\"mode\":\"improve\",\"idle_workflow\":\"none\"},{\"name\":\"gen_saas\",\"path\":\"${TMP}/gen_saas\",\"mode\":\"watch\"}],\"window\":20,\"improvement_epic\":\"epic-id\"}" >"${CONFIG}"
 
 STATE="${TMP}/state"
 mkdir -p "${STATE}"
@@ -399,7 +399,7 @@ echo "== reverts could not look"
 NOMAIN="${TMP}/nomain/custom"
 mkdir -p "${NOMAIN}"
 env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "${NOMAIN}" init -q -b main
-printf '%s\n' "{\"repos\":[{\"name\":\"custom\",\"path\":\"${NOMAIN}\",\"mode\":\"improve\"}],\"window\":20,\"improvement_epic\":\"epic-id\"}" >"${TMP}/nomain.json"
+printf '%s\n' "{\"repos\":[{\"name\":\"custom\",\"path\":\"${NOMAIN}\",\"mode\":\"improve\",\"idle_workflow\":\"none\"}],\"window\":20,\"improvement_epic\":\"epic-id\"}" >"${TMP}/nomain.json"
 STATE2="${TMP}/state2"
 mkdir -p "${STATE2}"
 /usr/bin/ruby "${HERE}/make_ledger.rb" "${STATE2}/ledger.jsonl" "${LANDING}"
@@ -597,7 +597,7 @@ GX=(env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_AUTHOR_NAME=t GIT_
 "${GX[@]}" init -q -b main
 GS_ONLY="$(GIT_COMMITTER_DATE=2026-09-01T00:00:00Z GIT_AUTHOR_DATE=2026-09-01T00:00:00Z "${GX[@]}" commit -q --allow-empty -m "fixture: gen_saas root" && "${GX[@]}" rev-parse HEAD)"
 XCONF="${TMP}/xrepo.json"
-printf '%s\n' "{\"repos\":[{\"name\":\"custom\",\"path\":\"${REPO}\",\"mode\":\"improve\"},{\"name\":\"gen_saas\",\"path\":\"${XGS}\",\"mode\":\"improve\"}],\"window\":20,\"improvement_epic\":\"epic-id\"}" >"${XCONF}"
+printf '%s\n' "{\"repos\":[{\"name\":\"custom\",\"path\":\"${REPO}\",\"mode\":\"improve\",\"idle_workflow\":\"none\"},{\"name\":\"gen_saas\",\"path\":\"${XGS}\",\"mode\":\"improve\",\"idle_workflow\":\"none\"}],\"window\":20,\"improvement_epic\":\"epic-id\"}" >"${XCONF}"
 # The custom change: written at 02:00 (author date), landed at 11:30 (committer).
 XC="$(GIT_AUTHOR_DATE=2026-10-02T02:00:00Z GIT_COMMITTER_DATE=2026-10-02T11:30:00Z "${G[@]}" commit -q --allow-empty -m "fixture: a harness change for gen_saas" -m "$(tr "gen_saas verify phase")" && "${G[@]}" rev-parse HEAD)"
 XID="gen_saas:verify:${XC:0:12}"
@@ -848,7 +848,7 @@ eq "settling on a watch repo: exit 2" "$(run settling --repo gen_saas --phase ve
 XNGS="${TMP}/xn/gen_saas"
 mkdir -p "${XNGS}"
 env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "${XNGS}" init -q -b main
-printf '%s\n' "{\"repos\":[{\"name\":\"custom\",\"path\":\"${REPO}\",\"mode\":\"improve\"},{\"name\":\"gen_saas\",\"path\":\"${XNGS}\",\"mode\":\"improve\"}],\"window\":20,\"improvement_epic\":\"epic-id\"}" >"${TMP}/xn.json"
+printf '%s\n' "{\"repos\":[{\"name\":\"custom\",\"path\":\"${REPO}\",\"mode\":\"improve\",\"idle_workflow\":\"none\"},{\"name\":\"gen_saas\",\"path\":\"${XNGS}\",\"mode\":\"improve\",\"idle_workflow\":\"none\"}],\"window\":20,\"improvement_epic\":\"epic-id\"}" >"${TMP}/xn.json"
 STATEXN="${TMP}/statexn"
 mkdir -p "${STATEXN}"
 gs_ledger "${STATEXN}/ledger.jsonl" "$(printf 'd%.0s' $(seq 40))" 500 2026-10-02T00:00:00Z
@@ -884,7 +884,7 @@ printf 'jobs: {build: {}, smoke: {}}\n' >"${PGS}/.github/workflows/deploy.yml"
 TH="$(pcommit 2026-10-16T14:00:00Z "fixture: a deploy step with its test" "$(tr "gen_saas tail phase")")"
 TNR="$(pcommit 2026-10-18T14:00:00Z "fixture: a change where no run concluded" "$(tr "gen_saas tail phase")")"
 TCONF="${TMP}/tail.json"
-printf '%s\n' "{\"repos\":[{\"name\":\"custom\",\"path\":\"${REPO}\",\"mode\":\"improve\"},{\"name\":\"gen_saas\",\"path\":\"${PGS}\",\"mode\":\"improve\"}],\"window\":20,\"improvement_epic\":\"epic-id\"}" >"${TCONF}"
+printf '%s\n' "{\"repos\":[{\"name\":\"custom\",\"path\":\"${REPO}\",\"mode\":\"improve\",\"idle_workflow\":\"none\"},{\"name\":\"gen_saas\",\"path\":\"${PGS}\",\"mode\":\"improve\",\"idle_workflow\":\"none\"}],\"window\":20,\"improvement_epic\":\"epic-id\"}" >"${TCONF}"
 # tl STATE NOW CMD...: runs CMD against that state dir and the tail config.
 tl() { local st="$1" now="$2"; shift 2; LEAD_TIME_STATE_DIR="${st}" ATHENA_LEADTIME_CONFIG="${TCONF}" LEAD_TIME_EXPERIMENT_NOW="${now}" "$@"; }
 trec() { run record --repo gen_saas --phase tail --metric "$1" --commit "$2" --kind "${3:-change}" --hypothesis-file "${HYP}"; }
@@ -980,7 +980,7 @@ has "... saying could not look, not unmeasured" "$(err)" "could not look: none o
 
 # ── a configured repo not on this machine (DND-1526) ────────────────────────
 echo "== skipped on this machine"
-printf '%s\n' "{\"repos\":[{\"name\":\"custom\",\"path\":\"${REPO}\",\"mode\":\"improve\"},{\"name\":\"gen_saas\",\"path\":\"${TMP}/gone/gen_saas\",\"mode\":\"improve\"}],\"window\":20,\"improvement_epic\":\"epic-id\"}" >"${TMP}/gone.json"
+printf '%s\n' "{\"repos\":[{\"name\":\"custom\",\"path\":\"${REPO}\",\"mode\":\"improve\",\"idle_workflow\":\"none\"},{\"name\":\"gen_saas\",\"path\":\"${TMP}/gone/gen_saas\",\"mode\":\"improve\",\"idle_workflow\":\"none\"}],\"window\":20,\"improvement_epic\":\"epic-id\"}" >"${TMP}/gone.json"
 eq "judge on a skipped repo: exit 4" "$(LEAD_TIME_STATE_DIR="${STATE2}" ATHENA_LEADTIME_CONFIG="${TMP}/gone.json" run judge --repo gen_saas)" "4"
 has "... saying skipped on this machine, with the reason" "$(err)" "gen_saas: skipped on this machine: no such path"
 has "... with Fix:" "$(err)" "Fix:"

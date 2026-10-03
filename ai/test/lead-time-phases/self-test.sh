@@ -72,7 +72,7 @@ CONFIG="${TMP}/repos.json"
 cat >"${CONFIG}" <<JSON
 {
   "repos": [
-    { "name": "custom", "path": "${REPO}", "mode": "improve" },
+    { "name": "custom", "path": "${REPO}", "mode": "improve", "idle_workflow": "none" },
     { "name": "gen_saas", "path": "${WATCH}", "mode": "watch" },
     { "name": "walt_ui", "path": "${TMP}/not-here", "mode": "watch" }
   ],
@@ -232,7 +232,7 @@ run "${TEL_EMPTY}" --summary --repo nope
 lacks "an unconfigured repo is not called skipped" "${ERR}" "skipped on this machine"
 has "... it is named not configured" "${ERR}" 'no repo "nope"'
 mkdir -p "${TMP}/notgit/custom"
-printf '{"repos":[{"name":"custom","path":"%s","mode":"improve"}],"window":20,"improvement_epic":"e"}\n' "${TMP}/notgit/custom" >"${TMP}/notgit.json"
+printf '{"repos":[{"name":"custom","path":"%s","mode":"improve","idle_workflow":"none"}],"window":20,"improvement_epic":"e"}\n' "${TMP}/notgit/custom" >"${TMP}/notgit.json"
 OUT="$(LEAD_TIME_STATE_DIR="${STATE}" ATHENA_LEADTIME_CONFIG="${TMP}/notgit.json" /usr/bin/ruby "${BIN}" --summary --repo custom 2>&1)"; CODE=$?
 eq "a configured path that is not a git repository is refused: exit 2" "${CODE}" "2"
 has "... naming it, with Fix:" "${OUT}" "is not a git repository"
@@ -371,15 +371,15 @@ cat >"${TMP}/rows-gs.json" <<JSON
 ]
 JSON
 GS_CONFIG="${TMP}/repos-gs.json"
-printf '{"repos":[{"name":"gen_saas","path":"%s","mode":"improve"}],"window":20,"improvement_epic":"e"}\n' "${WATCH}" >"${GS_CONFIG}"
+printf '{"repos":[{"name":"gen_saas","path":"%s","mode":"improve","idle_workflow":"post-merge.yml"}],"window":20,"improvement_epic":"e"}\n' "${WATCH}" >"${GS_CONFIG}"
 CONFIG_SAVE="${CONFIG}"; STATE_SAVE="${STATE}"
 CONFIG="${GS_CONFIG}"; STATE="${TMP}/state-gs"
 ROWS="${TMP}/rows-gs.json" run "${TEL_EMPTY}" --ingest --repo gen_saas
 eq "a gen_saas-shaped improve ingest exits 0" "${CODE}" "0"
 eq "the ledger keeps lead-time's end kind" "$(row_field "${HEAD_PUSH}" tail_end)" "deploy"
 eq "DND-1924 ingest: the deploy-ended landing keeps its lead_s" "$(row_field "${HEAD_PUSH}" lead_s)" "10800"
-eq "DND-1924 ingest: the no-run landing's lead_s is null (CI inferred from the batch), never 0" "$(row_field "${HEAD_BARE}" lead_s)" "null"
-has "DND-1924 ingest: its lead_na_reason is tail's" "$(row_field "${HEAD_BARE}" lead_na_reason)" "no successful post-merge CI run"
+eq "DND-1924 ingest: the no-run landing's lead_s is null (CI declared), never 0" "$(row_field "${HEAD_BARE}" lead_s)" "null"
+has "DND-1924 ingest: its lead_na_reason is tail's" "$(row_field "${HEAD_BARE}" lead_na_reason)" "found no successful post-merge run"
 STATE="${TMP}/state-gs-decl"; CONFIG="${TMP}/repos-gs-ci-ingest.json"
 printf '{"repos":[{"name":"gen_saas","path":"%s","mode":"improve","idle_workflow":"post-merge.yml"}],"window":20,"improvement_epic":"e"}\n' "${WATCH}" >"${CONFIG}"
 ROWS="${TMP}/rows-gs.json" run "${TEL_EMPTY}" --ingest --repo gen_saas
@@ -397,7 +397,7 @@ run "${TEL_EMPTY}" --summary --repo gen_saas --json
 JSON_GS="$(printf '%s' "${OUT}" | /usr/bin/ruby -rjson -e 'j = JSON.parse($stdin.read); b = j["biggest"]; t = j.dig("totals", "tail"); puts [b["phase"], b["lever"], b["sum_s"], t["n"], t["n_na"]].join(",")')"
 eq "--json: tail, product, 14400 s over 2 measured, the no-run landing n/a (never 0)" "${JSON_GS}" "tail,product,14400,2,1"
 tail_ci() { printf '%s' "${OUT}" | /usr/bin/ruby -rjson -e 'c = JSON.parse($stdin.read)["tail_ci"]; puts [c["source"], c["value"], c["mismatch"]].join(",")'; }
-eq "--json with no idle_workflow: tail_ci is inferred from the window (DND-1614)" "$(tail_ci)" "inferred,true,"
+eq "--json: an improve repo declares idle_workflow (DND-1927), so tail_ci is declared, never inferred" "$(tail_ci)" "declared,true,"
 
 echo "== summary: the repo's idle_workflow declares its post-merge CI (DND-1614)"
 printf '{"repos":[{"name":"gen_saas","path":"%s","mode":"improve","idle_workflow":"post-merge.yml"}],"window":20,"improvement_epic":"e"}\n' "${WATCH}" >"${TMP}/repos-gs-ci.json"
@@ -513,7 +513,7 @@ cat >"${TMP}/rows-rebase.json" <<JSON
 ]
 JSON
 cat >"${TMP}/repos-rebase.json" <<JSON
-{ "repos": [ { "name": "custom", "path": "${RB}", "mode": "improve" } ], "window": 20, "improvement_epic": "epic-id" }
+{ "repos": [ { "name": "custom", "path": "${RB}", "mode": "improve", "idle_workflow": "none" } ], "window": 20, "improvement_epic": "epic-id" }
 JSON
 CONFIG_SAVE="${CONFIG}"; STATE_SAVE="${STATE}"
 CONFIG="${TMP}/repos-rebase.json"; STATE="${TMP}/state-rebase"

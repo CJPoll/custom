@@ -155,6 +155,14 @@ Lead time is the owner's definition: captain dispatch (the ticket's
    an n/a lead carrying the tail's reason. No-CI repos and `code` are
    unchanged.
 
+   **Later (2026-10-03, DND-1927):** an `improve` repo must declare
+   `idle_workflow`. Without it the ingest inferred post-merge CI per batch and
+   could write two lead definitions into one ledger (DND-1924). The resolver
+   (`ai/lib/lead_time_config.rb`) refuses an `improve` entry with no
+   `idle_workflow`, by repo name, with a `Fix:` naming the key. The check runs
+   after the override inherits the tracked default's keys. A `watch` repo may
+   still omit it.
+
    **Later (2026-10-03, DND-1924):** the experiment judge reads `lead_s` from
    the ledger row, not from the summary, so ingest now applies the same rule:
    a no-run landing in a CI repo is written with `lead_s` null and the
