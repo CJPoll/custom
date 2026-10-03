@@ -33,7 +33,11 @@
 # repository that has submodules (each submodule push runs through git's
 # exec-path, where no wrapper sees it). The recursion rule is the
 # passthrough's fg_push_recurses, the one copy both routes share (DND-1841).
-# A local path or another host is allowed.
+# Also refused, to any remote, a local path included: a push that makes git
+# run a command itself (--receive-pack, --exec, an ext:: address,
+# --exec-path=<dir>, a GIT_EXEC_PATH that is not git's own), by the
+# passthrough's "Commands git runs itself" (DND-1844). Otherwise a local path
+# or another host is allowed.
 #
 # WHAT IS ROUTED. A forge push is allowed only when it carries the credential
 # isolation the Athena passthrough (fg_git_exec) gives git, for that host:
@@ -56,7 +60,9 @@
 # the wrapper (the DND-775 residual list in ai/agent-bin/git); a push from a
 # process git starts itself (a `!` alias, git-subtree, send-pack, `rebase -x`,
 # `submodule foreach`, `bisect run`, a git hook), which runs with git's
-# exec-path first on PATH, where a real `git` sits; a non-git client (libgit2,
+# exec-path first on PATH, where a real `git` sits (the Athena route refuses
+# most of these forms, DND-1844, but this wrapper judges only `push`); a
+# non-git client (libgit2,
 # an HTTP call); and a forge host no URL spells as github.com or gitlab.com
 # (an ~/.ssh/config Host alias such as `myalias:owner/repo`, an IP literal).
 # The passthrough's own resolution residuals (its header) apply too.
@@ -190,8 +196,8 @@ for host in github.com gitlab.com; do
   rc=0; afp_reaches "$host" || rc=$?
   case "$rc" in
     0) ;;
-    3) afp_refuse "this git push${AFP_URL:+ to $(afp_shown "$AFP_URL")}: it would reach $host over SSH or another non-HTTPS transport, or recurse into submodules, or it carries an option or alias the check cannot read by git's grammar, or it makes git run a command itself (--receive-pack, --exec, an ext:: address, --exec-path), so it can go out with the machine owner's SSH key, not Athena's (DND-1803, DND-1843, DND-1844)." \
-         "$(afp_fix "$host") Point the remote at https://$host/<owner>/<repo>.git (or git@$host:<owner>/<repo>.git, which the route rewrites), push each submodule separately, spell every option in full as \`git push -h\` lists it, and drop --receive-pack, --exec and --exec-path." ;;
+    3) afp_refuse "this git push${AFP_URL:+ to $(afp_shown "$AFP_URL")}: the Athena route's resolver refuses it, for one of these reasons: it would reach $host over SSH or another non-HTTPS transport, so it can go out with the machine owner's SSH key, not Athena's (DND-1803); it recurses into submodules, or carries an option or alias the check cannot read by git's grammar, so where it goes is unknown (DND-1841, DND-1843); or it makes git run a command itself (--receive-pack, --exec, an ext:: address, --exec-path=<dir>, a GIT_EXEC_PATH that is not git's own), which runs past every check (DND-1844)." \
+         "$(afp_fix "$host") Point the remote at https://$host/<owner>/<repo>.git (or git@$host:<owner>/<repo>.git, which the route rewrites), push each submodule separately, spell every option in full as \`git push -h\` lists it, drop --receive-pack, --exec and --exec-path, and unset a GIT_EXEC_PATH you set. The route's own refusal names the reason: run the same push through it to see it." ;;
     *) afp_refuse "this git push: its remote could not be resolved (exit $rc), so whether it goes to $host as the machine owner is unknown (DND-1803)." \
          "run it again from inside the repository with a configured remote; to push to a forge, $(afp_fix "$host")" ;;
   esac

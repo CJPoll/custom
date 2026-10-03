@@ -995,6 +995,37 @@ rc_passed "C37. hook list passes"
 OUT="$(cd "${SM}" && GIT_EXEC_PATH="$(env -u GIT_EXEC_PATH git --exec-path)" GH_ATHENA_GIT_DRY_RUN=1 "${WRAPPER}" git status 2>"${TMP}/err")"; RC=$?
 ERR="$(cat "${TMP}/err")"
 rc_passed "C38. GIT_EXEC_PATH set to git's own exec-path (as git exports it to its children) passes"
+# Review round: forms of the same class the first walk did not know.
+gha "${SM}" ls-remote --exec='git push; true' "${SUBBARE}"
+rc_refused "C39. ls-remote --exec=<cmd> (a hidden spelling of --upload-pack) -> refused"
+gha "${SM}" ls-remote --exe='git push; true' "${SUBBARE}"
+rc_refused "C40. ls-remote --exe=<cmd> (its abbreviation) -> refused"
+gha "${SM}" -c "fe.repo=${SM}" for-each-repo --config=fe.repo -- -c 'alias.z=!git push' z
+rc_refused "C41. for-each-repo (it runs a git argv per repository, from git's exec-path) -> refused" "git -C <repository>"
+gha "${SM}" send-pack --receive-pack='git push; true' "${SUPBARE}" main
+rc_refused "C42. send-pack --receive-pack=<cmd> -> refused"
+gha "${SM}" send-pack --exec='git push; true' "${SUPBARE}" main
+rc_refused "C43. send-pack --exec=<cmd> -> refused"
+gha "${SM}" fetch-pack --upload-pack='git push; true' "${SUBBARE}" main
+rc_refused "C44. fetch-pack --upload-pack=<cmd> -> refused"
+gha "${SM}" fetch-pack --exec='git push; true' "${SUBBARE}" main
+rc_refused "C45. fetch-pack --exec=<cmd> -> refused"
+gha "${SM}" remote-ext origin 'sh -c git% push'
+rc_refused "C46. remote-ext <remote> <cmd> (the ext helper called directly) -> refused"
+gha "${TMP}" clone --template="${TMP}/tpl" "${SUBBARE}" "${TMP}/c-tpl"
+rc_refused "C47. clone --template=<dir> (its post-checkout hook runs during the clone) -> refused"
+gha "${TMP}" init --template="${TMP}/tpl" "${TMP}/i-tpl"
+rc_refused "C48. init --template=<dir> -> refused"
+gha "${SM}" instaweb --httpd='git push'
+rc_refused "C49. instaweb -> refused"
+gha "${SM}" daemon --access-hook='git push' --export-all
+rc_refused "C50. daemon -> refused"
+gha "${SM}" -c 'alias.hr=hook run' hr pre-push
+rc_refused "C51. an alias that expands to hook run -> refused"
+gha "${SM}" log --grep=ext::x
+rc_passed "C52. an ext:: word in a subcommand that names no repository (log --grep) passes"
+gha "${SM}" fetch "${SUBBARE}"
+rc_passed "C53. fetch from a local path with no command option passes"
 
 # DND-1667: no git call may have fallen through past its shim.
 if fsg_verify; then ok "no git call fell through past its shim (DND-1667)"

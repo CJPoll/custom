@@ -48,7 +48,8 @@
 # --recurse-submodules` (the submodule URLs are unknown until the clone lands);
 # git-lfs transfers; third-party `git-<name>` subcommands; any subcommand not
 # named above; a command git runs from config, the environment or a hook
-# ("Commands git runs itself" names them); a push whose recursion comes from config, in a repository where
+# ("Commands git runs itself" names them); a push whose recursion comes
+# from config, in a repository where
 # only the pushed commit (not the index, .gitmodules or config) records a
 # populated nested repository as a gitlink (fg_push_recurses).
 #
@@ -368,21 +369,27 @@ fg_push_long() {
 # header (fg_git_exec puts it in the environment config channel) and git's
 # exec-path at the front of PATH, where a real git sits and no wrapper does.
 # A push that command makes is judged by nothing here: not its remote, its
-# submodule recursion, a red main or the gate. So every argv form that makes
-# git run a command the caller chose is refused, never run. Measured on git
-# 2.54; one walk, run on the alias-expanded argv fg_refuse_non_https reads:
+# submodule recursion, a red main or the gate. So each argv form below, which
+# makes git run a command the caller chose, is refused, never run. Measured
+# on git 2.54; one walk, run on the alias-expanded argv fg_refuse_non_https
+# reads:
 #   * submodule foreach (and submodule--helper foreach, which git-submodule
 #     calls), bisect run, hook run;
 #   * rebase --exec / -x (an abbreviation such as --ex=, or x in a short
 #     cluster such as -ix);
 #   * grep -O / --open-files-in-pager (its pager is any command);
-#   * difftool, mergetool, filter-branch, send-email, instaweb and daemon,
-#     outright: each runs a tool, filter, hook or helper command by design;
-#   * push --receive-pack / --exec, fetch / pull / ls-remote / clone
-#     --upload-pack (clone -u), archive --exec: for a local or ext:: remote
-#     git runs that value as a local command;
-#   * an ext:: address anywhere in the argv (its address is a shell command),
-#     and an ext:: URL any remote resolves to (the URL check below);
+#   * difftool, mergetool, filter-branch, send-email, instaweb, daemon,
+#     for-each-repo and remote-ext, outright: each runs a tool, filter, hook,
+#     helper, shell command or git argv of the caller's by design;
+#   * push and send-pack --receive-pack / --exec; fetch, pull, ls-remote,
+#     clone and fetch-pack --upload-pack (clone -u; ls-remote and fetch-pack
+#     --exec); archive --exec: for a local or ext:: remote git runs that
+#     value as a local command;
+#   * clone and init --template=<dir>: its hooks run (post-checkout during
+#     the clone);
+#   * an ext:: address in the argv of a subcommand that names a repository
+#     (its address is a shell command), and an ext:: URL any remote resolves
+#     to (the URL check in fg_refuse_non_https);
 #   * --exec-path=<dir>, or a GIT_EXEC_PATH that is not git's own: git runs
 #     every helper (git-remote-https included) from there;
 #   * a shell alias (`!...`): fg_refuse_shell_alias, above.
@@ -391,16 +398,23 @@ fg_push_long() {
 # Conservative, so a parse slip can only over-refuse: a word that may be an
 # option's value still counts (`submodule add <url> foreach` is refused).
 # Residual (NOT checked; each still runs): a command named in config, from
-# the repository's own config as much as from -c, --config-env or the
-# environment config channel (core.sshCommand, core.editor, core.pager,
-# sequence.editor, core.fsmonitor, diff.external, a diff, merge, filter or
-# textconv driver, gpg.program, remote.<name>.uploadpack / receivepack,
-# submodule.<name>.update=!cmd, include.path, ...); the same commands from
-# the environment (GIT_SSH_COMMAND, GIT_EDITOR, GIT_PAGER,
-# GIT_SEQUENCE_EDITOR, GIT_EXTERNAL_DIFF, ...); a git hook (pre-push runs
-# inside a routed push); a merge strategy (-s <name> runs git-merge-<name>);
-# a transport helper `<name>::` other than ext (git-remote-<name>).
-FG_RUNS_COMMAND_SUBS="submodule submodule--helper bisect hook rebase grep difftool mergetool filter-branch send-email instaweb daemon push fetch pull ls-remote clone archive"
+# the repository's own config as much as from -c, --config-env, clone's own
+# -c / --config or the environment config channel (core.sshCommand,
+# core.editor, core.pager, core.hooksPath, sequence.editor, core.fsmonitor,
+# diff.external, a diff, merge, filter or textconv driver, gpg.program,
+# remote.<name>.uploadpack / receivepack, submodule.<name>.update=!cmd,
+# include.path, ...); the same commands from the environment
+# (GIT_SSH_COMMAND, GIT_EDITOR, GIT_PAGER, GIT_SEQUENCE_EDITOR,
+# GIT_EXTERNAL_DIFF, GIT_TEMPLATE_DIR, ...); a git hook already in the
+# repository (pre-push runs inside a routed push); a merge strategy (-s
+# <name> runs git-merge-<name>); a transport helper `<name>::` other than
+# ext (git-remote-<name>); a script outside git's core that takes a program
+# on its argv (credential-netrc --gpg, svn --authors-prog, ...), which is
+# the header's "any subcommand not named above".
+FG_RUNS_COMMAND_SUBS="submodule submodule--helper bisect hook rebase grep difftool mergetool filter-branch send-email instaweb daemon for-each-repo remote-ext push send-pack fetch pull ls-remote clone fetch-pack archive init"
+# The subcommands whose argv can name a repository, so an ext:: word there
+# is an address git may run.
+FG_REPO_ARG_SUBS="push send-pack fetch pull ls-remote clone fetch-pack archive remote submodule submodule--helper"
 FG_RC_WHAT=""
 FG_RC_FIX=""
 
@@ -434,14 +448,16 @@ fg_runs_command() {
   shift
   plain="it needs no forge identity: run it with plain git, outside the Athena route, and push the result afterwards with \`~/dev/custom/ai/bin/$FG_TOOL git push …\`"
   FG_RC_WHAT=""; FG_RC_FIX="$plain"
-  for a in "$@"; do
-    case "${a,,}" in
-      ext::*|--*=ext::*)
-        FG_RC_WHAT="an ext:: address ('$a') is a shell command git runs"
-        FG_RC_FIX="name the repository by its https://$FG_HOST/<owner>/<repo>.git URL or a local path"
-        return 0 ;;
-    esac
-  done
+  if [[ " $FG_REPO_ARG_SUBS " == *" $sub "* ]]; then
+    for a in "$@"; do
+      case "${a,,}" in
+        ext::*|--*=ext::*)
+          FG_RC_WHAT="an ext:: address ('$a') is a shell command git runs"
+          FG_RC_FIX="name the repository by its https://$FG_HOST/<owner>/<repo>.git URL or a local path"
+          return 0 ;;
+      esac
+    done
+  fi
   case "$sub" in
     submodule|submodule--helper)
       for a in "$@"; do
@@ -482,6 +498,14 @@ fg_runs_command() {
       FG_RC_WHAT="instaweb runs a web server and browser command (--httpd, --browser)"; return 0 ;;
     daemon)
       FG_RC_WHAT="daemon runs an access hook (--access-hook) and serves the repository"; return 0 ;;
+    for-each-repo)
+      FG_RC_WHAT="for-each-repo runs its git argv in every repository a config key names, from git's exec-path, where no refusal here applies"
+      FG_RC_FIX="run the git command in each repository yourself, through the route: \`~/dev/custom/ai/bin/$FG_TOOL git -C <repository> <git command>\`"
+      return 0 ;;
+    remote-ext)
+      FG_RC_WHAT="remote-ext, the ext:: transport helper, runs its argument as a shell command"
+      FG_RC_FIX="name the repository by its https://$FG_HOST/<owner>/<repo>.git URL or a local path"
+      return 0 ;;
     push)
       # By git's push grammar, so an abbreviation (--rece) is read in full.
       fg_push_argv "$@"
@@ -493,12 +517,35 @@ fg_runs_command() {
             return 0 ;;
         esac
       done ;;
-    fetch|pull|ls-remote|clone)
+    send-pack)
+      for a in "$@"; do
+        if fg_long_is "$a" receive-pack || fg_long_is "$a" exec; then
+          FG_RC_WHAT="send-pack ${a%%=*} names the receive-pack command, which git runs locally for a local or ext:: remote"
+          FG_RC_FIX="drop ${a%%=*}: a push over HTTPS to $FG_HOST never uses it"
+          return 0
+        fi
+      done ;;
+    fetch|pull|ls-remote|clone|fetch-pack)
       for a in "$@"; do
         # clone's -o, -b, -c and -j take the rest of a cluster as their value.
-        if fg_long_is "$a" upload-pack || { [ "$sub" = clone ] && fg_short_has "$a" u objc; }; then
-          FG_RC_WHAT="$sub --upload-pack names the upload-pack command, which git runs locally for a local or ext:: remote"
-          FG_RC_FIX="drop --upload-pack: a $sub over HTTPS from $FG_HOST never uses it"
+        # ls-remote and fetch-pack read a hidden --exec as --upload-pack.
+        if fg_long_is "$a" upload-pack || { [ "$sub" = clone ] && fg_short_has "$a" u objc; } \
+           || { [[ " ls-remote fetch-pack " == *" $sub "* ]] && fg_long_is "$a" exec; }; then
+          FG_RC_WHAT="$sub ${a%%=*} names the upload-pack command, which git runs locally for a local or ext:: remote"
+          FG_RC_FIX="drop ${a%%=*}: a $sub over HTTPS from $FG_HOST never uses it"
+          return 0
+        fi
+        if [ "$sub" = clone ] && fg_long_is "$a" template; then
+          FG_RC_WHAT="clone --template copies that directory's hooks into the new repository, and post-checkout runs during the clone"
+          FG_RC_FIX="drop --template and clone with git's own template"
+          return 0
+        fi
+      done ;;
+    init)
+      for a in "$@"; do
+        if fg_long_is "$a" template; then
+          FG_RC_WHAT="init --template copies that directory's hooks into the repository, where git runs them"
+          FG_RC_FIX="drop --template, or run the init with plain git, outside the Athena route"
           return 0
         fi
       done ;;
