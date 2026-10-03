@@ -207,11 +207,17 @@ api_method() {
       if (x == "-X" || x == "--method") { v = $(i + 1); gsub(/["'"'"']/, "", v); m = v; i++; continue }
       if (x ~ /^--method=/) { m = substr(x, 10); continue }
       if (x ~ /^--(jq|template|preview|cache|output|header|field|raw-field|form|input|repo|hostname)=/) continue
-      if (x ~ /^-[HRqtpfF]./) continue
-      if (x ~ /^-[A-Za-z]*X/ && x !~ /^--/) {
-        v = x; sub(/^-[A-Za-z]*X=?/, "", v)
-        if (v == "") { v = $(i + 1); gsub(/["'"'"']/, "", v); i++ }
-        m = v; continue
+      if (x ~ /^-[^-]/) {
+        # A short cluster (`-iqXGET`): flags with no value (`-i`) are skipped,
+        # and the first value option takes the rest of the word, or the next
+        # word, as its value.
+        cl = substr(x, 2); done = 0
+        for (c = 1; c <= length(cl); c++) {
+          ch = substr(cl, c, 1); rest = substr(cl, c + 1)
+          if (ch == "X") { sub(/^=/, "", rest); if (rest == "") { rest = $(i + 1); gsub(/["'"'"']/, "", rest); i++ } m = rest; done = 1; break }
+          if (ch ~ /[qtpRHfF]/) { if (rest == "") i++; done = 1; break }
+        }
+        if (done) continue
       }
       if (x == "-q" || x == "--jq" || x == "-t" || x == "--template" || x == "-p" || x == "--preview" || x == "--cache" || x == "--output" || x == "-H" || x == "--header" || x == "-f" || x == "-F" || x == "--field" || x == "--raw-field" || x == "--form" || x == "--input" || x == "-R" || x == "--repo" || x == "--hostname") { i++; continue }
     }

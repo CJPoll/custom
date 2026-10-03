@@ -112,21 +112,29 @@ function valued(x) { return x == "-R" || x == "--repo" || x == "--hostname" }
 # A caller with the real argv masks every literal `$` first (to \034), as the
 # hook does inside single quotes, so a GraphQL `query($o: …)` reads as text.
 function unread(v) { return v ~ /=@/ || v ~ /(^|[^A-Za-z0-9_])query=.*[$]/ }
-function api_write(s,    k, x, m, method, field, ovr, ep, fromfile) {
+function api_write(s,    k, x, cl, c, ch, rest, v, done, method, field, ovr, ep, fromfile) {
   method = ""; field = 0; ovr = 0; ep = ""; fromfile = 0
   for (k = s; k <= n; k++) {
     x = t[k]
     if (x == "-X" || x == "--method") { method = t[k + 1]; k++; continue }
     if (x ~ /^--method=/) { method = substr(x, 10); continue }
-    # An attached value (`-qXGET`: the jq filter XGET) is that option's value,
-    # never the -X cluster. -H and -f/-F attached are judged on their own below.
-    if (x ~ /^-[qtpR]./ && x !~ /^--/) continue
-    if (x ~ /^-H./ && x !~ /^--/) { if (tolower(x) ~ /x-(http-)?method/) ovr = 1; continue }
-    if (x ~ /^-[fF]./ && x !~ /^--/) { field = 1; if (unread(x)) fromfile = 1; continue }
-    if (x ~ /^-[A-Za-z]*X/ && x !~ /^--/) {
-      m = x; sub(/^-[A-Za-z]*X=?/, "", m)
-      if (m == "") { method = t[k + 1]; k++ } else method = m
-      continue
+    # A short cluster (`-iqXGET`) is read the way pflag reads it: a flag that
+    # takes no value (`-i`) is skipped, and the first value option takes the
+    # rest of the word (or the next word) as its value. `-qXGET` is the jq
+    # filter XGET, never the method.
+    if (x ~ /^-[^-]/) {
+      cl = substr(x, 2); done = 0
+      for (c = 1; c <= length(cl); c++) {
+        ch = substr(cl, c, 1); rest = substr(cl, c + 1)
+        if (ch == "X") { sub(/^=/, "", rest); if (rest == "") { method = t[k + 1]; k++ } else method = rest; done = 1; break }
+        if (ch ~ /[qtpRHfF]/) {
+          v = rest; if (rest == "") { v = t[k + 1]; k++ }
+          if (ch == "H" && tolower(v) ~ /x-(http-)?method/) ovr = 1
+          if (ch ~ /[fF]/) { field = 1; if (unread(v)) fromfile = 1 }
+          done = 1; break
+        }
+      }
+      if (done) continue
     }
     if (x == "-H" || x == "--header") { if (tolower(t[k + 1]) ~ /x-(http-)?method/) ovr = 1; k++; continue }
     if ((x ~ /^--header=/ || x ~ /^-H/) && tolower(x) ~ /x-(http-)?method/) { ovr = 1; continue }
