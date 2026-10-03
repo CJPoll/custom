@@ -1352,6 +1352,105 @@ d2 "ZG32. a group git with a read-only verb after the whole zsh word" allow <<'E
 ./(x|g)it log -1
 EOF
 
+echo "== HS: here-string text fed to a program that runs it (DND-1859) =="
+# A here-string (`<<<`) is a redirection, so its word was dropped unread.
+# Each deny case ran a fake git's `stash pop` under zsh 5.9 in a scratch
+# dir and was ALLOWED before DND-1859. Its text is now read like a
+# heredoc body when the program it feeds runs it: a shell, eval, make,
+# xargs or parallel (and an unknowable consumer). The allow cases pin
+# the false-positive bound: text fed to a program that only reads it.
+d2 "HS1. xargs git reads stash pop from a here-string" deny <<'EOF'
+xargs ./git <<<'stash pop'
+EOF
+d2 "HS2. a double-quoted here-string after a blank" deny <<'EOF'
+xargs ./git <<< "stash pop"
+EOF
+d2 "HS3. an unquoted here-string word: a bare stash push" deny <<'EOF'
+xargs ./git <<<stash
+EOF
+d2 "HS4. sh runs a here-string script" deny <<'EOF'
+sh <<<'./git stash pop'
+EOF
+d2 "HS5. zsh -s runs a here-string script" deny <<'EOF'
+zsh -s <<<'./git stash pop'
+EOF
+d2 "HS6. the here-string before the command words" deny <<'EOF'
+<<<'stash pop' xargs ./git
+EOF
+d2 "HS7. xargs after a wrapper" deny <<'EOF'
+env xargs ./git <<<'stash pop'
+EOF
+d2 "HS8. a here-string inside a sh -c payload" deny <<'EOF'
+sh -c 'xargs ./git <<<"stash pop"'
+EOF
+d2 "HS9. ANSI-C quoting with an octal escape" deny <<'EOF'
+xargs ./git <<<$'st\141sh pop'
+EOF
+d2 "HS10. a shell after a wrapper option (sudo -E)" deny <<'EOF'
+sudo -E sh <<<'./git stash pop'
+EOF
+d2 "HS11. a shell after a wrapper value (timeout 5)" deny <<'EOF'
+timeout 5 sh <<<'./git stash pop'
+EOF
+d2 "HS12. a subshell fed a here-string" deny <<'EOF'
+( xargs ./git ) <<<'stash pop'
+EOF
+d2 "HS13. a brace group fed a here-string" deny <<'EOF'
+{ xargs ./git; } <<<'stash pop'
+EOF
+d2 "HS14. xargs git: global options before stash in the text" deny <<'EOF'
+xargs ./git <<<'-c a=b stash pop'
+EOF
+d2 "HS15. xargs -I{} sh -c {} runs the text" deny <<'EOF'
+xargs -I{} sh -c {} <<<'./git stash pop'
+EOF
+d2 "HS16. eval of stdin" deny <<'EOF'
+eval "$(cat)" <<<'./git stash pop'
+EOF
+# -- the false-positive bound: text no program runs, or a read-only verb --
+d2 "HS17. grep reads a here-string naming stash pop" allow <<'EOF'
+grep stash <<<'stash pop'
+EOF
+d2 "HS18. cat reads a here-string naming stash pop" allow <<'EOF'
+cat <<<'stash pop'
+EOF
+d2 "HS19. jq reads a JSON here-string" allow <<'EOF'
+jq -r '.[] | .a' <<<"$json"
+EOF
+d2 "HS20. xargs git with a read-only stash verb" allow <<'EOF'
+xargs ./git <<<'stash list'
+EOF
+d2 "HS21. sh runs a read-only git script" allow <<'EOF'
+sh <<<'git status'
+EOF
+d2 "HS22. read splits a here-string" allow <<'EOF'
+IFS=, read -ra arr <<<"$s"
+EOF
+d2 "HS23. xargs kill with an expanded here-string" allow <<'EOF'
+xargs kill <<<"$pids"
+EOF
+d2 "HS24. a while-read loop over an expanded here-string" allow <<'EOF'
+while read l; do echo $l; done <<<"$x"
+EOF
+d2 "HS25. an expanded command word with an expanded here-string" allow <<'EOF'
+"$HOOK" <<<"$json"
+EOF
+d2 "HS26. git commit -F - reads a message naming stash pop" allow <<'EOF'
+git commit -F - <<<'msg: avoid stash pop'
+EOF
+# Shapes from the replay of real commands (review of the first cut): a
+# brace group opening and an assignment with an expansion are not the
+# consumer.
+d2 "HS27. grep inside a function's brace group" allow <<'EOF'
+names() { grep -qF -- "$2" <<<"${out}" && echo ok; }
+EOF
+d2 "HS28. read after an IFS assignment with ANSI-C quoting" allow <<'EOF'
+IFS=$'\x1f' read -r a b <<<$'n\x1fm'
+EOF
+d2 "HS29. xargs git inside a brace group" deny <<'EOF'
+{ xargs ./git <<<'stash pop'; }
+EOF
+
 echo "== F: fail-open =="
 run ''
 check "F1. empty stdin" allow

@@ -220,6 +220,27 @@
 # or a `:`, in command position (awk `length($0) > 80`, ruby
 # `printf("%3d", $.)`).
 #
+# HERE-STRINGS (DND-1859): a here-string (`<<<word`) is a redirection, so
+# its word is no argument, but it is the text the command reads on stdin.
+# Before DND-1859 it was dropped unread, and `xargs git <<<'stash pop'`,
+# `sh <<<'git stash pop'` ran uncaught. Its text (dequoted; `$'...'`
+# escapes decoded) is now read like a heredoc body when the program it
+# feeds runs it:
+#   * a shell, eval, source or make (sh, bash, zsh, dash, ksh, ...): the
+#     text is read as a script;
+#   * xargs or parallel: the text is read as a script, and also appended
+#     to the simple command (`xargs git -c a=b stash pop`);
+#   * a consumer this pass cannot name (a command word built by expansion
+#     or glob, a compound command closed by `}`, done, fi or esac, or a
+#     `)` before the `<<<`): both readings.
+# Wrappers (env, sudo, nohup, timeout, ...), their options, one option
+# value or count after them, assignments and a `{` are skipped to reach
+# the program. Any other program (grep, jq, cat, read, git) only reads
+# the text, so it is not judged: `grep x <<<'stash pop'` stays allowed.
+# Not caught: a here-string whose text is built by expansion (`<<<"$X"`,
+# `<<<$(...)`), the pipe class under NOT CATCHABLE; a program not in
+# these lists that runs its stdin (`python3 -`, `perl`).
+#
 # ZSH: the Bash tool runs zsh, so zsh-only word rewrites count too: EQUALS
 # (`=git` is git's path), global aliases (`alias -g`, any word position),
 # suffix aliases (`alias -s`), and the noglob/nocorrect/- precommand modifiers.
@@ -239,7 +260,8 @@
 # expiry config (default 90 days; any git command can trigger auto-gc);
 # `fetch --mirror` into this same repo; a ref-rewriting
 # tool other than git (a script writing .git/ files by a computed path); git arguments supplied through a pipe
-# (`printf 'stash pop' | xargs git`). An alias in a config the command only
+# (`printf "$X" | xargs git`; a literal here-string is read, see
+# HERE-STRINGS). An alias in a config the command only
 # names (`-c include.path=<file>`, `--git-dir`, HOME=...) is not read; its
 # non-builtin subcommand is denied instead (see above). A `.gitconfig` written
 # with the Write tool in an earlier call is caught when the alias is USED,
@@ -1148,7 +1170,8 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   # arguments (ZA 0 when there are none, -1 when they cannot be read), ZP 1
   # when the zsh word starts
   # with its group paren (`env (x|g)it`), so k has SB only from that paren.
-  function tokenize(text, W, QF, SB, UX, PQ, AS, SC, QM, AD, ZV, ZA, ZB, ZP,    n, i, L, c, st, cur, curm, has, q, ns, skip, ux, rq, asg, fk, bt, wsi, wei, WS, WE, BRK, OPC, GG, CS, JC, MT, PS, ps, k, j, d) {
+  function tokenize(text, W, QF, SB, UX, PQ, AS, SC, QM, AD, ZV, ZA, ZB, ZP, HT, HI, HA,    n, i, L, c, st, cur, curm, has, q, ns, skip, ux, rq, asg, fk, bt, wsi, wei, WS, WE, BRK, OPC, GG, CS, JC, MT, PS, ps, k, j, d, ro, hs) {
+    HI[0] = 0; hs = 0
     n = 0; st = 0; cur = ""; curm = ""; has = 0; q = 0; ns = 1; skip = 0; ux = 0; rq = 0; asg = 0; fk = 0; bt = 0; L = length(text)
     wsi = 1; wei = 0
     for (i = 1; i <= L; i++) {
@@ -1212,17 +1235,28 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       if (c ~ /[<>]/ || (c == "&" && substr(text, i + 1, 1) == ">")) {
         if (c == "&") { i++; OPC[i] = 1 }
         if (has && cur !~ /^[0-9]+$/) {
-          if (skip) skip = 0; else { n++; W[n] = cur; QF[n] = q; SB[n] = ns; UX[n] = ux; AS[n] = asg; SC[n] = ns && fk; QM[n] = curm; WS[n] = wsi; WE[n] = wei; ns = 0 }
+          if (skip) { skip = 0; if (hs) { HT[HI[0]] = cur; hs = 0 } } else { n++; W[n] = cur; QF[n] = q; SB[n] = ns; UX[n] = ux; AS[n] = asg; SC[n] = ns && fk; QM[n] = curm; WS[n] = wsi; WE[n] = wei; ns = 0 }
         }
         cur = ""; curm = ""; has = 0; q = 0; ux = 0; rq = 0; asg = 0
         if (substr(text, i + 1, 1) == "(") continue
+        ro = i
         while (i < L && substr(text, i + 1, 1) ~ /[<>&|-]/) { i++; OPC[i] = 1 }
+        # DND-1859: a here-string (`<<<`) is a redirection too, but its
+        # word is the text the command reads on stdin. Keep it (HT), with
+        # the index of a word of the simple command it feeds (HI; 0 when
+        # it follows a `)`, a subshell or substitution whose consumer this
+        # pass cannot name), for analyze to judge.
+        if (substr(text, ro, i - ro + 1) == "<<<") {
+          hs = 1; HI[0]++; HT[HI[0]] = ""; HA[HI[0]] = 0
+          for (j = ro - 1; j >= 1 && substr(text, j, 1) ~ /[ \t]/; j--) ;
+          HI[HI[0]] = (j >= 1 && substr(text, j, 1) == ")") ? 0 : (ns ? n + 1 : n)
+        }
         skip = 1
         continue
       }
       if (is_sep(c)) {
         if (has) {
-          if (skip) skip = 0; else { n++; W[n] = cur; QF[n] = q; SB[n] = ns; UX[n] = ux; AS[n] = asg; SC[n] = ns && fk; QM[n] = curm; WS[n] = wsi; WE[n] = wei; ns = 0 }
+          if (skip) { skip = 0; if (hs) { HT[HI[0]] = cur; hs = 0 } } else { n++; W[n] = cur; QF[n] = q; SB[n] = ns; UX[n] = ux; AS[n] = asg; SC[n] = ns && fk; QM[n] = curm; WS[n] = wsi; WE[n] = wei; ns = 0 }
         }
         cur = ""; curm = ""; has = 0; q = 0; ux = 0; rq = 0; asg = 0
         if (c !~ /[ \t]/) {
@@ -1234,6 +1268,9 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       # An unquoted glob or brace character means the shell rewrites the word
       # before the command sees it (`git {stash,pop}`, `git st?sh`). Mark it
       # with \001 so the word counts as built by expansion.
+      # DND-1859: ANSI-C quoting (a `$` right before a single quote) in a
+      # here-string word: its text is decoded before it is read (HA, ansic).
+      if (c == "$" && hs && skip && substr(text, i + 1, 1) == "\047") { HA[HI[0]] = 1; continue }
       if (c == "$") {
         ux = 1; has = 1
         if (substr(text, i + 1, 1) == "?") { cur = cur "$?"; curm = curm "uu"; i++; wei = i; continue }
@@ -1246,6 +1283,7 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       cur = cur c; curm = curm "u"; has = 1
     }
     if (has && !skip) { n++; W[n] = cur; QF[n] = q; SB[n] = ns; UX[n] = ux; AS[n] = asg; SC[n] = ns && fk; QM[n] = curm; WS[n] = wsi; WE[n] = wei }
+    if (has && skip && hs) HT[HI[0]] = cur
     for (k = 1; k <= n; k++) {
       AD[k] = 0
       # A qualifier or numeric range right after the word, or a group or
@@ -1453,17 +1491,99 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
     gsub(/\001/, "", t); gsub(/\002/, "$", t); gsub(/[\n\r\t]+/, " ", t)
     return length(t) > 120 ? substr(t, 1, 117) "..." : t
   }
+  # hsfeed(W, SB, AS, n, c) (DND-1859): how the simple command holding
+  # word c treats a here-string on its stdin. "x": xargs or parallel, the
+  # text is more arguments of the command they run. "s": a shell, eval,
+  # source or make, the text is a script. "u": either, because the
+  # consumer is unknowable here (a command word built by expansion or
+  # glob, a compound command closed by `}`, done, fi or esac, or c is 0:
+  # a `)` before the here-string). "": a program that only reads the text
+  # (grep, jq, cat, a command not named here). Wrappers (env, sudo,
+  # nohup, timeout, ...), their options and an option value or count
+  # after them are skipped to reach the program; an interpreter name is
+  # checked before any skip, so `sudo -E sh` is a shell.
+  function hsfeed(W, SB, AS, n, c,    s, k, x, b, wr, po) {
+    if (c == 0) return "u"
+    if (c > n) return ""
+    for (s = c; s > 1 && !SB[s]; s--) ;
+    wr = 0; po = 0
+    for (k = s; k <= n && (k == s || !SB[k]); k++) {
+      x = W[k]
+      if (k == s && x ~ /^(\}|done|fi|esac)$/) return "u"
+      if (x == "{\001") { wr = 1; po = 0; continue }
+      if (AS[k] || is_assign(x)) { po = 0; continue }
+      if (x ~ /[$`\001]/) return "u"
+      b = x; sub(/^.*\//, "", b)
+      if (b ~ /^(xargs|parallel)$/) return "x"
+      if (b ~ /^(sh|bash|zsh|dash|ksh|mksh|yash|ash|busybox|eval|source|\.|make|gmake)$/) return "s"
+      if (b ~ /^(env|command|sudo|doas|exec|nohup|time|builtin|nice|setsid|noglob|nocorrect|timeout|stdbuf|ionice|chrt|taskset|unbuffer|then|do|else|if|while|until|!)$/) { wr = 1; po = 0; continue }
+      if (x ~ /^-/) { po = 1; continue }
+      if (wr && (po || x ~ /^[0-9][0-9.]*[smhd]?$/)) { po = 0; continue }
+      return ""
+    }
+    return ""
+  }
+  # ansic(t) (DND-1859): t with the backslash escapes of `$\047...\047`
+  # quoting decoded, so a here-string spelled `$\047st\141sh pop\047` is
+  # read as `stash pop`. Octal, \x, \u and \U below 128 and \cX are
+  # decoded; a code point above 127 cannot spell a word this guard reads
+  # and becomes `?`.
+  function ansic(t,    o, i, c, d, v, m, H) {
+    if (!ORDOK) { for (i = 1; i < 128; i++) ORD[sprintf("%c", i)] = i; ORDOK = 1 }
+    H = "0123456789abcdef"; o = ""
+    for (i = 1; i <= length(t); i++) {
+      c = substr(t, i, 1)
+      if (c != "\\" || i == length(t)) { o = o c; continue }
+      d = substr(t, ++i, 1)
+      if (d == "n") o = o "\n"
+      else if (d == "t") o = o "\t"
+      else if (d ~ /[rvfabeE]/) o = o " "
+      else if (d ~ /[0-7]/) {
+        v = 0; for (m = 0; m < 3 && substr(t, i, 1) ~ /[0-7]/; m++) v = v * 8 + substr(t, i++, 1); i--
+        o = o (v > 0 && v < 128 ? sprintf("%c", v) : "?")
+      }
+      else if (d ~ /[xuU]/) {
+        v = 0; for (m = 0; m < (d == "x" ? 2 : d == "u" ? 4 : 8) && tolower(substr(t, i + 1, 1)) ~ /[0-9a-f]/; m++) v = v * 16 + index(H, tolower(substr(t, ++i, 1))) - 1
+        o = o (m == 0 ? "\\" d : (v > 0 && v < 128 ? sprintf("%c", v) : "?"))
+      }
+      else if (d == "c" && i < length(t)) { v = ORD[toupper(substr(t, ++i, 1))]; o = o (v > 64 && v < 96 ? sprintf("%c", v - 64) : "?") }
+      else o = o d
+    }
+    return o
+  }
   # analyze(text, depth): the most specific finding in text (see rank), or
   # "" when it runs no stash write. It stops early only on a literal stash.
-  function analyze(text, depth,    W, QF, SB, UX, PQ, AS, SC, QM, AD, ZV, ZA, ZB, ZP, n, k, e, r, sw, m, i, cp, rs, prs, ap, pap, asgw, t, j, x, best, gc, ra, tbe, pgc, so, ne, pcp, zcp) {
+  function analyze(text, depth,    W, QF, SB, UX, PQ, AS, SC, QM, AD, ZV, ZA, ZB, ZP, HT, HI, HA, h, hf, n, k, e, r, sw, m, i, cp, rs, prs, ap, pap, asgw, t, j, x, best, gc, ra, tbe, pgc, so, ne, pcp, zcp) {
     # Past the nesting bound, text that still names stash is a deny.
     if (depth > 8) {
       if (!mentions_stash(text)) return ""
       if (!("stash" in NT)) { NT["stash"] = clip(text); NP["stash"] = 0; ND["stash"] = depth }
       return "stash"
     }
-    n = tokenize(text, W, QF, SB, UX, PQ, AS, SC, QM, AD, ZV, ZA, ZB, ZP); best = ""
+    n = tokenize(text, W, QF, SB, UX, PQ, AS, SC, QM, AD, ZV, ZA, ZB, ZP, HT, HI, HA); best = ""
     for (k = 1; k <= n; k++) if (QF[k]) { best = better(best, analyze(W[k], depth + 1)); if (best == "stash") return best }
+    # DND-1859: a here-string fed to a program that runs it is read like a
+    # heredoc body: as a script for a shell (sh, eval, make, ...), and for
+    # xargs or parallel also as more arguments of the command xargs runs
+    # (the simple command, then the text). A program that only reads text
+    # (grep, jq, cat) is not judged on it (hsfeed).
+    for (h = 1; h <= HI[0]; h++) {
+      hf = hsfeed(W, SB, AS, n, HI[h])
+      if (hf == "") continue
+      t = HT[h]; gsub(/\001/, "", t)
+      if (HA[h]) t = ansic(t)
+      best = better(best, analyze(t, depth + 1))
+      if (hf != "s") {
+        for (k = (HI[h] < 1 ? 1 : HI[h]); k > 1 && !SB[k]; k--) ;
+        x = ""
+        for (i = k; HI[h] >= 1 && i <= n && (i == k || !SB[i]); i++) {
+          if (W[i] ~ /\001/) { j = W[i]; gsub(/\001/, "", j); x = x j " " }
+          else x = x squote(W[i]) " "
+        }
+        if (x != "") best = better(best, analyze(x t, depth + 1))
+      }
+      if (best == "stash") return best
+    }
     cp = 0; pap = 0; rs = 0
     for (k = 1; k <= n; k++) {
       prs = rs
