@@ -574,13 +574,18 @@ one.
 write or push not made as Athena (`ai/hooks/forge-identity-guard.sh`, the agent
 PATH wrappers `ai/agent-bin/git`, `ai/agent-bin/gh` and `ai/agent-bin/glab`,
 `ai/lib/agent-forge-push.sh`, `ai/lib/agent-forge-cli.sh`, and
-`ai/agent-env/session-env.sh`, which puts the wrappers on PATH) and what they
-load to decide a call is a merge or a push (`ai/lib/forge-api-scan.sh`,
+`ai/agent-env/session-env.sh`, which puts the wrappers on PATH), the forge
+auth guard that keeps the owner's forge credentials from agents
+(`ai/hooks/forge-auth-guard.sh`), and what they load to decide a call is a
+merge, a push or a forge write (`ai/lib/forge-api-scan.sh`,
 `ai/lib/forge-cli-isolation.sh`, `ai/lib/forge-write-class.awk`),
 `ai/bin/gh-athena`, `ai/bin/glab-athena`,
 `locked-merge`,
 `ai/bin/main-health` and `ai/lib/main-health.sh` (the push guard's fix-push
-exception reads a receipt), or the critic verdict producer
+exception reads a receipt), the private overlay resolver and rules the
+owner-click verifier reads the owner's id through
+(`ai/lib/private_overlay_resolver.rb`, `ai/lib/private_overlay.rb`), or the
+critic verdict producer
 (`ai/bin/critic-review`, `ai/lib/critic_carry.rb`,
 `ai/lib/critic_verdict_stores.rb`) is `owner-approval-policy`, hold `always`:
 exit 4, cleared by the owner's verified decision (*Owner approval policy* ->
@@ -590,7 +595,8 @@ adds it. Not held: `confirm-merged`, `ai/bin/test-slot`,
 `ai/bin/ready-and-idle` (it reads a receipt to
 report, and decides nothing), `ai/lib/critic_prompt.rb` (the rubric text, not a
 trust decision) and the judge-set utilities `proc-stat.sh` and
-`telemetry-emit.sh`, which write no verdict.
+`telemetry-emit.sh`, which write no verdict. The manifest's
+`enforcers.excluded` names every other candidate left out, with its reason.
 
 **Later (2026-10-03, DND-1873):** this paragraph listed `ai/lib/glab-merge-guard.sh`
 as not held, "though it decides GitLab merges on the receipt since DND-1845".
@@ -609,13 +615,15 @@ per file.
 **Later (2026-10-03, DND-1892):** this paragraph did not name the forge
 identity guards, so DND-1881's and DND-1887's changes to them read COLD: a diff
 that let an agent push to a forge on the owner's key needed no owner record.
-They now sit in the same class. The third such gap in one night, so the class
+They sit in the same class from DND-1892, with the forge auth guard and the
+libraries the held files load. The third such gap in one night, so the class
 is closed by a walk, not a list: `blast-radius --self-test` computes the
-candidate enforcers (every hook wired in `ai/hooks/registry.json`, every file
-under `ai/agent-bin`, `ai/agent-env` and `ai/git-hooks`, and every `ai/lib` file
-named for forge, merge, receipt, seal or agent) and fails, with a `Fix:`, on one
-that neither holds nor sits in the manifest's `enforcers.excluded` with a
-reason.
+candidate enforcers (every hook wired or retired in `ai/hooks/registry.json`;
+every file under `ai/agent-bin`, `ai/agent-env` and `ai/git-hooks`; every file
+under `ai/lib`, `ai/bin`, `scripts/wt-lib` and a skill's `scripts/` or `bin/`
+named for forge, merge, receipt, seal, agent or push; and every `ai/lib` file a
+held file loads) and fails, with a `Fix:`, on one that neither holds nor sits in
+the manifest's `enforcers.excluded` with a reason, or that is both.
 
 **The gate comes from the landed target, not from you.** The first of
 `bin/prep-commit.sh` (gen_saas) and `ai/bin/harness-gate` (`~/dev/custom`) that
