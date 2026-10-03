@@ -608,7 +608,9 @@ It applies to chat, reports, PR bodies, commit messages, and skill/agent prose.
   reader as surely as one long sentence
   ([Google: tone](https://developers.google.com/style/tone)).
 - **Dates and times are exact and UTC.** Full dates (`2026-09-28`, never
-  `09-28`), exact times (`22:24Z`, never `22:2xZ`). The house rule keeps UTC
+  `09-28`), exact times (`22:24Z`, never `22:2xZ`). Read a
+  time from `date -u` or a server stamp, never estimate it or convert a
+  Slack `ts` in your head. The house rule keeps UTC
   over Google's 12-hour clock; the rest follows
   [Google: dates and times](https://developers.google.com/style/dates-times).
 
