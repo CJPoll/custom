@@ -33,6 +33,27 @@ TMP="$(mktemp -d)" || { echo "FAIL mktemp"; echo "  Fix: free space in TMPDIR"; 
 cleanup() { rm -rf "${TMP}"; }
 trap cleanup EXIT INT TERM
 
+# The tool names the harness repo by its main checkout's directory (the
+# series-break registry and the confound log are read from it), and the
+# fixtures name that repo "custom". Run in place, the suite passed only
+# where the checkout's directory is called custom: inside tool-sandbox it
+# is /work, so the registry read "work's origin/main" and 43 cases failed
+# (DND-1854). So the suite runs a copy of the tool inside a fresh git repo
+# named custom, whatever the real checkout is called. The tool's source is
+# unchanged and no case is skipped.
+AI_SRC="$(cd -- "${HERE}/../../.." && pwd -P)"
+SKILL_DIR="${AI_SRC}/skills/athena:lead-time-improve"
+HARNESS="${TMP}/harness/custom"
+mkdir -p "${HARNESS}/ai/skills/athena:lead-time-improve" "${HARNESS}/ai/config" \
+  || { echo "FAIL harness copy"; echo "  Fix: free space in TMPDIR"; exit 1; }
+cp -R "${AI_SRC}/lib" "${HARNESS}/ai/lib" \
+  && cp -R "${SKILL_DIR}/scripts" "${SKILL_DIR}/lib" "${HARNESS}/ai/skills/athena:lead-time-improve/" \
+  && cp "${AI_SRC}/config/lead-time-series-breaks.json" "${HARNESS}/ai/config/" \
+  || { echo "FAIL harness copy"; echo "  Fix: run from a complete ai/ checkout (lib, scripts, config)"; exit 1; }
+env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "${HARNESS}" init -q -b main \
+  || { echo "FAIL git init (harness copy)"; echo "  Fix: install git"; exit 1; }
+BIN="${HARNESS}/ai/skills/athena:lead-time-improve/scripts/experiment"
+
 echo "== domain + store"
 if /usr/bin/ruby "${HERE}/experiment_test.rb" >"${TMP}/lib.out" 2>&1; then
   ok "experiment_test.rb: $(tail -1 "${TMP}/lib.out")"
