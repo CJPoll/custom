@@ -646,8 +646,10 @@ for initd in github-runner gitlab-runner docker-rootless-github-runner docker-ro
   want_uid="$(id -u)"
   got="$(env -u ATHENA_INITD_LOG_DIR -u ATHENA_INITD_RUN_USER_DIR RC_SVCNAME=seam-default \
     RUNNER_USER="${me}" DOCKER_ROOTLESS_USER="${me}" \
-    sh -c '. "$1" >/dev/null 2>&1; echo "$output_log|$error_log|$XDG_RUNTIME_DIR"' sh "${sysfiles}/${initd}.initd" 2>&1)"
-  if [ "${got}" = "/var/log/seam-default.log|/var/log/seam-default.log|/run/user/${want_uid}" ]; then
+    sh -c '. "$1" >/dev/null 2>&1; echo "$output_log|$error_log|$XDG_RUNTIME_DIR|${DOCKER_HOST:-}"' sh "${sysfiles}/${initd}.initd" 2>&1)"
+  want_docker="unix:///run/user/${want_uid}/docker.sock"
+  case "${initd}" in docker-rootless-*) want_docker="" ;; esac
+  if [ "${got}" = "/var/log/seam-default.log|/var/log/seam-default.log|/run/user/${want_uid}|${want_docker}" ]; then
     pass "seam: ${initd}.initd defaults to the real /var/log and /run/user/<uid>"
   else
     fail "seam: ${initd}.initd defaults changed: ${got}"

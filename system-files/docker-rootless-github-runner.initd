@@ -26,8 +26,9 @@ respawn_max=0
 # DND-1439: test seams for the self-test (system-files/test/initd-proc-tree),
 # which points these at its own temp dirs so it writes nothing under the real
 # /var/log and needs no /run/user. Unset in production: the defaults below are
-# the real paths. Namespaced ATHENA_INITD_*, and set only by a root-owned
-# /etc/conf.d file, so nothing a runner job exports reaches an initd.
+# the real paths. Namespaced ATHENA_INITD_*, and read from the init environment
+# or a root-owned /etc/conf.d file, so nothing a runner job exports reaches an
+# initd.
 : "${ATHENA_INITD_LOG_DIR:=/var/log}"
 : "${ATHENA_INITD_RUN_USER_DIR:=/run/user}"
 pidfile="/run/${RC_SVCNAME}.pid"
