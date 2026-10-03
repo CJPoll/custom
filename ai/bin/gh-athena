@@ -157,7 +157,10 @@ fi
 # in a repo that declares an integration gate, integration-gate's receipt exists
 # for that head, recorded against the base tip or an ancestor of it (DND-969,
 # DND-1463; merge via integration-gate, then
-# locked-merge, which makes this call). A
+# locked-merge, which makes this call). Every `pr merge` is also REFUSED while
+# the base tip itself is red, by a run or by content the repo's entry in
+# ai/config/main-content-checks.json forbids, unless the head is a red-main
+# fix (DND-1902; gmg_line_check). A
 # `gh api` call that merges (REST …/pulls/<n>/merge, …/merges, …/merge-upstream;
 # GraphQL mergePullRequest / enablePullRequestAutoMerge / enqueuePullRequest /
 # mergeBranch) is REFUSED outright, with no reads (DND-728). So is a `gh api`

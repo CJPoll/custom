@@ -479,13 +479,18 @@ run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/b5.lock"; expect b5 0; na
 # b6/b7 the incident's real shape: every run green, but main holds two
 # migrations with one version. The origin is CJPoll/gen_saas, which
 # ai/config/main-content-checks.json declares.
-gs_dup_fixture() { # <name> -- main gains a duplicated athena migration version
+gs_fixture() { # <name> -- a fixture whose origin is CJPoll/gen_saas
   fixture "$1"; local GS="https://github.com/CJPoll/gen_saas.git"
   git -C "${WT}" config remote.origin.url "${GS}"; git -C "${WT}" config --unset-all "url.${BARE}.insteadOf"
   git -C "${WT}" config "url.${BARE}.insteadOf" "${GS}"
-  ( cd "${WT}" && git checkout -q main && mkdir -p apps/athena/priv/repo/migrations \
-    && : > apps/athena/priv/repo/migrations/20261003120000_cap.exs && : > apps/athena/priv/repo/migrations/20261003120000_strip.exs \
-    && git add apps && git commit -qm dup && git push -q origin main && git checkout -q feature )
+}
+on_main() { # <file...> -- main gains these empty files (one commit)
+  ( cd "${WT}" && git checkout -q main && for f in "$@"; do mkdir -p "$(dirname "${f}")"; : > "${f}"; done \
+    && git add -A && git commit -qm "main: $*" && git push -q origin main && git checkout -q feature )
+}
+GSM=apps/athena/priv/repo/migrations
+gs_dup_fixture() { # <name> -- main gains a duplicated athena migration version
+  gs_fixture "$1"; on_main "${GSM}/20261003120000_cap.exs" "${GSM}/20261003120000_strip.exs"
 }
 gs_dup_fixture b6
 run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/b6.lock"; expect b6 11; no_merge b6
@@ -496,6 +501,20 @@ gs_dup_fixture b7; follow_main
 H="$(git -C "${WT}" rev-parse HEAD)"; jq --arg h "${H}" '.headRefOid=$h' "${ST}/pr.json" > "${ST}/x" && mv "${ST}/x" "${ST}/pr.json"
 plant_receipt "${H}" "$(git --git-dir="${BARE}" rev-parse main)"
 run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/b7.lock"; expect b7 0; names b7 "RED-MAIN FIX"
+# b8 the incident's mechanism: main holds ONE 20261003120000 migration, and
+# the PR (gated on the older base, DND-1463) adds another. Main is not red
+# yet; the squash would make it red. Refused before the merge call.
+gs_fixture b8; old_main="$(git --git-dir="${BARE}" rev-parse main)"; on_main "${GSM}/20261003120000_cap.exs"
+( cd "${WT}" && mkdir -p "${GSM}" && : > "${GSM}/20261003120000_strip.exs" && git add -A && git commit -qm strip && git push -q origin feature )
+H="$(git -C "${WT}" rev-parse HEAD)"; jq --arg h "${H}" '.headRefOid=$h' "${ST}/pr.json" > "${ST}/x" && mv "${ST}/x" "${ST}/pr.json"
+plant_receipt "${H}" "${old_main}"
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/b8.lock"; expect b8 3; no_merge b8
+names b8 "SEMANTIC CONFLICT"; names b8 "${GSM} version 20261003120000: 20261003120000_cap.exs, 20261003120000_strip.exs"
+# b9 a declared repo whose tree has no directory the pattern matches: COULD
+# NOT LOOK, never "no duplicate" (a moved path or a wrong pattern).
+gs_fixture b9
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/b9.lock"; expect b9 2; no_merge b9
+names b9 "COULD NOT LOOK"; names b9 "matches no directory"
 
 # c14 --help: stdout, exit 0, no side effects.
 hout="$("${TOOL}" --help 2>/dev/null)"; rc=$?

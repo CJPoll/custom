@@ -125,7 +125,12 @@ REPO_FX="${TMP}/gen_saas"
 git init -q -b main "${REPO_FX}"
 gfx() { git -C "${REPO_FX}" -c user.name=t -c user.email=t@t -c commit.gpgsign=false "$@"; }
 gfx remote add origin git@github.com:CJPoll/gen_saas.git
-echo readme > "${REPO_FX}/README"; gfx add README; gfx commit -q -m nogate
+echo readme > "${REPO_FX}/README"
+# DND-1902: CJPoll/gen_saas declares a content check on its migration
+# directories (ai/config/main-content-checks.json), and a declared check that
+# matches no directory is COULD NOT LOOK, so every base carries one.
+mkdir -p "${REPO_FX}/apps/athena/priv/repo/migrations"; : > "${REPO_FX}/apps/athena/priv/repo/migrations/20250101000000_init.exs"
+gfx add README apps; gfx commit -q -m nogate
 NOGATE_BASE="$(gfx rev-parse HEAD)"
 mkdir -p "${REPO_FX}/bin"; printf '#!/bin/sh\nexit 0\n' > "${REPO_FX}/bin/prep-commit.sh"
 gfx add bin; gfx commit -q -m gated
@@ -1115,6 +1120,37 @@ reset_fx; pr_view "${GREEN}" "${STRAY_HEAD}"; base_is "${DUP_BASE}"; tip_rollup 
 run pr merge 362 --squash --match-head-commit "${STRAY_HEAD}"
 refused && [[ "${ERR}" == *"Red run(s)"* ]] && [[ "${ERR}" == *"Duplicated migration version"* ]] \
   && ok "C6. a red run AND a duplicate -> refused, naming both" || bad "C6. both reds named" "$(detail)"
+
+gfx checkout -q -b nodir "${NOGATE_BASE}"; gfx rm -rq apps; gfx commit -q -m nodir
+NODIR_BASE="$(gfx rev-parse HEAD)"; gfx checkout -q main
+reset_fx; pr_view "${GREEN}" "${STRAY_HEAD}"; base_is "${NODIR_BASE}"
+run pr merge 362 --squash --match-head-commit "${STRAY_HEAD}"
+refused && [[ "${ERR}" == *"COULD NOT LOOK"* ]] && [[ "${ERR}" == *"matches no directory"* ]] \
+  && ok "C7. a declared check whose pattern matches NO directory in the tip -> COULD NOT LOOK, never 'no duplicate'" \
+  || bad "C7. zero matched directories refused" "$(detail)"
+
+# C8: the declaration itself unreadable or malformed. The path is fixed when
+# the lib is sourced (no env var moves it), so this drives the lib directly.
+for bad_cfg in missing '{"schema":"other","repos":{}}' '{"schema":"main-content-checks/1","repos":{"cjpoll/gen_saas":{"unique_migration_dirs":""}}}' \
+               '{"schema":"main-content-checks/1","repos":{"cjpoll/gen_saas":{"unique_migration_dirs":"(["}}}' 'not json'; do
+  cfg="${TMP}/cfg.json"; rm -f "${cfg}"; [ "${bad_cfg}" = missing ] || printf '%s' "${bad_cfg}" > "${cfg}"
+  out="$( . "${AI_DIR}/lib/gh-merge-guard.sh"; GMG_CONTENT_CONFIG="${cfg}"
+          if gmg_content_health CJPoll gen_saas "${NOGATE_BASE}" "" "${REPO_FX}"; then echo "rc=0"; else echo "rc=$? ${GMG_CONTENT_STATE} ${GMG_CONTENT_WHY}"; fi )"
+  [[ "${out}" == "rc=2 LOOK "* ]] && ok "C8. declaration '${bad_cfg:0:40}' -> LOOK (rc 2), never NONE or CLEAN" \
+    || bad "C8. bad declaration '${bad_cfg}'" "${out}"
+done
+
+TIP_OLD_RED_NEW_PENDING='[{"__typename":"CheckRun","name":"Test","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-10-03T14:00:00Z","checkSuite":{"databaseId":71,"app":{"databaseId":15368,"slug":"github-actions"},"workflowRun":{"event":"push","workflow":{"databaseId":5}}}},{"__typename":"CheckRun","name":"Test","status":"IN_PROGRESS","conclusion":null,"startedAt":"2026-10-03T14:30:00Z","checkSuite":{"databaseId":73,"app":{"databaseId":15368,"slug":"github-actions"},"workflowRun":{"event":"push","workflow":{"databaseId":5}}}}]'
+reset_fx; pr_view "${GREEN}"; base_is "${TIP}"; tip_rollup "${TIP_OLD_RED_NEW_PENDING}"; compare_is diverged 1
+run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
+refused && [[ "${ERR}" == *"does not supersede"* ]] \
+  && ok "T10. an older red run with a newer re-run still in progress -> still RED (only an all-SUCCESS suite supersedes)" \
+  || bad "T10. old red + new pending" "$(detail)"
+
+reset_fx; pr_view "${GREEN}"; base_is "${TIP}"; tip_rollup '[{"__typename":"SomethingNew","name":"x"}]'
+run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
+refused && [[ "${ERR}" == *"COULD NOT LOOK"* ]] && [[ "${ERR}" == *"unknown type"* ]] \
+  && ok "T11. a tip context of a type the judge does not know -> COULD NOT LOOK" || bad "T11. unknown context type" "$(detail)"
 
 # DND-1647: no gh/glab call may have fallen through past its stub.
 if fsg_verify; then ok "no gh/glab call fell through past its stub (DND-1647)"

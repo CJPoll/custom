@@ -131,7 +131,7 @@ module LeadTimeProduct
     "the latest post-merge run on main (#{latest['headSha'].to_s[0, 12]}) concluded #{latest['conclusion']}"
   end
 
-  # locked-merge prints "WARN base deploy ... concluded <x>; merging anyway" when
+  # locked-merge prints "WARN base deploy ... concluded <x>; ..." when
   # the base's deploy did not succeed. -> that line, or nil.
   def merge_warning(output)
     output.to_s.lines.find { |l| l.start_with?("WARN base deploy") }&.strip

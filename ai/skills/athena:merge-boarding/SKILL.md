@@ -165,7 +165,12 @@ The landing, as Cody confirmed it (2026-10-01):
    every duplicate, and carries its own `INTEGRATION OK` receipt. What cannot
    be read is COULD NOT LOOK and refused; a pending run is not red and does
    not hold the merge (DND-1902; `ai/lib/gh-merge-guard.sh` →
-   `gmg_line_check`). No flag or env var skips it.
+   `gmg_line_check`). No flag or env var skips it. For a red run, containing
+   the tip is the only fix evidence read, so any head rebased onto it
+   passes: before landing onto a red deploy, judge that the head fixes it.
+   `locked-merge` also reads its expected squash tree against the same
+   declaration, so two PRs that each add one migration version are refused
+   (exit 3, `SEMANTIC CONFLICT`) before the second lands.
 
 **Later (2026-10-02, DND-1664):** step 5 was "Check `main` after the push"
 and ran `main-health check` first, with no fast-forward or installer before

@@ -764,6 +764,14 @@ ${old%$'\n'}}" >&2
 # failed attempt re-run inside the SAME check suite still reads red (the
 # head judge's residual too), so the tip stays red until a new commit or a
 # fix; a red run beyond the rollup's first 100 contexts is COULD NOT LOOK.
+# For a red RUN, containing the tip is the only fix evidence read (the brief's
+# rule, mirroring custom's push rule): a head rebased onto the red tip for
+# any reason passes as a fix. That is sound where the receipt's gate re-runs
+# the red check (custom); a deploy never runs on a PR, so for a red deploy the
+# merger must judge that the head fixes it. The content half asks more: the
+# head's own tree must drop every duplicate. The content declaration is read
+# from the custom checkout this file is loaded from, so a custom branch that
+# edits it moves the bar for merges run from that branch's copy.
 GMG_TIP_JUDGE="$GMG_ROLLUP_DEFS"'
   def known: .__typename == "StatusContext" or .__typename == "CheckRun";
   def red:
@@ -887,37 +895,46 @@ ${odd%$'\n'}"; return 2
 # has already required the head's own INTEGRATION OK receipt.
 GMG_CONTENT_CONFIG="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../config/main-content-checks.json"
 
-# gmg_mig_dups <gitdir> <rev> <dir-ere> : prints one line per duplicated
-# version ("<dir> version <v>: <file>, <file>"). Returns 2 when the tree
-# cannot be read.
+# gmg_mig_dups <gitdir> <rev> <dir-ere> : reads <rev>'s tree (a commit or a
+# tree id). Sets GMG_DUPS (one line per duplicated version, "<dir> version
+# <v>: <file>, <file>", sorted), GMG_DUP_NDIRS (directories the ERE matched)
+# and GMG_DUP_NFILES (migrations read). Returns 0, 2 when the tree cannot be
+# read, or 3 when the ERE matched NO directory: a declared check that finds
+# nothing to read is never read as clean (a path move or a typo in the ERE).
 gmg_mig_dups() {
   local gitdir="$1" rev="$2" re="$3" tree path dir base v key
-  local -A files=()
-  if ! tree="$(git -C "$gitdir" ls-tree -r --name-only "$rev" 2>/dev/null)"; then return 2; fi
+  local -A files=() dirs=()
+  GMG_DUPS="" GMG_DUP_NDIRS=0 GMG_DUP_NFILES=0
+  # NUL-separated, so a path git would quote is read as itself.
+  if ! tree="$(git -C "$gitdir" ls-tree -r -z --name-only "$rev" 2>/dev/null | tr '\0' '\n')"; then return 2; fi
+  [ -n "$tree" ] || return 2
   while IFS= read -r path; do
     [ -n "$path" ] || continue
+    dir="${path%/*}"; [ "$dir" != "$path" ] || dir=""
+    [[ "$dir" =~ $re ]] || continue
+    dirs["$dir"]=1
     base="${path##*/}"
     [[ "$base" =~ ^([0-9]+)_.*\.exs$ ]] || continue
     v="${BASH_REMATCH[1]}"
-    dir="${path%/*}"; [ "$dir" != "$path" ] || dir=""
-    [[ "$dir" =~ $re ]] || continue
     key="$dir version $v"
     files["$key"]+="${files[$key]:+, }$base"
+    GMG_DUP_NFILES=$((GMG_DUP_NFILES + 1))
   done <<<"$tree"
+  GMG_DUP_NDIRS="${#dirs[@]}"
+  [ "$GMG_DUP_NDIRS" -gt 0 ] || return 3
   for key in "${!files[@]}"; do
-    [[ "${files[$key]}" == *", "* ]] && printf '%s: %s\n' "$key" "${files[$key]}"
-  done | sort
+    if [[ "${files[$key]}" == *", "* ]]; then GMG_DUPS+="$key: ${files[$key]}"$'\n'; fi
+  done
+  if [ -n "$GMG_DUPS" ]; then GMG_DUPS="$(sort <<<"${GMG_DUPS%$'\n'}")"; fi
   return 0
 }
 
-# gmg_content_health <owner> <repo> <tip> <head|""> <gitdir> : judges the base
-# tip's content. Never exits. Sets GMG_CONTENT_STATE to NONE (no check
-# declared), CLEAN or FIX (return 0), RED (return 1) or LOOK (return 2), with
-# GMG_CONTENT_DUPS and GMG_CONTENT_WHY.
-gmg_content_health() {
-  local owner="$1" repo="$2" tip="$3" head="$4" gitdir="$5" key re rc dups
-  GMG_CONTENT_STATE="LOOK" GMG_CONTENT_DUPS="" GMG_CONTENT_WHY=""
-  key="${owner,,}/${repo,,}"
+# gmg_content_re <owner> <repo> : sets GMG_CONTENT_RE to the repo's declared
+# unique_migration_dirs ERE, or "" when it declares none. Returns 2 with
+# GMG_CONTENT_WHY when the declaration cannot be read or is malformed.
+gmg_content_re() {
+  local key="${1,,}/${2,,}" re
+  GMG_CONTENT_RE=""
   if ! re="$(jq -er --arg k "$key" 'if .schema != "main-content-checks/1" then error("schema is not main-content-checks/1")
              elif (.repos | type) != "object" then error("repos is not an object")
              elif .repos[$k] == null then ""
@@ -927,16 +944,35 @@ gmg_content_health() {
              else .repos[$k].unique_migration_dirs end' "$GMG_CONTENT_CONFIG" 2>&1)"; then
     GMG_CONTENT_WHY="the content declaration $GMG_CONTENT_CONFIG cannot be read: $(tr '\n' ' ' <<<"$re")"; return 2
   fi
-  if [ -z "$re" ]; then GMG_CONTENT_STATE="NONE"; return 0; fi
-  if [[ "" =~ $re ]]; [ $? = 2 ]; then
+  if [ -n "$re" ] && { [[ "" =~ $re ]]; [ $? = 2 ]; }; then
     GMG_CONTENT_WHY="the unique_migration_dirs pattern for $key in $GMG_CONTENT_CONFIG is not a valid ERE ('$re')"; return 2
   fi
-  if dups="$(gmg_mig_dups "$gitdir" "$tip" "$re")"; then rc=0; else rc=$?; fi
-  if [ "$rc" != 0 ]; then
-    GMG_CONTENT_WHY="the tree of the tip $tip cannot be read in $gitdir (\`git ls-tree -r $tip\` failed; fetch origin so it is local)"; return 2
-  fi
-  if [ -z "$dups" ]; then GMG_CONTENT_STATE="CLEAN"; return 0; fi
-  GMG_CONTENT_DUPS="$(sed 's/^/    /' <<<"$dups")"
+  GMG_CONTENT_RE="$re"
+  return 0
+}
+
+# gmg_dups_why <rc> <what> : GMG_CONTENT_WHY for a gmg_mig_dups failure.
+gmg_dups_why() {
+  case "$1" in
+    3) GMG_CONTENT_WHY="the unique_migration_dirs pattern '$GMG_CONTENT_RE' in $GMG_CONTENT_CONFIG matches no directory in $2, so the declared check has nothing to read (a moved path or a wrong ERE; fix the declaration)" ;;
+    *) GMG_CONTENT_WHY="the tree of $2 cannot be read (\`git ls-tree -r\` failed; fetch origin so it is local)" ;;
+  esac
+}
+
+# gmg_content_health <owner> <repo> <tip> <head|""> <gitdir> : judges the base
+# tip's content. Never exits. Sets GMG_CONTENT_STATE to NONE (no check
+# declared), CLEAN or FIX (return 0), RED (return 1) or LOOK (return 2), with
+# GMG_CONTENT_DUPS and GMG_CONTENT_WHY.
+gmg_content_health() {
+  local owner="$1" repo="$2" tip="$3" head="$4" gitdir="$5" rc
+  GMG_CONTENT_STATE="LOOK" GMG_CONTENT_DUPS="" GMG_CONTENT_WHY="" GMG_CONTENT_COUNTS=""
+  gmg_content_re "$owner" "$repo" || return 2
+  if [ -z "$GMG_CONTENT_RE" ]; then GMG_CONTENT_STATE="NONE"; return 0; fi
+  if gmg_mig_dups "$gitdir" "$tip" "$GMG_CONTENT_RE"; then rc=0; else rc=$?; fi
+  if [ "$rc" != 0 ]; then gmg_dups_why "$rc" "the tip $tip"; return 2; fi
+  GMG_CONTENT_COUNTS="$GMG_DUP_NDIRS director(ies), $GMG_DUP_NFILES migration(s) read"
+  if [ -z "$GMG_DUPS" ]; then GMG_CONTENT_STATE="CLEAN"; return 0; fi
+  GMG_CONTENT_DUPS="$(sed 's/^/    /' <<<"$GMG_DUPS")"
   GMG_CONTENT_STATE="RED"
   [ -n "$head" ] || return 1
   if git -C "$gitdir" merge-base --is-ancestor "$tip" "$head" 2>/dev/null; then rc=0; else rc=$?; fi
@@ -947,12 +983,12 @@ gmg_content_health() {
        GMG_CONTENT_WHY="the tip $tip holds a duplicated migration version, and the head $head is not in the object store of $gitdir, so whether it is a fix cannot be read (fetch the PR branch)"
        return 2 ;;
   esac
-  if dups="$(gmg_mig_dups "$gitdir" "$head" "$re")"; then rc=0; else rc=$?; fi
+  if gmg_mig_dups "$gitdir" "$head" "$GMG_CONTENT_RE"; then rc=0; else rc=$?; fi
   if [ "$rc" != 0 ]; then
-    GMG_CONTENT_STATE="LOOK"; GMG_CONTENT_WHY="the tree of the head $head cannot be read in $gitdir"; return 2
+    GMG_CONTENT_STATE="LOOK"; gmg_dups_why "$rc" "the head $head"; return 2
   fi
-  if [ -n "$dups" ]; then
-    GMG_CONTENT_DUPS+=$'\n'"  the head $head contains the tip but still holds:"$'\n'"$(sed 's/^/    /' <<<"$dups")"
+  if [ -n "$GMG_DUPS" ]; then
+    GMG_CONTENT_DUPS+=$'\n'"  the head $head contains the tip but still holds:"$'\n'"$(sed 's/^/    /' <<<"$GMG_DUPS")"
     return 1
   fi
   GMG_CONTENT_STATE="FIX"; return 0
@@ -979,6 +1015,10 @@ ${GMG_TIP_OLD%$'\n'}}"
 $GMG_CONTENT_DUPS"
     GMG_LINE_WHY+="
   The head ${head:-(none: --auto)} is not a red-main fix: it must contain $tip and remove every duplicate."
+    [ "$rr" = 2 ] && GMG_LINE_WHY+="
+  Also COULD NOT LOOK at the runs: $GMG_TIP_WHY"
+    [ "$cr" = 2 ] && GMG_LINE_WHY+="
+  Also COULD NOT LOOK at the content: $GMG_CONTENT_WHY"
     return 1
   fi
   if [ "$rr" = 2 ] || [ "$cr" = 2 ]; then
@@ -992,12 +1032,12 @@ $GMG_CONTENT_DUPS"
     CLEAN) GMG_LINE_NOTE="BASE-TIP $base $tip: no judged run is red" ;;
     PENDING) GMG_LINE_NOTE="BASE-TIP $base $tip PENDING: no judged run is red, and these have not concluded; a pending run is not red, so this merge is not held:
 $GMG_TIP_RUNS" ;;
-    FIX) GMG_LINE_NOTE="BASE-TIP $base $tip is RED, and the head contains it: RED-MAIN FIX, merging onto the red tip. Red run(s):
+    FIX) GMG_LINE_NOTE="BASE-TIP $base $tip is RED, and the head contains it: RED-MAIN FIX, merging onto the red tip. Containing the tip is the only evidence read for a red RUN, so this head must really fix it. Red run(s):
 $GMG_TIP_RUNS" ;;
   esac
   case "$GMG_CONTENT_STATE" in
     NONE) GMG_LINE_NOTE+=$'\n'"  content: no check declared for $owner/$repo" ;;
-    CLEAN) GMG_LINE_NOTE+=$'\n'"  content: no duplicated migration version" ;;
+    CLEAN) GMG_LINE_NOTE+=$'\n'"  content: no duplicated migration version ($GMG_CONTENT_COUNTS)" ;;
     FIX) GMG_LINE_NOTE+=$'\n'"  content: RED-MAIN FIX: the tip holds a duplicated migration version and the head removes it:"$'\n'"$GMG_CONTENT_DUPS" ;;
   esac
   GMG_LINE_NOTE+=" (DND-1902)"
@@ -1006,7 +1046,7 @@ $GMG_TIP_RUNS" ;;
 
 # gmg_line_fix <owner> <repo> <base> <tip> : the Fix: text for a RED tip.
 gmg_line_fix() {
-  printf 'land only a red-main fix: a head that contains %s, removes every duplicate named above, and carries its own INTEGRATION OK receipt (merge origin/%s into it, fix it, push as Athena, re-gate). Every other PR waits until %s is green again (`~/dev/custom/ai/bin/gh-ci-wait --repo %s/%s --sha <the new %s tip>`)' \
+  printf 'land only a red-main fix: a head that contains %s, removes every duplicate named above, and (in a repo that declares an integration gate) carries its own INTEGRATION OK receipt (merge origin/%s into it, fix it, push as Athena, re-gate). Every other PR waits until %s is green again (`~/dev/custom/ai/bin/gh-ci-wait --repo %s/%s --sha <the new %s tip>`)' \
     "$4" "$3" "$3" "$1" "$2" "$3"
 }
 
@@ -1014,7 +1054,8 @@ gmg_line_fix() {
 # the base tip does not stop the merge; exits 3 otherwise.
 gmg_tip_gate() {
   local shown="$1" owner="$2" repo="$3" base="$4" tip="$5" head="$6" rc
-  if gmg_line_check "$owner" "$repo" "$base" "$tip" "$head" .; then rc=0; else rc=$?; fi
+  # GMG_TOP: the checkout gmg_receipt_gate resolved, which holds the tip.
+  if gmg_line_check "$owner" "$repo" "$base" "$tip" "$head" "$GMG_TOP"; then rc=0; else rc=$?; fi
   case "$rc" in
     0) printf '%s: %s\n' "$GMG_TOOL" "$GMG_LINE_NOTE" >&2; return 0 ;;
     1) gmg_refuse "$shown" "$GMG_LINE_WHY" "$(gmg_line_fix "$owner" "$repo" "$base" "$tip"). Then $GMG_LAND" ;;

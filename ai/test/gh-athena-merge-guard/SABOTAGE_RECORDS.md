@@ -295,3 +295,9 @@ unreadable): `expected exit 2, got 0`, merged.
 ### After the fix
 
 Guard: `RESULT: 209 passed, 0 failed`. locked-merge: `272 passed, 0 failed`.
+
+After the review round (a declared pattern that matches no directory is
+COULD NOT LOOK; a malformed declaration; an old red run under a newer pending
+one; an unknown context type; locked-merge reads the expected squash tree, b8
+SEMANTIC CONFLICT, and a no-directory tip, b9): guard `RESULT: 217 passed, 0
+failed`; locked-merge `284 passed, 0 failed`.

@@ -72,13 +72,6 @@ path fleets already share) it:
      prints BASE MOVED: the head merged with R..B was never gated;
   3. computes the expected squash tree, git merge-tree B --head (the head's
      own tree when R == B). A conflict is refused here (exit 3);
-  3b. stops the line (DND-1902): reads the runs on the base tip B itself,
-     and B's tree against ai/config/main-content-checks.json (a duplicated
-     migration version). A judged red run (CI or a post-merge deploy) or a
-     duplicate refuses (exit 11), naming each, unless --head contains B and
-     removes every duplicate (RED-MAIN FIX). What it cannot read is COULD NOT
-     LOOK (exit 2). A pending run is not red: it merges now and names the
-     run. No check on B and no declared content check merge as before;
   4. with --require-idle-workflow <workflow-file>, keyed on the base SHA B
      (DND-1378): the base commit's own push run, looked up by SHA and
      re-read by id, must be completed, and the <base> run list must show no
@@ -86,6 +79,15 @@ path fleets already share) it:
      or NO RUN FOR BASE (exit 5), never idle, unless the commit carries a skip
      marker ([skip ci] and kin). Any read it cannot make is COULD NOT LOOK
      (exit 2). The base run's conclusion is printed; a non-success is a WARN;
+  4b. stops the line (DND-1902): reads the runs on the base tip B itself,
+     and B's tree against ai/config/main-content-checks.json (a duplicated
+     migration version). A judged red run (CI or a post-merge deploy) or a
+     duplicate refuses (exit 11), naming each, unless --head contains B and
+     removes every duplicate (RED-MAIN FIX). What it cannot read is COULD NOT
+     LOOK (exit 2). A pending run is not red: it merges now and names the
+     run. No check on B and no declared content check merge as before. The
+     expected squash tree from step 3 is read against the same declaration:
+     a duplicate there is a SEMANTIC CONFLICT (exit 3);
   5. merges via gh-athena pr merge --squash --match-head-commit <head> (no --auto);
   6. confirm-merged --pr <n> --fetch (bounded retry), also after a failed
      merge call, which can still have landed (DND-1324);
@@ -97,7 +99,8 @@ path fleets already share) it:
 Exit (every non-zero prints a Fix: line):
   0 merged, confirmed, tree matches          (landed)
   2 usage / prerequisite / non-GitHub remote (nothing landed)
-  3 stale: PR not open, head moved, or CONFLICT with origin/<base> -- merge
+  3 stale: PR not open, head moved, CONFLICT with origin/<base>, or a
+    SEMANTIC CONFLICT (the merged tree duplicates a migration version) -- merge
     origin/<base> in, resolve, re-gate (nothing landed)
   4 forge refused the merge, and confirm-merged does not show it landed
     (a failed call that DID land is verified and reported as a merge)
@@ -313,24 +316,6 @@ esac
        "check git >= 2.38 (merge-tree --write-tree); nothing was merged."
 echo "EXPECTED-TREE ${EXPECTED_TREE} (${HEAD_SHA} merged into ${B})"
 
-# ---- stop the line: a red base tip (DND-1902) ----
-# gen_saas 2026-10-03: main went red at 14:06Z and a merge landed onto it at
-# 14:23Z, because stop-the-line was a message that arrived a minute late. The
-# tip B's own runs and its content are read here, under the lock, with
-# gh-athena's judge (ai/lib/gh-merge-guard.sh -> gmg_line_check); the guard
-# reads them again.
-[[ "${ORIGIN_URL}" =~ github\.com[:/]+([^/]+)/([^/]+)$ ]] \
-  || die 2 "COULD NOT LOOK: origin '${ORIGIN_URL}' names no <owner>/<repo>, so the base tip's runs cannot be read" \
-       "set origin to the GitHub repo's URL (https://github.com/<owner>/<repo>.git); nothing was merged."
-GH_OWNER="${BASH_REMATCH[1]}"; GH_REPO="${BASH_REMATCH[2]%.git}"
-if gmg_line_check "${GH_OWNER}" "${GH_REPO}" "origin/${base}" "${B}" "${HEAD_SHA}" "${REPO}"; then tip_rc=0; else tip_rc=$?; fi
-case "${tip_rc}" in
-  0) echo "${GMG_LINE_NOTE}" ;;
-  1) die 11 "${GMG_LINE_WHY}" "$(gmg_line_fix "${GH_OWNER}" "${GH_REPO}" "${base}" "${B}"), then re-run locked-merge. Nothing was merged." ;;
-  *) die 2 "${GMG_LINE_WHY}" \
-       "make the tip readable (network up, gh auth, git fetch origin), then re-run locked-merge. Could-not-read is never green; nothing was merged." ;;
-esac
-
 # ---- required-idle workflow, keyed on the base SHA (DND-1378) ----
 # A single base-branch list read can miss the run for the commit that just
 # landed (not listed yet, or a stale list), and "no live run listed" then read
@@ -390,10 +375,46 @@ idle_check() {
     "wait for each run with ~/dev/custom/ai/bin/gh-ci-wait --repo <owner>/<repo> --run-id <id> (a 60 s poll on the App budget, DND-1706), then re-run; nothing was merged."
   if [ -n "${base_run}" ]; then
     echo "IDLE ${wf} base ${B}: BASE-RUN ${base_run} completed/${base_conc}; ${base} list counted $(jq length <<<"${branch_json}") runs, none live"
-    [ "${base_conc}" = success ] || echo "WARN base deploy ${base_run} for ${B} concluded ${base_conc:-unknown}, but no red run on ${B}'s own checks stopped this merge (DND-1902); a failed deploy stops the line: merge nothing but the fix or the revert (athena:merge-boarding -> Stop the line)"
+    [ "${base_conc}" = success ] || echo "WARN base deploy ${base_run} for ${B} concluded ${base_conc:-unknown}; the stop-the-line check next reads ${B}'s own runs and refuses a red one (DND-1902). A failed deploy stops the line: merge nothing but the fix or the revert (athena:merge-boarding -> The merge bar, step Stop the line)"
   fi
 }
 [ -z "${IDLE_WF}" ] || idle_check "${IDLE_WF}"
+
+# ---- stop the line: a red base tip (DND-1902) ----
+# gen_saas 2026-10-03: main went red at 14:06Z and a merge landed onto it at
+# 14:23Z, because stop-the-line was a message that arrived a minute late. The
+# tip B's own runs and its content are read here, under the lock, with
+# gh-athena's judge (ai/lib/gh-merge-guard.sh -> gmg_line_check); the guard
+# reads them again. It runs AFTER the idle check, so a deploy that check
+# waited out is read concluded, not pending.
+[[ "${ORIGIN_URL}" =~ github\.com[:/]+([^/]+)/([^/]+)$ ]] \
+  || die 2 "COULD NOT LOOK: origin '${ORIGIN_URL}' names no <owner>/<repo>, so the base tip's runs cannot be read" \
+       "set origin to the GitHub repo's URL (https://github.com/<owner>/<repo>.git); nothing was merged."
+GH_OWNER="${BASH_REMATCH[1]}"; GH_REPO="${BASH_REMATCH[2]%.git}"
+if gmg_line_check "${GH_OWNER}" "${GH_REPO}" "origin/${base}" "${B}" "${HEAD_SHA}" "${REPO}"; then tip_rc=0; else tip_rc=$?; fi
+case "${tip_rc}" in
+  0) echo "${GMG_LINE_NOTE}" ;;
+  1) die 11 "${GMG_LINE_WHY}" "$(gmg_line_fix "${GH_OWNER}" "${GH_REPO}" "${base}" "${B}"), then re-run locked-merge. Nothing was merged." ;;
+  *) die 2 "${GMG_LINE_WHY}" \
+       "make the tip readable (network up, gh auth, git fetch origin), then re-run locked-merge. Could-not-read is never green; nothing was merged." ;;
+esac
+
+# ---- the merged tree must not break main either (DND-1902) ----
+# gen_saas #767 and #771 each added an athena migration with one version; the
+# duplicate existed only once both had landed. A receipt on an older base is
+# accepted (DND-1463), so the squash tree computed above is the first place
+# the two meet: read it against the same declaration.
+if [ "${GMG_CONTENT_STATE}" != NONE ]; then
+  if gmg_mig_dups "${REPO}" "${EXPECTED_TREE}" "${GMG_CONTENT_RE}"; then mt_rc=0; else mt_rc=$?; fi
+  if [ "${mt_rc}" != 0 ]; then
+    gmg_dups_why "${mt_rc}" "the expected squash tree ${EXPECTED_TREE}"
+    die 2 "COULD NOT LOOK: ${GMG_CONTENT_WHY}" "fix what the message names, then re-run locked-merge; nothing was merged."
+  fi
+  [ -z "${GMG_DUPS}" ] || die 3 "SEMANTIC CONFLICT: ${HEAD_SHA} merged into origin/${base} at ${B} holds duplicated migration version(s) (ai/config/main-content-checks.json):
+$(sed 's/^/    /' <<<"${GMG_DUPS}")" \
+    "merge origin/${base} into the PR branch (never rebase a published branch), renumber this PR's migration to a version no other migration in its directory holds, push as Athena, re-run integration-gate, then re-run locked-merge. Nothing was merged."
+  echo "MERGED-TREE content: no duplicated migration version (${GMG_DUP_NDIRS} director(ies), ${GMG_DUP_NFILES} migration(s) read)"
+fi
 
 # confirm_landed <tries> -- confirm-merged, bounded; sets confirmed=1 on a landing.
 confirmed=""
