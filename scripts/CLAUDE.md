@@ -497,3 +497,16 @@ github-runner `231072`, gitlab-runner `296608`, each `:65536`). Neither is ever 
 `wheel`/`sudo`/`docker` — the setup scripts assert it. Registration (a repo/project
 token) and the actual `sudo` install are **yours to run**; the scripts install the
 OpenRC service but never start it until a runner is registered.
+
+**Later (2026-10-03, DND-1937):** the GitLab family serves N runner users per
+host, one per trust domain. Every script takes `--user gitlab-runner-<suffix>`
+(default `gitlab-runner`, whose names, block and paths are unchanged). Its
+services are the OpenRC instances `gitlab-runner.<suffix>` and
+`docker-rootless-gitlab-runner.<suffix>`: symlinks inside `/etc/init.d` to the
+installed copies, so the copy-not-symlink rule still holds. A named user's
+subuid/subgid block is `1000000000 + (CRC32(name) mod 4096) * 65536`; an overlap
+with any other line is refused with a `Fix:` naming `--subid-start`. Its home
+and `/srv/ci/<user>/{docker,cache}` are `0700`. `setup-gitlab-runner --runner
+NAME:TAG[:LIMIT]` writes the `[[runners]]` entries into a `0600` config.toml,
+reading one `glrt-` token per entry on stdin, never argv. The rules live in
+`scripts/lib/gitlab-runner-kit.sh`; the tests in `scripts/test/gitlab-runner-kit/`.

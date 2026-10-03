@@ -31,7 +31,23 @@ sudo scripts/setup-gitlab-runner-docker    # its own rootless dockerd (subuid 29
 sudo scripts/setup-gitlab-runner           # gitlab-runner binary + OpenRC service; does NOT start
 ```
 
+**Later (2026-10-03, DND-1937):** the kit serves N runner users per host, one
+per trust domain. The commands above install the default user `gitlab-runner`,
+unchanged. A second user adds `--user gitlab-runner-<suffix>` to all three
+scripts; it gets its own subuid block, rootless dockerd
+(`docker-rootless-gitlab-runner.<suffix>`), runner service
+(`gitlab-runner.<suffix>`) and `0700` `/srv/ci/<user>/{docker,cache}`. Each
+script's `--help` has the flags.
+
 ## 2. Register (as the runner user)
+
+**Later (2026-10-03, DND-1937):** step 2 below puts the `glrt-` token in
+`register`'s argv, where any process on the host can read it. Superseded:
+create the runner with its tag and "Run untagged jobs" set in GitLab, then
+`sudo scripts/setup-gitlab-runner --user <user> --runner <name>:<tag>` with
+the token on stdin. It writes the `[[runners]]` entry with the
+`[runners.docker]` block below into a `0600` config.toml. The walt_ui runner's
+untagged design is set in GitLab, so its `<tag>` is only the entry's record.
 
 1. GitLab: **walt_ui → Settings → CI/CD → Runners → New project runner**. Turn ON
    **"Run untagged jobs"**, leave **Tags empty**, copy the `glrt-…` token.

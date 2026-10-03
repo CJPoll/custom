@@ -1,7 +1,10 @@
-# Options for the self-hosted GitLab Runner (/etc/init.d/gitlab-runner).
+# Options for the self-hosted GitLab Runner (/etc/init.d/gitlab-runner, or an
+# instance /etc/init.d/gitlab-runner.<suffix> with /etc/conf.d/gitlab-runner.<suffix>).
 #
 # Which user runs the runner. Must exist, have rootless Docker
-# (docker-rootless-gitlab-runner), and lingering enabled. Default: gitlab-runner.
+# (docker-rootless-gitlab-runner[.<suffix>]), and lingering enabled. Default:
+# gitlab-runner-<suffix> for an instance, else gitlab-runner. scripts/setup-gitlab-runner
+# writes a new install's conf.d with these set.
 #RUNNER_USER="gitlab-runner"
 #RUNNER_HOME="/home/gitlab-runner"
 

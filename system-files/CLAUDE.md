@@ -100,6 +100,15 @@ register steps, the `keep-stopped-until-the-walt_ui-MR-merges` ordering, the
 **`gitlab-runner-runbook.md`**. The live `config.toml` holds the `glrt-` token and
 is never committed; `gitlab-runner-config.toml.example` is the non-secret shape.
 
+**Later (2026-10-03, DND-1937):** both initd files also serve named runner users.
+An instance `gitlab-runner.<suffix>` / `docker-rootless-gitlab-runner.<suffix>`
+(a symlink in `/etc/init.d` to the base file) derives its user,
+`gitlab-runner-<suffix>`, from `RC_SVCNAME`; `/etc/conf.d/<instance>` may
+override it. The runner instance starts after its own docker instance. The
+config.toml is written by `scripts/setup-gitlab-runner --runner …` (tokens on
+stdin), not by `gitlab-runner register --token` in argv; the registry declares
+each runner user's config.toml (`ai/secrets/registry.json`, field `user`).
+
 ### Stopping a service ends its whole process tree (lib/initd-proc-tree.sh)
 
 `supervise-daemon` and `start-stop-daemon` signal ONE pid on stop. A command

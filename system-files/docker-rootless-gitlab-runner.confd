@@ -1,8 +1,11 @@
-# Options for the rootless Docker service (/etc/init.d/docker-rootless-gitlab-runner).
+# Options for the rootless Docker service (/etc/init.d/docker-rootless-gitlab-runner,
+# or an instance docker-rootless-gitlab-runner.<suffix> with its own conf.d).
 #
 # Which user's rootless daemon this service manages. The user must exist, have
 # /etc/subuid + /etc/subgid ranges, and lingering enabled
-# (loginctl enable-linger <user>). Default: gitlab-runner.
+# (loginctl enable-linger <user>). Default: gitlab-runner-<suffix> for an
+# instance, else gitlab-runner. scripts/setup-gitlab-runner-docker writes a new
+# install's conf.d with the user and --data-root /srv/ci/<user>/docker.
 #DOCKER_ROOTLESS_USER="gitlab-runner"
 
 # Extra args passed through to dockerd (inside dockerd-rootless.sh).

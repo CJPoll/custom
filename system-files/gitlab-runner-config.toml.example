@@ -6,6 +6,10 @@
 # to reconcile the registered config against, especially the [runners.docker]
 # block (which `register --docker-*` flags set, but which is easy to drift).
 #
+# Since DND-1937, scripts/setup-gitlab-runner --runner NAME:TAG[:LIMIT] writes
+# this file (tokens on stdin, mode 0600) for any runner user, with a per-runner
+# `limit`, and the cache bind-mounted from /srv/ci/<user>/cache.
+#
 # Design (see system-files/gitlab-runner-runbook.md):
 #   * privileged = false — the whole point of the rootless setup; a CI job can
 #     never reach host root.
