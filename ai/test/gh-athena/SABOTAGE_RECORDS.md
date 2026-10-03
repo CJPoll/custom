@@ -135,3 +135,23 @@ In the first unfixed run, H4's reference-transaction hook made a plain
 header (`start via=direct url=https://github.com/o/r2.git
 hdr=ok:x-access-token`): a push from inside the route, as the bot, judged by
 nothing. After: `RESULT: 227 passed, 0 failed`.
+
+The review round (code-reviewer and adr-reviewer) found three commands that
+reached the grant or the header anyway: core.fsmonitor and a rebasing pull's
+post-index-change hook both run before the transport (measured on git 2.54),
+and the wrapper's header-carrying ls-remote probes followed a repository
+insteadOf to another helper. Cases R1-R3 were added first. On the
+first-round head 58dd556a: `RESULT: 227 passed, 3 failed`:
+
+```
+  FAIL  R1. fsmonitor before the transport
+        r1a=0 r1b=0 r1c=1 rc=0
+  FAIL  R2. pull --rebase
+        a_rc=1 a_err='git-remote-athena-forge: REFUSING the connection to https://github.com/o/r.git: the route's one credential grant for this command was already used: ...
+  FAIL  R3. probe insteadOf
+        rc=0 out= err= probe=[r3 hdr=present fd=nofd transport=refused
+```
+
+R2's "already used" is the post-index-change hook having drained the grant
+before the fetch; R3's `hdr=present` is the helper holding the header. After
+(fg_refuse_pre_transport, https-only probes): `RESULT: 230 passed, 0 failed`.

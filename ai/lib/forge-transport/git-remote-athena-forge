@@ -74,8 +74,8 @@ IFS= read -r -t 5 rh <&"${fd}" || rc=$?
 eval "exec ${fd}<&-"
 unset ATHENA_FG_CRED_FD
 if [ "${rc}" -gt 128 ]; then
-  refuse "the route's credential grant did not arrive within 5 seconds." \
-    "run the command again through the Athena route; if it repeats, escalate to your admiral with the command and this error."
+  refuse "the route's credential grant did not arrive within 5 seconds: it was already used (and its writer had not yet closed the pipe), or the route stalled." \
+    "push or fetch from a hook with \`~/dev/custom/ai/bin/gh-athena git …\` (or glab-athena) itself, one connection per command; if a plain routed command shows this, escalate to your admiral with the command and this error."
 fi
 if [ -z "${rh}" ] || [ -z "${header}" ]; then
   refuse "the route's one credential grant for this command was already used: a hook, a driver, a nested git, or a second connection (fetch --all, remote update, a submodule fetch) asked for it after the first connection." \

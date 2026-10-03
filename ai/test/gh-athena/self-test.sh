@@ -1531,6 +1531,54 @@ if [ "${X1A_RC}" != 0 ] && [ "${X1B_RC}" != 0 ] && [ "${X1C_RC}" != 0 ] \
   ok "X1. the transport with no grant, a grant that is no pipe, a used grant: three distinct refusals, each with Fix: and the URL"
 else bad "X1. transport misses" "a=[${X1A_RC}:${X1A}] b=[${X1B_RC}:${X1B}] c=[${X1C_RC}:${X1C}]"; fi
 
+# R1 (review round). A command git starts BEFORE the transport would drain
+# the grant: core.fsmonitor (fetch, pull) and, on a pull that rebases, the
+# post-index-change hook. Measured on git 2.54: each runs before the remote
+# helper. A granted command with either is refused up front.
+git -C "${X}/src" remote set-url origin 'https://github.com/o/r.git'
+never_granted() { # <tag> : no line for <tag> saw a header, a grant pipe, or ran the transport
+  ! grep -q "^$1 .*\\(hdr=present\\|fd=pipe\\|transport=RAN\\)" "${X_PROBE_LOG}"
+}
+x_reset
+xgh "${X}/src" -c core.fsmonitor="$(mkprobe r1a)" fetch -q origin
+R1A=0; is_refusal && [[ "${ERR}" == *"core.fsmonitor"* ]] && never_granted r1a && R1A=1
+x_reset; git -C "${X}/src" config core.fsmonitor "$(mkprobe r1b)"
+xgh "${X}/src" pull -q --no-rebase origin main
+git -C "${X}/src" config --unset core.fsmonitor
+R1B=0; is_refusal && [[ "${ERR}" == *"core.fsmonitor"* ]] && never_granted r1b && R1B=1
+x_reset
+xgh "${X}/src" -c core.fsmonitor=false fetch -q origin
+R1C=0; [ "${RC}" = 0 ] && [ "$(x_starts)" = 1 ] && R1C=1
+if [ "${R1A}" = 1 ] && [ "${R1B}" = 1 ] && [ "${R1C}" = 1 ]; then
+  ok "R1. core.fsmonitor naming a command (-c, repository config) on a granted fetch / pull: refused up front, the command never holds the grant; core.fsmonitor=false runs"
+else bad "R1. fsmonitor before the transport" "r1a=${R1A} r1b=${R1B} r1c=${R1C} $(xdiag)"; fi
+
+x_reset; x_sync
+git -C "${X}/src" config hook.r2.command "$(mkprobe r2)"; git -C "${X}/src" config hook.r2.event post-index-change
+touch "${X}/src/.gitattributes-r2"; git -C "${X}/src" add .gitattributes-r2; git -C "${X}/src" commit -q -m r2; touch "${X}/src/.gitattributes-r2"
+xgh "${X}/src" pull -q --rebase origin main; R2A_RC="${RC}"; R2A_ERR="${ERR}"
+git -C "${X}/src" config pull.rebase true
+xgh "${X}/src" pull -q origin main; R2B_RC="${RC}"; R2B_ERR="${ERR}"
+git -C "${X}/src" config --unset pull.rebase
+git -C "${X}/src" config --unset hook.r2.command; git -C "${X}/src" config --unset hook.r2.event
+if [ "${R2A_RC}" = 3 ] && [[ "${R2A_ERR}" == *"rebase"*"Fix:"* ]] && [ "${R2B_RC}" = 3 ] && [[ "${R2B_ERR}" == *"rebase"* ]] && never_granted r2; then
+  ok "R2. a granted pull that rebases (--rebase, pull.rebase): refused up front, since its post-index-change hook runs before the transport"
+else bad "R2. pull --rebase" "a_rc=${R2A_RC} a_err='${R2A_ERR}' b_rc=${R2B_RC} b_err='${R2B_ERR}' probe=[$(cat "${X_PROBE_LOG}")]"; fi
+
+# R3 (review round). The wrapper's own ls-remote probes around a push carry
+# the header: a repository insteadOf must not hand it to a helper of its
+# choosing. They run with https as the only allowed protocol.
+x_reset; x_sync; git -C "${X}/src" commit -q --allow-empty -m r3
+git -C "${X}/src" remote set-url origin 'git@github.com:o/r.git'
+git -C "${X}/src" config url.r3::x/.insteadOf https://github.com/
+printf '#!/bin/sh\nexec %s r3\n' "${X}/probe" > "${X}/bin/git-remote-r3"; chmod +x "${X}/bin/git-remote-r3"
+OUT="$(cd "${X}/src" && PATH="${X}/bin:${XPATH}" GIT_ALLOW_PROTOCOL=file:athena-forge:https:r3 "${WRAPPER}" git push -q origin HEAD:main 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"
+git -C "${X}/src" config --unset url.r3::x/.insteadOf
+git -C "${X}/src" remote set-url origin 'https://github.com/o/r.git'
+if [ "${RC}" = 0 ] && [ "$(git --git-dir="${X_FORGE}/o/r.git" rev-parse main)" = "$(git -C "${X}/src" rev-parse HEAD)" ] && never_granted r3; then
+  ok "R3. a repository insteadOf to another helper: the push lands; the wrapper's header-carrying probes never reach that helper"
+else bad "R3. probe insteadOf" "$(xdiag)"; fi
+
 # DND-1880. No command under the route sees the bot header in its config.
 OUT="$(cd "${X}/src" && PATH="${XPATH}" "${WRAPPER}" git config --get-all http.https://github.com/.extraheader 2>&1)"; RC=$?
 if [ "${RC}" = 1 ] && [ -z "${OUT}" ]; then ok "DND-1880. \`gh-athena git config --get-all http.https://github.com/.extraheader\` prints no bot header"

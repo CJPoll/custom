@@ -101,7 +101,9 @@ What each part does:
 - The `insteadOf` rewrite turns an SSH-form remote (`git@github.com:o/r.git`)
   into HTTPS for that command. Without it the push goes over SSH as the owner.
   The wrapper's own rewrite (to its transport, `athena-forge::https://…`)
-  comes first and wins.
+  comes before this `-c` and wins. A repository or global
+  `url.https://github.com/.insteadOf=git@github.com:` is read earlier and
+  wins instead; the wrapper then refuses the push, with a `Fix:`.
 - `GIT_TERMINAL_PROMPT=0` makes a bot-auth failure **fail** instead of prompting.
 
 The wrapper (DND-389 and later) applies the helper reset, the rewrite, and the

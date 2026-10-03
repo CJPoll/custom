@@ -34,8 +34,8 @@
 #     below holds the tables, and names the walks that read them). Also
 #     refused: any form that makes git run a command the caller chose
 #     (submodule foreach, bisect run, rebase --exec, an ext:: address,
-#     --exec-path, ...), since that command inherits the bot's credential
-#     and pushes past every check here (DND-1844; "Commands git runs
+#     --exec-path, ...), since any git that command runs is past every
+#     check here (DND-1844; "Commands git runs
 #     itself" below lists them and the residual). Also refused: a command
 #     that writes a remote ref other than `git push` (send-pack, http-push,
 #     a remote-<name> transport helper, subtree push), since only a push is
@@ -610,7 +610,7 @@ fg_runs_command() {
 # fg_refuse_runs_command <what git was asked> : refuse FG_RC_WHAT with FG_RC_FIX.
 fg_refuse_runs_command() {
   cat >&2 <<EOF
-$FG_TOOL: REFUSING \`git $1\`: it runs a command that git starts itself ($FG_RC_WHAT). That command inherits this route's bot credential, and any git it runs comes from git's exec-path, where $FG_TOOL never sees it: a push it makes is not checked for its remote, its submodules, a red main or the gate.
+$FG_TOOL: REFUSING \`git $1\`: it runs a command that git starts itself ($FG_RC_WHAT). Any git that command runs comes from git's exec-path, where $FG_TOOL never sees it: a push it makes is not checked for its remote, its submodules, a red main or the gate.
   Fix: $FG_RC_FIX. $FG_ESCALATE
 EOF
   exit 3
@@ -866,6 +866,8 @@ FG_RESOLVED_URLS=""
 FG_CRED_URLS=""
 FG_URLS_RESOLVED=0
 FG_URLS_SUB=""
+FG_CMD_GLOB=()
+FG_CMD_ARGS=()
 FG_PAGINATE=0
 FG_PUSH_URL=""
 FG_PUSH_GLOB=()
@@ -873,7 +875,7 @@ FG_PUSH_ARGS=()
 fg_refuse_non_https() {
   local -a glob=() ex=()
   local sub="" mode depth=0 alias_val
-  FG_URLS_RESOLVED=0; FG_URLS_SUB=""; FG_CRED_URLS=""; FG_PAGINATE=0
+  FG_URLS_RESOLVED=0; FG_URLS_SUB=""; FG_CRED_URLS=""; FG_PAGINATE=0; FG_CMD_GLOB=(); FG_CMD_ARGS=()
   fg_rewrite_args
 
   G() { git "${FG_REWRITE_ARGS[@]}" "${glob[@]}" "$@"; }
@@ -928,8 +930,8 @@ fg_refuse_non_https() {
     depth=$((depth + 1))
   done
 
-  # A command git starts itself carries the bot's credential past every check
-  # below (DND-1844): refuse it, on the alias-expanded argv.
+  # A git that a command git starts itself runs is past every check below
+  # (DND-1844): refuse it, on the alias-expanded argv.
   fg_exec_path_moved "${glob[@]}" && fg_refuse_runs_command "${glob[*]:+${glob[*]} }$sub"
   fg_runs_command "$sub" "$@" && fg_refuse_runs_command "$sub $*"
   # Only `push` is judged below: every other remote-ref writer is refused.
@@ -1105,6 +1107,8 @@ fg_refuse_non_https() {
   done
   FG_URLS_RESOLVED=1
   FG_URLS_SUB="$sub"
+  FG_CMD_GLOB=( "${glob[@]}" )
+  FG_CMD_ARGS=( "${sub_args[@]}" )
   if [ "$sub" = push ]; then
     FG_PUSH_URL="${FG_RESOLVED_URLS%%$'\n'*}"
     FG_PUSH_GLOB=( "${glob[@]}" )
@@ -1175,10 +1179,14 @@ fg_push_and_record() {
   fi
   # hprobe <git args...> : a probe with the header appended to the
   # environment config channel, in a subshell (export is a builtin, so the
-  # header is on no argv). A local push URL needs no header and gets none.
+  # header is on no argv). https is the only protocol it may use, so a
+  # config rewrite of the URL cannot hand the header to a helper (`<name>::`),
+  # ext::, ssh's command or a local path. A local push URL needs no header
+  # and gets none.
   hprobe() (
     case "$purl" in "https://$FG_HOST/"*)
-      export "GIT_CONFIG_KEY_$n=$hk" "GIT_CONFIG_VALUE_$n=$FG_HEADER" GIT_CONFIG_COUNT="$((n + 1))" ;;
+      export "GIT_CONFIG_KEY_$n=$hk" "GIT_CONFIG_VALUE_$n=$FG_HEADER" GIT_CONFIG_COUNT="$((n + 1))" \
+        GIT_ALLOW_PROTOCOL=https ;;
     esac
     fg_probe "${probe[@]}" "$@"
   )
@@ -1197,6 +1205,7 @@ fg_push_and_record() {
   if [ "$ref" = refs/heads/main ]; then before="$main_sha"; else before="$head_sha"; fi
   [ "$FG_CRED" = grant ] && fg_open_grant
   env -u GIT_ASKPASS -u SSH_ASKPASS GIT_TERMINAL_PROMPT=0 git "$@" || rc=$?
+  fg_close_grant
   if [ "$rc" -eq 0 ] && ls="$(hprobe ls-remote "$purl" "$ref")"; then
     while IFS= read -r line; do
       [ "${line#*$'\t'}" = "$ref" ] && after="${line%%$'\t'*}"
@@ -1433,15 +1442,18 @@ fg_refuse_ungated_main() {
 # past every check here. Measured on git 2.54 against local bare remotes
 # (ai/test/gh-athena/self-test.sh, the DND-1868 cases).
 #
-# Now the header never enters git's environment. fg_git_exec rewrites both
-# forge URL forms to `athena-forge::https://<host>/` (fg_rewrite), puts
+# The header never enters git's environment. fg_git_exec rewrites both forge
+# URL forms to `athena-forge::https://<host>/` (fg_rewrite), puts
 # FG_TRANSPORT_DIR first on git's PATH, and, for a command that reaches
 # exactly ONE forge URL, opens a pipe holding two lines, the absolute path of
 # git's own git-remote-https and the header, exported as ATHENA_FG_CRED_FD
-# with ATHENA_FG_HOST. git starts the transport first (git --no-pager; -p is
-# refused): for a push it connects before the pre-push hook and on-demand
-# submodule pushes; a fetch, clone or pull runs its hooks, filters, drivers
-# and editors after the transfer. The transport drains the pipe and execs
+# with ATHENA_FG_HOST. git starts the transport before any command of the
+# caller's: a push connects before the pre-push hook and on-demand submodule
+# pushes; a fetch, clone or pull runs its hooks, filters, drivers and editors
+# after the transfer. The three exceptions measured on git 2.54 are closed:
+# a pager (git --no-pager; -p is refused), core.fsmonitor naming a command,
+# and the post-index-change hook of a rebasing pull (each refused,
+# fg_refuse_pre_transport). The transport drains the pipe and execs
 # git-remote-https with the header. Anything started later finds the pipe
 # empty, and its own forge connection fails at the transport, loudly.
 #
@@ -1458,19 +1470,83 @@ fg_refuse_ungated_main() {
 #     pushurls, a forge remote beside another); an athena-forge:: URL to any
 #     other host (a caller-written rewrite); and a URL that an insteadOf or
 #     pushInsteadOf turns into plain https://<host>/, which the route's
-#     rewrite never reaches and which would carry no credential.
+#     rewrite never reaches and which would carry no credential; and a
+#     command that would start a command of the caller's before the
+#     transport (fg_refuse_pre_transport).
+# A `submodule` command whose URL set holds several gets no credential
+# instead of a refusal: most of its subcommands (status, init, sync) reach
+# no forge at all.
 # Over-refusals, accepted: a submodule fetch nested under a routed fetch,
 # pull or clone, a partial-clone lazy fetch, push.negotiate, and a bundle-URI
 # clone each meet a used grant and fail; a signed push fails at
 # refuse-signing. One connection per command.
+# The wrapper's own ls-remote probes around a push (fg_push_and_record) carry
+# the header in their environment, with https as the only protocol git may
+# use (GIT_ALLOW_PROTOCOL), so no helper or command a config rewrite names
+# can receive it.
 # Residual: same uid is not a boundary (a process that reads the token cache,
 # or the transport's /proc/<pid>/environ while it runs, gets the token); the
-# grant rests on fg_refuse_non_https's URL resolution.
+# grant rests on fg_refuse_non_https's URL resolution; and the transport and
+# the probes read the caller's http.* config (proxy, TLS verification) like
+# any git over https.
 FG_CRED=""
 FG_CRED_WHY=""
 FG_CRED_URL=""
 FG_REMOTE_HTTPS=""
 FG_HEADER=""
+
+# CG : git with the granted command's own global options (alias ones
+# included) and the route's rewrites, for the config reads below.
+CG() { git "${FG_REWRITE_ARGS[@]}" "${FG_CMD_GLOB[@]}" "$@"; }
+
+# fg_refuse_pre_transport : refuse a granted command that would start a
+# command of the caller's before the transport, where it would hold the
+# grant. Measured on git 2.54 (each before the remote helper starts):
+#   * core.fsmonitor naming a hook command, on fetch and pull (an index read).
+#     A bool (git's own fsmonitor daemon, or off) runs no caller command;
+#   * the post-index-change hook, on a pull that rebases (its clean-tree
+#     check refreshes and writes the index). A pull that merges, or rebases
+#     with --autostash, starts nothing before the fetch; this refuses every
+#     rebasing pull, which can only over-refuse.
+# Push, clone and ls-remote start nothing before the helper.
+fg_refuse_pre_transport() {
+  local fsm rc=0 a mode="" cur v
+  fsm="$(CG config --get core.fsmonitor 2>/dev/null)" || rc=$?
+  case "$rc" in
+    0|1) ;;
+    *) fg_refuse_cred "COULD NOT LOOK whether core.fsmonitor names a command (git config exited $rc)" \
+         "repair the git config git cannot read, then retry." ;;
+  esac
+  if [ -n "$fsm" ] && ! fg_bool_false "$fsm"; then
+    case "${fsm,,}" in
+      true|yes|on|1) ;;
+      *) fg_refuse_cred "core.fsmonitor names a command ($fsm), which git starts before the forge connection, so it would hold the credential" \
+           "run it with \`-c core.fsmonitor=false\` (\`~/dev/custom/ai/bin/$FG_TOOL git -c core.fsmonitor=false …\`), or unset core.fsmonitor in this repository." ;;
+    esac
+  fi
+  [ "$FG_URLS_SUB" = pull ] || return 0
+  # Does this pull rebase? The last --rebase / --no-rebase / -r flag, else
+  # branch.<cur>.rebase, else pull.rebase. Anything but false rebases.
+  for a in "${FG_CMD_ARGS[@]}"; do
+    case "$a" in
+      --) break ;;
+      --no-rebase) mode=false ;;
+      --rebase) mode=true ;;
+      --rebase=*) mode="${a#--rebase=}" ;;
+      -r) mode=true ;;
+    esac
+  done
+  if [ -z "$mode" ]; then
+    cur="$(CG symbolic-ref -q --short HEAD 2>/dev/null || true)"
+    [ -n "$cur" ] && mode="$(CG config --get "branch.$cur.rebase" 2>/dev/null || true)"
+    [ -n "$mode" ] || mode="$(CG config --get pull.rebase 2>/dev/null || true)"
+  fi
+  [ -z "$mode" ] && return 0
+  fg_bool_false "$mode" && return 0
+  v="$mode"
+  fg_refuse_cred "this pull rebases (rebase=$v), and a rebasing pull runs the post-index-change hook before its fetch, so the hook would hold the credential" \
+    "fetch through the route, then rebase with plain git, which reaches no forge: \`~/dev/custom/ai/bin/$FG_TOOL git fetch <remote>\`, then \`git rebase <remote>/<branch>\`; or pull with --no-rebase."
+}
 
 # fg_refuse_cred <what> <fix> : refuse the whole command up front.
 fg_refuse_cred() {
@@ -1527,6 +1603,7 @@ fg_cred_decide() {
     FG_CRED_WHY="no URL it reaches is https://$FG_HOST/"
     return 0
   fi
+  fg_refuse_pre_transport
   own="$(env -u GIT_EXEC_PATH git --exec-path 2>/dev/null || true)"
   if [ -z "$own" ] || [ ! -x "$own/git-remote-https" ]; then
     fg_refuse_cred "COULD NOT LOOK where git's own git-remote-https is (\`git --exec-path\` gave '${own}')" \
@@ -1541,18 +1618,28 @@ fg_cred_decide() {
 # a drained pipe gives every later reader EOF, where a file (or a here-string,
 # which may be one) can be reopened at offset 0 through /proc/<pid>/fd/N.
 # printf is a builtin, so the header is on no argv.
+FG_GRANT_FD=""
 fg_open_grant() {
-  local fd
-  exec {fd}< <(printf '%s\n%s\n' "$FG_REMOTE_HTTPS" "$FG_HEADER")
-  export ATHENA_FG_CRED_FD="$fd" ATHENA_FG_HOST="$FG_HOST"
+  exec {FG_GRANT_FD}< <(printf '%s\n%s\n' "$FG_REMOTE_HTTPS" "$FG_HEADER")
+  export ATHENA_FG_CRED_FD="$FG_GRANT_FD" ATHENA_FG_HOST="$FG_HOST"
+}
+
+# fg_close_grant : after git ran as a child (fg_push_and_record), close the
+# grant, so nothing the wrapper runs next inherits it.
+fg_close_grant() {
+  [ -n "$FG_GRANT_FD" ] || return 0
+  exec {FG_GRANT_FD}<&-
+  FG_GRANT_FD=""
+  unset ATHENA_FG_CRED_FD ATHENA_FG_HOST
 }
 
 # fg_git_exec <basic-user> <token> <git args...> : run (or, under FG_DRY_RUN=1,
 # print) git with every owner credential source removed, git's pager off, and
 # the bot's HTTPS basic-auth header for FG_HOST granted to the route's
 # transport alone ("The credential grant" above). The token is never on any
-# process's argv (visible in `ps`), never in a URL, a config file or git's
-# environment.
+# process's argv (visible in `ps`), never in a URL or a config file, and never
+# in the environment of the git that runs the command; only the wrapper's own
+# https-only ls-remote probes around a push (fg_push_and_record) carry it.
 fg_git_exec() {
   local user="$1" token="$2" a
   shift 2
