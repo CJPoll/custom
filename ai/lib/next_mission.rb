@@ -25,6 +25,11 @@
 # tier 4's Kind order. An unset Control on an open CRITICAL/HIGH ticket whose
 # tier it could change is reported (control_unset), never read as "none".
 #
+# Security (DND-1789): tier 1(a) needs Security=pre-existing, as the tier
+# table states. An unset Security is not pre-existing, so an open CRITICAL/HIGH
+# Vulnerability with it unset ranks below tier 1 and is reported
+# (security_unset), never silently dropped.
+#
 # Functional-first (owner correction, 2026-09-27): a tier-4 ticket that is not a
 # Feature (and not a blocker) is held while any Path=Critical or Kind=Feature
 # ticket in scope is unfinished. Tiers 0-2 and blockers are never held.
