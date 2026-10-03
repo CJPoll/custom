@@ -129,6 +129,11 @@ The lib is installed as a root-owned copy at
 Every `scripts/setup-*` installer and `bt-setup service` install it. A missing
 lib fails start and stop loudly, with the install command as its `Fix:`.
 
+The runner and rootless-docker initds read two test seams (DND-1439):
+`ATHENA_INITD_LOG_DIR` (default `/var/log`) and `ATHENA_INITD_RUN_USER_DIR`
+(default `/run/user`). Only the self-test sets them, to its own temp dirs. Leave
+them unset in `/etc/conf.d/<svc>`.
+
 Consequences to know:
 
 - The anchor match is by design broader than the tree. Start and stop also end

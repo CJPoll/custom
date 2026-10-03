@@ -644,7 +644,7 @@ if [ -z "${real_logs}" ]; then pass "seam: nothing of this run exists under the 
 else fail "seam: this run wrote under the real /var/log: ${real_logs}"; fi
 for initd in github-runner gitlab-runner docker-rootless-github-runner docker-rootless-gitlab-runner docker-rootless-athena; do
   want_uid="$(id -u)"
-  got="$(env -u ATHENA_INITD_LOG_DIR -u ATHENA_INITD_RUN_USER_DIR RC_SVCNAME=seam-default \
+  got="$(env -u ATHENA_INITD_LOG_DIR -u ATHENA_INITD_RUN_USER_DIR -u DOCKER_HOST RC_SVCNAME=seam-default \
     RUNNER_USER="${me}" DOCKER_ROOTLESS_USER="${me}" \
     sh -c '. "$1" >/dev/null 2>&1; echo "$output_log|$error_log|$XDG_RUNTIME_DIR|${DOCKER_HOST:-}"' sh "${sysfiles}/${initd}.initd" 2>&1)"
   want_docker="unix:///run/user/${want_uid}/docker.sock"
