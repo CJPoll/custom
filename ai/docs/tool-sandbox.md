@@ -12,7 +12,7 @@ creation*, requirement R3 and adoption-gate state S3). `ai/bin/tool-propose`
 
 ```
 ai/bin/tool-sandbox --prepare-clone DEST [--sha SHA]
-ai/bin/tool-sandbox --work DEST/repo [--out DIR] [--timeout SECS] -- CMD [ARGS...]
+ai/bin/tool-sandbox --work DEST/repo [--out DIR] [--stdin FILE] [--timeout SECS] -- CMD [ARGS...]
 ai/bin/tool-sandbox --self-test
 ```
 
@@ -58,6 +58,7 @@ harness-gate run. A probe whose sandbox cannot start fails; none skips.
 | Host processes | `--unshare-all` (pid ns), `--new-session`, `--die-with-parent`, `--cap-drop ALL` | E-13 a different pid ns, at most 3 pids visible |
 | Leaked file descriptors | spawned with `close_others`; bwrap closes its status fd | E-20 an fd the caller leaks is not open inside, and no fd but 0-2 and the probe's own is |
 | The caller's stdin | stdin is `/dev/null` | E-21 |
+| A `--stdin FILE` beyond its bytes | the host reads FILE and writes its bytes into a pipe that is the child's fd 0; FILE is never bound | E-23 the child reads exactly the bytes from a pipe, FILE's path is ENOENT inside, and a write through `/proc/self/fd/0` leaves FILE unchanged; a symlink, a directory, a missing, relative, hardlinked or out-of-root FILE is refused (125) and CMD never runs |
 | A sandbox outliving tool-sandbox | TERM/INT/HUP are trapped before the spawn and forwarded to `timeout` | E-22 a TERM mid-run exits 143 and leaves no bwrap running |
 | Host files through the work dir | refusals below | E-17 each refused path exits 125 and CMD never runs |
 
@@ -86,6 +87,12 @@ refusal names the path and why (exit 125, `Fix:`):
   repo) is refused;
 - a `--work` or `--out` holding an `origin.git` (a `--prepare-clone` DEST
   itself) is refused: bound read-write, the mirror could be rewritten.
+
+`--stdin FILE` (DND-176) is validated as a key too: absolute, an existing
+regular file that is not a symlink leaf, owned by you, with one link, at most
+16 MiB, and with a realpath strictly beneath the temp root. The host opens it
+with `O_NOFOLLOW` and feeds its bytes through a pipe, so the child never holds
+a descriptor of FILE. Without `--stdin`, stdin stays `/dev/null`.
 
 `DEST/origin.git` is bound read-only at `/origin` when `--work` is
 `DEST/repo`. If it is present but fails validation, the run is refused; it is

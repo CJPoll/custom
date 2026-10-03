@@ -297,6 +297,12 @@ STATIC_CHECKS = [
   # policy and pinned-clone suites are the discovered
   # ai/lib/test/tool-sandbox/self-test.sh.
   ["tool-sandbox self-test",    %w[ai/bin/tool-sandbox --self-test]],
+  # tool-propose's manager (fake adapters) + containment self-test (DND-176) is
+  # gate-safe: no model, no git, no bwrap. Its domain and end-to-end suites
+  # (real tool-sandbox, a stub gate, file candidates) are the discovered
+  # ai/lib/test/tool-propose/self-test.sh. A real measurement run, or one that
+  # calls the proposer model, is NEVER declared here.
+  ["tool-propose self-test",    %w[ai/bin/tool-propose --self-test]],
   # setup-hooks' --self-test is INLINE in the installer (no dedicated
   # **/test/self-test.sh file backs it), so it stays hand-declared here.
   ["setup-hooks self-test",     %w[scripts/setup-hooks --self-test]],

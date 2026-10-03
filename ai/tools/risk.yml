@@ -240,6 +240,12 @@ tools:
   # CMD still writes its --work and --out dirs, and --prepare-clone writes a
   # clone. Classed by worst-case capability, like test-slot: it runs a command.
   tool-sandbox:            { class: destructive, reason: executes }
+  # tool-propose (DND-176) is propose-only, like block-optimize: it writes only
+  # its --out-dir and scratch clones under the temp root that it removes, and
+  # an unreachable candidate commit inside them. Its capture allowlist denies
+  # every ref move, push, forge CLI and --update-baseline, and the candidate
+  # runs only inside tool-sandbox. One model call without --candidate.
+  tool-propose:            { class: idempotent, reason: propose }
   # main-health (DND-1482) runs the landed tree's harness gate in a lane under
   # test-slot, writes its own state under the git common dir, and on a RED main
   # sends a harness-alerts message through send-mail (destructive, send). Classed
