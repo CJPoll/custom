@@ -191,20 +191,22 @@
 #   * a group or alternation (`(a|b)`, one alternative included, `g(i)t`)
 #     is expanded into its alternatives and matched like a glob word: may
 #     be git when any alternative can be git or git-stash;
-#   * a trailing qualifier list (`(...)` with no `|` or `(`) that holds a
-#     `:` modifier, `e`, `+`, `P`, or an `oe`/`o+` sort can rename the
-#     match or run code: may be git. A filter-only list (`(.)`, `(x)`) keeps
-#     the pattern itself. A list zsh refuses (an unknown character, a
-#     missing number, no closing delimiter) runs nothing: jq `select(.a==1)`,
-#     python `print(a, b)`;
+#   * a trailing `(...)` with no `|` or `(` is read both ways, and the worse
+#     verdict wins. Under bareglobqual (the zsh default, so a `zsh -c`
+#     payload) it is a qualifier list: one that holds a `:` modifier, `e`,
+#     `+`, `P`, or an `oe`/`o+` sort can rename the match or run code, so
+#     may be git; a filter-only list (`(.)`, `(x)`) keeps the pattern
+#     before it; a list zsh refuses (an unknown character, a missing
+#     number, no closing delimiter: jq `select(.a==1)`, python
+#     `print(a, b)`) or one on an empty pattern yields nothing. Under
+#     NO_BARE_GLOB_QUAL, which Claude Code sets in the Bash tool shell
+#     before each command (seen in its process list 2026-10-03), it is a
+#     group: `./gi(t)` and `env (git)` run git there;
 #   * `(#...)` flags work only under extendedglob, which GLOBOPT already
 #     reads as may be git; under default options `#` in a group is literal
 #     and in a qualifier list is refused;
-#   * nothing runs for a qualifier on an empty pattern (prose `x (written
-#     ...)`), a group holding `/`, an unbalanced paren, or a `;` or `&`
-#     inside the paren (zsh: "bad pattern", "parse error"). This holds
-#     before the next rule: an empty pattern matches no file whatever its
-#     qualifier expands to;
+#   * nothing runs for a group holding `/`, an unbalanced paren, or a `;`
+#     or `&` inside the paren (zsh: "bad pattern", "parse error");
 #   * an expansion or backtick in the word, or a leading tilde: may be git.
 # A may-be-git word is judged like a glob command word, with the words
 # after the whole zsh word as its arguments. A zsh word that starts with
@@ -842,25 +844,26 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
     return ns
   }
   # zwcat(z) (DND-1858): what the raw zsh word z, which holds a glob group
-  # or qualifier, can run as. Verified against zsh 5.9 under default
-  # options (a fake git in a scratch dir):
+  # or qualifier, can run as. Verified against zsh 5.9 (a fake git in a
+  # scratch dir):
   #   "git"  it may be git or git-stash, or this hook cannot tell;
-  #   "glob" a group pattern none of whose words can be git or git-stash;
-  #   "lit"  a plain word that only a filter qualifier follows (`print(x)`,
-  #          jq `select(.x)`): zsh matches that literal name or nothing;
+  #   "glob" a pattern none of whose words can be git or git-stash;
+  #   "lit"  a plain word, so zsh matches that literal name or nothing;
   #   "err"  it yields no command word: zsh refuses the qualifier or the
-  #          pattern (`select(.a==1)` and python `print(a, b)`: "number
-  #          expected"; `Runs.close(`: "bad pattern"), or the qualifier
-  #          sits on an empty pattern, which matches no file.
+  #          pattern (`Runs.close(`: "bad pattern").
   # A glob option set anywhere (GO) or a leading tilde is "git"; so is a
-  # `$` or backtick, unquoted or double-quoted (an expansion fills the
-  # pattern or the qualifier list: `X=:u; ab($X)` is AB), unless the word
-  # is a qualifier on an empty pattern. A trailing `(...)` holding no `|`
-  # or `(` is a qualifier list (bareglobqual, on by default), read by
-  # zqual. Every other paren is a group: each alternative is expanded
-  # (zgexp), then braces (gbexp), and each word is matched like a glob
-  # command word (gword).
-  function zwcat(z,    n, i, c, st, cw, cu, d, p, r, g, k, any, hx) {
+  # `$` or backtick, unquoted or double-quoted: an expansion fills the
+  # pattern or the qualifier list (`X=:u; ab($X)` is AB). A trailing
+  # `(...)` holding no `|` or `(` is read two ways, and the worse verdict
+  # wins. Under bareglobqual (the zsh default, so `zsh -c` payloads) it is
+  # a qualifier list, read by zqual: a renaming one is "git", a refused one
+  # (`select(.a==1)`, python `print(a, b)`: "number expected") yields
+  # nothing, and a filter-only one leaves the pattern before it (bv); on an
+  # empty pattern it yields nothing. Under NO_BARE_GLOB_QUAL, which Claude
+  # Code sets in the Bash tool shell before each command, it is a group
+  # (gv): `./gi(t)` is git there. Every other paren is a group too, read by
+  # zgroups.
+  function zwcat(z,    n, i, c, st, cw, cu, d, p, hx, qv, bv, gv) {
     if (GO) return "git"
     cw = ""; cu = ""; st = 0; hx = 0; n = length(z)
     for (i = 1; i <= n; i++) {
@@ -889,16 +892,33 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
         else if (c == "(" && --d == 0) { p = i; break }
       }
       if (p > 0 && zqtext(cw, cu, p, n)) {
-        # An empty pattern matches no file, so its qualifiers never run
-        # and it yields no word (prose `x (written 2026-10-02 ...)`).
-        if (p == 1) return "err"
-        if (hx) return "git"
-        r = zqual(substr(cw, p + 1, n - p - 1))
-        if (r != "filter") return r
-        cw = substr(cw, 1, p - 1); cu = substr(cu, 1, p - 1)
+        # The qualifier reading (qv). An empty pattern matches no file, so
+        # its qualifiers never run and it yields no word (prose `x
+        # (written 2026-10-02 ...)`).
+        if (p == 1) qv = "err"
+        else if (hx) return "git"
+        else {
+          qv = zqual(substr(cw, p + 1, n - p - 1))
+          if (qv == "git") return "git"
+          if (qv == "filter") bv = zgroups(substr(cw, 1, p - 1), substr(cu, 1, p - 1))
+          if (bv == "git") return "git"
+        }
       }
     }
     if (hx) return "git"
+    # The group reading (gv): under NO_BARE_GLOB_QUAL, which the Bash tool
+    # sets, a trailing paren is a group (`./gi(t)` is git there), so the
+    # word is judged both ways and the worse verdict wins.
+    gv = zgroups(cw, cu)
+    if (gv == "git" || gv == "glob" || bv == "glob") return (gv == "git") ? "git" : "glob"
+    return (gv == "lit" || bv == "lit") ? "lit" : "err"
+  }
+  # zgroups(cw, cu) (DND-1858): the verdict for a word read as glob groups
+  # and braces, with no qualifier: "git", "glob", "lit", or "err" when
+  # zsh refuses the pattern. Each group alternative is expanded (zgexp),
+  # then braces (gbexp), and each word is matched like a glob command word
+  # (gword).
+  function zgroups(cw, cu,    g, k, r, any) {
     ZERR = 0; NG = 0; delete GW; delete GU
     zgexp(cw, cu)
     if (ZERR) return "err"

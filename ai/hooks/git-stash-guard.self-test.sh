@@ -1292,6 +1292,14 @@ EOF
 d2 "ZG37. a group git inside a backtick substitution" deny <<'EOF'
 echo `./(x|g)it stash pop`
 EOF
+# The Bash tool shell runs `setopt NO_BARE_GLOB_QUAL` before each command,
+# so a filter-shaped trailing paren is a group there.
+d2 "ZG38. a filter-shaped trailing paren is a group under NO_BARE_GLOB_QUAL" deny <<'EOF'
+./gi(t) sp
+EOF
+d2 "ZG39. a whole-word paren after env is a group under NO_BARE_GLOB_QUAL" deny <<'EOF'
+env (git) sp
+EOF
 OUT=$(json "$WT" 'env (GIT|x) sp' | ZDOTDIR="$D2Z" CLAUDE_CONFIG_DIR="$D2S" sh "$HOOK" 2>/dev/null); STATUS=$?
 check "ZG19. a bare alternation group under a glob option set outside the command" deny
 # Precision: qualifier-shaped code in a payload that zsh rejects or only
