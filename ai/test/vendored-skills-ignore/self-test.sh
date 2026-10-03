@@ -136,7 +136,7 @@ for name in "athena:brand-new-skill" "hyperframes-future"; do
   if git -C "${FX}" check-ignore -q "ai/skills/${name}/SKILL.md"; then
     bad "a new first-party skill ai/skills/${name}/ stays visible" \
         "it is git-ignored, so 'git add -A' would skip it with no error; list third-party skills one per line, never by pattern"
-  elif git -C "${FX}" status --porcelain -uall | grep -qF "ai/skills/${name}/SKILL.md"; then
+  elif grep -qF "ai/skills/${name}/SKILL.md" <<<"$(git -C "${FX}" status --porcelain -uall)"; then
     ok "a new first-party skill ai/skills/${name}/ stays visible"
   else
     bad "a new first-party skill ai/skills/${name}/ stays visible" \
