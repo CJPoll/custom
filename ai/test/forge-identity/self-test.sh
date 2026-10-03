@@ -157,7 +157,7 @@ R="$(fid fid_resolve_url https://gitlab.com/cjpoll/custom.git)"
 expect M10 "an entry with bot null -> PENDING with its reason, no bot" 4 PENDING "" "synthetic pending reason"; neither_bot M10b "no bot handed out"
 write_map
 R="$(ATHENA_FORGE_IDENTITIES_FILE= fid fid_resolve_url https://gitlab.com/cjpoll/custom.git)"
-expect M11 "the tracked map: cjpoll is PENDING until the owner names the bot (Q2)" 4 PENDING "" "Q2"
+expect M11 "the tracked map: cjpoll is PENDING until the owner names the bot (DND-1944)" 4 PENDING "" "DND-1944"
 
 echo
 echo "--- glab's own arguments: -R, the api endpoint, origin ---"
@@ -189,17 +189,131 @@ R="$(fid_in "${PERS}" fid_resolve_glab_args mr -R cjpoll list)"
 expect G11 "-R with no project part -> BAD KEY" 2 "BAD KEY" "" "names no <namespace>/<project>"
 git -C "${PERS}" remote add fork https://gitlab.com/someone-else/custom.git
 R="$(fid_in "${PERS}" fid_resolve_glab_args mr list)"
-expect G12 "a second remote with no Athena identity is ignored" 0 FOUND "${P_BOT}" -
+expect G12 "a second remote with no Athena identity -> BAD KEY (glab could act on it with origin's bot), pass -R" 2 "BAD KEY" "" "'fork': it is gitlab.com/someone-else"
+git -C "${PERS}" remote remove fork
+write_ov "[${W_ENTRY},{\"host\":\"gitlab.com\",\"namespace\":\"${W_NS}-two\",\"bot\":\"${W_BOT}\",\"token_file\":\"/abs/work-token\",\"refresh\":\"group_service_account\"}]"
+git -C "${WORK}" remote add other "https://gitlab.com/${W_NS}-two/app.git"
+R="$(fid_in "${WORK}" fid_resolve_glab_args mr list)"
+expect G12b "a second remote whose namespace maps to the SAME bot and token is not ambiguous" 0 FOUND "${W_BOT}" -
+git -C "${WORK}" remote set-url other "https://gitlab.com/$(printf '%s' "${W_NS}" | tr a-z A-Z)-TWO/app.git"
+R="$(fid_in "${WORK}" fid_resolve_glab_args mr list)"
+expect G12c "... matched case-insensitively, as GitLab paths are" 0 FOUND "${W_BOT}" -
+git -C "${WORK}" remote remove other
+write_ov "[${W_ENTRY}]"
 git -C "${PERS}" remote add upstream "https://gitlab.com/${W_NS}/custom.git"
 R="$(fid_in "${PERS}" fid_resolve_glab_args mr list)"
-expect G13 "a second remote that is ANOTHER bot's namespace -> BAD KEY, pass -R" 2 "BAD KEY" "" "its own Athena identity"
+expect G13 "a second remote that is ANOTHER bot's namespace -> BAD KEY, pass -R" 2 "BAD KEY" "" "'upstream': it is gitlab.com/${W_NS}"
 R="$(fid_in "${PERS}" fid_resolve_glab_args mr -R cjpoll/custom list)"
 expect G14 "the same checkout with -R -> resolves (the explicit project wins)" 0 FOUND "${P_BOT}" -
 R="$(fid_in "${PERS}" fid_resolve_glab_args api "projects/123/merge_requests")"
-expect G15 "a numeric api project id names no namespace: origin is used (and the ambiguity refused)" 2 "BAD KEY" "" "its own Athena identity"
+expect G15 "an api project named by a numeric id -> BAD KEY (it says nothing about its namespace)" 2 "BAD KEY" "" "numeric id"
+R="$(fid_in "${PERS}" fid_resolve_glab_args -R cjpoll/custom api "projects/123/notes")"
+expect G15b "... even with -R (the id could be any project)" 2 "BAD KEY" "" "numeric id"
+git -C "${PERS}" remote set-url upstream "https://gitlab.com/$(printf '%s' "${W_NS}" | tr a-z A-Z)/custom.git"
+R="$(fid_in "${PERS}" fid_resolve_glab_args mr list)"
+expect G15c "a second remote naming another bot's namespace in other case -> BAD KEY" 2 "BAD KEY" "" "'upstream': it is gitlab.com/"
+git -C "${PERS}" remote set-url upstream /some/local/path.git
+R="$(fid_in "${PERS}" fid_resolve_glab_args mr list)"
+expect G15d "a local-path remote is no forge project and is skipped" 0 FOUND "${P_BOT}" -
+git -C "${PERS}" remote set-url upstream "not a url"
+R="$(fid_in "${PERS}" fid_resolve_glab_args mr list)"
+expect G15e "a remote that cannot be parsed -> BAD KEY, never skipped" 2 "BAD KEY" "" "cannot be parsed"
+git -C "${PERS}" remote remove upstream
+
+echo
+echo "--- a word glab reads differently from this resolver never picks the bot ---"
+R="$(fid_in "${PERS}" fid_resolve_glab_args api -R cjpoll/custom "projects/${W_NS}%2Fapp/merge_requests")"
+expect A1 "-R written AFTER api does not hide the endpoint: -R vs endpoint disagree -> BAD KEY" 2 "BAD KEY" "" "api endpoint names"
+R="$(fid_in "${PERS}" fid_resolve_glab_args mr note 1 -m "-R${W_NS}/y")"
+expect A2 "-m -R<work>/y (a message that looks like -R) -> BAD KEY, never the work bot" 2 "BAD KEY" "" "right after the flag '-m'"
+R="$(fid_in "${PERS}" fid_resolve_glab_args mr note 1 --message -R "${W_NS}/y")"
+expect A3 "--message -R <work>/y -> BAD KEY" 2 "BAD KEY" "" "right after the flag '--message'"
+R="$(fid_in "${PERS}" fid_resolve_glab_args api -X POST --hostname gitlab.example.com user)"
+expect A4 "--hostname right after a valued flag's value is fine (it is after a value word)" 1 "NO ENTRY" "" "gitlab.example.com/cjpoll"
+R="$(fid_in "${PERS}" fid_resolve_glab_args mr list --draft --hostname gitlab.com)"
+expect A5 "--hostname right after a flag -> BAD KEY (it may be that flag's value)" 2 "BAD KEY" "" "right after the flag '--draft'"
+R="$(fid_in "${PERS}" fid_resolve_glab_args api "groups/${W_NS}/issues")"
+expect A6 "api groups/<work>/... -> the work bot" 0 FOUND "${W_BOT}" -
+R="$(fid_in "${PERS}" fid_resolve_glab_args api "groups/42/issues")"
+expect A7 "api groups/<numeric id> -> BAD KEY" 2 "BAD KEY" "" "numeric id"
+R="$(fid_in "${PERS}" fid_resolve_glab_args api graphql -f query=x)"
+expect A8 "api graphql with no -R -> BAD KEY (the target is inside the query)" 2 "BAD KEY" "" "api graphql"
+R="$(fid_in "${PERS}" fid_resolve_glab_args -R cjpoll/custom api graphql -f query=x)"
+expect A9 "-R <p> api graphql -> the -R project's bot" 0 FOUND "${P_BOT}" -
+R="$(fid_in "${PERS}" fid_resolve_glab_args api "https://gitlab.com/api/v4/projects/${W_NS}%2Fy")"
+expect A10 "an absolute-URL endpoint -> BAD KEY" 2 "BAD KEY" "" "absolute URL"
+R="$(fid_in "${PERS}" fid_resolve_glab_args api "projects/${W_NS}%252Fy/issues")"
+expect A11 "a double-encoded endpoint project -> BAD KEY" 2 "BAD KEY" "" "URL-encoded beyond"
+R="$(fid_in "${PERS}" fid_resolve_glab_args api "api/v4/projects/123/notes")"
+expect A11b "an api/v4/ prefix is read through: a numeric id behind it -> BAD KEY" 2 "BAD KEY" "" "numeric id"
+R="$(fid_in "${PERS}" fid_resolve_glab_args api "API/V4/projects/${W_NS}%2Fapp/notes")"
+expect A11c "... and a path behind it keys normally" 0 FOUND "${W_BOT}" -
+R="$(fid_in "${PERS}" fid_resolve_glab_args api "api/v4/./projects/123/notes")"
+expect A11d "a '.' segment anywhere in an endpoint -> BAD KEY" 2 "BAD KEY" "" "'.' segment"
+R="$(fid_in "${PERS}" fid_resolve_glab_args api "%70rojects/123/notes")"
+expect A11e "a %-encoded route word (hiding projects/) -> BAD KEY" 2 "BAD KEY" "" "%-encoded"
+R="$(fid_in "${PERS}" fid_resolve_glab_args api "projects/${W_NS}%2Fapp/%6derge")"
+expect A11f "%-encoding past the project path -> BAD KEY" 2 "BAD KEY" "" "past its project path"
+R="$(fid_in "${PERS}" fid_resolve_glab_args api "projects/:id/issues")"
+expect A12 "the :id placeholder uses origin" 0 FOUND "${P_BOT}" -
+R="$(fid fid_resolve_url "https://gitlab.com/${W_NS}/../cjpoll/x.git")"
+expect A13 "a '..' segment in a remote -> BAD KEY (the URL reaches another project)" 2 "BAD KEY" "" "'..' path segment"
+R="$(fid fid_resolve_url "https://gitlab.com/${W_NS}/%2e%2e/cjpoll/x.git")"
+expect A14 "an encoded dot in a remote -> BAD KEY" 2 "BAD KEY" "" "encoded dot"
+R="$(fid_in "${PERS}" fid_resolve_glab_args mr list -R "https://u:s3cr3t@gitlab.com/someone-else/x")"
+if [ "$(f_rc)" = 1 ] && [[ "$R" != *s3cr3t* ]]; then ok "A15. a -R URL's credentials never reach a refusal"
+else bad "A15. -R credentials kept out" "got '${R}'"; fi
+write_ov "[{\"host\":\"gitlab.com\",\"namespace\":\"${W_NS}\",\"bot\":\"${W_BOT}\",\"token_file\":\"${HOME}/.claude/personal-token\",\"refresh\":\"group_service_account\"}]"
+R="$(fid fid_resolve_url https://gitlab.com/cjpoll/custom.git)"
+expect A16 "two bots sharing one token file spelled ~/x and \$HOME/x -> COULD NOT LOOK" 3 "COULD NOT LOOK" "" "share the token file"
+write_ov "[${W_ENTRY}]"
 GH="$(mkrepo ghrepo https://github.com/someone/custom.git)"
 R="$(fid_in "${GH}" fid_resolve_glab_args api user)"
 expect G16 "a github.com origin -> NO ENTRY naming github.com" 1 "NO ENTRY" "" "github.com/someone"
+
+echo
+echo "--- ai/bin/forge-identity: the miss is visible before a landing ---"
+CLI="${AI_DIR}/bin/forge-identity"
+[ -n "${FORGE_IDENTITY_LIB_UNDER_TEST:-}" ] && CLI=""
+if [ -n "${CLI}" ]; then
+  HELP="$("${CLI}" --help 2>/dev/null)"; RC=$?
+  [ "${RC}" = 0 ] && [[ "${HELP}" == *"Usage:"* ]] && ok "C1. --help on stdout, exit 0" || bad "C1. --help" "rc=${RC}"
+  CR="${TMP}/check-root"; mkdir -p "${CR}"
+  for spec in "p https://gitlab.com/cjpoll/custom.git" "w git@gitlab.com:${W_NS}/app.git" "gh https://github.com/x/y.git"; do
+    git init -q "${CR}/${spec%% *}"; git -C "${CR}/${spec%% *}" remote add origin "${spec#* }"
+  done
+  mkdir -p "${CR}/not-a-repo"
+  OUT="$("${CLI}" check --root "${CR}" 2>&1)"; RC=$?
+  if [ "${RC}" = 0 ] && [[ "${OUT}" == *"OK   ${CR}/p -> ${P_BOT}"* ]] && [[ "${OUT}" == *"OK   ${CR}/w -> ${W_BOT}"* ]] \
+    && [[ "${OUT}" != *"${CR}/gh"* ]] && [[ "${OUT}" == *"3 checkout(s)"*"2 with an origin"*"2 resolve to a bot, 0 do not"* ]]; then
+    ok "C2. check: each GitLab checkout and its bot; a github.com checkout is not a candidate; counts printed"
+  else bad "C2. check, all resolve" "rc=${RC} out='${OUT}'"; fi
+  for spec in "u https://gitlab.com/someone-else/app.git" "a git@gitlab.com-work:${W_NS}/app.git"; do
+    git init -q "${CR}/${spec%% *}"; git -C "${CR}/${spec%% *}" remote add origin "${spec#* }"
+  done
+  OUT="$("${CLI}" check --root "${CR}" 2>&1)"; RC=$?
+  if [ "${RC}" = 1 ] && [[ "${OUT}" == *"MISS ${CR}/u: NO ENTRY"* ]] && [[ "${OUT}" == *"MISS ${CR}/a: NO ENTRY"*"gitlab.com-work"* ]] \
+    && [ "$(grep -c '     Fix: ' <<<"${OUT}")" = 2 ] && [[ "${OUT}" == *"2 do not"* ]]; then
+    ok "C3. check: an unmapped namespace and an aliased GitLab host are each a MISS with a Fix:, exit 1"
+  else bad "C3. check, misses" "rc=${RC} out='${OUT}'"; fi
+  OUT="$( (unset ATHENA_PRIVATE_ROOT; export HOME="${TMP}/no-overlay-home"; mkdir -p "${HOME}"; "${CLI}" check --root "${CR}") 2>&1)"; RC=$?
+  if [ "${RC}" = 1 ] && [[ "${OUT}" == *"MISS ${CR}/w: NO ENTRY"*"ABSENT"* ]]; then
+    ok "C4. check on a machine with no overlay: the work checkout is a MISS that says the overlay is absent"
+  else bad "C4. check, overlay absent" "rc=${RC} out='${OUT}'"; fi
+  EMPTY="${TMP}/empty-root"; mkdir -p "${EMPTY}"
+  OUT="$("${CLI}" check --root "${EMPTY}" 2>&1)"; RC=$?
+  [ "${RC}" = 0 ] && [[ "${OUT}" == *"nothing to resolve"* ]] && [[ "${OUT}" == *"0 checkout(s)"* ]] \
+    && ok "C5. check with no candidate says so, with its counts (an empty result is never silent)" || bad "C5. empty root" "rc=${RC} out='${OUT}'"
+  OUT="$(ATHENA_FORGE_IDENTITIES_FILE="${TMP}/no-such-map.json" "${CLI}" check --root "${CR}" 2>&1)"; RC=$?
+  [ "${RC}" = 3 ] && [[ "${OUT}" == *"COULD NOT LOOK"* ]] && [[ "${OUT}" == *"Fix:"* ]] \
+    && ok "C6. an unreadable map -> exit 3 COULD NOT LOOK, never a clean pass" || bad "C6. unreadable map" "rc=${RC} out='${OUT}'"
+  OUT="$("${CLI}" resolve https://gitlab.com/cjpoll/custom.git 2>&1)"; RC=$?
+  [ "${RC}" = 0 ] && [[ "${OUT}" == "OK gitlab.com/cjpoll -> ${P_BOT} "* ]] && ok "C7. resolve <url> prints the bot" || bad "C7. resolve" "rc=${RC} out='${OUT}'"
+  OUT="$("${CLI}" resolve https://gitlab.com/CJPoll/custom.git 2>&1)"; RC=$?
+  [ "${RC}" = 1 ] && [[ "${OUT}" == *"differs only in case"* ]] && [[ "${OUT}" == *"Fix:"* ]] && ok "C8. resolve of a wrong-case key -> exit 1 with Fix:" || bad "C8. resolve miss" "rc=${RC} out='${OUT}'"
+  OUT="$("${CLI}" bogus 2>&1)"; RC=$?
+  [ "${RC}" = 2 ] && [[ "${OUT}" == *"Fix:"* ]] && ok "C9. an unknown subcommand -> usage exit 2 with Fix:" || bad "C9. usage" "rc=${RC} out='${OUT}'"
+fi
 
 echo
 echo "==================================================="

@@ -5,7 +5,8 @@
 # to gitlab.com went out over SSH with the machine OWNER's key and GitLab
 # recorded the owner, with nothing saying so. The wrapper now (a) rewrites the
 # SSH form git@gitlab.com: to HTTPS, (b) keeps every owner credential source
-# out, (c) authenticates as athena-amby with the PAT from its token file, and
+# out, (c) authenticates as the namespace's bot with the PAT from its token
+# file (DND-1936: the bot follows the project's namespace), and
 # (d) REFUSES a network op that would still reach gitlab.com over non-HTTPS.
 #
 # NO NETWORK, EVER. GIT_ALLOW_PROTOCOL=file makes git itself refuse every
@@ -356,6 +357,13 @@ run_refresh "${OV}"
 if [[ "$(cat "${TMP}/glab.args" 2>/dev/null)" == "api groups/synthetic-group" ]] && [[ "${ERR}" == *"synthetic-group"* ]]; then
   ok "23. refresh looks the group up by the overlay's value (DND-1668)"
 else bad "23. refresh, overlay value used" "rc=${RC} err='${ERR}' args='$(cat "${TMP}/glab.args" 2>/dev/null)'"; fi
+# DND-1936: the service account is minted in the group the identity was
+# resolved for; a .group naming another group refuses before any glab call.
+printf '{"group":"another-group","identities":[{"host":"gitlab.com","namespace":"synthetic-group","bot":"synthetic-sa-bot","token_file":"%s/sa-token","refresh":"group_service_account"}]}\n' "${TMP}" > "${OV}/overlay/gitlab.json"
+run_refresh "${OV}"
+if [ "${RC}" = 1 ] && [[ "${ERR}" == *"names a different group"* ]] && [[ "${ERR}" == *"Fix:"* ]] && [ ! -e "${TMP}/glab.args" ]; then
+  ok "23b. refresh whose overlay .group names another group than the resolved namespace -> refused, glab never called"
+else bad "23b. refresh, group mismatch" "rc=${RC} err='${ERR}' args='$(cat "${TMP}/glab.args" 2>/dev/null)'"; fi
 
 echo
 echo "--- DND-2000: a URL on another forge's host, or any host but gitlab.com, is REFUSED ---"

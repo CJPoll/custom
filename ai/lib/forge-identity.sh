@@ -44,7 +44,7 @@ FID_ADD_FIX='if Athena works in this namespace, add its entry: a personal namesp
 
 fid_clear() {
   FID_STATE="" FID_WHY="" FID_FIX="" FID_HOST="" FID_NS="" FID_BOT=""
-  FID_TOKEN_FILE="" FID_REFRESH="" FID_SOURCE="" FID_PENDING=""
+  FID_TOKEN_FILE="" FID_TOKEN_FILE_RAW="" FID_REFRESH="" FID_SOURCE="" FID_PENDING=""
 }
 
 # fid_fail <rc> <STATE> <why> <fix> : set the refusal fields, return <rc>.
@@ -52,7 +52,7 @@ fid_clear() {
 # caller that ignored the return code still has no token file to read.
 fid_fail() {
   FID_STATE="$2" FID_WHY="$3" FID_FIX="$4"
-  FID_BOT="" FID_TOKEN_FILE="" FID_REFRESH="" FID_SOURCE=""
+  FID_BOT="" FID_TOKEN_FILE="" FID_TOKEN_FILE_RAW="" FID_REFRESH="" FID_SOURCE=""
   return "$1"
 }
 
@@ -139,6 +139,25 @@ fid_parse_remote() {
   fid_split_path "$path" "$url"
 }
 
+# fid_check_segments <path> <shown> : 2 (BAD KEY) when <path> holds a `.` or
+# `..` segment, or an encoded dot: a client collapses those (libcurl does by
+# default), so the project reached is not the one the first segment names.
+fid_check_segments() {
+  local seg segs=()
+  case "$1" in
+    *%2[Ee]*) fid_fail 2 "BAD KEY" "'$2' has an encoded dot (%2e) in its path" \
+      "name the project by its plain <namespace>/<project> path. $FID_ESCALATE"; return ;;
+  esac
+  IFS=/ read -ra segs <<<"$1"
+  for seg in "${segs[@]}"; do
+    case "$seg" in
+      .|..) fid_fail 2 "BAD KEY" "'$2' has a '$seg' path segment, so the project it reaches is not the one its first segment names" \
+        "name the project by its plain <namespace>/<project> path. $FID_ESCALATE"; return ;;
+    esac
+  done
+  return 0
+}
+
 # fid_split_path <path> <shown> : FID_KEY_NS from <namespace>[/<sub>...]/<project>.
 fid_split_path() {
   local p="$1"
@@ -154,7 +173,7 @@ fid_split_path() {
   case "$p" in *//*)
     fid_fail 2 "BAD KEY" "'$2' has an empty path segment" "fix the remote or -R value. $FID_ESCALATE"; return ;;
   esac
-  return 0
+  fid_check_segments "$p" "$2"
 }
 
 # fid_parse_repo_arg <-R value> <--hostname or ""> : glab's -R forms. A URL or
@@ -165,7 +184,7 @@ fid_parse_repo_arg() {
   case "$v" in
     *://*|*@*:*) fid_parse_remote "$v" || return
       if [ -n "$hn" ] && [ "$hn" != "$FID_KEY_HOST" ]; then
-        fid_fail 2 "BAD KEY" "-R '$v' names host $FID_KEY_HOST but --hostname names $hn" \
+        fid_fail 2 "BAD KEY" "-R '$(fid_shown "$v")' names host $FID_KEY_HOST but --hostname names $hn" \
           "pass one host: drop --hostname or make -R match it. $FID_ESCALATE"; return
       fi
       return 0 ;;
@@ -177,7 +196,7 @@ fid_parse_repo_arg() {
       "pass the full URL (-R https://<host>/<namespace>/<project>) or OWNER/REPO with --hostname. $FID_ESCALATE"
     return
   fi
-  fid_split_path "$v" "-R $v"
+  fid_split_path "$v" "-R $(fid_shown "$v")"
 }
 
 # ---- the map (side effects: one file read, one overlay read) ---------------
@@ -206,13 +225,13 @@ fid_load() {
   [ "$rc" = 0 ] || err="$(printf '%s' "$out" | head -c 600)"
   case "$rc" in
     0) ov="$out"; FID_OV_STATE="PRESENT" ;;
-    3) FID_OV_STATE="ABSENT (no private overlay on this machine)" ;;
+    3) FID_OV_STATE="ABSENT (no private overlay on this machine; scripts/setup-private-overlay --init creates one)" ;;
     5) FID_OV_STATE="PRESENT, with no gitlab .identities key" ;;
     *) fid_fail 3 "COULD NOT LOOK" "the private overlay's gitlab .identities cannot be read (private-overlay exit $rc: ${err:-no message})" \
          "follow the resolver's Fix: in that message, then retry. $FID_ESCALATE"; return ;;
   esac
   rc=0
-  out="$(jq -cn --argjson ov "$ov" --arg pubtxt "$pub" -f "$FID_LIB_DIR/forge-identity.jq" 2>&1)" || rc=$?
+  out="$(jq -cn --argjson ov "$ov" --arg pubtxt "$pub" --arg home "$HOME" -f "$FID_LIB_DIR/forge-identity.jq" 2>&1)" || rc=$?
   if [ "$rc" != 0 ]; then
     fid_fail 3 "COULD NOT LOOK" "the identity map could not be evaluated (jq exit $rc: $(printf '%s' "$out" | head -c 300))" \
       "check ai/lib/forge-identity.jq and the map files are intact. $FID_ESCALATE"; return
@@ -255,7 +274,7 @@ fid_lookup() {
       "the owner sets \`bot\` for $h/$n (then removes \`pending\`); until then nothing runs as a bot in $h/$n. $FID_ESCALATE"
     return
   fi
-  FID_BOT="$f2"
+  FID_BOT="$f2" FID_TOKEN_FILE_RAW="$f3"
   case "$f3" in "~/"*) FID_TOKEN_FILE="$HOME/${f3#\~/}" ;; *) FID_TOKEN_FILE="$f3" ;; esac
   FID_STATE=FOUND
   return 0
@@ -272,41 +291,127 @@ fid_resolve_url() {
 
 # Value-taking flags of `glab api` (glab 1.92 --help), so the endpoint is the
 # first word that is neither a flag nor a flag's value.
-FID_API_VALUED=" -X --method -F --field -f --raw-field -H --header --input --form --hostname --output "
+FID_API_VALUED=" -X --method -F --field -f --raw-field -H --header --input --form --hostname --output -R --repo "
+
+# fid_flag_may_take_value <word> : 0 when <word> is a flag that could take the
+# NEXT word as its value (a flag with no `=`, other than `--`). Which glab
+# flags are boolean is not known here, so every such flag counts.
+fid_flag_may_take_value() {
+  case "$1" in
+    --|'') return 1 ;;
+    -*=*) return 1 ;;
+    -*) return 0 ;;
+  esac
+  return 1
+}
+
+# fid_endpoint_key <endpoint> : what an `api` endpoint says about its target.
+# Sets FID_EP_NS (a namespace it names, or "") and FID_EP_KIND (none |
+# project | group | placeholder | graphql). 0, or 2 (BAD KEY) for an endpoint
+# this cannot key on: a project or group named by a numeric id, a `.` or `..`
+# segment, any %-encoding other than the %2F separators of the project or
+# group path, or an absolute URL. An optional leading api/v4/ is read through.
+# `graphql` names its target inside the query, so it is never keyed here.
+fid_endpoint_key() {
+  local ep="$1" kind seg v rest segs=() s
+  FID_EP_NS="" FID_EP_KIND=none
+  ep="${ep%%\?*}"
+  case "$ep" in
+    [A-Za-z]*://*)
+      fid_fail 2 "BAD KEY" "the api endpoint '$(fid_shown "$ep")' is an absolute URL, so its host and project are not the ones this resolves" \
+        "use the relative endpoint (projects/<namespace>%2F<project>/...). $FID_ESCALATE"; return ;;
+  esac
+  while [ "${ep#/}" != "$ep" ]; do ep="${ep#/}"; done
+  IFS=/ read -ra segs <<<"$ep"
+  for s in "${segs[@]}"; do
+    case "$s" in
+      .|..) fid_fail 2 "BAD KEY" "the api endpoint '$ep' has a '$s' segment, so the route it reaches is not the one it spells" \
+        "spell the endpoint plainly (projects/<namespace>%2F<project>/...). $FID_ESCALATE"; return ;;
+    esac
+  done
+  case "$(printf '%s' "${segs[0]:-}/${segs[1]:-}" | tr '[:upper:]' '[:lower:]')" in
+    api/v4) ep="${ep#*/}"; ep="${ep#*/}" ;;
+  esac
+  case "$(printf '%s' "$ep" | tr '[:upper:]' '[:lower:]')" in
+    graphql|api/graphql) FID_EP_KIND=graphql; return 0 ;;
+    projects/*) kind=project ;;
+    groups/*) kind=group ;;
+    *)
+      if [[ "$ep" == *%* ]]; then
+        fid_fail 2 "BAD KEY" "the api endpoint '$ep' is %-encoded, so the route it reaches is not the one it spells" \
+          "spell the endpoint plainly. $FID_ESCALATE"; return
+      fi
+      return 0 ;;
+  esac
+  rest="${ep#*/}"; seg="${rest%%/*}"; rest="${rest#"$seg"}"
+  if [[ "$rest" == *%* ]]; then
+    fid_fail 2 "BAD KEY" "the api endpoint '$ep' is %-encoded past its $kind path, so the route it reaches is not the one it spells" \
+      "spell the route plainly after ${kind}s/<path>. $FID_ESCALATE"; return
+  fi
+  case "$seg" in
+    :*) FID_EP_KIND=placeholder; return 0 ;;
+    '') return 0 ;;
+  esac
+  if [[ "$seg" =~ ^[0-9]+$ ]]; then
+    fid_fail 2 "BAD KEY" "the api endpoint '$ep' names its $kind by a numeric id, which says nothing about its namespace" \
+      "name it by path (${kind}s/<namespace>%2F<...>), or by the placeholder :id from the project's checkout. $FID_ESCALATE"; return
+  fi
+  v="${seg//%2F//}"; v="${v//%2f//}"
+  if [[ "$v" == *%* ]]; then
+    fid_fail 2 "BAD KEY" "the api endpoint's $kind '$seg' is URL-encoded beyond its path separators (%2F)" \
+      "name it as ${kind}s/<namespace>%2F<...> with only the separators encoded. $FID_ESCALATE"; return
+  fi
+  if [ "$kind" = project ] && [[ "$v" != */* ]]; then
+    fid_fail 2 "BAD KEY" "the api endpoint's project '$seg' is not a <namespace>%2F<project> path" \
+      "name it as projects/<namespace>%2F<project>, or use :id from the project's checkout. $FID_ESCALATE"; return
+  fi
+  fid_check_segments "$v" "the api endpoint $ep" || return
+  FID_EP_NS="${v%%/*}" FID_EP_KIND="$kind"
+  return 0
+}
 
 # fid_resolve_glab_args <glab args...> : the identity a glab command acts as.
-# The namespace comes from -R/--repo, else from an `api projects/<g>%2F<p>/…`
-# endpoint, else from the cwd checkout's origin. The host is --hostname when
-# given, else the source's own (gitlab.com for a bare OWNER/REPO). Sources that
-# disagree, two -R values, and an origin checkout whose other remote on that
-# host has a DIFFERENT Athena identity (glab could pick either) are BAD KEY.
+# The namespace comes from -R/--repo, else from an `api projects/…` or
+# `api groups/…` endpoint that names it by path, else from the cwd checkout's
+# origin. The host is --hostname when given, else the source's own (gitlab.com
+# for a bare OWNER/REPO). BAD KEY when glab could act on a project other than
+# the one read here: two -R values; -R or --hostname right after another flag
+# (it may be that flag's value); -R and the endpoint disagreeing; an endpoint
+# naming its target by id, double encoding or an absolute URL; `api graphql`
+# with no -R; an origin checkout with another remote on that host that is not
+# this identity (fid_check_other_remotes).
 fid_resolve_glab_args() {
-  local repos=() hn="" a v i=0 n="$#" ep="" ep_ns="" key_h key_n src
+  local repos=() hn="" a v prev="" i=0 n="$#" ep="" key_h key_n src
   local args=("$@")
   fid_clear
   while [ "$i" -lt "$n" ]; do
     a="${args[$i]}"
     case "$a" in
       --) break ;;
-      -R|--repo) i=$((i + 1)); repos+=("${args[$i]:-}") ;;
-      --repo=*) repos+=("${a#--repo=}") ;;
-      -R?*) v="${a#-R}"; repos+=("${v#=}") ;;
-      --hostname) i=$((i + 1)); v="${args[$i]:-}"
+      -R|--repo|-R?*|--repo=*|--hostname|--hostname=*)
+        if fid_flag_may_take_value "$prev"; then
+          fid_fail 2 "BAD KEY" "'$(fid_shown "$a")' comes right after the flag '$prev', so glab may read it as that flag's value and act on another project than the one it names" \
+            "put -R/--repo (and --hostname) right after a subcommand or argument word, e.g. \`mr create -R <namespace>/<project> --fill\` or \`mr -R <namespace>/<project> merge <iid>\`. $FID_ESCALATE"
+          return
+        fi ;;
+    esac
+    case "$a" in
+      -R|--repo) i=$((i + 1)); v="${args[$i]:-}"; repos+=("$v"); prev="$v" ;;
+      --repo=*) repos+=("${a#--repo=}"); prev="$a" ;;
+      -R?*) v="${a#-R}"; repos+=("${v#=}"); prev="$a" ;;
+      --hostname|--hostname=*)
+        if [ "$a" = --hostname ]; then i=$((i + 1)); v="${args[$i]:-}"; prev="$v"; else v="${a#--hostname=}"; prev="$a"; fi
+        v="$(printf '%s' "$v" | tr '[:upper:]' '[:lower:]')"
         if [ -n "$hn" ] && [ "$hn" != "$v" ]; then
-          fid_fail 2 "BAD KEY" "--hostname is given twice ($hn, $v)" "pass --hostname once. $FID_ESCALATE"; return; fi
+          fid_fail 2 "BAD KEY" "--hostname is given twice ($hn, $v)" "pass --hostname once. $FID_ESCALATE"; return
+        fi
         hn="$v" ;;
-      --hostname=*) v="${a#--hostname=}"
-        if [ -n "$hn" ] && [ "$hn" != "$v" ]; then
-          fid_fail 2 "BAD KEY" "--hostname is given twice ($hn, $v)" "pass --hostname once. $FID_ESCALATE"; return; fi
-        hn="$v" ;;
+      *) prev="$a" ;;
     esac
     i=$((i + 1))
   done
-  if [ -n "$hn" ]; then
-    hn="$(printf '%s' "$hn" | tr '[:upper:]' '[:lower:]')"
-  fi
-  # The api endpoint: the first positional word after the `api` subcommand
-  # (only -R/--repo may come before it).
+  # The api endpoint: the first word after `api` that is neither a flag nor a
+  # flag's value (-R/--repo may sit before `api`, or anywhere after it).
   i=0
   while [ "$i" -lt "$n" ]; do
     case "${args[$i]}" in
@@ -321,47 +426,43 @@ fid_resolve_glab_args() {
       a="${args[$i]}"
       case "$a" in
         --) ep="${args[$((i + 1))]:-}"; break ;;
-        --*=*) ;;
+        --*=*|-R?*) ;;
         -*) [[ "$FID_API_VALUED" == *" $a "* ]] && i=$((i + 1)) ;;
         *) ep="$a"; break ;;
       esac
       i=$((i + 1))
     done
+    fid_endpoint_key "$ep" || return
+  else
+    FID_EP_NS="" FID_EP_KIND=none
   fi
-  ep="${ep#/}"
-  case "$ep" in
-    projects/*)
-      v="${ep#projects/}"; v="${v%%/*}"; v="${v%%\?*}"
-      case "$v" in *%2[Ff]*)
-        v="${v//%2F//}"; v="${v//%2f//}"
-        ep_ns="${v%%/*}"
-        [[ "$ep_ns" == *%* ]] && {
-          fid_fail 2 "BAD KEY" "the api endpoint's project '$v' is still URL-encoded past its namespace separator" \
-            "name the project as projects/<namespace>%2F<project>, or pass -R <namespace>/<project>. $FID_ESCALATE"; return; } ;;
-      esac ;;
-  esac
   if [ "${#repos[@]}" -gt 1 ]; then
     for v in "${repos[@]}"; do
       if [ "$v" != "${repos[0]}" ]; then
-        fid_fail 2 "BAD KEY" "-R/--repo is given more than once (${repos[*]})" "pass one -R. $FID_ESCALATE"; return
+        fid_fail 2 "BAD KEY" "-R/--repo is given more than once" "pass one -R. $FID_ESCALATE"; return
       fi
     done
   fi
   if [ "${#repos[@]}" -ge 1 ]; then
     fid_parse_repo_arg "${repos[0]}" "$hn" || return
-    key_h="$FID_KEY_HOST" key_n="$FID_KEY_NS" src="-R ${repos[0]}"
-    if [ -n "$ep_ns" ] && [ "$ep_ns" != "$key_n" ]; then
-      fid_fail 2 "BAD KEY" "-R names namespace '$key_n' but the api endpoint names '$ep_ns'" \
-        "make -R and the endpoint name the same project. $FID_ESCALATE"; return
+    key_h="$FID_KEY_HOST" key_n="$FID_KEY_NS" src="-R $(fid_shown "${repos[0]}")"
+    if [ -n "$FID_EP_NS" ] && [ "$FID_EP_NS" != "$key_n" ]; then
+      fid_fail 2 "BAD KEY" "-R names namespace '$key_n' but the api endpoint names '$FID_EP_NS'" \
+        "make -R and the endpoint name the same namespace. $FID_ESCALATE"; return
     fi
-  elif [ -n "$ep_ns" ]; then
-    key_h="${hn:-gitlab.com}" key_n="$ep_ns" src="the api endpoint $ep"
+  elif [ "$FID_EP_KIND" = graphql ]; then
+    fid_fail 2 "BAD KEY" "\`api graphql\` names its target inside the query, which this cannot read, so no bot can be chosen for it" \
+      "make the call through the REST endpoint of the project it acts on (glab-athena api projects/<namespace>%2F<project>/...). $FID_ESCALATE"
+    return
+  elif [ -n "$FID_EP_NS" ]; then
+    key_h="${hn:-gitlab.com}" key_n="$FID_EP_NS" src="the api endpoint $ep"
   else
     fid_resolve_origin_key "$hn" || return
     key_h="$FID_KEY_HOST" key_n="$FID_KEY_NS" src="origin"
+    [ -z "$hn" ] || src="origin, with the host from --hostname"
   fi
   fid_lookup "$key_h" "$key_n" || { FID_WHY="$FID_WHY (key from $src)"; return "$(fid_rc)"; }
-  if [ "$src" = origin ]; then
+  if [ "${src%%,*}" = origin ]; then
     fid_check_other_remotes || return
   fi
   return 0
@@ -388,27 +489,35 @@ fid_resolve_origin_key() {
 }
 
 # fid_check_other_remotes : with the identity taken from origin, refuse when
-# another remote of this checkout on the same host belongs to a DIFFERENT
-# Athena identity: glab picks among remotes by its own rules, so either bot's
-# token could reach the other bot's project. Remotes with no entry are ignored
-# (no bot can be chosen for them).
+# another remote of this checkout on the same host is NOT this identity: glab
+# picks among remotes by its own rules (upstream before origin), so origin's
+# bot could act on that remote's project. A remote passes only when its
+# namespace is origin's, or maps (case-insensitively, as GitLab paths do) to
+# the same bot and token file. A remote whose namespace has no entry, maps to
+# another bot, or cannot be parsed refuses; a local-path remote is no forge
+# project and is skipped. The fix is always -R.
 fid_check_other_remotes() {
   local keep_h="$FID_HOST" keep_n="$FID_NS" keep_b="$FID_BOT" keep_t="$FID_TOKEN_FILE"
-  local keep_r="$FID_REFRESH" keep_s="$FID_SOURCE" name url
+  local keep_r="$FID_REFRESH" keep_s="$FID_SOURCE" keep_raw="$FID_TOKEN_FILE_RAW" name url why
   while read -r name url; do
     name="${name#remote.}"; name="${name%.url}"
     [ "$name" = origin ] && continue
-    fid_parse_remote "$url" 2>/dev/null || continue
-    [ "$FID_KEY_HOST" = "$keep_h" ] || continue
-    [ "$FID_KEY_NS" = "$keep_n" ] && continue
-    if [[ "$FID_KEY_NS" =~ $FID_NS_RE ]] && jq -e --arg h "$keep_h" --arg n "$FID_KEY_NS" \
-        'any(.[]; .host == $h and .namespace == $n)' <<<"$FID_ENTRIES" >/dev/null 2>&1; then
-      fid_fail 2 "BAD KEY" "this checkout's origin is $keep_h/$keep_n, but its remote '$name' is $keep_h/$FID_KEY_NS, which has its own Athena identity; glab could act on either project" \
-        "pass -R <namespace>/<project> to name the project explicitly. $FID_ESCALATE"
-      return
+    if ! fid_parse_remote "$url"; then
+      [[ "$FID_WHY" == *"is a local path"* ]] && continue
+      why="its URL cannot be parsed ($FID_WHY)"
+    else
+      [ "$FID_KEY_HOST" = "$keep_h" ] || continue
+      [ "$FID_KEY_NS" = "$keep_n" ] && continue
+      jq -e --arg h "$keep_h" --arg n "$FID_KEY_NS" --arg b "$keep_b" --arg t "$keep_raw" \
+        'any(.[]; .host == $h and (.namespace | ascii_downcase) == ($n | ascii_downcase)
+                  and .bot == $b and .token_file == $t)' <<<"$FID_ENTRIES" >/dev/null 2>&1 && continue
+      why="it is $keep_h/$FID_KEY_NS, which is not this identity (no entry, or another bot)"
     fi
+    fid_fail 2 "BAD KEY" "this checkout's origin is $keep_h/$keep_n (bot $keep_b), but its remote '$name': $why; glab could act on that remote's project with this bot" \
+      "pass -R <namespace>/<project> to name the project explicitly. $FID_ESCALATE"
+    return
   done < <(git config --get-regexp '^remote\..*\.url$' 2>/dev/null)
   FID_HOST="$keep_h" FID_NS="$keep_n" FID_BOT="$keep_b" FID_TOKEN_FILE="$keep_t"
-  FID_REFRESH="$keep_r" FID_SOURCE="$keep_s" FID_STATE=FOUND FID_WHY="" FID_FIX=""
+  FID_TOKEN_FILE_RAW="$keep_raw" FID_REFRESH="$keep_r" FID_SOURCE="$keep_s" FID_STATE=FOUND FID_WHY="" FID_FIX=""
   return 0
 }

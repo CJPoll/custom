@@ -166,7 +166,12 @@ case "$host" in
       echo "Fix: run forge-preflight from a full ~/dev/custom checkout (ai/bin and ai/lib side by side)." >&2
       exit 1
     fi
-    fid_rc=0; fid_resolve_url "$remote" || fid_rc=$?
+    # In production the remote IS this checkout's origin, so resolve it the way
+    # glab-athena will (its other-remotes check included); the test seam
+    # FORGE_PREFLIGHT_REMOTE names a URL with no checkout behind it.
+    fid_rc=0
+    if [ -n "${FORGE_PREFLIGHT_REMOTE:-}" ]; then fid_resolve_url "$remote" || fid_rc=$?
+    else fid_resolve_glab_args api user || fid_rc=$?; fi
     if [ "$fid_rc" != 0 ]; then
       {
         echo "forge-preflight: REFUSED — no Athena GitLab bot resolves for origin ('$remote'), so"

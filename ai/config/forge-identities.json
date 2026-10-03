@@ -7,7 +7,7 @@
       "host": "gitlab.com",
       "namespace": "cjpoll",
       "bot": null,
-      "pending": "the personal bot's GitLab username is not chosen yet (owner question Q2 in the GitLab migration design, then step A1); set `bot` to it here and drop `pending`",
+      "pending": "the personal bot's GitLab username is not chosen yet (DND-1944, the owner's gitlab.com setup); set `bot` to it here and drop `pending`",
       "token_file": "~/.claude/gitlab-personal-athena-token",
       "refresh": "self_rotate"
     }

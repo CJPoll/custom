@@ -134,6 +134,13 @@ if [ "${1:-}" = refresh ]; then
 		echo "Fix: follow the resolver's Fix: above; if the key is simply missing, add {\"group\": \"<work GitLab group path>\"} to overlay/gitlab.json in the private overlay. Then run refresh again." >&2
 		exit 1
 	}
+	# The service account lives in the group the identity was resolved for;
+	# a .group naming another group would mint in the wrong place.
+	[ "${GROUP_NAME%%/*}" = "$FID_NS" ] || {
+		echo "glab-athena refresh: the overlay's gitlab .group names a different group than the namespace being refreshed ($FID_HOST/$FID_NS); nothing was minted." >&2
+		echo "Fix: refresh with -R <project in the group gitlab .group names>, or correct gitlab .group in the private overlay." >&2
+		exit 1
+	}
 	GROUP_ID="$(glab api "groups/$GROUP_NAME" | jq -r '.id')"
 	[ -n "$GROUP_ID" ] && [ "$GROUP_ID" != null ] || {
 		echo "glab-athena refresh: could not resolve the group id for $GROUP_NAME (is the owner glab logged in?)" >&2
@@ -257,7 +264,7 @@ if [ "${1:-}" = git ]; then
 		fid_resolve_url "$1" || ga_refuse_identity 3 "\`git\` to $1"
 		FG_BOT="$FID_BOT"
 		tf="${GITLAB_ATHENA_TOKEN_FILE:-$FID_TOKEN_FILE}"
-		[ -r "$tf" ] && t="$(tr -d '[:space:]' < "$tf")"
+		if [ -r "$tf" ]; then t="$(tr -d '[:space:]' < "$tf" 2>/dev/null)" || t=""; fi
 		[ -n "$t" ] || {
 			echo "glab-athena: REFUSING \`git\`: the $FID_BOT token file $tf (for $FID_HOST/$FID_NS) is missing, unreadable or empty, so the push cannot run as Athena." >&2
 			echo "  Fix: do not run \`glab-athena refresh\` or any \`glab auth\` yourself (owner-gated), and do not fall back to a plain \`git push\`; $FG_ESCALATE" >&2
@@ -290,7 +297,7 @@ FCI_LIB="$GA_DIR/../lib/forge-cli-isolation.sh"
 # shellcheck source=../lib/forge-cli-isolation.sh
 . "$FCI_LIB"
 TOKEN=""
-[ -r "$TOKEN_FILE" ] && TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE")"
+if [ -r "$TOKEN_FILE" ]; then TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE" 2>/dev/null)" || TOKEN=""; fi
 # Read before the scrub below, which removes every GLAB_* variable.
 MERGE_DRY_RUN="${GLAB_ATHENA_MERGE_DRY_RUN:-}"
 fci_require_token 1 glab-athena "$GA_BOT" "token file $TOKEN_FILE" "$TOKEN"

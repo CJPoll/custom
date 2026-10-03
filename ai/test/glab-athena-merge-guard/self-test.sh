@@ -52,7 +52,7 @@ unset GLAB_ATHENA_MERGE_DRY_RUN GLAB_ATHENA_GIT_DRY_RUN
 # (ai/test/forge-identity, ai/test/glab-athena).
 export ATHENA_FORGE_IDENTITIES_FILE="${TMP}/forge-identities.json"
 jq -n --arg t "${TMP}/token" '{kind:"athena-forge-identities", schema:1, identities:
-  [["gitlab.com","example-group"], ["gitlab.com","x"], ["evil-gitlab.com","example-group"],
+  [["gitlab.com","example-group"], ["gitlab.com","x"], ["gitlab.com","someone"], ["evil-gitlab.com","example-group"],
    ["gitlabxcom","example-group"], ["other.example.com","example-group"]]
   | map({host:.[0], namespace:.[1], bot:"synthetic-merge-bot", token_file:$t, refresh:"group_service_account"})}' \
   > "${ATHENA_FORGE_IDENTITIES_FILE}"
@@ -328,48 +328,52 @@ expect_ran M31 "mr -R<repo> merge (attached), pinned and green, runs" any mr -Re
 
 echo
 echo "--- api: the REST merge route is refused outright ---"
+# DND-1936: glab-athena keys the bot on the endpoint's project, so a numeric
+# project id, a dot segment, %-encoding past the project path and an absolute
+# URL are refused by the identity map before the guard runs (A3, A7, A9, A12).
+# Every other route case names the project by path and reaches the guard.
 reset_fx; green_fx
 expect_refused A1 "PUT projects/:id/merge_requests/<iid>/merge" "REST merge" api -X PUT "projects/:id/merge_requests/4242/merge"
 reset_fx
 expect_refused A2 "--method=put, encoded project, query string" "REST merge" api --method=put "projects/example-group%2Fexample-app/merge_requests/4242/merge?sha=${HEAD_SHA}"
 reset_fx
-expect_refused A3 "-XPUT full URL with api/v4" "REST merge" api -XPUT "https://gitlab.com/api/v4/projects/1/merge_requests/2/merge"
+expect_refused A3 "-XPUT full URL with api/v4 (identity: absolute URL)" "absolute URL" api -XPUT "https://gitlab.com/api/v4/projects/example-group%2Fexample-app/merge_requests/2/merge"
 reset_fx
-expect_refused A4 "no method, a field -> POST" "REST merge" api "projects/1/merge_requests/2/merge" -f "sha=${HEAD_SHA}"
+expect_refused A4 "no method, a field -> POST" "REST merge" api "projects/example-group%2Fexample-app/merge_requests/2/merge" -f "sha=${HEAD_SHA}"
 reset_fx
-expect_refused A5 "GET with a method-override header" "REST merge" api -H "X-HTTP-Method-Override: PUT" "projects/1/merge_requests/2/merge"
+expect_refused A5 "GET with a method-override header" "REST merge" api -H "X-HTTP-Method-Override: PUT" "projects/example-group%2Fexample-app/merge_requests/2/merge"
 reset_fx
-expect_refused A6 ".json format suffix" "REST merge" api -X PUT "projects/1/merge_requests/2/merge.json"
+expect_refused A6 ".json format suffix" "REST merge" api -X PUT "projects/example-group%2Fexample-app/merge_requests/2/merge.json"
 reset_fx
-expect_refused A7 "dot segments" "REST merge" api -X PUT "projects/1/./merge_requests/../merge_requests/2/merge"
+expect_refused A7 "dot segments (identity)" "segment" api -X PUT "projects/example-group%2Fexample-app/./merge_requests/../merge_requests/2/merge"
 reset_fx
-expect_refused A8 "upper-case route word" "REST merge" api -X PUT "projects/1/MERGE_REQUESTS/2/Merge"
+expect_refused A8 "upper-case route word" "REST merge" api -X PUT "projects/example-group%2Fexample-app/MERGE_REQUESTS/2/Merge"
 reset_fx
-expect_refused A9 "%-encoded route word" "REST merge" api -X PUT "projects/1/merge_requests/2/%6derge"
+expect_refused A9 "%-encoded route word (identity)" "%-encoded" api -X PUT "projects/example-group%2Fexample-app/merge_requests/2/%6derge"
 reset_fx
-expect_refused A10 "--form _method=PUT" "REST merge" api --form "_method=PUT" "projects/1/merge_requests/2/merge"
+expect_refused A10 "--form _method=PUT" "REST merge" api --form "_method=PUT" "projects/example-group%2Fexample-app/merge_requests/2/merge"
 reset_fx
-expect_refused A11 "an unknown api flag" "--bogus" api --bogus "projects/1/merge_requests/2/merge"
+expect_refused A11 "an unknown api flag" "--bogus" api --bogus "projects/example-group%2Fexample-app/merge_requests/2/merge"
 reset_fx
-expect_refused A12 "a malformed escape" "cannot be normalized" api -X PUT "projects/1/merge_requests/2/merg%zz"
+expect_refused A12 "a malformed escape (identity)" "%-encoded" api -X PUT "projects/example-group%2Fexample-app/merge_requests/2/merg%zz"
 reset_fx
-expect_refused A13 "api/v4 prefix without host" "REST merge" api -X PUT "api/v4/projects/1/merge_requests/2/merge"
+expect_refused A13 "api/v4 prefix without host" "REST merge" api -X PUT "api/v4/projects/example-group%2Fexample-app/merge_requests/2/merge"
 reset_fx
-expect_refused A14 "GET with a _method field" "REST merge" api -X GET -f "_method=PUT" "projects/1/merge_requests/2/merge"
+expect_refused A14 "GET with a _method field" "REST merge" api -X GET -f "_method=PUT" "projects/example-group%2Fexample-app/merge_requests/2/merge"
 # glab dispatches `glab -R g/r api …` to api (measured, glab 1.112), so a word
 # before `api` must not hide the call from the api judgment.
 reset_fx
-expect_refused A15 "-R <repo> before api" "is not the first word" -R example-group/example-app api -X PUT "projects/1/merge_requests/2/merge"
+expect_refused A15 "-R <repo> before api" "is not the first word" -R example-group/example-app api -X PUT "projects/example-group%2Fexample-app/merge_requests/2/merge"
 reset_fx
-expect_refused A16 "--repo=<repo> before api" "is not the first word" --repo=example-group/example-app api -X PUT "projects/1/merge_requests/2/merge"
+expect_refused A16 "--repo=<repo> before api" "is not the first word" --repo=example-group/example-app api -X PUT "projects/example-group%2Fexample-app/merge_requests/2/merge"
 reset_fx
-expect_refused A17 "-X PUT before api" "PUT" -X PUT api "projects/1/merge_requests/2/merge"
+expect_refused A17 "-X PUT before api" "PUT" -X PUT api "projects/example-group%2Fexample-app/merge_requests/2/merge"
 reset_fx
-expect_refused A18 "-- before api" "REFUSING" -- api -X PUT "projects/1/merge_requests/2/merge"
+expect_refused A18 "-- before api" "REFUSING" -- api -X PUT "projects/example-group%2Fexample-app/merge_requests/2/merge"
 reset_fx
 expect_refused A19 "-R <repo> before api, train boarding with no pin" "is not the first word" -R example-group/example-app api -X POST "projects/:id/merge_trains/merge_requests/4242"
 reset_fx
-expect_refused A20 "-R <repo> before api, REST merge by a field (default POST)" "is not the first word" -R example-group/example-app api "projects/1/merge_requests/2/merge" -f "sha=${HEAD_SHA}"
+expect_refused A20 "-R <repo> before api, REST merge by a field (default POST)" "is not the first word" -R example-group/example-app api "projects/example-group%2Fexample-app/merge_requests/2/merge" -f "sha=${HEAD_SHA}"
 reset_fx; green_fx
 expect_refused A21 "-R <repo> before api, train boarding with a wrong pin (default POST)" "is not the first word" -R example-group/example-app api "projects/:id/merge_trains/merge_requests/4242" -f "sha=${OTHER_SHA}"
 
@@ -424,31 +428,35 @@ expect_refused T20 "boarding with a failed head pipeline" "'failed', not success
 
 echo
 echo "--- api graphql: mergeRequestAccept is refused wherever the query comes from ---"
+# DND-1936: a GraphQL call names its target inside the query, so glab-athena
+# can key no bot on it and refuses every \`api graphql\` before the guard runs.
+# Each case below is still refused, nothing reaches glab, and the reason is
+# the identity map's (G10-G12, F1, F2 included: they ran before).
 Q='mutation { mergeRequestAccept(input: {projectPath: "example-group/example-app", iid: "4242", sha: "x"}) { errors } }'
 reset_fx
-expect_refused G1 "inline -f query" "mergeRequestAccept" api graphql -f "query=${Q}"
+expect_refused G1 "inline -f query (identity: api graphql)" "api graphql" api graphql -f "query=${Q}"
 reset_fx; printf '%s' "${Q}" > "${TMP}/q.graphql"
-expect_refused G2 "-F query=@file" "mergeRequestAccept" api graphql -F "query=@${TMP}/q.graphql"
+expect_refused G2 "-F query=@file (identity: api graphql)" "api graphql" api graphql -F "query=@${TMP}/q.graphql"
 reset_fx; printf '{"query":"mutation { mergeRequest\\u0041ccept(input: {}) { errors } }"}' > "${TMP}/q.json"
-expect_refused G3 "--input JSON body with a \\u escape" "mergeRequestAccept" api graphql --input "${TMP}/q.json"
+expect_refused G3 "--input JSON body with a \\u escape (identity: api graphql)" "api graphql" api graphql --input "${TMP}/q.json"
 reset_fx
-expect_refused G4 "-F query=@- (stdin)" "stdin" api graphql -F "query=@-"
+expect_refused G4 "-F query=@- (stdin) (identity: api graphql)" "api graphql" api graphql -F "query=@-"
 reset_fx
-expect_refused G5 "--input - (stdin)" "stdin" api graphql --input -
+expect_refused G5 "--input - (stdin) (identity: api graphql)" "api graphql" api graphql --input -
 reset_fx; printf 'not json' > "${TMP}/bad.json"
-expect_refused G6 "--input that is not JSON" "not JSON" api graphql --input "${TMP}/bad.json"
+expect_refused G6 "--input that is not JSON (identity: api graphql)" "api graphql" api graphql --input "${TMP}/bad.json"
 reset_fx
-expect_refused G7 "an unreadable query file" "cannot read" api graphql -F "query=@${TMP}/does-not-exist"
+expect_refused G7 "an unreadable query file (identity: api graphql)" "api graphql" api graphql -F "query=@${TMP}/does-not-exist"
 reset_fx
-expect_refused G8 "the full GraphQL URL" "mergeRequestAccept" api "https://gitlab.com/api/graphql" -f "query=${Q}"
+expect_refused G8 "the full GraphQL URL (identity: absolute URL)" "absolute URL" api "https://gitlab.com/api/graphql" -f "query=${Q}"
 reset_fx
-expect_refused G9 "an operation alias around it" "mergeRequestAccept" api graphql -f 'query=mutation M { go: mergeRequestAccept(input: $i) { errors } }'
+expect_refused G9 "an operation alias around it (identity: api graphql)" "api graphql" api graphql -f 'query=mutation M { go: mergeRequestAccept(input: $i) { errors } }'
 reset_fx
-expect_ran G10 "mergeTrainsDeleteCar passes" none api graphql -f 'query=mutation { mergeTrainsDeleteCar(input: {carId: "x"}) { errors } }'
+expect_refused G10 "mergeTrainsDeleteCar: refused (identity: api graphql)" "api graphql" api graphql -f 'query=mutation { mergeTrainsDeleteCar(input: {carId: "x"}) { errors } }'
 reset_fx
-expect_ran G11 "a read query passes" none api graphql -f 'query=query { currentUser { username } }'
+expect_refused G11 "a read query: refused (identity: api graphql)" "api graphql" api graphql -f 'query=query { currentUser { username } }'
 reset_fx
-expect_ran G12 "mergeRequestSetLabels passes" none api graphql -f 'query=mutation { mergeRequestSetLabels(input: {}) { errors } }'
+expect_refused G12 "mergeRequestSetLabels: refused (identity: api graphql)" "api graphql" api graphql -f 'query=mutation { mergeRequestSetLabels(input: {}) { errors } }'
 
 
 # The scan's own failure must never read as "no merge mutation". F1: mktemp
@@ -459,13 +467,13 @@ REAL_MKTEMP="$(command -v mktemp)"; REAL_GREP="$(command -v grep)"
 printf '#!/usr/bin/env bash\ncase " $* " in *" -d "*) exec "%s" "$@" ;; esac\nexit 1\n' "${REAL_MKTEMP}" > "${TMP}/brokenbin/mktemp"
 chmod +x "${TMP}/brokenbin/mktemp"
 reset_fx; PATH="${TMP}/brokenbin:${PATH}" run api graphql -f 'query=query { currentUser { username } }'
-if refused && [[ "${ERR}" == *"scratch file"* ]]; then ok "F1. the scan's scratch file cannot be made -> refused"
+if refused && [[ "${ERR}" == *"api graphql"* ]]; then ok "F1. the scan's scratch file cannot be made -> refused (identity: api graphql)"
 else bad "F1. mktemp failure fails closed" "$(detail)"; fi
 rm -f "${TMP}/brokenbin/mktemp"
 printf '#!/usr/bin/env bash\ncase " $* " in *" -aEiq "*) echo "grep: simulated I/O error" >&2; exit 2 ;; esac\nexec "%s" "$@"\n' "${REAL_GREP}" > "${TMP}/brokenbin/grep"
 chmod +x "${TMP}/brokenbin/grep"
 reset_fx; PATH="${TMP}/brokenbin:${PATH}" run api graphql -f 'query=query { currentUser { username } }'
-if refused && [[ "${ERR}" == *"grep exit 2"* ]]; then ok "F2. the scan's grep errors (exit 2) -> refused"
+if refused && [[ "${ERR}" == *"api graphql"* ]]; then ok "F2. the scan's grep errors (exit 2) -> refused (identity: api graphql)"
 else bad "F2. grep error fails closed" "$(detail)"; fi
 rm -rf "${TMP}/brokenbin"
 

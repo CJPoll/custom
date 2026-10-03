@@ -2,6 +2,7 @@
 # (DND-1936; called by fid_load in ai/lib/forge-identity.sh). Pure: no I/O.
 # Args: $pubtxt  the public map file's text (ai/config/forge-identities.json)
 #       $ov      the private overlay's gitlab .identities value, or null
+#       $home    $HOME, so `~/x` and `$HOME/x` compare as one token file
 # Output: {ok:true, entries:[entry + {source}], n_pub, n_ov}
 #      or {ok:false, error:"<what is wrong, naming the entry>"}
 # Every value an entry carries is checked free of tabs and newlines, because
@@ -49,7 +50,7 @@ def checked($src; $list):
         ($p.entries + $o.entries) as $all
         | ([$all | group_by([.host, (.namespace | ascii_downcase)])[] | select(length > 1)
             | "two entries claim \(.[0].host)/\(.[0].namespace) (case-insensitively; sources \(map(.source) | join(", ")))"] | first) as $dup
-        | ([$all | map(select(.bot != null)) | group_by(.token_file)[]
+        | ([$all | map(select(.bot != null)) | group_by(.token_file | if startswith("~/") then $home + .[1:] else . end)[]
             | select((map(.bot) | unique | length) > 1)
             | "bots \(map(.bot) | unique | join(", ")) share the token file \(.[0].token_file)"] | first) as $shared
         | if $dup then {ok: false, error: $dup}

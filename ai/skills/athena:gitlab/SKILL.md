@@ -1,12 +1,12 @@
 ---
 name: athena:gitlab
-description: Act on GitLab as Athena's own service account (athena-amby) via the glab-athena wrapper — MR create/comment/approve/resolve, merge-train boarding, merges, label and pipeline/job control — so writes are attributed to Athena, not Cody. Use whenever a GitLab WRITE should be authored by the agent; reads stay on plain glab.
+description: Act on GitLab as Athena's own bot for the project's namespace (athena-amby in the work group; the personal bot in cjpoll/) via the glab-athena wrapper — MR create/comment/approve/resolve, merge-train boarding, merges, label and pipeline/job control — so writes are attributed to Athena, not Cody. Use whenever a GitLab WRITE should be authored by the agent; reads stay on plain glab.
 ---
 
 # athena:gitlab
 
-The `glab` CLI (and raw GitLab API) run as **Athena's own service account**,
-through a thin wrapper. No MCP, no daemon — the wrapper just injects the right
+The `glab` CLI (and raw GitLab API) run as **Athena's own bot for the
+project's namespace** (*Which bot* below), through a thin wrapper. No MCP, no daemon — the wrapper just injects the right
 token at call time and execs `glab`.
 
 ## Two GitLab identities, and which one to use
@@ -29,7 +29,11 @@ for `glab-athena git`, from the URL the command reaches. The map is
 overlay's `gitlab` `.identities` (work entries). A namespace with no entry, a
 differently cased one, a bot not named yet, or an unreadable map is refused
 with a `Fix:`. It never falls back to another bot or to Cody's login, so run
-from the project's checkout or pass `-R <namespace>/<project>`.
+from the project's checkout or pass `-R <namespace>/<project>`. A work
+namespace's entry is machine-local, so each machine that writes to the work
+group needs it in its private overlay; `~/dev/custom/ai/bin/forge-identity
+check` lists every GitLab checkout under `~/dev` and the bot it resolves to,
+or why none does.
 
 ## The wrapper
 
@@ -57,8 +61,11 @@ reasons are in
 
 ## Setup
 
-- Token: `~/.claude/gitlab-athena-token`, mode `600`, one token line.
-  `$GITLAB_ATHENA_TOKEN_FILE` overrides the path. The wrapper reads it at call
+- Token: the `token_file` the namespace's identity entry names (*Which bot*):
+  `~/.claude/gitlab-athena-token` for the work group's bot,
+  `~/.claude/gitlab-personal-athena-token` for the personal bot. Mode `600`,
+  one token line. `$GITLAB_ATHENA_TOKEN_FILE` overrides the path (a test seam;
+  the identity is still resolved). The wrapper reads it at call
   time and exports it as `GITLAB_TOKEN`; it **never** puts the token in argv, a
   URL, or a config file. If the file is missing, unreadable, empty or
   whitespace-only, the wrapper refuses with a `Fix:` and does nothing (DND-725:
@@ -67,7 +74,7 @@ reasons are in
   inherited `GITLAB_*`/`GLAB_*`/`GL_*`, `OAUTH_TOKEN` and `CI_JOB_TOKEN`
   removed, so the owner's glab login and keyring entry are unreachable. The
   owner's glab aliases do not apply; use the real command name.
-- It pins `GITLAB_HOST=gitlab.com` and sets `GLAB_NO_PROMPT=1` /
+- It pins `GITLAB_HOST` to the identity entry's host (gitlab.com) and sets `GLAB_NO_PROMPT=1` /
   `GLAB_CHECK_UPDATE=false`, so it never blocks on a prompt.
 - Requires `glab` on `PATH` (it is — via asdf).
 

@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# forge-identity — which Athena GitLab bot each checkout resolves to (DND-1936).
+#
+# glab-athena picks its bot from the project's (host, top-level namespace)
+# through one identity map: ai/config/forge-identities.json (public) plus the
+# private overlay's gitlab .identities (work entries, machine-local). A
+# machine whose overlay lacks a work entry refuses every glab-athena write in
+# that namespace, by design. This tool makes that visible BEFORE it bites: run
+# `check` on a machine before landing a change to the map, or after setting up
+# its overlay. It reads only: the map, the overlay and each checkout's git
+# config. It never reads a token.
+#
+# The resolution is ai/lib/forge-identity.sh, the same one glab-athena runs,
+# so a checkout that `check` reports OK resolves the same way for glab-athena
+# run in it (with no -R).
+
+set -uo pipefail
+
+usage() {
+  cat <<'EOF'
+forge-identity -- which Athena GitLab bot each checkout resolves to (DND-1936)
+
+Usage:
+  forge-identity check [--root DIR]   every git checkout directly under DIR
+                                      (default ~/dev) whose origin is on a
+                                      host the identity map knows, or looks
+                                      like GitLab: the bot it resolves to, or
+                                      why none does
+  forge-identity resolve <remote-url> the bot one remote URL resolves to
+  forge-identity --help               this text (stdout, exit 0, no side effects)
+
+The map: ai/config/forge-identities.json plus the private overlay's
+gitlab .identities (ai/contracts/athena-private-overlay.md -> Keys in use).
+
+Exit: 0 every candidate resolves (check: also when there is none, said so)
+      1 at least one candidate resolves to no bot (each line carries Fix:)
+      2 usage
+      3 COULD NOT LOOK: the map or the overlay cannot be read
+EOF
+}
+
+for a in "$@"; do
+  case "$a" in -h|--help) usage; exit 0 ;; esac
+done
+
+die_usage() { printf 'forge-identity: %s\nFix: %s\n' "$1" "$2" >&2; exit 2; }
+
+FID_LIB="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/forge-identity.sh"
+# shellcheck source=../lib/forge-identity.sh
+{ [ -r "${FID_LIB}" ] && . "${FID_LIB}"; } || {
+  printf 'forge-identity: COULD NOT LOOK: cannot load %s.\nFix: run it from a full ~/dev/custom checkout (ai/bin and ai/lib side by side).\n' "${FID_LIB}" >&2
+  exit 3
+}
+
+cmd="${1:-}"; [ "$#" -gt 0 ] && shift
+case "${cmd}" in
+  resolve)
+    [ "$#" = 1 ] || die_usage "resolve takes exactly one remote URL" "forge-identity resolve https://gitlab.com/<namespace>/<project>.git"
+    rc=0; fid_resolve_url "$1" || rc=$?
+    if [ "${rc}" = 0 ]; then
+      printf 'OK %s/%s -> %s (token file %s; %s map; refresh %s)\n' "${FID_HOST}" "${FID_NS}" "${FID_BOT}" "${FID_TOKEN_FILE}" "${FID_SOURCE}" "${FID_REFRESH}"
+      exit 0
+    fi
+    printf 'forge-identity: %s: %s.\nFix: %s\n' "${FID_STATE}" "${FID_WHY%.}" "${FID_FIX}" >&2
+    [ "${rc}" = 3 ] && exit 3
+    exit 1 ;;
+  check) ;;
+  '') die_usage "no subcommand" "forge-identity check [--root DIR], or forge-identity resolve <remote-url>; see --help" ;;
+  *) die_usage "unknown subcommand '${cmd}'" "use check or resolve; see --help" ;;
+esac
+
+root="${HOME}/dev"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --root) [ "$#" -ge 2 ] && [ -n "$2" ] || die_usage "--root needs a directory" "pass --root <dir holding checkouts>"
+      root="$2"; shift 2 ;;
+    --root=*) root="${1#--root=}"; shift ;;
+    *) die_usage "unknown argument '$1'" "forge-identity check [--root DIR]" ;;
+  esac
+done
+[ -d "${root}" ] || die_usage "--root '${root}' is not a directory" "pass --root <dir holding checkouts>"
+
+if ! fid_load; then
+  printf 'forge-identity: %s: %s.\nFix: %s\n' "${FID_STATE}" "${FID_WHY%.}" "${FID_FIX}" >&2
+  exit 3
+fi
+hosts=" $(jq -r '[.[].host] | unique | join(" ")' <<<"${FID_ENTRIES}") "
+
+seen=0 cand=0 good=0 bad=0
+for d in "${root}"/*/; do
+  d="${d%/}"
+  git -C "${d}" rev-parse --git-dir >/dev/null 2>&1 || continue
+  seen=$((seen + 1))
+  url="$(git -C "${d}" remote get-url origin 2>/dev/null)" || continue
+  fid_parse_remote "${url}" 2>/dev/null || true
+  h="${FID_KEY_HOST:-}"
+  # A mapped host, or anything that looks like GitLab (an alias such as
+  # gitlab.com-work is a miss to report, not a host to skip).
+  [[ "${hosts}" == *" ${h} "* ]] || [[ "${h}" == *gitlab* ]] || continue
+  cand=$((cand + 1))
+  line="$(cd "${d}" && { rc=0; fid_resolve_glab_args mr list || rc=$?
+    if [ "${rc}" = 0 ]; then printf 'OK   %s -> %s (%s map)' "${d}" "${FID_BOT}" "${FID_SOURCE}"
+    else printf 'MISS %s: %s: %s.\n     Fix: %s' "${d}" "${FID_STATE}" "${FID_WHY%.}" "${FID_FIX}"; fi
+    exit "${rc}"; })" && good=$((good + 1)) || bad=$((bad + 1))
+  printf '%s\n' "${line}"
+done
+
+printf 'forge-identity check: %d checkout(s) under %s, %d with an origin on a mapped or GitLab host (mapped hosts:%s), %d resolve to a bot, %d do not.\n' \
+  "${seen}" "${root}" "${cand}" "${hosts% }" "${good}" "${bad}"
+if [ "${cand}" = 0 ]; then
+  echo "forge-identity check: no checkout under ${root} has an origin on a mapped or GitLab host; nothing to resolve."
+fi
+[ "${bad}" = 0 ] || exit 1
+exit 0
