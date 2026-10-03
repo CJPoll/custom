@@ -1216,6 +1216,11 @@ module LeadTimePhases
         cells = rows.map do |r|
           next tail_cell(r, ci, decl) if name == "tail"
 
+          # DND-1615: a lead with no post-merge run, in a CI window, is n/a.
+          if name == "lead" && (why = no_run_reason(r, ci, decl))
+            next [nil, why]
+          end
+
           r[key].nil? ? [nil, generic(r["lead_na_reason"] || "#{name}: not measured", r)] : [r[key], nil]
         end
         [name, series(cells.map(&:first), cells.map(&:last))]
@@ -1241,8 +1246,20 @@ module LeadTimePhases
     def tail_cell(row, ci, decl = nil)
       s = row["tail_s"]
       return [nil, generic(row["lead_na_reason"] || "tail: not measured", row)] if s.nil?
-      return [s, nil] unless ci && s.zero? && !TAIL_RUN_ENDS.include?(row["tail_end"])
-      return [nil, TailCI.declared_na(decl, row["tail_end"])] if TailCI.ci_declared?(decl)
+      why = no_run_reason(row, ci, decl)
+      why ? [nil, why] : [s, nil]
+    end
+
+    # The n/a reason of a landing that has no post-merge run in a window with
+    # post-merge CI, nil otherwise (DND-1615). Tail and lead share it: a lead
+    # with no run ends at the landing, a lead with one at the deploy, so in a
+    # CI window the no-run lead is not a shorter lead but n/a, with tail's
+    # reason. A row with no measured tail is not decided here (its own n/a
+    # reason stands).
+    def no_run_reason(row, ci, decl)
+      s = row["tail_s"]
+      return nil unless ci && s.is_a?(Numeric) && s.zero? && !TAIL_RUN_ENDS.include?(row["tail_end"])
+      return TailCI.declared_na(decl, row["tail_end"]) if TailCI.ci_declared?(decl)
 
       why = if row["tail_end"].nil?
               "tail: 0 with no end kind in the ledger row (ingested before DND-1532), so a 0 cannot be told " \
@@ -1251,7 +1268,7 @@ module LeadTimePhases
               "tail: lead-time found no successful post-merge CI run for the landing (end kind " \
                 "#{row['tail_end']}), where other landings in the window have one"
             end
-      [nil, "#{why}; #{TailCI::INFERRED}"]
+      "#{why}; #{TailCI::INFERRED}"
     end
 
     # Where the fix for each biggest-contributor candidate lands: a phase is

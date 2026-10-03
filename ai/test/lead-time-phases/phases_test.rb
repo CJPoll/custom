@@ -643,6 +643,49 @@ check("D5 the mismatch counts the landings with a post-merge run") do
   mis["tail_ci"] == { "source" => "declared", "value" => false, "mismatch" => 1 }
 end
 
+# ── lead reads the same post-merge fact as tail (DND-1615) ─────────────────
+# A lead with no post-merge run ends at the landing, a lead with one ends at
+# the deploy. In a window with post-merge CI the no-run lead is n/a, never a
+# shorter lead. gs_rows: lead_s 1000 * i, a deploy end each; no_deploy swaps
+# the fifth for a merge end (lead_s 5000).
+def totals_of(rs, **kw) = L::Stats.summarize(rs, **kw).fetch("totals")
+
+lead_mixed = totals_of(no_deploy).fetch("lead")
+check("LC1 inferred CI: a lead with no post-merge run is n/a, not a shorter lead") do
+  lead_mixed.values_at("n", "n_na", "sum_s") == [4, 1, 10_000]
+end
+check("LC1 its reason is tail's, saying no post-merge run was found") do
+  lead_mixed["na_reasons"].first["reason"].include?("found no successful post-merge CI run")
+end
+check("LC1 the lead and tail n/a counts agree, so the two share a definition") do
+  lt = totals_of(no_deploy)
+  lt["lead"]["n_na"] == lt["tail"]["n_na"]
+end
+check("LC2 declared CI: the same lead cells, the reason names the declaration") do
+  d = totals_of(no_deploy, idle_workflow: WF, repo: "prod").fetch("lead")
+  d.values_at("n", "n_na", "sum_s") == [4, 1, 10_000] && d["na_reasons"].first["reason"].include?("declares post-merge CI")
+end
+check("LC2 a row ingested before DND-1532, in a CI window: lead is n/a with why") do
+  d = totals_of(pre).fetch("lead")
+  d["n_na"] == 1 && d["na_reasons"].first["reason"].include?("no end kind")
+end
+check("LC3 no CI declared: a landing-ended lead stays measured") do
+  totals_of(all_merge, idle_workflow: "none", repo: "prod").fetch("lead").values_at("n", "n_na") == [5, 0]
+end
+check("LC3 no CI seen in the window (custom-shaped): every lead stays measured") do
+  totals_of(custom_rows).fetch("lead").values_at("n", "n_na", "sum_s") == [5, 0, 15_000]
+end
+check("LC4 a lead that ended at a deploy with a 0 tail is still measured") do
+  totals_of(zero_deploy).fetch("lead")["n"] == 5
+end
+check("LC5 a lead already n/a keeps its own reason, not the tail's") do
+  rs = no_deploy.first(4) + [row(5).merge("lead_s" => nil, "tail_s" => nil, "lead_na_reason" => "start: no stamp")]
+  totals_of(rs).fetch("lead")["na_reasons"] == [{ "reason" => "start: no stamp", "count" => 1 }]
+end
+check("LC6 code stays measured for the no-run landing (it ends at the landing by definition)") do
+  totals_of(no_deploy).fetch("code").values_at("n", "n_na") == [5, 0]
+end
+
 # The tail numbers and candidacy before DND-1614, pinned: [n, n_na, sum_s, candidate].
 { "custom-shaped" => [custom_rows, [5, 0, 0, false]], "gen_saas-shaped" => [gs_rows, [5, 0, 18_000, true]],
   "one no-run landing" => [no_deploy, [4, 1, 14_400, true]], "one pre-DND-1532 row" => [pre, [4, 1, 14_400, true]],

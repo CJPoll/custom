@@ -206,8 +206,14 @@ HELP = <<~TXT
                                       else as for "none", without the
                                       warning. The reason says it was
                                       inferred.
-                   `lead` is not adjusted: it ends at the landing when no
-                   run was found. --json carries tail_ci: {"source":
+                   `lead` follows the same fact (DND-1615): a lead ends
+                   at the deploy when a run was found and at the landing
+                   when none was, so where post-merge CI holds (declared
+                   or inferred as above) a landing with no run has an n/a
+                   lead with the tail's reason, never a shorter lead. With
+                   no CI a lead ends at the landing and stays measured.
+                   `code` ends at the landing by definition and is
+                   unchanged. --json carries tail_ci: {"source":
                    "declared"|"inferred", "value": true|false, and
                    "mismatch": N for a "none" repo with runs}.
     --self-test    run the domain and IO suites.
