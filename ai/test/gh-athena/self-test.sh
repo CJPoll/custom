@@ -1572,10 +1572,14 @@ xgh "${X}/src" pull -q --rebase origin main; R2A_RC="${RC}"; R2A_ERR="${ERR}"
 git -C "${X}/src" config pull.rebase true
 xgh "${X}/src" pull -q origin main; R2B_RC="${RC}"; R2B_ERR="${ERR}"
 git -C "${X}/src" config --unset pull.rebase
+# Critic round: git reads an abbreviation (--reb) and a short cluster (-qr).
+xgh "${X}/src" pull --reb origin main; R2C_RC="${RC}"
+xgh "${X}/src" pull -qr origin main; R2D_RC="${RC}"
 git -C "${X}/src" config --unset hook.r2.command; git -C "${X}/src" config --unset hook.r2.event
-if [ "${R2A_RC}" = 3 ] && [[ "${R2A_ERR}" == *"rebase"*"Fix:"* ]] && [ "${R2B_RC}" = 3 ] && [[ "${R2B_ERR}" == *"rebase"* ]] && never_granted r2; then
-  ok "R2. a granted pull that rebases (--rebase, pull.rebase): refused up front, since its post-index-change hook runs before the transport"
-else bad "R2. pull --rebase" "a_rc=${R2A_RC} a_err='${R2A_ERR}' b_rc=${R2B_RC} b_err='${R2B_ERR}' probe=[$(cat "${X_PROBE_LOG}")]"; fi
+if [ "${R2A_RC}" = 3 ] && [[ "${R2A_ERR}" == *"rebase"*"Fix:"* ]] && [ "${R2B_RC}" = 3 ] && [[ "${R2B_ERR}" == *"rebase"* ]] \
+  && [ "${R2C_RC}" = 3 ] && [ "${R2D_RC}" = 3 ] && never_granted r2; then
+  ok "R2. a granted pull that rebases (--rebase, --reb, -qr, pull.rebase): refused up front, since its post-index-change hook runs before the transport"
+else bad "R2. pull --rebase" "a_rc=${R2A_RC} a_err='${R2A_ERR}' b_rc=${R2B_RC} b_err='${R2B_ERR}' c_rc=${R2C_RC} d_rc=${R2D_RC} probe=[$(cat "${X_PROBE_LOG}")]"; fi
 
 # R3 (review round). The wrapper's own ls-remote probes around a push carry
 # the header: a repository insteadOf must not hand it to a helper of its

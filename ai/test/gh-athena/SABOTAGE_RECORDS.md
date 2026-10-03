@@ -172,3 +172,11 @@ its subtree). On 9e978d9b: `RESULT: 231 passed, 1 failed`,
 `FAIL C6b` with `eff=gpg:p-c6b,helper:p-c6h,askpass:p-c6a`. After (the
 transport appends its values last to GIT_CONFIG_PARAMETERS):
 `RESULT: 232 passed, 0 failed`.
+
+The third critic round found the rebasing-pull check read only four exact
+spellings, while git also takes an abbreviation (`--reb`) and a short
+cluster (`-qr`). R2 gained both. On 6be49b40: `RESULT: 231 passed, 1
+failed`, `FAIL R2` with `c_rc=1 d_rc=1` (not refused) and the
+post-index-change hook's probe lines `r2 hdr=absent fd=pipe transport=RAN`:
+the hook held the grant and used it. After (any prefix of --rebase, any
+short cluster with r, counts as rebasing): `RESULT: 232 passed, 0 failed`.

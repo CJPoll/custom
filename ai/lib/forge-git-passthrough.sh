@@ -1525,17 +1525,32 @@ fg_refuse_pre_transport() {
     esac
   fi
   [ "$FG_URLS_SUB" = pull ] || return 0
-  # Does this pull rebase? The last --rebase / --no-rebase / -r flag, else
-  # branch.<cur>.rebase, else pull.rebase. Anything but false rebases.
+  # Does this pull rebase? Read conservatively, so a parse slip can only
+  # over-refuse: any long option git may read as --rebase (any prefix of it,
+  # since git accepts a unique abbreviation: --reb), with no value or a value
+  # that is not false, and any short cluster holding r (-qr), count as
+  # rebasing wherever they stand. Only the exact --no-rebase, or a --rebase
+  # value that is false, counts as off. With no flag: branch.<cur>.rebase,
+  # else pull.rebase. Anything but false rebases.
+  local on="" off=0 n
   for a in "${FG_CMD_ARGS[@]}"; do
     case "$a" in
       --) break ;;
-      --no-rebase) mode=false ;;
-      --rebase) mode=true ;;
-      --rebase=*) mode="${a#--rebase=}" ;;
-      -r) mode=true ;;
+      --no-rebase) off=1 ;;
+      --?*)
+        n="${a#--}"; n="${n%%=*}"
+        if [[ rebase == "$n"* ]]; then
+          case "$a" in
+            *=*) if fg_bool_false "${a#*=}"; then off=1; else on="$a"; fi ;;
+            *) on="$a" ;;
+          esac
+        fi ;;
+      -?*) [[ "${a#-}" == *r* ]] && on="$a" ;;
     esac
   done
+  if [ -n "$on" ]; then mode="true ($on)"
+  elif [ "$off" = 1 ]; then mode=false
+  fi
   if [ -z "$mode" ]; then
     cur="$(CG symbolic-ref -q --short HEAD 2>/dev/null || true)"
     [ -n "$cur" ] && mode="$(CG config --get "branch.$cur.rebase" 2>/dev/null || true)"
