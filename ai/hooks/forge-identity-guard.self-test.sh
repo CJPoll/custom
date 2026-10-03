@@ -223,6 +223,18 @@ check "4d. GET + method-override header on git/refs" deny
 run "$(bash_json 'gh api --method=PUT repos/o/r/contents/lib/a.ex -f message=x -f content=eA==')"
 check "4e. bare gh api PUT contents/<path>" deny
 
+# DND-1886: an option's VALUE that looks like -X<method> is not the method. The
+# real method is POST/PATCH, so the ref-write rule must own the deny and its Fix
+# (the guarded push path), not leave the call to the generic api-write rule.
+run "$(bash_json 'gh api -X POST repos/o/r/git/refs -f ref=refs/heads/x -f sha=abc --jq -XGET')"
+check "4e1. -X POST + --jq -XGET on git/refs" deny
+check_text "4e2. ...the deny is the ref-write one, naming the guarded push path" 'creates or moves a ref'
+run "$(bash_json 'gh api --method PATCH repos/o/r/git/refs/heads/main -f sha=abc -q -XGET')"
+check "4e3. --method PATCH + -q -XGET on git/refs" deny
+check_text "4e4. ...the deny is the ref-write one" 'creates or moves a ref'
+run "$(bash_json 'gh api -X GET repos/o/r/git/refs/heads/main --jq -XPATCH')"
+check "4e5. verdict unchanged: -X GET + --jq -XPATCH is still denied" deny
+
 run "$(bash_json 'gh api -X DELETE repos/o/r/contents/lib/a.ex -f message=x -f sha=abc')"
 check "4f. bare gh api DELETE contents/<path>" deny
 

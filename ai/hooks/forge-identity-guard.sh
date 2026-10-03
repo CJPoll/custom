@@ -191,18 +191,58 @@ REF_ROUTE_RE='(repos/[^/[:space:]]+/[^/[:space:]]+|repositories/[^/[:space:]]+)/
 GIT_REF_RE='(repos/[^/[:space:]]+/[^/[:space:]]+|repositories/[^/[:space:]]+)/git/refs?([/.?[:space:]'"'"'"]|$)'
 REF_DENY='forge-identity: this is a bare `gh api` call that creates or moves a ref (REST …/git/refs, …/contents/…, …/branches/<b>/rename or …/pulls/<n>/update-branch; GraphQL createCommitOnBranch / createRef / updateRef / updateRefs / createLinkedBranch / revertPullRequest / updatePullRequestBranch). It runs as the machine owner AND can put commits on the default branch with no pinned head and no green check (DND-741). Fix: commit locally and move a branch only with `~/dev/custom/ai/bin/gh-athena git push origin <feature-branch>` (athena:github -> "Pushing as Athena"); land on the default branch only through a PR: once every check on its head is green, run `~/dev/custom/ai/skills/athena:merge-boarding/scripts/integration-gate` from the worktree of the PR, then `~/dev/custom/ai/skills/athena:merge-boarding/scripts/locked-merge --pr <n> --head <sha>` with the SHA its INTEGRATION OK line names (it makes the pinned `gh-athena pr merge` call under the merge lock; athena:merge-boarding -> "Landing onto a moving main"). To delete a branch, `gh-athena git push origin --delete <branch>`. If the wrapper refuses, do not work around it; escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can'\''t be done as Athena").'
 
+# api_method <segment> : the HTTP method one `gh … api` segment names (upper
+# case, the last one wins), or "" when it names none. Options that take a value
+# are read WITH that value, so `--jq -XGET` is a jq filter and never a method
+# (DND-1886). The value options are the shared classifier's -R/--repo and
+# --hostname (ai/lib/forge-write-class.awk, valued) plus gh api's own: -q/--jq,
+# -t/--template, -p/--preview, --cache, --output, -H/--header, -f/-F/--field/
+# --raw-field/--form and --input.
+api_method() {
+  printf '%s' "$1" | awk '{
+    m = ""; seen = 0
+    for (i = 1; i <= NF; i++) {
+      x = $i; gsub(/["'"'"']/, "", x)
+      if (!seen) { if (x == "api") seen = 1; continue }
+      if (x == "-X" || x == "--method") { v = $(i + 1); gsub(/["'"'"']/, "", v); m = v; i++; continue }
+      if (x ~ /^--method=/) { m = substr(x, 10); continue }
+      if (x ~ /^-[A-Za-z]*X/ && x !~ /^--/) {
+        v = x; sub(/^-[A-Za-z]*X=?/, "", v)
+        if (v == "") { v = $(i + 1); gsub(/["'"'"']/, "", v); i++ }
+        m = v; continue
+      }
+      if (x ~ /^--(jq|template|preview|cache|output|header|field|raw-field|form|input|repo|hostname)=/) continue
+      if (x ~ /^-[HRqtpfF]./) continue
+      if (x == "-q" || x == "--jq" || x == "-t" || x == "--template" || x == "-p" || x == "--preview" || x == "--cache" || x == "--output" || x == "-H" || x == "--header" || x == "-f" || x == "-F" || x == "--field" || x == "--raw-field" || x == "--form" || x == "--input" || x == "-R" || x == "--repo" || x == "--hostname") { i++; continue }
+    }
+    sub(/[^A-Za-z].*/, "", m)
+    print toupper(m)
+  }'
+}
+
 # api_ref_write <segment> : true when one `gh … api` command segment writes a ref.
 api_ref_write() {
   _s=$1
   printf '%s' "$_s" | grep -Eq "$REF_MUT_RE" && return 0
   printf '%s' "$_s" | grep -Eiq "$REF_ROUTE_RE" || return 1
   printf '%s' "$_s" | grep -Eiq 'x-(http-)?method(-override)?[[:space:]]*:' && return 0
-  _m=$(printf '%s' "$_s" | sed -nE "s/(^|.*[[:space:]])(-[[:alpha:]]*X|--method)(=|[[:space:]]+)?[\"']?([[:alpha:]]+).*/\4/p" | tr '[:lower:]' '[:upper:]')
+  _m=$(api_method "$_s")
   case "$_m" in
-    GET|HEAD) return 1 ;;
     DELETE) printf '%s' "$_s" | grep -Eiq "$GIT_REF_RE" && return 1; return 0 ;;
-    ?*) return 0 ;;
+    GET|HEAD|"") ;;
+    *) return 0 ;;
   esac
+  # DND-1886: the lexical reading (any -X<word> in the segment, last wins) can
+  # take an option's value for the method. It still denies where it names a
+  # write the option-aware reading above does not, so no verdict changes; the
+  # option-aware reading only decides WHICH rule owns the deny and its Fix.
+  _lex=$(printf '%s' "$_s" | sed -nE "s/(^|.*[[:space:]])(-[[:alpha:]]*X|--method)(=|[[:space:]]+)?[\"']?([[:alpha:]]+).*/\4/p" | tr '[:lower:]' '[:upper:]')
+  case "$_lex" in
+    GET|HEAD|"") ;;
+    DELETE) printf '%s' "$_s" | grep -Eiq "$GIT_REF_RE" && return 1; return 0 ;;
+    *) return 0 ;;
+  esac
+  [ "$_m" = GET ] || [ "$_m" = HEAD ] && return 1
   printf '%s' "$_s" | grep -Eq '(^|[[:space:]])(-[[:alpha:]]*[fF]|--(raw-)?field|--input)' && return 0
   return 1
 }
