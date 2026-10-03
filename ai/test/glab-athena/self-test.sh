@@ -78,15 +78,17 @@ echo "glab-athena git-passthrough self-test"
 echo "wrapper: ${WRAPPER}"
 echo
 
-echo "--- HIT: an SSH-form origin is rewritten to HTTPS with the PAT header ---"
+echo "--- HIT: an SSH-form origin is rewritten to the route's HTTPS transport, with the PAT grant ---"
 R="$(new_repo scp 'git@gitlab.com:example-group/example-app.git')"
 gla "${R}" push origin HEAD
-if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: url https://gitlab.com/example-group/example-app.git"* ]] \
+if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: url athena-forge::https://gitlab.com/example-group/example-app.git"* ]] \
   && [[ "${OUT}" == *"[credential.helper=]"* ]] \
   && [[ "${OUT}" == *"[core.askPass=]"* ]] \
-  && [[ "${OUT}" == *"[url.https://gitlab.com/.insteadOf=git@gitlab.com:]"* ]] \
-  && [[ "${OUT}" == *"GIT_CONFIG_KEY_0=[http.https://gitlab.com/.extraheader] GIT_CONFIG_VALUE_0=[AUTHORIZATION: basic <oauth2:REDACTED>]"* ]]; then
-  ok "1. git@gitlab.com: origin -> https://gitlab.com/..., helper off, oauth2 PAT header via env"
+  && [[ "${OUT}" == *"[url.athena-forge::https://gitlab.com/.insteadOf=git@gitlab.com:]"* ]] \
+  && [[ "${OUT}" == *"[url.athena-forge::https://gitlab.com/.insteadOf=https://gitlab.com/]"* ]] \
+  && [[ "${OUT}" == *"cred: granted (one forge URL: https://gitlab.com/example-group/example-app.git)"*"[AUTHORIZATION: basic <oauth2:REDACTED>]"* ]] \
+  && [[ "${OUT}" == *"dry-run: exec git [--no-pager]"* ]] && [[ "${OUT}" != *"GIT_CONFIG_KEY"* ]]; then
+  ok "1. git@gitlab.com: origin -> athena-forge::https://gitlab.com/..., helper off, pager off, the oauth2 PAT header granted to the transport alone (DND-1868)"
 else bad "1. SSH-form origin rewritten with PAT header" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
 
 if [[ "${OUT}${ERR}" != *"${FAKE_TOKEN}"* ]] && [[ "${OUT}${ERR}" != *"${B64}"* ]] \
@@ -95,12 +97,12 @@ if [[ "${OUT}${ERR}" != *"${FAKE_TOKEN}"* ]] && [[ "${OUT}${ERR}" != *"${B64}"* 
 else bad "2. dry-run leaks the PAT or puts the header on argv" "out='${OUT}'"; fi
 
 gla "${R}" push
-if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: url https://gitlab.com/example-group/example-app.git"* ]]; then
+if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: url athena-forge::https://gitlab.com/example-group/example-app.git"* ]]; then
   ok "3. bare \`push\` resolves the default remote (origin) and rewrites it"
 else bad "3. default-remote push rewritten" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
 
 gla "${R}" push -u origin HEAD:refs/heads/feature
-if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: url https://gitlab.com/example-group/example-app.git"* ]]; then
+if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: url athena-forge::https://gitlab.com/example-group/example-app.git"* ]]; then
   ok "3b. \`push -u origin HEAD:<ref>\` rewrites"
 else bad "3b. push -u rewritten" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
 
@@ -198,7 +200,7 @@ echo
 echo "--- NEGATIVE: what must pass untouched ---"
 R="$(new_repo https 'https://gitlab.com/example-group/example-app.git')"
 gla "${R}" push origin HEAD
-if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: url https://gitlab.com/example-group/example-app.git"* ]] && [ -z "${ERR}" ]; then
+if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: url athena-forge::https://gitlab.com/example-group/example-app.git"* ]] && [ -z "${ERR}" ]; then
   ok "15. an HTTPS origin is untouched (same URL, no refusal)"
 else bad "15. HTTPS origin untouched" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
 
@@ -219,22 +221,77 @@ if [ "${RC}" = 0 ] && [ "$(git -C "${BARE}" rev-parse refs/heads/landed 2>/dev/n
   ok "17. real exec: push to a local bare remote under .../gitlab.com/... lands"
 else bad "17. real local push lands" "rc=${RC} err='$(cat "${TMP}/err")'"; fi
 
-# A REAL exec of a local command: git itself must see the oauth2 PAT header for
-# https://gitlab.com/ (proves the env channel is wired, not just printed).
+# A REAL exec of a local command: git resolves origin to the route's
+# transport and never sees the oauth2 PAT header (DND-1868, DND-1880).
 R="$(new_repo hdr 'git@gitlab.com:example-group/example-app.git')"
 ( cd "${R}" && "${WRAPPER}" git config --get-all http.https://gitlab.com/.extraheader ) >"${TMP}/out" 2>"${TMP}/err"; RC=$?
-if [ "${RC}" = 0 ] && [ "$(cat "${TMP}/out")" = "AUTHORIZATION: basic ${B64}" ]; then
-  ok "18. real exec: git sees the oauth2:<PAT> basic header for https://gitlab.com/"
-else bad "18. git sees the PAT header" "rc=${RC} out='$(cat "${TMP}/out")' err='$(cat "${TMP}/err")'"; fi
+( cd "${R}" && "${WRAPPER}" git remote get-url --push origin ) >"${TMP}/out2" 2>>"${TMP}/err"; RC2=$?
+if [ "${RC}" = 1 ] && [ ! -s "${TMP}/out" ] && [ "${RC2}" = 0 ] \
+  && [ "$(cat "${TMP}/out2")" = "athena-forge::https://gitlab.com/example-group/example-app.git" ]; then
+  ok "18. real exec: git resolves origin to the route's transport and sees no PAT header (DND-1880)"
+else bad "18. git sees the transport rewrite and no header" "rc=${RC} rc2=${RC2} out2='$(cat "${TMP}/out2")' err='$(cat "${TMP}/err")'"; fi
 
-# A caller's own GIT_CONFIG_COUNT entries survive: the header is appended.
+# A caller's own GIT_CONFIG_COUNT entries survive, and no header joins them.
 ( cd "${R}" && GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=user.name GIT_CONFIG_VALUE_0=kept \
     "${WRAPPER}" git config --get user.name ) >"${TMP}/out" 2>"${TMP}/err"; RC=$?
 ( cd "${R}" && GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=user.name GIT_CONFIG_VALUE_0=kept \
     "${WRAPPER}" git config --get-all http.https://gitlab.com/.extraheader ) >"${TMP}/out2" 2>>"${TMP}/err"
-if [ "${RC}" = 0 ] && [ "$(cat "${TMP}/out")" = kept ] && [ "$(cat "${TMP}/out2")" = "AUTHORIZATION: basic ${B64}" ]; then
-  ok "19. a caller's GIT_CONFIG_COUNT entry is kept and the header is appended"
+if [ "${RC}" = 0 ] && [ "$(cat "${TMP}/out")" = kept ] && [ ! -s "${TMP}/out2" ]; then
+  ok "19. a caller's GIT_CONFIG_COUNT entry is kept, and no header is added (DND-1868)"
 else bad "19. GIT_CONFIG_COUNT append" "out='$(cat "${TMP}/out")' out2='$(cat "${TMP}/out2")' err='$(cat "${TMP}/err")'"; fi
+
+# DND-1868, mirrored: a REAL routed push to a fixture gitlab.com (no network:
+# a git shim runs git with a copy of its exec-path whose git-remote-https is a
+# stub mapping https://gitlab.com/<g>/<r> to a local bare repo). The push
+# lands with the oauth2 header at the transport alone; a pre-push hook gets no
+# header and finds the grant used.
+X="${TMP}/x1868"; mkdir -p "${X}/shim" "${X}/exec" "${X}/forge/g"
+export X_REAL_GIT="$(git --exec-path)/git" X_EXEC="${X}/exec" X_FORGE="${X}/forge" X_LOG="${X}/stub.log" X_B64="${B64}"
+for f in "$(git --exec-path)"/*; do ln -s "${f}" "${X_EXEC}/${f##*/}"; done
+rm -f "${X_EXEC}/git-remote-https"
+cat > "${X_EXEC}/git-remote-https" <<'EOF'
+#!/usr/bin/env bash
+url="${2:-$1}"; hdr=none; i=0
+while [ "${i}" -lt "${GIT_CONFIG_COUNT:-0}" ]; do
+  k="GIT_CONFIG_KEY_${i}"; v="GIT_CONFIG_VALUE_${i}"
+  case "${!k}" in http.https://gitlab.com/.extraheader) [ "${!v}" = "AUTHORIZATION: basic ${X_B64}" ] && hdr=ok:oauth2 || hdr=wrong ;; esac
+  i=$((i + 1))
+done
+printf 'start url=%s hdr=%s\n' "${url}" "${hdr}" >> "${X_LOG}"
+while IFS= read -r line; do
+  case "${line}" in
+    capabilities) printf 'connect\n\n' ;;
+    "connect "*) printf '\n'; exec env -u GIT_DIR git "${line#connect git-}" "${X_FORGE}/${url#https://*/}" ;;
+    *) exit 0 ;;
+  esac
+done
+EOF
+chmod +x "${X_EXEC}/git-remote-https"
+printf '#!/bin/sh\nexec "$X_REAL_GIT" --exec-path="$X_EXEC" "$@"\n' > "${X}/shim/git"; chmod +x "${X}/shim/git"
+. "${AI_DIR}/lib/forge-stub-guard.sh"
+fsg_make "${TMP}/git-guard" git
+fsg_require_stubs "${X}/shim" git
+git init -q --bare -b main "${X_FORGE}/g/r.git"
+R="$(new_repo x1868 'git@gitlab.com:g/r.git')"
+cat > "${R}/.git/hooks/pre-push" <<'EOF'
+#!/usr/bin/env bash
+hdr=absent; i=0
+while [ "${i}" -lt "${GIT_CONFIG_COUNT:-0}" ]; do k="GIT_CONFIG_KEY_${i}"; case "${!k}" in *extraheader*) hdr=present ;; esac; i=$((i + 1)); done
+out="$(git-remote-athena-forge origin https://gitlab.com/g/r.git </dev/null 2>&1)"
+tr=other; [[ "${out}" == *"already used"* ]] && tr=already-used
+printf 'hook hdr=%s transport=%s\n' "${hdr}" "${tr}" >> "${X_LOG}"
+exit 0
+EOF
+chmod +x "${R}/.git/hooks/pre-push"
+( cd "${R}" && PATH="${X}/shim:${FSG_DIR}:${PATH}" GIT_ALLOW_PROTOCOL=file:athena-forge "${WRAPPER}" git push -q origin HEAD:main ) >"${TMP}/out" 2>"${TMP}/err"; RC=$?
+if [ "${RC}" = 0 ] && [ "$(git --git-dir="${X_FORGE}/g/r.git" rev-parse main 2>/dev/null)" = "$(git -C "${R}" rev-parse HEAD)" ] \
+  && [ "$(grep -c '^start url=https://gitlab.com/g/r.git hdr=ok:oauth2$' "${X_LOG}")" = 1 ] \
+  && grep -q '^hook hdr=absent transport=already-used$' "${X_LOG}" \
+  && [ -z "$(grep -rlF -e "${FAKE_TOKEN}" -e "${B64}" "${X}" 2>/dev/null)" ]; then
+  ok "X1868. a routed push to a fixture gitlab.com lands with the oauth2 header at the transport alone; the pre-push hook gets no header and finds the grant used"
+else bad "X1868. routed gitlab push through the transport" "rc=${RC} err='$(cat "${TMP}/err")' log='$(cat "${X_LOG}" 2>/dev/null)'"; fi
+if fsg_verify; then ok "X1868. no git call fell through past its shim (DND-1667)"
+else bad "X1868. a git call fell through past its shim (DND-1667)" "see the forge-stub-guard FAIL above"; fi
 
 # DND-1690: the passthrough is shared, so glab-athena refuses an ungated
 # push to main in a gated repo too (bin/prep-commit.sh declares the gate).

@@ -170,6 +170,12 @@ tools:
   # --- destructive: external/irreversible, or grants that capability ---
   gh-athena:               { class: destructive, reason: forge }
   glab-athena:             { class: destructive, reason: forge }
+  # The Athena route's forge transport (DND-1868): git runs it for a routed
+  # command, and it connects to the forge with the bot's header, so a push
+  # through it writes the forge.
+  lib/forge-transport/git-remote-athena-forge: { class: destructive, reason: forge }
+  # Its signing program: it signs nothing and writes nothing; it only refuses.
+  lib/forge-transport/refuse-signing: { class: readOnly, reason: refuse }
   # fleet-report (DND-433) upserts this session's fleet registry rows on the
   # Athena server. Each report is an idempotent upsert, but it mutates EXTERNAL
   # state, which is this file's definition of destructive.

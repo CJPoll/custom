@@ -51,6 +51,8 @@ ai/lib/fleet/resume-manager.sh	guard
 ai/lib/forge-cli-isolation.sh	guard	
 ai/lib/forge-stub-guard.sh	guard	
 ai/lib/forge-git-passthrough.sh	guard	
+ai/lib/forge-transport/git-remote-athena-forge	guard	
+ai/lib/forge-transport/refuse-signing	guard	
 ai/lib/gh-merge-guard.sh	guard	
 ai/lib/glab-merge-guard.sh	guard	
 ai/lib/eval_score.rb	guard	

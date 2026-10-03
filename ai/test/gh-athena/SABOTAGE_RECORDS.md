@@ -109,3 +109,29 @@ review-round head 0cfb1b10, before the fix: `RESULT: 201 passed, 2 failed`,
 `FAIL W27` (`write-tree`, git's last own command, refused as unknown) and
 `FAIL W28` (rc=0: the last PATH program ran, through a same-named alias).
 After: `RESULT: 203 passed, 0 failed`.
+
+## DND-1868: the bot credential reaches only the forge transport
+
+The DND-1868 cases (P1-P3, H1-H4, C1-C8, E1-E3, M1-M2, X1, DND-1880) were
+added first, with a fixture forge (a git shim whose exec-path copy holds a
+stub git-remote-https; no network). Run against the unfixed wrapper at
+8b271b9a (`GH_ATHENA_UNDER_TEST`), with the final test file:
+`RESULT: 197 passed, 30 failed`. Every new case but X1 (it calls the new
+transport directly) and P3 (a non-regression: the outbound scan still runs)
+was red, and cases 1, 3, 3b, 13i, 14, 17, 18 and S32 (they now assert the
+transport rewrite and the absent header). The lines that carry the defect:
+
+```
+  FAIL  H1. pre-push hook
+        probe=[h1 hdr=present fd=nofd transport=absent]
+  FAIL  E1. template dir hook
+        probe=[e1 hdr=present fd=nofd transport=absent]
+  FAIL  DND-1880. config read shows the bot header
+        rc=0 out-has-header=yes
+```
+
+In the first unfixed run, H4's reference-transaction hook made a plain
+`git push https://github.com/o/r2.git` that the stub saw with the bot's
+header (`start via=direct url=https://github.com/o/r2.git
+hdr=ok:x-access-token`): a push from inside the route, as the bot, judged by
+nothing. After: `RESULT: 227 passed, 0 failed`.

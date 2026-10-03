@@ -106,14 +106,17 @@ GIT_TERMINAL_PROMPT=0 ~/dev/custom/ai/bin/glab-athena git push -u origin HEAD
 
 For that one command, with no git or glab config change, the passthrough:
 
-- rewrites `git@gitlab.com:` to `https://gitlab.com/`, so an SSH-form origin
-  goes over HTTPS;
+- rewrites `git@gitlab.com:` and `https://gitlab.com/` to its own HTTPS
+  transport (`athena-forge::https://gitlab.com/`), so an SSH-form origin goes
+  over HTTPS;
 - clears every credential helper (`credential.helper=`) and askpass, and sets
   `GIT_TERMINAL_PROMPT=0`, so the owner's credentials cannot answer and a
   bot-auth failure **fails**;
 - authenticates as `athena-amby` with an `oauth2:<PAT>` basic-auth header. The
-  PAT is read from the token file (see *Setup*) at call time and reaches git
-  through the environment config channel, never argv.
+  PAT is read from the token file (see *Setup*) at call time and reaches only
+  the route's own transport (`git-remote-athena-forge`, DND-1868), through a
+  one-shot pipe: never argv, and never git's environment, so a hook, filter,
+  editor or nested git never holds it. One forge remote per command.
 
 It **refuses**, exit 3 with a `Fix:`, a network op that would still reach
 gitlab.com over SSH or plain HTTP: an `ssh://git@gitlab.com/…` remote or URL, a

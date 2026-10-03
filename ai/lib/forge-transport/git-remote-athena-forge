@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# git-remote-athena-forge — the Athena route's forge transport (DND-1868).
+#
+# `gh-athena git` and `glab-athena git` (ai/lib/forge-git-passthrough.sh,
+# fg_git_exec) never put the bot's HTTPS header in git's environment. They
+# rewrite every forge URL to `athena-forge::https://<host>/...`, put this
+# directory first on git's PATH, and, for a command that reaches exactly one
+# forge URL, hand that header to THIS program through a one-shot pipe:
+#   ATHENA_FG_CRED_FD  the pipe's descriptor; line 1 is the absolute path of
+#                      git's own git-remote-https, line 2 the header;
+#   ATHENA_FG_HOST     the forge host the grant is for (github.com / gitlab.com).
+# git starts this program as `git-remote-athena-forge <remote> <url>`, with the
+# URL after the `athena-forge::` prefix. It drains the pipe, closes it, and
+# execs git's git-remote-https with the header (and four signing programs set
+# to refuse-signing) appended to the environment config channel. Only that one
+# process, and the send-pack / fetch-pack it runs, hold the header. A hook, a
+# config or environment command, or a nested git that git starts later finds
+# the pipe empty: its own transport fails here, loudly.
+#
+# Each refusal is exit 1 with a Fix: line, and names the URL it was asked for:
+#   * a URL that is not https://<ATHENA_FG_HOST>/..., refused BEFORE the pipe
+#     is read, so a stray URL never spends the grant;
+#   * no ATHENA_FG_CRED_FD: git was not started by the Athena route;
+#   * ATHENA_FG_CRED_FD that does not name a pipe;
+#   * an empty pipe: the one grant for this command was already used.
+#
+# Residual (same uid is not a boundary): a process that reads this program's
+# /proc/<pid>/environ while it runs, or the bot's token cache, gets the token.
+set -u
+TAG=git-remote-athena-forge
+HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+
+case "${1:-}" in
+  -h | --help)
+    cat <<'EOF'
+git-remote-athena-forge <remote> <url>   (git runs it; the remote-helper protocol on stdin/stdout)
+  The Athena route's forge transport (DND-1868). gh-athena git and glab-athena git
+  rewrite forge URLs to athena-forge::https://<host>/... and hand the bot's HTTPS
+  header to this program alone, through a one-shot pipe (ATHENA_FG_CRED_FD, for
+  ATHENA_FG_HOST). It drains the pipe and execs git's own git-remote-https with the
+  header. A second start in the same command (a hook, a driver, a nested git, a
+  second connection) finds the grant used and refuses, exit 1 with a Fix: line.
+  Not run by hand. Mechanism: ai/lib/forge-git-passthrough.sh, fg_git_exec.
+EOF
+    exit 0 ;;
+esac
+
+url="${2:-${1:-}}"
+refuse() {
+  printf '%s: REFUSING the connection to %s: %s\n  Fix: %s\n' "${TAG}" "${url:-<no URL>}" "$1" "$2" >&2
+  exit 1
+}
+
+host="${ATHENA_FG_HOST:-}"
+[ -n "${host}" ] || refuse "ATHENA_FG_HOST is not set, so this git was not started by the Athena route and no forge host is granted." \
+  "push or fetch through \`~/dev/custom/ai/bin/gh-athena git …\` (github.com) or \`~/dev/custom/ai/bin/glab-athena git …\` (gitlab.com), one forge connection per command."
+case "${url}" in
+  "https://${host}/"?*) ;;
+  *) refuse "the route grants a connection to https://${host}/ only, and this URL is not one; the grant was not read." \
+       "name the repository by its https://${host}/<owner>/<repo>.git URL, and drop any url.athena-forge::<other host> insteadOf rule from git config." ;;
+esac
+
+fd="${ATHENA_FG_CRED_FD:-}"
+[ -n "${fd}" ] || refuse "ATHENA_FG_CRED_FD is not set: this git was not started by the Athena route, so it holds no credential for ${host}." \
+  "push or fetch through \`~/dev/custom/ai/bin/gh-athena git …\` or \`~/dev/custom/ai/bin/glab-athena git …\` itself, never a plain git (a hook's git included)."
+case "${fd}" in *[!0-9]*) refuse "ATHENA_FG_CRED_FD='${fd}' is not a file descriptor number, so it is not the route's grant." \
+  "push or fetch through \`~/dev/custom/ai/bin/gh-athena git …\` or \`~/dev/custom/ai/bin/glab-athena git …\`; do not set ATHENA_FG_CRED_FD yourself." ;; esac
+[ -p "/proc/self/fd/${fd}" ] || refuse "ATHENA_FG_CRED_FD=${fd} is not a pipe (closed, or a file), so it is not the route's one-shot grant." \
+  "push or fetch through \`~/dev/custom/ai/bin/gh-athena git …\` or \`~/dev/custom/ai/bin/glab-athena git …\`; do not set ATHENA_FG_CRED_FD yourself."
+
+rh=""; header=""; rc=0
+IFS= read -r -t 5 rh <&"${fd}" || rc=$?
+[ "${rc}" = 0 ] && { IFS= read -r -t 5 header <&"${fd}" || rc=$?; }
+eval "exec ${fd}<&-"
+unset ATHENA_FG_CRED_FD
+if [ "${rc}" -gt 128 ]; then
+  refuse "the route's credential grant did not arrive within 5 seconds." \
+    "run the command again through the Athena route; if it repeats, escalate to your admiral with the command and this error."
+fi
+if [ -z "${rh}" ] || [ -z "${header}" ]; then
+  refuse "the route's one credential grant for this command was already used: a hook, a driver, a nested git, or a second connection (fetch --all, remote update, a submodule fetch) asked for it after the first connection." \
+    "push or fetch from the hook with \`~/dev/custom/ai/bin/gh-athena git …\` (or glab-athena) itself, or run one connection per command: one remote, and each submodule from its own directory."
+fi
+case "${rh}" in /*) ;; *) refuse "the grant's first line is not an absolute path to git's git-remote-https." \
+  "run the command again through the Athena route; do not write to ATHENA_FG_CRED_FD yourself." ;; esac
+[ -x "${rh}" ] || refuse "git's git-remote-https (${rh}) is not executable." \
+  "check that \`git --exec-path\` names git's own exec directory and that it holds git-remote-https, then retry."
+case "${header}" in "AUTHORIZATION: basic "?*) ;; *) refuse "the grant's second line is not an AUTHORIZATION: basic header." \
+  "run the command again through the Athena route; do not write to ATHENA_FG_CRED_FD yourself." ;; esac
+
+n="${GIT_CONFIG_COUNT:-0}"
+case "${n}" in '' | *[!0-9]*) n=0 ;; esac
+export "GIT_CONFIG_KEY_${n}=http.https://${host}/.extraheader" "GIT_CONFIG_VALUE_${n}=${header}"
+n=$((n + 1))
+for k in gpg.program gpg.openpgp.program gpg.x509.program gpg.ssh.program; do
+  export "GIT_CONFIG_KEY_${n}=${k}" "GIT_CONFIG_VALUE_${n}=${HERE}/refuse-signing"
+  n=$((n + 1))
+done
+export GIT_CONFIG_COUNT="${n}"
+unset header
+exec "${rh}" "$@"

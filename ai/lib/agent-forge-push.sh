@@ -83,17 +83,23 @@
 #     `credential.helper`, which resets the list: no owner helper is consulted;
 #   * core.askPass is set and empty, GIT_ASKPASS and SSH_ASKPASS are unset, and
 #     GIT_TERMINAL_PROMPT=0: nothing can prompt for the owner's password;
-#   * an http.https://<host>/.extraheader entry in the environment config
-#     channel (GIT_CONFIG_KEY_n) whose value is an `AUTHORIZATION: basic`
-#     header: the bot's credential.
-# A plain shell sets none of this. With all of it, and the URL HTTPS (checked
-# on the URL git will use), the push's only credential is the header the
-# caller supplied: the owner's SSH key, credential helper and keyring are out
-# of reach.
+#   * the route's rewrites to its transport in the push's config,
+#     url.athena-forge::https://<host>/.insteadOf=git@<host>: and
+#     =https://<host>/, and the URL git will use is
+#     athena-forge::https://<host>/...;
+#   * the route's credential grant for that host: ATHENA_FG_HOST=<host> and
+#     ATHENA_FG_CRED_FD naming an open pipe (DND-1868; the passthrough's "The
+#     credential grant"). Before DND-1868 the marker was an
+#     http.https://<host>/.extraheader entry in the environment config
+#     channel, which the route no longer sets: that alone is not routed.
+# A plain shell sets none of this. With all of it, the push goes out through
+# the route's transport, whose only credential is the bot header it reads from
+# the grant: the owner's SSH key, credential helper and keyring are out of
+# reach.
 #
 # RESIDUAL (it is not a sandbox). Defeated by: a caller that builds the whole
-# marker by hand with the OWNER's token in the header (deliberate, and it needs
-# the token read out first); git run by absolute path or with a PATH that skips
+# marker by hand, a pipe holding the OWNER's token included (deliberate, and it
+# needs the token read out first); git run by absolute path or with a PATH that skips
 # the wrapper (the DND-775 residual list in ai/agent-bin/git); a push from a
 # process git starts itself (a `!` alias, `rebase -x`, `submodule foreach`,
 # `bisect run`, a git hook), which runs with git's exec-path first on PATH,
@@ -106,7 +112,7 @@
 # The passthrough's own resolution residuals (its header) apply too.
 # A known false refusal: a push the forge CLI runs on a routed call
 # (`gh-athena repo create --push`, `glab-athena mr create --push`) carries no
-# bot header, so it is refused; push first with `gh-athena git push` /
+# route grant, so it is refused; push first with `gh-athena git push` /
 # `glab-athena git push`, then run the CLI command without --push.
 
 AFP_TAG='git (agent wrapper)'
@@ -137,8 +143,17 @@ if [ -z "$AFP_REAL" ] || [ ! -x "$AFP_REAL" ]; then
   afp_refuse "this git command: the forge-identity check was not given the real git (ATHENA_REAL_GIT='${AFP_REAL}'), so it cannot tell where the command writes." \
     "run git through ai/agent-bin/git, which sets it; to push to a forge, use ~/dev/custom/ai/bin/gh-athena git push … or ~/dev/custom/ai/bin/glab-athena git push …."
 fi
-# Every git this check runs is the real one, never the wrapper again.
-git() { "$AFP_REAL" "$@"; }
+# Every git this check runs is the real one, never the wrapper again. None of
+# them gets the route's credential grant (DND-1868): the pipe is closed for
+# each probe, and its variable emptied, so a command a probe might start
+# (core.fsmonitor on an index read) cannot drain it before the push's
+# transport does.
+AFP_GRANT_FD="${ATHENA_FG_CRED_FD:-}"
+case "$AFP_GRANT_FD" in '' | *[!0-9]*) AFP_GRANT_FD="" ;; esac
+git() {
+  if [ -n "$AFP_GRANT_FD" ]; then ATHENA_FG_CRED_FD= "$AFP_REAL" "$@" {AFP_GRANT_FD}<&-
+  else "$AFP_REAL" "$@"; fi
+}
 
 AFP_LIB="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/forge-git-passthrough.sh"
 # shellcheck source=forge-git-passthrough.sh
@@ -197,7 +212,8 @@ afp_reaches() {
     case "$h" in
       "$host" | *."$host")
         AFP_URL="$u"
-        [ "${hs%% *}" = https ] || return 3
+        # athena-forge::https is the route's own transport (DND-1868).
+        case "${hs%% *}" in https | athena-forge::https) ;; *) return 3 ;; esac
         return 0 ;;
     esac
   done <<<"$urls"
@@ -210,23 +226,22 @@ afp_g() { git "${AFP_GLOB[@]}" "$@"; }
 
 # afp_routed <host> : 0 when the push carries the passthrough's isolation for <host>.
 afp_routed() {
-  local host="$1" last askpass i k v found=0
+  local host="$1" last askpass rules fd
   [ "${GIT_TERMINAL_PROMPT:-}" = 0 ] || return 1
   [ -z "${GIT_ASKPASS+x}" ] && [ -z "${SSH_ASKPASS+x}" ] || return 1
   last="$(git "${AFP_GLOB[@]}" config --get-regexp '^credential\..*helper$' 2>/dev/null | tail -n 1)"
   [ "$last" = credential.helper ] || [ "$last" = 'credential.helper ' ] || return 1
   askpass="$(git "${AFP_GLOB[@]}" config --get core.askPass 2>/dev/null)" || return 1
   [ -z "$askpass" ] || return 1
-  case "${GIT_CONFIG_COUNT:-0}" in '' | *[!0-9]*) return 1 ;; esac
-  i=0
-  while [ "$i" -lt "${GIT_CONFIG_COUNT:-0}" ]; do
-    k="GIT_CONFIG_KEY_$i"; v="GIT_CONFIG_VALUE_$i"
-    if [ "${!k:-}" = "http.https://$host/.extraheader" ]; then
-      case "${!v:-}" in "AUTHORIZATION: basic "?*) found=1 ;; esac
-    fi
-    i=$((i + 1))
-  done
-  [ "$found" = 1 ]
+  # The route's rewrites to its transport, both forge forms (DND-1868).
+  rules=$'\n'"$(git "${AFP_GLOB[@]}" config --get-all "url.athena-forge::https://$host/.insteadof" 2>/dev/null)"$'\n'
+  [[ "$rules" == *$'\n'"git@$host:"$'\n'* ]] && [[ "$rules" == *$'\n'"https://$host/"$'\n'* ]] || return 1
+  # The URL is the route's transport, and the route's grant is open for this host.
+  case "$AFP_URL" in "athena-forge::https://$host/"?*) ;; *) return 1 ;; esac
+  [ "${ATHENA_FG_HOST:-}" = "$host" ] || return 1
+  fd="${ATHENA_FG_CRED_FD:-}"
+  case "$fd" in '' | *[!0-9]*) return 1 ;; esac
+  [ -p "/proc/self/fd/$fd" ]
 }
 
 # ---- Remote-ref writers other than push (DND-1881) ---------------------------

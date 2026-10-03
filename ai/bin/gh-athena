@@ -124,12 +124,13 @@ fi
 # source is removed, and a network op that would still reach github.com over
 # SSH or another non-HTTPS transport is REFUSED (exit 3, Fix:). The mechanism,
 # its coverage and its named residuals live in ai/lib/forge-git-passthrough.sh,
-# shared with `glab-athena git` (DND-393). The App token goes to git as an
-# x-access-token basic-auth extraheader through the environment config channel,
-# never on argv.
+# shared with `glab-athena git` (DND-393). The App token, as an x-access-token
+# basic-auth header, reaches only the route's transport (git-remote-athena-forge)
+# through a one-shot pipe: never argv, and never git's environment (DND-1868;
+# the lib's "The credential grant").
 #
-# Test seam: GH_ATHENA_GIT_DRY_RUN=1 prints the resolved URLs and the git argv
-# (token redacted) instead of exec'ing git.
+# Test seam: GH_ATHENA_GIT_DRY_RUN=1 prints the resolved URLs, the credential
+# decision and the git argv (token redacted) instead of exec'ing git.
 
 if [ "${1:-}" = "git" ]; then
   shift

@@ -77,17 +77,19 @@ echo "gh-athena git-passthrough self-test"
 echo "wrapper: ${WRAPPER}"
 echo
 
-echo "--- HIT: an SSH-form origin is rewritten to HTTPS with bot auth ---"
+echo "--- HIT: an SSH-form origin is rewritten to the route's HTTPS transport, with the grant ---"
 R="$(new_repo scp 'git@github.com:o/r.git')"
 gha "${R}" push origin HEAD
-if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: url https://github.com/o/r.git"* ]] \
+if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: url athena-forge::https://github.com/o/r.git"* ]] \
   && [[ "${OUT}" == *"[credential.helper=]"* ]] \
-  && [[ "${OUT}" == *"[url.https://github.com/.insteadOf=git@github.com:]"* ]] \
-  && [[ "${OUT}" == *"GIT_CONFIG_KEY_0=[http.https://github.com/.extraheader] GIT_CONFIG_VALUE_0=[AUTHORIZATION: basic <x-access-token:REDACTED>]"* ]] \
-  && [[ "${OUT}" != *"exec git"*"extraheader"* ]] \
+  && [[ "${OUT}" == *"[url.athena-forge::https://github.com/.insteadOf=git@github.com:]"* ]] \
+  && [[ "${OUT}" == *"[url.athena-forge::https://github.com/.insteadOf=https://github.com/]"* ]] \
+  && [[ "${OUT}" == *"cred: granted (one forge URL: https://github.com/o/r.git)"*"[AUTHORIZATION: basic <x-access-token:REDACTED>]"* ]] \
+  && [[ "${OUT}" == *"dry-run: exec git [--no-pager]"* ]] \
+  && [[ "${OUT}" != *"extraheader"* ]] && [[ "${OUT}" != *"GIT_CONFIG_KEY"* ]] \
   && [[ "${OUT}" == *"[core.askPass=]"* ]]; then
-  ok "1. git@github.com: origin -> https://github.com/o/r.git, helper off, bot header via env (not argv)"
-else bad "1. SSH-form origin rewritten with bot auth" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+  ok "1. git@github.com: origin -> athena-forge::https://github.com/o/r.git, helper off, pager off, the header granted to the transport alone (DND-1868)"
+else bad "1. SSH-form origin rewritten to the transport with the grant" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
 
 B64="$(printf 'x-access-token:%s' "${FAKE_TOKEN}" | openssl base64 -A)"
 if [[ "${OUT}${ERR}" != *"${FAKE_TOKEN}"* ]] && [[ "${OUT}${ERR}" != *"${B64}"* ]]; then
@@ -95,12 +97,12 @@ if [[ "${OUT}${ERR}" != *"${FAKE_TOKEN}"* ]] && [[ "${OUT}${ERR}" != *"${B64}"* 
 else bad "2. dry-run leaks the token" "out='${OUT}'"; fi
 
 gha "${R}" push
-if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: url https://github.com/o/r.git"* ]]; then
+if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: url athena-forge::https://github.com/o/r.git"* ]]; then
   ok "3. bare \`push\` resolves the default remote (origin) and rewrites it"
 else bad "3. default-remote push rewritten" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
 
 gha "${R}" -c credential.helper= -c 'url.https://github.com/.insteadOf=git@github.com:' push origin HEAD
-if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: url https://github.com/o/r.git"* ]]; then
+if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: url athena-forge::https://github.com/o/r.git"* ]]; then
   ok "3b. the documented explicit form (caller's own -c flags) still resolves to HTTPS"
 else bad "3b. explicit universal form" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
 
@@ -195,14 +197,14 @@ if [ "${RC}" = 0 ] && [ -z "${ERR}" ]; then
   ok "13h. an alias to a local command (alias.st=status) is not refused"
 else bad "13h. local alias passes" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
 
-gha "${R}" -c alias.pz=push -c url.https://github.com/.insteadOf=ssh://git@github.com/ pz origin HEAD
-if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: url https://github.com/o/r.git"* ]]; then
-  ok "13i. an aliased push whose remote DOES resolve to HTTPS passes"
+gha "${R}" -c alias.pz=push -c url.athena-forge::https://github.com/.insteadOf=ssh://git@github.com/ pz origin HEAD
+if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: url athena-forge::https://github.com/o/r.git"* ]]; then
+  ok "13i. an aliased push whose remote DOES resolve to the route's HTTPS transport passes"
 else bad "13i. aliased https push passes" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
 
 R="$(new_repo https 'https://github.com/o/r.git')"
 gha "${R}" push origin HEAD
-if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: url https://github.com/o/r.git"* ]] && [ -z "${ERR}" ]; then
+if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: url athena-forge::https://github.com/o/r.git"* ]] && [ -z "${ERR}" ]; then
   ok "14. an HTTPS origin is untouched (same URL, no refusal)"
 else bad "14. HTTPS origin untouched" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
 
@@ -223,14 +225,15 @@ if [ "${RC}" = 0 ] && [ "$(git -C "${BARE}" rev-parse refs/heads/landed 2>/dev/n
   ok "16. real exec: push to a local bare remote under .../github.com/... lands"
 else bad "16. real local push lands" "rc=${RC} err='$(cat "${TMP}/err")'"; fi
 
-# A REAL exec of a local command through the wrapper: git itself must see the
-# bot header for https://github.com/ (proves the env config channel is wired,
-# not just printed), and the token must not be on git's argv.
+# A REAL exec of a local command through the wrapper: git sees the route's
+# rewrite to its transport, and never the bot header (DND-1868: only the
+# transport holds it; DND-1880).
 R="$(new_repo hdr 'git@github.com:o/r.git')"
 ( cd "${R}" && "${WRAPPER}" git config --get-all http.https://github.com/.extraheader ) >"${TMP}/out" 2>"${TMP}/err"; RC=$?
-if [ "${RC}" = 0 ] && [ "$(cat "${TMP}/out")" = "AUTHORIZATION: basic ${B64}" ]; then
-  ok "17. real exec: git sees the x-access-token basic header for https://github.com/"
-else bad "17. git sees the bot header" "rc=${RC} out='$(cat "${TMP}/out")' err='$(cat "${TMP}/err")'"; fi
+( cd "${R}" && "${WRAPPER}" git remote get-url --push origin ) >"${TMP}/out2" 2>>"${TMP}/err"; RC2=$?
+if [ "${RC}" = 1 ] && [ ! -s "${TMP}/out" ] && [ "${RC2}" = 0 ] && [ "$(cat "${TMP}/out2")" = "athena-forge::https://github.com/o/r.git" ]; then
+  ok "17. real exec: git resolves origin to the route's transport and sees no bot header"
+else bad "17. git sees the transport rewrite and no header" "rc=${RC} rc2=${RC2} out2='$(cat "${TMP}/out2")' err='$(cat "${TMP}/err")'"; fi
 
 # DND-775 condition (a): agent sessions carry the agent-stash hook as injected
 # config entries. The header must be APPENDED after them (index COUNT), never
@@ -254,12 +257,12 @@ INJ="$(inject_env)"
 N="$(eval "${INJ}"; printf '%s' "${GIT_CONFIG_COUNT}")"
 OUT="$(cd "${R}" && eval "export ${INJ}" && GH_ATHENA_GIT_DRY_RUN=1 "${WRAPPER}" git push origin HEAD 2>"${TMP}/err")"; RC=$?
 ( cd "${R}" && eval "export ${INJ}" && "${WRAPPER}" git config --get user.name \
-    && "${WRAPPER}" git config --get-all http.https://github.com/.extraheader \
+    && ! "${WRAPPER}" git config --get-all http.https://github.com/.extraheader \
     && "${WRAPPER}" git hook list reference-transaction ) >"${TMP}/out" 2>>"${TMP}/err"; RC2=$?
-if [ "${RC}" = 0 ] && [[ "${OUT}" == *"GIT_CONFIG_KEY_${N}=[http.https://github.com/.extraheader]"* ]] \
+if [ "${RC}" = 0 ] && [[ "${OUT}" == *"cred: granted"* ]] && [[ "${OUT}" != *"GIT_CONFIG_KEY"* ]] \
   && [ "${RC2}" = 0 ] \
-  && [ "$(cat "${TMP}/out")" = "caller-kept"$'\n'"AUTHORIZATION: basic ${B64}"$'\n'"agentstash" ]; then
-  ok "18. injected entries (count ${N}) are kept: the header lands at index ${N} and the agent-stash hook stays registered"
+  && [ "$(cat "${TMP}/out")" = "caller-kept"$'\n'"agentstash" ]; then
+  ok "18. injected entries (count ${N}) are kept, no header is added to them (DND-1868), and the agent-stash hook stays registered"
 else bad "18. append after injected entries" "rc=${RC} rc2=${RC2} n=${N} out='${OUT}' real='$(cat "${TMP}/out")' err='$(cat "${TMP}/err")'"; fi
 
 echo
@@ -857,7 +860,7 @@ if is_refusal && [[ "${ERR}" == *"--synth-unknown"* ]]; then ok "S31. a global o
 else bad "S31. unknown global option" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
 R="$(new_repo v1843b 'https://github.com/o/r.git')"
 gha "${R}" push --push-opt ci.skip --force-with-lease origin HEAD:refs/heads/feat
-if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: url https://github.com/o/r.git"* ]]; then
+if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: url athena-forge::https://github.com/o/r.git"* ]]; then
   ok "S32. an abbreviated push option and an optional-value flag still push to the named HTTPS remote"
 else bad "S32. abbreviated option happy path" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
 gha "${R}" --version
@@ -1182,6 +1185,357 @@ ERR="$(cat "${TMP}/err")"
 if [ "${LAST_PATH}" = zzzz-last ] && is_refusal && [[ "${ERR}" == *"program on PATH"* ]]; then
   ok "W28. the last-listed PATH program (git-zzzz-last), shadowing alias.zzzz-last=status -> refused"
 else bad "W28. last PATH program refused" "last='${LAST_PATH}' rc=${RC} out='${OUT}' err='${ERR}'"; fi
+
+echo
+echo "--- DND-1868: the bot credential reaches only the forge transport ---"
+# A command git starts itself (a hook, a config or environment command, a
+# config-defined hook) ran with the bot's header in its environment, and a push
+# it made was judged by nothing. Now the header reaches only the route's
+# transport, git-remote-athena-forge, through a one-shot pipe that it drains
+# before any caller-chosen command starts.
+#
+# NO NETWORK. Every git here goes through a shim that runs the real git with
+# --exec-path=<a copy of git's exec-path> whose git-remote-https is a FIXTURE:
+# it records its start, maps https://github.com/<o>/<r> to a local bare repo
+# under X_FORGE, and speaks the remote-helper `connect` capability.
+X="${TMP}/x1868"; mkdir -p "${X}/bin" "${X}/shim" "${X}/exec"
+export X_REAL_GIT="$(git --exec-path)/git" X_EXEC="${X}/exec" X_FORGE="${X}/forge"
+export X_STUB_LOG="${X}/stub.log" X_PROBE_LOG="${X}/probe.log" X_B64="${B64}" X_USER=x-access-token
+for f in "$(git --exec-path)"/*; do ln -s "${f}" "${X_EXEC}/${f##*/}"; done
+rm -f "${X_EXEC}/git-remote-https"
+cat > "${X_EXEC}/git-remote-https" <<'EOF'
+#!/usr/bin/env bash
+# fixture git-remote-https (DND-1868): no network.
+url="${2:-$1}"; hdr=none; gpg=""; via=direct; i=0
+while [ "${i}" -lt "${GIT_CONFIG_COUNT:-0}" ]; do
+  k="GIT_CONFIG_KEY_${i}"; v="GIT_CONFIG_VALUE_${i}"
+  case "${!k}" in
+    http.https://*/.extraheader)
+      dec="$(printf '%s' "${!v#AUTHORIZATION: basic }" | openssl base64 -d -A 2>/dev/null)"
+      if [ "${!v}" = "AUTHORIZATION: basic ${X_B64}" ]; then hdr="ok:${dec%%:*}"; else hdr="wrong:${dec%%:*}"; fi ;;
+    gpg.program|gpg.openpgp.program|gpg.x509.program|gpg.ssh.program) gpg="${gpg}${!k}=${!v##*/},"; via=transport ;;
+  esac
+  i=$((i + 1))
+done
+printf 'start via=%s url=%s hdr=%s gpg=%s argv=%s\n' "${via}" "${url}" "${hdr}" "${gpg}" "$*" >> "${X_STUB_LOG}"
+repo="${X_FORGE}/${url#https://*/}"
+while IFS= read -r line; do
+  case "${line}" in
+    capabilities) printf 'connect\n\n' ;;
+    "connect "*) printf '\n'; exec env -u GIT_DIR git "${line#connect git-}" "${repo}" ;;
+    '') exit 0 ;;
+    *) exit 1 ;;
+  esac
+done
+EOF
+chmod +x "${X_EXEC}/git-remote-https"
+printf '#!/bin/sh\nexec "$X_REAL_GIT" --exec-path="$X_EXEC" "$@"\n' > "${X}/shim/git"; chmod +x "${X}/shim/git"
+fsg_require_stubs "${X}/shim" git
+# The probe every caller-chosen command runs: is the header in its
+# environment, does it hold the grant, can it start the transport itself, and
+# does a plain push it makes land on o/r2?
+cat > "${X}/probe" <<'EOF'
+#!/usr/bin/env bash
+tag="$1"
+case "${tag}" in c1) cat ;; esac
+[ -n "${X_PROBE_NESTED:-}" ] && exit 0
+export X_PROBE_NESTED=1
+hdr=absent; i=0
+while [ "${i}" -lt "${GIT_CONFIG_COUNT:-0}" ]; do
+  k="GIT_CONFIG_KEY_${i}"; case "${!k}" in *extraheader*) hdr=present ;; esac; i=$((i + 1))
+done
+case "${GIT_CONFIG_PARAMETERS:-}" in *extraheader*) hdr=present ;; esac
+fd="${ATHENA_FG_CRED_FD:-}"; fds=nofd
+[ -n "${fd}" ] && { if [ -p "/proc/self/fd/${fd}" ]; then fds=pipe; else fds=closed; fi; }
+if command -v git-remote-athena-forge >/dev/null 2>&1; then
+  out="$(git-remote-athena-forge origin https://github.com/o/r2.git </dev/null 2>&1)"; rc=$?
+  tr=refused; [[ "${out}" == *"already used"* ]] && tr=already-used; [ "${rc}" = 0 ] && tr=RAN
+else tr=absent; fi
+git -C "${X_FORGE}/../src" push -q https://github.com/o/r2.git "HEAD:refs/heads/${tag}" </dev/null >/dev/null 2>&1
+printf '%s hdr=%s fd=%s transport=%s\n' "${tag}" "${hdr}" "${fds}" "${tr}" >> "${X_PROBE_LOG}"
+exit 0
+EOF
+chmod +x "${X}/probe"
+# mkprobe <tag> : a command for a config or environment value, args ignored.
+mkprobe() { printf '#!/bin/sh\nexec %s %s "$@"\n' "${X}/probe" "$1" > "${X}/bin/p-$1"; chmod +x "${X}/bin/p-$1"; printf '%s' "${X}/bin/p-$1"; }
+XPATH="${X}/shim:${FSG_DIR}:${PATH}"
+export GIT_ALLOW_PROTOCOL=file:athena-forge:https
+# xgh <dir> <git args...> : a REAL run of the route, through the shim.
+xgh() {
+  local d="$1"; shift
+  OUT="$(cd "${d}" && PATH="${XPATH}" "${WRAPPER}" git "$@" 2>"${TMP}/err")"; RC=$?
+  ERR="$(cat "${TMP}/err")"
+}
+# xdry <dir> <git args...> : the dry-run seam, through the shim.
+xdry() {
+  local d="$1"; shift
+  OUT="$(cd "${d}" && PATH="${XPATH}" GH_ATHENA_GIT_DRY_RUN=1 "${WRAPPER}" git "$@" 2>"${TMP}/err")"; RC=$?
+  ERR="$(cat "${TMP}/err")"
+}
+x_reset() { : > "${X_STUB_LOG}"; : > "${X_PROBE_LOG}"; rm -rf "${X_FORGE}/o/r2.git"; git init -q --bare "${X_FORGE}/o/r2.git"; }
+# x_sync : src at the fixture forge's main, so its next push fast-forwards.
+x_sync() { git -C "${X}/src" fetch -q "${X_FORGE}/o/r.git" main && git -C "${X}/src" reset -q --hard FETCH_HEAD; }
+x_starts() { local n; n="$(grep -c '^start via=transport ' "${X_STUB_LOG}")"; printf '%s' "${n:-0}"; }
+# probe_clean <tag> : the probe ran, saw no header, found the grant used, and
+# its plain push landed nothing; the stub saw exactly one transport start.
+probe_clean() {
+  local lines
+  lines="$(grep "^$1 " "${X_PROBE_LOG}")"
+  [ -n "${lines}" ] && [[ "${lines}" != *"hdr=present"* ]] && [[ "${lines}" != *"transport=RAN"* ]] \
+    && [[ "${lines}" != *"transport=refused"* ]] && [[ "${lines}" != *"transport=absent"* ]] \
+    && [ -z "$(git --git-dir="${X_FORGE}/o/r2.git" for-each-ref)" ] && [ "$(x_starts)" = 1 ]
+}
+# probe_nofd <tag> : the probe ran with no header and no grant at all.
+probe_nofd() {
+  local lines
+  lines="$(grep "^$1 " "${X_PROBE_LOG}")"
+  [ -n "${lines}" ] && [[ "${lines}" != *"hdr=present"* ]] && [[ "${lines}" != *"fd=pipe"* ]] && [[ "${lines}" != *"fd=closed"* ]]
+}
+xdiag() { printf 'rc=%s out=%s err=%s probe=[%s] stub=[%s]' "${RC}" "${OUT}" "${ERR}" "$(cat "${X_PROBE_LOG}")" "$(cat "${X_STUB_LOG}")"; }
+
+# The fixture forge: o/r (pushes land here), o/r2 (a probe's push must not).
+mkdir -p "${X_FORGE}/o"
+git init -q --bare -b main "${X_FORGE}/o/r.git"
+git init -q -b main "${X}/src" && git -C "${X}/src" commit -q --allow-empty -m s0
+git -C "${X}/src" push -q "${X_FORGE}/o/r.git" main
+git -C "${X}/src" remote add origin 'git@github.com:o/r.git'
+x_reset
+
+# P1. A normal routed push lands, as the bot, with the token on no argv and in no file.
+git -C "${X}/src" commit -q --allow-empty -m p1
+S="${X}/p1-store"
+OUT="$(cd "${X}/src" && PATH="${XPATH}" ATHENA_TELEMETRY_DIR="${S}" "${WRAPPER}" git push -q origin HEAD:main 2>"${TMP}/err")"; RC=$?
+ERR="$(cat "${TMP}/err")"
+if [ "${RC}" = 0 ] && [ "$(git --git-dir="${X_FORGE}/o/r.git" rev-parse main)" = "$(git -C "${X}/src" rev-parse HEAD)" ] \
+  && grep -q '^start via=transport url=https://github.com/o/r.git hdr=ok:x-access-token ' "${X_STUB_LOG}" \
+  && [ "$(x_starts)" = 1 ] && ! grep -qF "${FAKE_TOKEN}" "${X_STUB_LOG}" \
+  && [ -z "$(grep -rlF -e "${FAKE_TOKEN}" -e "${B64}" "${X}" 2>/dev/null)" ] \
+  && [ "$(landed_n "${S}")" = 1 ]; then
+  ok "P1. a routed push lands on o/r: one transport start with the x-access-token header, token on no argv and in no file, merge.landed emitted"
+else bad "P1. routed push through the transport" "$(xdiag) landed=$(landed_n "${S}")"; fi
+
+# P2. Routed fetch, clone, ls-remote and pull each succeed, one grant each.
+git -C "${X}/src" remote set-url origin 'https://github.com/o/r.git'
+p2() { # <label> <dir> <git args...>
+  local l="$1" d="$2"; shift 2
+  : > "${X_STUB_LOG}"; xgh "${d}" "$@"
+  if [ "${RC}" = 0 ] && [ "$(x_starts)" = 1 ] && grep -q 'hdr=ok:x-access-token' "${X_STUB_LOG}"; then ok "P2. routed ${l}: succeeds, the transport saw the header exactly once"
+  else bad "P2. routed ${l}" "$(xdiag)"; fi
+}
+p2 fetch "${X}/src" fetch -q origin
+p2 ls-remote "${X}/src" ls-remote origin
+p2 clone "${X}" clone -q https://github.com/o/r.git "${X}/p2-clone"
+git -C "${X}/src" push -q "${X_FORGE}/o/r.git" "$(git -C "${X}/src" commit-tree -p HEAD -m p2 "$(git -C "${X}/src" rev-parse 'HEAD^{tree}')"):refs/heads/main"
+p2 pull "${X}/p2-clone" pull -q --ff-only
+
+# H1. A pre-push hook in the repository.
+x_reset; x_sync; git -C "${X}/src" commit -q --allow-empty -m h1
+printf '#!/bin/sh\nexec %s h1\n' "${X}/probe" > "${X}/src/.git/hooks/pre-push"; chmod +x "${X}/src/.git/hooks/pre-push"
+xgh "${X}/src" push -q origin HEAD:main
+if [ "${RC}" = 0 ] && [ "$(git --git-dir="${X_FORGE}/o/r.git" rev-parse main)" = "$(git -C "${X}/src" rev-parse HEAD)" ] && probe_clean h1; then
+  ok "H1. a pre-push hook: the push lands; the hook gets no header and finds the grant used"
+else bad "H1. pre-push hook" "$(xdiag)"; fi
+rm -f "${X}/src/.git/hooks/pre-push"
+
+# H2. core.hooksPath, from -c and from the repository's config.
+x_reset; mkdir -p "${X}/hp"; printf '#!/bin/sh\nexec %s h2\n' "${X}/probe" > "${X}/hp/pre-push"; chmod +x "${X}/hp/pre-push"
+x_sync; git -C "${X}/src" commit -q --allow-empty -m h2
+xgh "${X}/src" -c core.hooksPath="${X}/hp" push -q origin HEAD:main
+H2A=0; [ "${RC}" = 0 ] && probe_clean h2 && H2A=1
+x_reset; git -C "${X}/src" config core.hooksPath "${X}/hp"; x_sync; git -C "${X}/src" commit -q --allow-empty -m h2b
+xgh "${X}/src" push -q origin HEAD:main
+git -C "${X}/src" config --unset core.hooksPath
+if [ "${H2A}" = 1 ] && [ "${RC}" = 0 ] && probe_clean h2; then
+  ok "H2. core.hooksPath (-c and repository config): the hook gets no header and finds the grant used"
+else bad "H2. core.hooksPath" "h2a=${H2A} $(xdiag)"; fi
+
+# H3. A config-defined hook on pre-push (git 2.54 hook.<name>.*).
+x_reset; x_sync; git -C "${X}/src" commit -q --allow-empty -m h3
+xgh "${X}/src" -c hook.probe.command="$(mkprobe h3)" -c hook.probe.event=pre-push push -q origin HEAD:main
+if [ "${RC}" = 0 ] && probe_clean h3; then ok "H3. hook.<name>.command on pre-push: no header, grant used"
+else bad "H3. config-defined pre-push hook" "$(xdiag)"; fi
+
+# H4. A config-defined hook on reference-transaction, during a routed fetch.
+x_reset
+xgh "${X}/src" -c hook.probe.command="$(mkprobe h4)" -c hook.probe.event=reference-transaction fetch -q origin
+if [ "${RC}" = 0 ] && probe_clean h4; then ok "H4. hook.<name>.command on reference-transaction in a fetch: no header, grant used"
+else bad "H4. config-defined reference-transaction hook" "$(xdiag)"; fi
+
+# C1. A smudge filter during a routed clone.
+git init -q -b main "${X}/fsrc" && printf '* filter=p\n' > "${X}/fsrc/.gitattributes" && printf 'x\n' > "${X}/fsrc/f"
+git -C "${X}/fsrc" add -A && git -C "${X}/fsrc" commit -q -m f
+git init -q --bare -b main "${X_FORGE}/o/f.git"; git -C "${X}/fsrc" push -q "${X_FORGE}/o/f.git" main
+x_reset
+xgh "${X}" -c filter.p.smudge="$(mkprobe c1)" clone -q https://github.com/o/f.git "${X}/c1-clone"
+if [ "${RC}" = 0 ] && [ -f "${X}/c1-clone/f" ] && probe_clean c1; then ok "C1. a smudge filter in a routed clone: the clone succeeds; the filter gets no header, grant used"
+else bad "C1. smudge filter" "$(xdiag)"; fi
+
+# C2. remote.<n>.receivepack / uploadpack on a local-path remote: no credential.
+git init -q --bare -b main "${X}/local.git"
+git -C "${X}/src" remote add lo "${X}/local.git"
+git -C "${X}/src" config remote.lo.receivepack "$(mkprobe c2); exec git-receive-pack"
+git -C "${X}/src" config remote.lo.uploadpack "$(mkprobe c2u); exec git-upload-pack"
+xdry "${X}/src" push lo HEAD:main; C2D="${OUT}"
+x_reset; xgh "${X}/src" push -q lo HEAD:main; xgh "${X}/src" fetch -q lo
+if [[ "${C2D}" == *"cred: none"* ]] && probe_nofd c2 && probe_nofd c2u; then
+  ok "C2. receivepack / uploadpack on a local remote: cred: none; the commands get no grant and no header"
+else bad "C2. receivepack / uploadpack" "dry='${C2D}' $(xdiag)"; fi
+
+# C3. remote.<n>.vcs names another transport helper: no credential.
+git -C "${X}/src" config remote.origin.vcs probe
+printf '#!/bin/sh\nexec %s c3\n' "${X}/probe" > "${X}/bin/git-remote-probe"; chmod +x "${X}/bin/git-remote-probe"
+OUT="$(cd "${X}/src" && PATH="${X}/bin:${XPATH}" GH_ATHENA_GIT_DRY_RUN=1 "${WRAPPER}" git fetch origin 2>"${TMP}/err")"; RC=$?; C3D="${OUT}"
+x_reset; ( cd "${X}/src" && PATH="${X}/bin:${XPATH}" GIT_ALLOW_PROTOCOL=file:athena-forge:https:probe "${WRAPPER}" git fetch -q origin ) >/dev/null 2>&1
+git -C "${X}/src" config --unset remote.origin.vcs
+if [[ "${C3D}" == *"cred: none"* ]] && [ "$(x_starts)" = 0 ] && ! grep -q '^c3 .*\(hdr=present\|fd=pipe\|fd=closed\)' "${X_PROBE_LOG}"; then
+  ok "C3. remote.<n>.vcs: cred: none; nothing it starts gets a grant or a header, and no credentialed connection is made"
+else bad "C3. remote vcs helper" "dry='${C3D}' $(xdiag)"; fi
+
+# C4 / E2. core.sshCommand and GIT_SSH_COMMAND to another host: no credential.
+git -C "${X}/src" remote add other 'ssh://other.invalid/r.git'
+xdry "${X}/src" -c core.sshCommand="$(mkprobe c4)" fetch other; C4D="${OUT}"
+x_reset
+( cd "${X}/src" && unset GIT_SSH_COMMAND && PATH="${XPATH}" GIT_ALLOW_PROTOCOL=file:athena-forge:https:ssh \
+    "${WRAPPER}" git -c core.sshCommand="$(mkprobe c4)" fetch -q other ) >/dev/null 2>&1
+( cd "${X}/src" && PATH="${XPATH}" GIT_ALLOW_PROTOCOL=file:athena-forge:https:ssh GIT_SSH_COMMAND="$(mkprobe e2)" \
+    "${WRAPPER}" git fetch -q other ) >/dev/null 2>&1
+if [[ "${C4D}" == *"cred: none"* ]] && probe_nofd c4 && probe_nofd e2; then
+  ok "C4/E2. core.sshCommand and GIT_SSH_COMMAND to another host: cred: none; no grant, no header"
+else bad "C4/E2. ssh command" "dry='${C4D}' $(xdiag)"; fi
+
+# C5. A pager: never started under the route; -p is refused.
+xdry "${X}/src" -c pager.push="$(mkprobe c5)" push origin HEAD:main
+C5D="${OUT}"
+xdry "${X}/src" -p push origin HEAD:main
+if [[ "${C5D}" == *"dry-run: exec git [--no-pager]"* ]] && is_refusal && [[ "${ERR}" == *"-p"* ]]; then
+  ok "C5. git's argv starts --no-pager; \`-p push\` is refused (exit 3, Fix:)"
+else bad "C5. pager" "dry='${C5D}' rc=${RC} err='${ERR}'"; fi
+
+# C6. gpg.program on a signed push: the probe gets nothing; the transport
+# subtree's signing programs are refuse-signing.
+git -C "${X_FORGE}/o/r.git" config receive.certNonceSeed synthetic-seed
+x_reset; x_sync; git -C "${X}/src" commit -q --allow-empty -m c6
+xgh "${X}/src" -c gpg.program="$(mkprobe c6)" -c user.signingKey=synthetic push --signed -q origin HEAD:main
+if probe_clean c6 && grep -q 'gpg=gpg.program=refuse-signing,gpg.openpgp.program=refuse-signing,gpg.x509.program=refuse-signing,gpg.ssh.program=refuse-signing,' "${X_STUB_LOG}"; then
+  ok "C6. a signed push: gpg.program gets no header and finds the grant used; the transport's four signing programs are refuse-signing"
+else bad "C6. signed push" "$(xdiag)"; fi
+
+# C7. A caller-written athena-forge:: rewrite to another host.
+xdry "${X}/src" -c 'url.athena-forge::https://evil.invalid/.insteadOf=https://github.com/o/' push origin HEAD:main
+C7R=0; is_refusal && C7R=1
+exec {XFD}< <(printf '%s\n%s\n' /bin/false 'AUTHORIZATION: basic eDp5')
+TOUT="$(ATHENA_FG_HOST=github.com ATHENA_FG_CRED_FD="${XFD}" "${AI_DIR}/lib/forge-transport/git-remote-athena-forge" origin https://evil.invalid/r.git </dev/null 2>&1)"; TRC=$?
+IFS= read -r -t 5 LEFT <&"${XFD}"; exec {XFD}<&-
+if [ "${C7R}" = 1 ] && [ "${TRC}" != 0 ] && [[ "${TOUT}" == *"Fix:"* ]] && [[ "${TOUT}" == *"evil.invalid"* ]] && [ "${LEFT}" = /bin/false ]; then
+  ok "C7. an athena-forge:: URL to another host: refused up front; the transport refuses it before reading the grant"
+else bad "C7. foreign athena-forge URL" "c7r=${C7R} trc=${TRC} tout='${TOUT}' left='${LEFT}' err='${ERR}'"; fi
+
+# C8. A pushInsteadOf that turns the forge into plain https.
+git -C "${X}/src" remote set-url origin 'git@github.com:o/r.git'
+xdry "${X}/src" -c 'url.https://github.com/.pushInsteadOf=git@github.com:' push origin HEAD:main
+if is_refusal && [[ "${ERR}" == *"pushInsteadOf"* ]]; then ok "C8. a pushInsteadOf to plain https://github.com/: refused up front (exit 3, Fix:)"
+else bad "C8. pushInsteadOf to https" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+git -C "${X}/src" remote set-url origin 'https://github.com/o/r.git'
+
+# E1. GIT_TEMPLATE_DIR with a post-checkout hook during a routed clone.
+mkdir -p "${X}/tpl/hooks"; printf '#!/bin/sh\nexec %s e1\n' "${X}/probe" > "${X}/tpl/hooks/post-checkout"; chmod +x "${X}/tpl/hooks/post-checkout"
+x_reset
+OUT="$(cd "${X}" && PATH="${XPATH}" GIT_TEMPLATE_DIR="${X}/tpl" "${WRAPPER}" git clone -q https://github.com/o/r.git "${X}/e1-clone" 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"
+if [ "${RC}" = 0 ] && probe_clean e1; then ok "E1. GIT_TEMPLATE_DIR post-checkout in a routed clone: the clone succeeds; no header, grant used"
+else bad "E1. template dir hook" "$(xdiag)"; fi
+
+# E3. GIT_EDITOR during a routed pull that merges.
+git clone -q "${X_FORGE}/o/r.git" "${X}/e3" && git -C "${X}/e3" remote set-url origin https://github.com/o/r.git
+git -C "${X}/e3" commit -q --allow-empty -m e3-local
+git -C "${X}/src" fetch -q "${X_FORGE}/o/r.git" main && git -C "${X}/src" reset -q --hard FETCH_HEAD
+git -C "${X}/src" commit -q --allow-empty -m e3-remote && git -C "${X}/src" push -q "${X_FORGE}/o/r.git" HEAD:main
+x_reset
+OUT="$(cd "${X}/e3" && PATH="${XPATH}" GIT_EDITOR="$(mkprobe e3)" "${WRAPPER}" git pull -q --no-rebase --no-ff --edit origin main 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"
+if [ "${RC}" = 0 ] && grep -q 'hdr=ok:x-access-token' "${X_STUB_LOG}" && probe_clean e3; then
+  ok "E3. GIT_EDITOR in a routed pull --edit: the pull merges; the editor gets no header, grant used"
+else bad "E3. editor in pull" "$(xdiag)"; fi
+
+# M1. More than one URL that needs the credential: refused up front.
+git -C "${X}/src" remote add second 'https://github.com/o/r2.git'
+xdry "${X}/src" fetch --all
+M1A=0; is_refusal && [[ "${ERR}" == *"one"* ]] && M1A=1
+git -C "${X}/src" remote remove second
+git -C "${X}/src" config --add remote.origin.pushurl 'https://github.com/o/r.git'
+git -C "${X}/src" config --add remote.origin.pushurl 'https://github.com/o/r2.git'
+xdry "${X}/src" push origin HEAD:main
+git -C "${X}/src" config --unset-all remote.origin.pushurl
+if [ "${M1A}" = 1 ] && is_refusal; then ok "M1. fetch --all over two forge remotes, and two forge pushurls: refused up front (exit 3, Fix:)"
+else bad "M1. multiple forge URLs" "m1a=${M1A} rc=${RC} err='${ERR}'"; fi
+
+# M2. A submodule fetch nested under a routed pull: the top-level fetch gets
+# the grant; the nested transport finds it used, and says which URL.
+git init -q -b main "${X}/subsrc" && git -C "${X}/subsrc" commit -q --allow-empty -m sub0
+git init -q --bare -b main "${X_FORGE}/o/sub.git" && git -C "${X}/subsrc" push -q "${X_FORGE}/o/sub.git" main
+git init -q -b main "${X}/spsrc" && git -C "${X}/spsrc" -c protocol.file.allow=always submodule add -q "${X_FORGE}/o/sub.git" sub >/dev/null 2>&1
+git -C "${X}/spsrc" config -f .gitmodules submodule.sub.url ../sub.git && git -C "${X}/spsrc" add .gitmodules && git -C "${X}/spsrc" commit -q -m sp0
+git init -q --bare -b main "${X_FORGE}/o/sp.git" && git -C "${X}/spsrc" push -q "${X_FORGE}/o/sp.git" main
+git -C "${X}/spsrc" remote add origin https://github.com/o/sp.git && git -C "${X}/spsrc" config submodule.sub.url ../sub.git
+git -C "${X}/spsrc" fetch -q "${X_FORGE}/o/sp.git" main && git -C "${X}/spsrc" update-ref refs/remotes/origin/main FETCH_HEAD
+git -C "${X}/spsrc" branch -q -u origin/main main
+git -C "${X}/spsrc/sub" remote set-url origin https://github.com/o/sub.git
+git -C "${X}/spsrc" commit -q --allow-empty -m sp1 && git -C "${X}/spsrc" push -q "${X_FORGE}/o/sp.git" main
+git -C "${X}/spsrc" reset -q --hard HEAD~1
+x_reset
+xgh "${X}/spsrc" pull -q --ff-only --recurse-submodules
+if [ "$(git -C "${X}/spsrc" rev-parse refs/remotes/origin/main)" = "$(git --git-dir="${X_FORGE}/o/sp.git" rev-parse main)" ] \
+  && [[ "${ERR}" == *"already used"* ]] && [[ "${ERR}" == *"https://github.com/o/sub.git"* ]] && [ "$(x_starts)" = 1 ]; then
+  ok "M2. pull --recurse-submodules: the top-level fetch updates origin/main; the nested submodule transport fails loudly, naming its URL"
+else bad "M2. nested submodule fetch" "$(xdiag) head=$(git -C "${X}/spsrc" rev-parse HEAD)"; fi
+
+# P3. The outbound pre-push scan keeps running, and keeps blocking: a
+# dispatcher of the shape of ~/dev/custom/.git/hooks/pre-push execs a scan
+# that refuses a pushed commit carrying a synthetic pattern and marks each run.
+cat > "${X}/scan" <<'EOF'
+#!/usr/bin/env bash
+printf 'ran\n' >> "${X_PROBE_LOG}.scan"
+while read -r _lref lsha _rref _rsha; do
+  if git log --format=%B "${lsha}" -1 | grep -q SYNTHETIC-WORK-VALUE; then
+    printf 'outbound-pre-push: REFUSED: a work-domain value. Fix: remove it.\n' >&2; exit 3
+  fi
+done
+exit 0
+EOF
+chmod +x "${X}/scan"
+printf '#!/bin/sh\nexec %s "$@"\n' "${X}/scan" > "${X}/src/.git/hooks/pre-push"; chmod +x "${X}/src/.git/hooks/pre-push"
+git -C "${X}/src" fetch -q "${X_FORGE}/o/r.git" main && git -C "${X}/src" reset -q --hard FETCH_HEAD
+BEFORE3="$(git --git-dir="${X_FORGE}/o/r.git" rev-parse main)"
+git -C "${X}/src" commit -q --allow-empty -m 'carries SYNTHETIC-WORK-VALUE'
+x_reset; rm -f "${X_PROBE_LOG}.scan"
+xgh "${X}/src" push -q origin HEAD:main; P3A_RC="${RC}"; P3A_MAIN="$(git --git-dir="${X_FORGE}/o/r.git" rev-parse main)"
+git -C "${X}/src" reset -q --hard HEAD~1 && git -C "${X}/src" commit -q --allow-empty -m clean
+xgh "${X}/src" push -q origin HEAD:main
+if [ "${P3A_RC}" != 0 ] && [ "${P3A_MAIN}" = "${BEFORE3}" ] && [ "${RC}" = 0 ] \
+  && [ "$(git --git-dir="${X_FORGE}/o/r.git" rev-parse main)" = "$(git -C "${X}/src" rev-parse HEAD)" ] \
+  && [ "$(grep -c ran "${X_PROBE_LOG}.scan")" = 2 ]; then
+  ok "P3. the outbound pre-push scan runs on every routed push: a commit with the pattern is refused and lands nothing; a clean one lands"
+else bad "P3. outbound scan" "a_rc=${P3A_RC} a_main=${P3A_MAIN} before=${BEFORE3} $(xdiag) scan=$(cat "${X_PROBE_LOG}.scan" 2>/dev/null)"; fi
+rm -f "${X}/src/.git/hooks/pre-push"
+
+# X1. Every miss of the transport is loud: no grant, a grant that is no pipe,
+# a grant already used. Three distinct messages, each with Fix: and the URL.
+TR="${AI_DIR}/lib/forge-transport/git-remote-athena-forge"
+X1A="$(env -u ATHENA_FG_CRED_FD ATHENA_FG_HOST=github.com "${TR}" origin https://github.com/o/r.git </dev/null 2>&1)"; X1A_RC=$?
+X1B="$(ATHENA_FG_HOST=github.com ATHENA_FG_CRED_FD=0 "${TR}" origin https://github.com/o/r.git </dev/null 2>&1)"; X1B_RC=$?
+exec {XFD}< <(:)
+X1C="$(ATHENA_FG_HOST=github.com ATHENA_FG_CRED_FD="${XFD}" "${TR}" origin https://github.com/o/r.git </dev/null 2>&1)"; X1C_RC=$?
+exec {XFD}<&-
+if [ "${X1A_RC}" != 0 ] && [ "${X1B_RC}" != 0 ] && [ "${X1C_RC}" != 0 ] \
+  && [[ "${X1A}" == *"not started by the Athena route"* ]] && [[ "${X1B}" == *"not a pipe"* ]] && [[ "${X1C}" == *"already used"* ]] \
+  && [[ "${X1A}${X1B}${X1C}" == *"Fix:"*"Fix:"*"Fix:"* ]] \
+  && [[ "${X1A}" == *"https://github.com/o/r.git"* ]] && [[ "${X1B}" == *"https://github.com/o/r.git"* ]] && [[ "${X1C}" == *"https://github.com/o/r.git"* ]]; then
+  ok "X1. the transport with no grant, a grant that is no pipe, a used grant: three distinct refusals, each with Fix: and the URL"
+else bad "X1. transport misses" "a=[${X1A_RC}:${X1A}] b=[${X1B_RC}:${X1B}] c=[${X1C_RC}:${X1C}]"; fi
+
+# DND-1880. No command under the route sees the bot header in its config.
+OUT="$(cd "${X}/src" && PATH="${XPATH}" "${WRAPPER}" git config --get-all http.https://github.com/.extraheader 2>&1)"; RC=$?
+if [ "${RC}" = 1 ] && [ -z "${OUT}" ]; then ok "DND-1880. \`gh-athena git config --get-all http.https://github.com/.extraheader\` prints no bot header"
+else bad "DND-1880. config read shows the bot header" "rc=${RC} out-has-header=$([[ "${OUT}" == *AUTHORIZATION* ]] && echo yes || echo no)"; fi
+export GIT_ALLOW_PROTOCOL=file
 
 # DND-1667: no git call may have fallen through past its shim.
 if fsg_verify; then ok "no git call fell through past its shim (DND-1667)"

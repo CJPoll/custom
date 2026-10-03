@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# refuse-signing — the signing program inside the Athena route's forge
+# transport (DND-1868). git-remote-athena-forge sets gpg.program,
+# gpg.openpgp.program, gpg.x509.program and gpg.ssh.program to this file for
+# the git-remote-https it starts, so a signed push cannot run a program of the
+# caller's choosing with the bot's header in its environment. It signs nothing.
+case "${1:-}" in
+  -h | --help)
+    printf '%s\n' "refuse-signing   (git runs it as gpg.program inside the Athena route's transport)" \
+      "  Refuses every signing request, exit 1 with a Fix: line (DND-1868). A signed push" \
+      "  under gh-athena git / glab-athena git would run the signing program with the bot's" \
+      "  header in its environment. Not run by hand."
+    exit 0 ;;
+esac
+cat >/dev/null 2>&1
+printf '%s\n' "refuse-signing: REFUSING to sign: a signed push (push --signed, push.gpgSign) under the Athena route would run a signing program with the bot's credential in its environment (DND-1868)." \
+  "  Fix: push without --signed and with push.gpgSign unset, through ~/dev/custom/ai/bin/gh-athena git push … or glab-athena git push …; GitHub does not accept push certificates." >&2
+exit 1

@@ -122,7 +122,10 @@ case "${sub}" in
       case "${!k:-}" in http.https://*/.extraheader) hdr="${!k}" ;; esac
       i=$((i+1))
     done
-    printf 'REAL-GIT %s|hdr=%s\n' "${args[*]}" "${hdr}" >> "${LOG}"
+    # DND-1868: the route's grant, a pipe for this host, reaches git.
+    cred=none
+    [ -n "${ATHENA_FG_CRED_FD:-}" ] && [ -p "/proc/self/fd/${ATHENA_FG_CRED_FD}" ] && cred="pipe:${ATHENA_FG_HOST:-}"
+    printf 'REAL-GIT %s|hdr=%s|cred=%s\n' "${args[*]}" "${hdr}" "${cred}" >> "${LOG}"
     [ "${SHIM_REAL_PUSH:-0}" = 1 ] && exec "${REAL_G}" "${args[@]}"
     exit 0 ;;
   fetch|pull)
@@ -241,6 +244,18 @@ run "${R}" env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://gitlab.com/.extr
 refused "F3. a gitlab.com header on a github.com push" git gh-athena 'REAL-GIT'
 run "${R}" env GH_TOKEN=forged gh pr create --title t --body b
 refused "F4. gh with a token in the env but no isolated config dir" gh gh-athena 'REAL-GH'
+# DND-1868 (X2): the pre-DND-1868 marker, the bot header in the environment
+# config channel with every owner credential source off, is no longer the
+# route; nor is the route's rewrite with a grant that is no pipe.
+repo 'https://github.com/synth-owner/synth-repo.git'
+run "${R}" env GIT_TERMINAL_PROMPT=0 GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
+  'GIT_CONFIG_VALUE_0=AUTHORIZATION: basic eDp5' git -c credential.helper= -c core.askPass= push origin HEAD
+refused "X2a. the old extraheader-only marker, owner credential sources off (DND-1868)" git gh-athena 'REAL-GIT'
+run "${R}" env GIT_TERMINAL_PROMPT=0 ATHENA_FG_HOST=github.com ATHENA_FG_CRED_FD=0 git -c credential.helper= -c core.askPass= \
+  -c 'url.athena-forge::https://github.com/.insteadOf=git@github.com:' -c 'url.athena-forge::https://github.com/.insteadOf=https://github.com/' \
+  push origin HEAD </dev/null
+refused "X2b. the route's rewrite with a grant that is no pipe (DND-1868)" git gh-athena 'REAL-GIT'
+
 repo 'git@github.com:synth-owner/synth-repo.git'
 run "${R}" env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
   'GIT_CONFIG_VALUE_0=AUTHORIZATION: basic eDp5' git -c credential.helper= -c core.askPass= push origin HEAD
@@ -486,10 +501,10 @@ echo
 echo "--- the Athena routes still work (against the fixtures) ---"
 repo 'git@github.com:synth-owner/synth-repo.git'
 run "${R}" "${GHA}" git push origin HEAD:refs/heads/feat
-passed "R1. gh-athena git push reaches git with the bot header" 'hdr=http.https://github.com/.extraheader'
+passed "R1. gh-athena git push reaches git through the route's transport, with its grant and no header in git's environment (DND-1868)" 'hdr=none|cred=pipe:github.com'
 repo 'https://gitlab.com/synth-group/synth-repo.git'
 run "${R}" "${GLA}" git push origin HEAD:refs/heads/feat
-passed "R2. glab-athena git push reaches git with the bot header" 'hdr=http.https://gitlab.com/.extraheader'
+passed "R2. glab-athena git push reaches git through the route's transport, with its grant and no header in git's environment (DND-1868)" 'hdr=none|cred=pipe:gitlab.com'
 repo 'https://github.com/synth-owner/synth-repo.git'
 run "${R}" "${GLA}" git push origin HEAD:refs/heads/feat
 refused "R3. glab-athena git push to a github.com remote (wrong bot for the host)" git gh-athena 'REAL-GIT'

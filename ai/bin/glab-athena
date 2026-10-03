@@ -123,12 +123,14 @@ fi
 # ---- The git passthrough (DND-393) ------------------------------------------
 # `glab-athena git <args>` runs git authenticated as athena-amby for ONE command.
 # No git or glab config change, no auth subcommand:
-#   * url.https://gitlab.com/.insteadOf=git@gitlab.com: rewrites the SSH form;
+#   * url.athena-forge::https://gitlab.com/.insteadOf=git@gitlab.com: (and
+#     =https://gitlab.com/) send both forms to the route's transport;
 #   * credential.helper= / core.askPass= / GIT_ASKPASS, SSH_ASKPASS unset /
 #     GIT_TERMINAL_PROMPT=0 keep every owner credential source out;
-#   * the athena-amby PAT, read from TOKEN_FILE at call time, goes to git as an
-#     `oauth2:<PAT>` basic-auth http.https://gitlab.com/.extraheader through the
-#     environment config channel — never on argv, in a URL, or in a config file;
+#   * the athena-amby PAT, read from TOKEN_FILE at call time, as an
+#     `oauth2:<PAT>` basic-auth header, reaches only the route's transport
+#     (git-remote-athena-forge) through a one-shot pipe — never on argv, in a
+#     URL, a config file or git's environment (DND-1868);
 #   * a network op that would still reach gitlab.com over SSH or another
 #     non-HTTPS transport (ssh://, a pushurl override, an insteadOf forcing SSH)
 #     is REFUSED, exit 3 with a Fix:.

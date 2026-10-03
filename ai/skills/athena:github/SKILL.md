@@ -90,12 +90,18 @@ GIT_TERMINAL_PROMPT=0 ~/dev/custom/ai/bin/gh-athena git \
 
 What each part does:
 
-- The passthrough adds an App-token `Authorization` header for that one
-  command. It reaches git only over **HTTPS**.
+- The passthrough grants an App-token `Authorization` header for that one
+  command, over **HTTPS**, to its own transport alone
+  (`git-remote-athena-forge`, DND-1868). A hook, filter, editor or nested git
+  never holds it, so a push from a hook fails; push from the hook through
+  `gh-athena git` itself. One forge remote per command: `fetch --all`,
+  `remote update` and `-p` are refused.
 - `credential.helper=` (empty) clears every helper, URL-scoped ones included,
   so the owner's `gh auth git-credential` cannot answer.
 - The `insteadOf` rewrite turns an SSH-form remote (`git@github.com:o/r.git`)
   into HTTPS for that command. Without it the push goes over SSH as the owner.
+  The wrapper's own rewrite (to its transport, `athena-forge::https://…`)
+  comes first and wins.
 - `GIT_TERMINAL_PROMPT=0` makes a bot-auth failure **fail** instead of prompting.
 
 The wrapper (DND-389 and later) applies the helper reset, the rewrite, and the
