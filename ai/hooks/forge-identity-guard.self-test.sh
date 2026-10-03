@@ -388,6 +388,14 @@ run "$(bash_json_cwd "$TMP/gh_scp" 'git push -o -h')"
 check_text "B9. git push -o -h (-o takes -h as its value) denies" 'to a github.com remote'
 run "$(bash_json_cwd "$TMP/gh_scp" 'git push -h; git push origin HEAD')"
 check_text "B10. help, then a real push: the second push is still examined" 'to a github.com remote'
+run "$(bash_json_cwd "$TMP/gh_scp" 'git push -h origin main')"
+check "B11. git push -h origin main: git prints usage and exits, so -h first allows" allow
+run "$(bash_json_cwd "$TMP/gh_scp" 'git -c k=v push -h')"
+check "B12. git -c k=v push -h: a global value option does not hide help-first" allow
+run "$(bash_json_cwd "$TMP/gh_scp" 'git push -hf origin main')"
+check_text "B13. git push -hf (a cluster, not the help word) is judged: denies" 'to a github.com remote'
+run "$(bash_json_cwd "$TMP/gh_scp" 'git push -h && git push origin HEAD')"
+check_text "B14. help && a real push: the second push is still examined" 'to a github.com remote'
 # The grammar cannot be read (a hook copy with no ../lib beside it): a push
 # is denied as unresolved, naming the file, never allowed as "not a forge".
 mkdir -p "$TMP/nolib/hooks"
