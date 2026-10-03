@@ -235,7 +235,8 @@ Give the captain, in the brief:
   conflict or when I ask."* This is the
   captain half of `athena:merge-boarding` → *Landing onto a moving main*.
   The admiral lands a head whose gated main is an ancestor of the current one
-  without a re-gate; only a conflict sends it back. Measured 2026-09-26/27
+  without a re-gate; only a conflict, textual or semantic, sends it back
+  (`athena:merge-boarding` → *Merge one at a time*). Measured 2026-09-26/27
   (harness-epics-ab): DND-838 re-gated three times ("Main moved under each of
   them"), DND-785 ran `integration-gate` three times and never got a clean
   run, and DND-887 hit the same cycle. Two admirals then issued this rule by

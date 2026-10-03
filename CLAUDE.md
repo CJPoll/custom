@@ -1115,8 +1115,10 @@ report, a recorded critic PASS on the head, the gate green), an admiral lands
 it per `athena:merge-boarding` (the no-CI rule there names the steps):
 1. under `~/.local/state/athena/custom-merge.lock`, held around the fetch,
    rebase and push only, rebase onto `origin/main`;
-2. a clean rebase: push the rebased head fast-forward to `main` as Athena,
-   then release the lock; a conflicted rebase: release the lock, resolve,
+2. a clean rebase (no textual or semantic conflict; a migration-version
+   collision is one, `athena:merge-boarding` → *Merge one at a time*): push
+   the rebased head fast-forward to `main` as Athena, then release the lock;
+   a conflicted rebase: release the lock, resolve,
    re-gate (`integration-gate --with-critic`), and start again;
 3. confirm it landed (`ai/bin/confirm-merged`);
 4. fast-forward the main checkout (`git merge --ff-only`);
@@ -1156,6 +1158,11 @@ confirm it landed", with a re-gate after every rebase and no lock scope. Superse
 that will cause issues and we'll fix those asap. The velocity increase is
 worth the risk of incompatible concurrent merges." "That is true for both
 custom and gen_saas." A full re-gate is needed only after a conflicted rebase.
+
+**Later (2026-10-03, DND-1901):** "conflicted" meant a textual conflict. It
+now includes a semantic one, a migration-version collision being the named
+case (`athena:merge-boarding` → *Merge one at a time*). A clean rebase with
+none still lands without a re-gate.
 
 The author still never pushes to main and never merges its own PR. An
 `integration-gate` exit 4 is held for the owner; it fires only for what

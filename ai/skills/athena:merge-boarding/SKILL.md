@@ -86,7 +86,8 @@ The landing, as Cody confirmed it (2026-10-01):
 2. Under the lock, `git fetch origin`, then rebase that head onto
    `origin/main` if main moved. Record the fetched `origin/main` SHA: it is
    the landed range's base in steps 3 and 5.
-3. A **clean** rebase lands with no re-gate: push the rebased head
+3. A **clean** rebase (no textual or semantic conflict, *Merge one at a time*)
+   lands with no re-gate: push the rebased head
    fast-forward (`gh-athena git push origin <sha>:main`), still under the
    lock, then release it. The pushed SHA is not the reported one; the clean
    rebase carries the reported head's gate and verdict. `gh-athena` checks
@@ -103,8 +104,8 @@ The landing, as Cody confirmed it (2026-10-01):
    --to <the head>`. If it names an installer and nothing authorizes you to
    run it (step 5), do not push: release the lock, hold the landing, and
    report the install as the step awaiting authorization.
-4. A **conflicted** rebase is the one case that needs a full re-gate: release
-   the lock, resolve the conflict, run `integration-gate --with-critic` on the
+4. A **conflicted** rebase, textual or semantic, is the one case that needs a
+   full re-gate: release the lock, resolve the conflict, run `integration-gate --with-critic` on the
    new head, and start again.
 5. **Fast-forward, install, then check `main` after the push**, outside the
    lock, in this order:
@@ -180,8 +181,8 @@ the lock gating DND-1359, whose push then failed NOT-FF and cost a re-gate.
 with the risk of multiple merges at the same time; sometimes that will cause
 issues and we'll fix those asap. The velocity increase is worth the risk of
 incompatible concurrent merges." "That is true for both custom and gen_saas."
-A clean rebase onto a moved main is accepted without a re-gate. The lock
-still serialises the push itself.
+A rebase onto a moved main with no textual or semantic conflict is accepted
+without a re-gate. The lock still serialises the push itself.
 
 For any other no-CI repo, land CI first, or escalate the merge to Cody as a
 step only Cody can run. Measured 2026-09-29 (`2026-09-25-dnd-671-650-644`,
@@ -708,7 +709,8 @@ above had no exception: a rebase always needed a new gate and verdict, and the
 SHA landed was always the one `INTEGRATION OK` names. Superseded by the
 owner's landing doctrine as the DND-1463 ticket records it: custom lands by a
 clean rebase plus ff push, with `custom-merge.lock` around the push only, and
-re-gates only after a conflicted rebase. Cody's words behind it are quoted
+re-gates only after a conflicted rebase (textual or semantic, *Merge one at
+a time*). Cody's words behind it are quoted
 under the no-CI landing in *The merge bar*.
 
 **Later (2026-09-27, DND-965):** this paragraph said the gate "never rebases or
@@ -809,11 +811,27 @@ integration result runs only after a conflict.
 merge call itself stays serial under the lock. But a receipt whose recorded
 base is an **ancestor** of current `origin/<base>` is accepted: car N landing
 does not invalidate car N+1's gate. Car N+1 lands if its head merges into the
-new tip with no conflict. A conflict is refused (by `locked-merge` before the
-call, and by GitHub). Only then do you bring main in and re-gate: merge
+new tip with no conflict. A textual conflict is refused (by `locked-merge`
+before the call, and by GitHub). A semantic conflict is not: see below. Only
+then do you bring main in and re-gate: merge
 `origin/<base>` into a published PR branch (never rebase it), or rebase an
 unpublished one, resolve, and re-gate. Stop the line on a red main or a failed
 deploy: land nothing more until it is fixed.
+
+A **semantic conflict** is a collision git cannot see. A text-clean merge is
+not proof of a clean integration. Before every merge or push to main, compare
+the head's migration versions with current `origin/main`. A version both sides
+added is a conflict and takes the same re-gate. Where a repo has a merge-time
+version check (gen_saas DND-1754), it is the mechanical form of this rule.
+This widens what counts as a conflict. It does not restore a re-gate after
+every rebase: the DND-1463 decision stands.
+
+**Later (2026-10-03, DND-1901):** this rule treated "conflict" as a textual
+conflict only, so a clean merge of a head and a moved main never needed a
+re-gate. Superseded for a semantic conflict, a migration-version collision
+being the named case. Measured 2026-10-03 ~14:06Z in gen_saas: two PRs each
+added the same migration version, git merged them cleanly, `main` went red and
+the prod migration was skipped.
 
 **Later (2026-10-01, DND-1463):** this said "re-running `integration-gate`
 between merges", because merging car N invalidated the check for car N+1:
