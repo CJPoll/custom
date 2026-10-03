@@ -135,6 +135,15 @@ module MergeRoleIO
     !common.nil? && realpath(common) == home
   end
 
+  # attended_session? -> whether the Claude Code process that ran this hook is
+  # an attended interactive session, read from the mode variables it sets in
+  # its own environment, which every hook inherits (MergeRole.attended?). A
+  # payload field cannot carry it: an interactive `claude --agent X` and a
+  # headless `claude -p --agent X` send the same one (DND-1934).
+  def attended_session?
+    MergeRole.attended?(ENV.fetch("CLAUDE_CODE_ENTRYPOINT", nil), ENV.fetch("CLAUDE_CODE_SESSION_ATTENDED", nil))
+  end
+
   def deny_json(reason)
     JSON.generate(hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny",
                                         permissionDecisionReason: reason })
@@ -171,7 +180,7 @@ module MergeRoleIO
       home != :none && lane?(dir, home)
     end
     verdict = MergeRole.decide(found, agent_id: payload["agent_id"], agent_type: payload["agent_type"],
-                                      lane_of: lane_of)
+                                      attended: attended_session?, lane_of: lane_of)
     return "" if verdict.nil?
 
     f = verdict[:finding]

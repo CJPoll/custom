@@ -5,7 +5,12 @@
 # role. The payload shapes are the ones measured on Claude Code 2.1.286
 # (DND-726 step 0): a subagent's PreToolUse(Bash) carries agent_id and
 # agent_type; a top-level session carries neither; a top-level
-# `claude -p --agent X` carries agent_type X and no agent_id.
+# `claude -p --agent X` carries agent_type X and no agent_id. An attended
+# interactive `claude --agent X` carries the same payload as the headless one;
+# the hook's environment tells them apart (DND-1934, also 2.1.286): interactive
+# CLAUDE_CODE_ENTRYPOINT=cli + CLAUDE_CODE_SESSION_ATTENDED=1, headless
+# sdk-cli + 0. A role written <mode>:<who> runs the hook in that mode's
+# environment; a bare role runs it with both variables unset.
 #
 # Functional only (DND-1222): one pass, no load, no timing. Hermetic: HOME and
 # XDG_STATE_HOME point into one trap-removed temp dir. Every git repo is a
@@ -42,6 +47,9 @@ export HOME="${TMP}/home" XDG_STATE_HOME="${TMP}/state"
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="${TMP}/gitconfig"
 # The agent-stash env (DND-775) must not reach fixture git calls.
 unset GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS GIT_DIR GIT_WORK_TREE
+# The session-mode env this suite inherits (an interactive session sets
+# cli + 1) must not reach the hook: each case sets its own (with_mode).
+unset CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_SESSION_ATTENDED
 mkdir -p "${HOME}" "${XDG_STATE_HOME}"
 git config --file "${GIT_CONFIG_GLOBAL}" user.email t@example.invalid
 git config --file "${GIT_CONFIG_GLOBAL}" user.name test
@@ -111,8 +119,9 @@ ok()  { PASS=$((PASS + 1)); printf '  PASS  %s\n' "$1"; }
 bad() { FAIL=$((FAIL + 1)); printf '  FAIL  %s -- %s\n' "$1" "$2"; }
 
 # payload <role> <command> <cwd> <tool> : the measured PreToolUse shapes.
+# A <mode>: prefix on the role is with_mode's; the payload ignores it.
 payload() {
-  case "$1" in
+  case "${1#*:}" in
     top)       _r='{}' ;;
     captain)   _r='{"agent_id":"a1111111111111111","agent_type":"athena-captain"}' ;;
     admiral)   _r='{"agent_id":"a2222222222222222","agent_type":"athena-admiral"}' ;;
@@ -123,6 +132,8 @@ payload() {
     nokey)     _r='{"agent_id":"a7777777777777777"}' ;;
     agent-captain) _r='{"agent_type":"athena-captain"}' ;;
     agent-admiral) _r='{"agent_type":"athena-admiral"}' ;;
+    agent-claude) _r='{"agent_type":"claude"}' ;;
+    sub-claude) _r='{"agent_id":"a8888888888888888","agent_type":"claude"}' ;;
     *) echo "FAIL: unknown role $1 in the self-test. Fix: use a role payload() defines."; exit 1 ;;
   esac
   # For the Agent/Task tool, <command> is the spawn's subagent_type.
@@ -130,9 +141,31 @@ payload() {
     '{session_id:"s1",transcript_path:"/nonexistent/s1.jsonl",cwd:$d,permission_mode:"bypassPermissions",hook_event_name:"PreToolUse",tool_name:$t,tool_input:(if $t == "Agent" or $t == "Task" then {description:"d",prompt:"p",subagent_type:$c} else {command:$c} end),tool_use_id:"toolu_x"} + $r'
 }
 
+# with_mode <role> <cmd...> : run <cmd> in the session-mode environment the
+# role's <mode>: prefix names, as measured on Claude Code 2.1.286 (DND-1934):
+#   att:      an attended interactive session: ENTRYPOINT=cli, ATTENDED=1
+#   hl:       a headless `claude -p`: ENTRYPOINT=sdk-cli, ATTENDED=0
+#   cli0:     ENTRYPOINT=cli, ATTENDED=0      (the two disagree)
+#   sdk1:     ENTRYPOINT=sdk-cli, ATTENDED=1  (the two disagree)
+#   cliunset: ENTRYPOINT=cli, ATTENDED unset  (half the signal)
+# A bare role runs with both unset. It runs in a pipeline, so the exports
+# stay in its subshell.
+with_mode() {
+  case "$1" in
+    att:*) export CLAUDE_CODE_ENTRYPOINT=cli CLAUDE_CODE_SESSION_ATTENDED=1 ;;
+    hl:*) export CLAUDE_CODE_ENTRYPOINT=sdk-cli CLAUDE_CODE_SESSION_ATTENDED=0 ;;
+    cli0:*) export CLAUDE_CODE_ENTRYPOINT=cli CLAUDE_CODE_SESSION_ATTENDED=0 ;;
+    sdk1:*) export CLAUDE_CODE_ENTRYPOINT=sdk-cli CLAUDE_CODE_SESSION_ATTENDED=1 ;;
+    cliunset:*) export CLAUDE_CODE_ENTRYPOINT=cli ;;
+    *:*) echo "FAIL: unknown mode in role $1. Fix: use a mode with_mode defines."; exit 1 ;;
+  esac
+  shift
+  "$@"
+}
+
 # run <role> <command> [cwd] [tool] -> OUT, RC
 run() {
-  OUT=$(payload "$1" "$2" "${3:-${HOMEREPO}}" "${4:-Bash}" | "${HOOK}" 2>/dev/null)
+  OUT=$(payload "$1" "$2" "${3:-${HOMEREPO}}" "${4:-Bash}" | with_mode "$1" "${HOOK}" 2>/dev/null)
   RC=$?
 }
 decision() {
@@ -452,6 +485,38 @@ expect "top-level --agent captain, bare push: cwd is not trusted" agent-captain 
 expect "top-level --agent captain, bare merge: cwd is not trusted" agent-captain deny "git merge feat" "${FEAT}"
 expect "top-level --agent captain, explicit cd to a feature branch" agent-captain allow "cd ${FEAT} && git push"
 expect "subagent, bare push: cwd is the dir it runs in" captain allow "git push" "${FEAT}"
+
+echo "== attended interactive top-level session (DND-1934) =="
+# The regression: FleetView starts an interactive coordinator as
+# `claude --agent claude`. Its payload is the headless `claude -p --agent X`
+# shape (agent_type, no agent_id); its environment says a person is attending.
+expect "attended --agent claude spawns athena-admiral" att:agent-claude allow "athena-admiral" "${HOMEREPO}" "Agent"
+expect "attended --agent claude spawns athena-admiral (Task)" att:agent-claude allow "athena-admiral" "${HOMEREPO}" "Task"
+# The same top-level test on every merge class (rules 1-6), not only rule 7.
+expect "attended --agent claude, pr merge" att:agent-claude allow "${GHA} pr merge 5 --squash"
+expect "attended --agent claude, push to main" att:agent-claude allow "cd ${HOMEREPO} && git push origin HEAD:main"
+expect "attended --agent claude, mcp merge tool" att:agent-claude allow "" "${HOMEREPO}" "mcp__forge__merge_pull_request"
+expect "attended --agent athena-captain, pr merge" att:agent-captain allow "${GHA} pr merge 5 --squash"
+# A subagent of an attended session inherits cli + 1; agent_id still marks it.
+expect "subagent of an attended session spawns athena-admiral" att:gp deny "athena-admiral" "${HOMEREPO}" "Agent" "general-purpose"
+expect "subagent of an attended session spawns athena-admiral" att:captain deny "athena-admiral" "${HOMEREPO}" "Agent"
+expect "subagent typed claude of an attended session spawns athena-admiral" att:sub-claude deny "athena-admiral" "${HOMEREPO}" "Agent"
+expect "subagent of an attended session, pr merge" att:captain deny "${GHA} pr merge 5 --squash"
+expect "subagent of an attended session, mcp merge tool" att:gp deny "" "${HOMEREPO}" "mcp__forge__merge_pull_request"
+expect "subagent, empty agent_type, attended env" att:notype deny "athena-admiral" "${HOMEREPO}" "Agent" "could not tell the caller's role"
+# A headless `claude -p --agent X` keeps its verdict: denied for X but the admiral.
+expect "headless --agent claude spawns athena-admiral" hl:agent-claude deny "athena-admiral" "${HOMEREPO}" "Agent" "claude"
+expect "headless --agent claude, pr merge" hl:agent-claude deny "${GHA} pr merge 5 --squash"
+expect "headless --agent claude, mcp merge tool" hl:agent-claude deny "" "${HOMEREPO}" "mcp__forge__merge_pull_request"
+expect "headless --agent athena-captain, pr merge" hl:agent-captain deny "${GHA} pr merge 5 --squash"
+expect "headless --agent athena-admiral spawns athena-admiral" hl:agent-admiral allow "athena-admiral" "${HOMEREPO}" "Agent"
+# Cannot tell (no signal, half of it, or a contradiction): the headless verdict.
+expect "mode env unset, --agent claude spawns athena-admiral" agent-claude deny "athena-admiral" "${HOMEREPO}" "Agent"
+expect "entrypoint cli, attended 0" cli0:agent-claude deny "athena-admiral" "${HOMEREPO}" "Agent"
+expect "entrypoint sdk-cli, attended 1" sdk1:agent-claude deny "athena-admiral" "${HOMEREPO}" "Agent"
+expect "entrypoint cli, attended unset" cliunset:agent-claude deny "athena-admiral" "${HOMEREPO}" "Agent"
+# A session with neither field is top level in every mode.
+expect "no agent fields, headless env" hl:top allow "athena-admiral" "${HOMEREPO}" "Agent"
 
 echo "== fail-open and hook contract =="
 OUT=$(printf '' | "${HOOK}" 2>/dev/null); RC=$?

@@ -522,14 +522,39 @@ module MergeRole
     dir == :unresolved ? "a directory it could not resolve (a variable, glob, subshell or earlier cd)" : dir.to_s
   end
 
-  # decide(found, agent_id:, agent_type:, lane_of:) -> nil (allow) or
-  # {role:, finding:} (deny). lane_of.call(dir) is true when dir is a cron
-  # lane of the hook's own repo.
-  def decide(found, agent_id:, agent_type:, lane_of:)
+  # attended?(entrypoint, attended) -> true only when Claude Code's own mode
+  # variables both say an attended interactive session: CLAUDE_CODE_ENTRYPOINT
+  # "cli" and CLAUDE_CODE_SESSION_ATTENDED "1" (DND-1934). Measured on Claude
+  # Code 2.1.286 in the hook's own environment: interactive `claude [--agent
+  # X]` gives cli + 1 (its subagents inherit it); `claude -p [--agent X]` gives
+  # sdk-cli + 0, and overwrites an inherited cli + 1. Anything else, a missing
+  # value, half the signal or a contradiction, cannot tell: false.
+  def attended?(entrypoint, attended)
+    entrypoint.to_s == "cli" && attended.to_s == "1"
+  end
+
+  # top_level?(agent_id, agent_type, attended) -> true for a session no
+  # subagent runs in: no agent_id, and either no agent_type (a plain session)
+  # or an attended interactive one (`claude --agent X` with a person at it,
+  # FleetView's default launch). A headless `claude -p --agent X` carries the
+  # same agent_type and no agent_id, so without the attended signal it is NOT
+  # top level here: that keeps its DND-726 verdict. Every merge class uses
+  # this one test (decide).
+  def top_level?(agent_id, agent_type, attended)
+    return false unless agent_id.to_s.empty?
+
+    agent_type.to_s.empty? || attended == true
+  end
+
+  # decide(found, agent_id:, agent_type:, attended:, lane_of:) -> nil (allow)
+  # or {role:, finding:} (deny). attended is attended?'s answer for the hook's
+  # environment. lane_of.call(dir) is true when dir is a cron lane of the
+  # hook's own repo.
+  def decide(found, agent_id:, agent_type:, attended:, lane_of:)
     return nil if found.empty?
 
     type = agent_type.to_s
-    return nil if agent_id.to_s.empty? && type.empty? # top level: the human, the coordinator, a cron parent
+    return nil if top_level?(agent_id, type, attended) # the human, the coordinator, a cron parent
     return nil if type == ADMIRAL
     return nil if type == SHIPWRIGHT && shipwright_lane_push?(found, lane_of)
 
@@ -559,7 +584,8 @@ module MergeRole
     end
     if f[:rule] == :spawn_admiral
       return "merge-role-guard: `#{role}` may not spawn athena-admiral: an admiral it spawns could merge on " \
-             "its behalf, and only a top-level session or an admiral starts an admiral. Fix: do not spawn an " \
+             "its behalf, and only a top-level session (a plain or attended interactive one, never a subagent " \
+             "or a headless `claude -p --agent X`) or an admiral starts an admiral. Fix: do not spawn an " \
              "admiral; finish your own work and report to whoever launched you. If a merge is needed, say so " \
              "in your report; the admiral merges."
     end
