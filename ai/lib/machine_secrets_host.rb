@@ -132,8 +132,10 @@ module MachineSecretsHost
     { state: :ok, shown: shown }
   rescue Errno::ENOENT
     { state: :absent, shown: tilde(path, env) }
-  rescue Errno::EACCES => e
-    raise e unless user
+  rescue Errno::EACCES
+    # A rescue clause cannot hand off to a later one, so the own-account case
+    # returns the SystemCallError result below itself.
+    return { state: :bad, shown: tilde(path, env), problem: "could not stat (EACCES)" } unless user
 
     { state: :held, shown: tilde(path, env), problem: "held by #{user} in a directory this account cannot read" }
   rescue SystemCallError => e

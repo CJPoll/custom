@@ -391,6 +391,13 @@ if [ "$(id -u)" -ne 0 ]; then
   check -- --probe c
   expect "(c) a held entry this account cannot stat is named not checked, never ok" 0 \
     "not checked as this account: fx-held .*run as root or ${ME}" "ok    fx-held"
+  # The same unreadable file declared WITHOUT `user` stays a per-entry
+  # finding, and the entries after it are still checked.
+  write_registry "$(entry fx-own-unreadable "${TMP}/held/config.toml")" "${BASE_ENTRIES[@]}"
+  check -- --probe c
+  expect "(c) an own-account entry this account cannot stat is a finding, not a registry fault" 1 \
+    "FAIL  fx-own-unreadable .*could not stat \(EACCES\)" "registry could not be read"
+  expect "(c) the entries after an unreadable one are still checked" 1 "ok    fx-token ~/.fx/token"
   chmod 700 "${TMP}/held"
 fi
 write_registry "${BASE_ENTRIES[@]}" "$(held fx-held '~/.fx/token' "${ME}")"
