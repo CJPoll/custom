@@ -1825,7 +1825,7 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   # fault text (see the AWK_RC check below the evaluator), and exit 3 makes
   # it a fault.
   function wbad(why) { print "WOPTS-BAD\t" why; exit 3 }
-  # wwalk(W, k, e, b, WCP, ZP, SC, n) (DND-1898): word k is wrapper b in command
+  # wwalk(W, k, e, b, WCP, ZP, SB, SC, n) (DND-1898): word k is wrapper b in command
   # position, and e ends its simple command. Marks in WCP every later word
   # that may be the command b runs, so it keeps command position past b'"'"'s
   # options: the walk skips each option from the table (a value option
@@ -1840,7 +1840,7 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   # ./g?t`), and a value or operand built by expansion or glob, which may
   # be no word or several. extra counts those pending words; they are
   # spent before b'"'"'s operands.
-  function wwalk(W, k, e, b, WCP, ZP, SC, n,    tb, j, t, pend, ops, extra, done, i, c, nm, hits, hn, xw, u, m) {
+  function wwalk(W, k, e, b, WCP, ZP, SB, SC, n,    tb, j, t, pend, ops, extra, done, i, c, nm, hits, hn, xw, u, m) {
     tb = (b in WSAME) ? WSAME[b] : b
     ops = (tb in WOP) ? WOP[tb] : 0
     pend = 0; extra = 0; done = 0
@@ -2061,7 +2061,7 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       for (e = k; e < n && !SB[e + 1]; e++) ;
       # DND-1898: a literal wrapper in command position (env, timeout, sudo,
       # a path to one) passes command position past its options (wwalk).
-      if (cp && !asgw && W[k] !~ /[\001\003$`]/) { wb = W[k]; sub(/^.*\//, "", wb); if (wb in WWR) wwalk(W, k, e, wb, WCP, ZP, SC, n) }
+      if (cp && !asgw && W[k] !~ /[\001\003$`]/) { wb = W[k]; sub(/^.*\//, "", wb); if (wb in WWR) wwalk(W, k, e, wb, WCP, ZP, SB, SC, n) }
       # A shell alias in command position: read its value, followed by the
       # rest of this simple command, as a command of its own. The name is
       # looked up without glob marks: an alias named `gs?` expands before

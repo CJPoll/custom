@@ -1096,7 +1096,7 @@ The canary reads usage under LC_ALL=C. After: `RESULT: 429 passed, 0 failed`.
   against the first cut (`61464168`), `RESULT: 724 passed, 6 failed`
   (WO46, WO47, WO49, WO50, WO51, F17). WO5, WO20, WO48 and WO52 were
   already denied by other rules and are kept as regression cases. After:
-  `RESULT: 730 passed, 0 failed`. worktree-escape-guard's suite stays
+  `RESULT: 731 passed, 0 failed`. worktree-escape-guard's suite stays
   green (182 passed, 0 failed, with cases for a missing and a malformed
   table), and its WRAPPER_OPTS loaded from the table equals the old
   literal key for key.
@@ -1109,6 +1109,11 @@ The canary reads usage under LC_ALL=C. After: `RESULT: 429 passed, 0 failed`.
   operand; a value or operand built by expansion, glob or substitution)
   and F17 (a malformed table named in the fault). Each case was written
   before its fix.
+- **Critic:** the standing judge (BLOCK on `5f2ca1e1`) found wwalk read
+  `SB` as an empty global, so the walk across a substitution ran past the
+  command's end and marked later commands. WO50c (`timeout $(echo 5) -k
+  1; grep gstp notes.txt`) failed on that head (`RESULT: 730 passed, 1
+  failed`, a deny) and passes once `SB` is passed in (S-1898-20).
 - **Equivalent mutants:** S-1898-15 and S-1898-16 survive. wwalk marks
   every word it passes and the word it stops on, so with pending words
   counted, spending them before or after the operands, or capping one
@@ -1137,3 +1142,4 @@ The canary reads usage under LC_ALL=C. After: `RESULT: 429 passed, 0 failed`.
 | S-1898-17 | a value or operand built by expansion or glob is one word | WO49, WO50, WO51 |
 | S-1898-18 | no walk across a substitution in a value or operand slot | WO50 |
 | S-1898-19 | the malformed-table fault does not name the table | F17 |
+| S-1898-20 | wwalk does not take `SB` (an empty global; the critic's finding) | WO50c |

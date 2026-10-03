@@ -1838,6 +1838,9 @@ EOF
 d2 "WO50b. a substitution in sudo's value slot, a builtin" allow <<'EOF'
 sudo -u $(id -un) ./g?t status
 EOF
+d2 "WO50c. the walk across a substitution stops at the command's end (critic)" allow <<'EOF'
+timeout $(echo 5) -k 1; grep gstp notes.txt
+EOF
 d2 "WO51. a glob in a value slot (review floor)" deny <<'EOF'
 env -u /tmp/a* Y ./g?t stash pop
 EOF
