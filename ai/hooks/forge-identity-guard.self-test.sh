@@ -319,6 +319,60 @@ run "$(bash_json_cwd "$TMP/gh_scp" 'git push origin HEAD')"
 check_text "3j. push deny carries the escalate Fix:" 'Fix: push through the wrapper'
 check_text "3k. push deny says escalate to your admiral" 'escalate to your admiral with the command + error and wait'
 
+echo
+echo "--- DND-1862: push argv read with git's grammar (fg_push_argv), not word by word ---"
+# Each push below goes to the github origin as git reads it: an option VALUE
+# is not the repository, so git falls back to the default remote.
+run "$(bash_json_cwd "$TMP/gh_scp" 'git push -fo /tmp/x.git')"
+check_text "A1. push -fo <path>: -o takes the path as its value, origin=github denies" 'to a github.com remote'
+run "$(bash_json_cwd "$TMP/gh_scp" 'git push --push-o /tmp/x.git')"
+check_text "A2. push --push-o <path> (an abbreviation of --push-option) denies" 'to a github.com remote'
+run "$(bash_json_cwd "$TMP/gh_scp" 'git push --repo=/tmp/x.git --no-repo')"
+check_text "A3. push --repo=<path> --no-repo: the default remote (github) denies" 'to a github.com remote'
+run "$(bash_json_cwd "$TMP/gh_scp" 'git push -o ci.skip -v')"
+check_text "A4. push -o <value> -v: the value is not the repository" 'to a github.com remote'
+# The global peel: a global option's value is not the subcommand.
+run "$(bash_json_cwd "$TMP/gh_scp" 'git --namespace ns push origin HEAD')"
+check_text "A5. git --namespace <ns> push (a global value option) denies" 'to a github.com remote'
+run "$(bash_json_cwd "$TMP/norepo" "git -C $TMP -C gh_scp push origin HEAD")"
+check_text "A6. git -C <a> -C <b> push: -C values join, as git applies them" 'to a github.com remote'
+run "$(bash_json_cwd "$TMP/local" "git --git-dir $TMP/gh_scp/.git push origin HEAD")"
+check_text "A7. git --git-dir <github repo> push: the remote is read in that repo" 'to a github.com remote'
+run "$(bash_json_cwd "$TMP/local" 'git -c remote.origin.url=git@github.com:o/r.git push origin HEAD')"
+check_text "A8. git -c remote.origin.url=<github> push: the override is read" 'to a github.com remote'
+# Deny by default: an option git push's grammar does not have.
+run "$(bash_json_cwd "$TMP/local" 'git push --bogus-flag origin HEAD')"
+check_text "A9. push with an option git push does not have -> deny, names it" '--bogus-flag'
+# As git reads them, in the allow direction too.
+run "$(bash_json_cwd "$TMP/local" "git push -fo ci.skip $TMP/bare.git HEAD")"
+check "A10. push -fo <value> <local path>: the repository is the path -> allow" allow
+run "$(bash_json_cwd "$TMP/gh_scp" 'git --no-pager log --grep push')"
+check "A11. git --no-pager log --grep push (log is the subcommand) -> allow" allow
+run "$(bash_json_cwd "$TMP/gh_scp" 'git --version push')"
+check "A12. git --version push (prints and exits; nothing is pushed) -> allow" allow
+# An empty quoted word is still a word to git (review round).
+run "$(bash_json_cwd "$TMP/gh_scp" "git -C '' push")"
+check_text "A15. git -C '' push: -C '' is the cwd, push is the subcommand" 'to a github.com remote'
+run "$(bash_json_cwd "$TMP/gh_scp" 'git --namespace "" push origin HEAD')"
+check_text "A16. git --namespace \"\" push origin" 'to a github.com remote'
+# A redirection is not argv: git never sees it as the repository.
+run "$(bash_json_cwd "$TMP/gh_scp" 'git push 2>/dev/null')"
+check_text "A17. git push 2>/dev/null: the default remote (github) denies" 'to a github.com remote'
+run "$(bash_json_cwd "$TMP/gh_scp" 'git push > /tmp/push.log 2>&1')"
+check_text "A18. git push > <file> 2>&1: the default remote (github) denies" 'to a github.com remote'
+run "$(bash_json_cwd "$TMP/gh_scp" "git push $TMP/bare.git HEAD 2>/dev/null")"
+check "A19. git push <local path> HEAD 2>/dev/null -> allow" allow
+run "$(bash_json_cwd "$TMP/local" 'git push --repo=git@github.com:o/r.git')"
+check_text "A20. git push --repo=<github url>: the --repo value is the repository" 'to a github.com remote'
+# The grammar cannot be read (a hook copy with no ../lib beside it): a push
+# is denied as unresolved, naming the file, never allowed as "not a forge".
+mkdir -p "$TMP/nolib/hooks"
+cp "$HOOK" "$TMP/nolib/hooks/forge-identity-guard.sh"
+OUT=$(bash_json_cwd "$TMP/local" 'git push origin HEAD' | sh "$TMP/nolib/hooks/forge-identity-guard.sh" 2>/dev/null); STATUS=$?
+check_text "A13. no push grammar to read -> the push is denied, naming the file" 'restore ai/lib/forge-git-passthrough.sh'
+OUT=$(bash_json_cwd "$TMP/local" 'git log --oneline' | sh "$TMP/nolib/hooks/forge-identity-guard.sh" 2>/dev/null); STATUS=$?
+check "A14. no push grammar, and no push in the command -> allow" allow
+
 run "$(bash_json 'gh pr create --fill')"
 check_text "3l. create deny carries the escalate clause" 'escalate to your admiral with the command + error and wait'
 

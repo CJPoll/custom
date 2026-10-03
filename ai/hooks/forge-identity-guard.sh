@@ -15,13 +15,35 @@
 # Measured 2026-09-23: every captain/admiral branch push on gen_saas showed
 # actor=CJPoll. The remote is resolved the way git would (the command's own
 # remote/URL argument, else branch.<cur>.pushRemote / remote.pushDefault /
-# branch.<cur>.remote / origin) in the repo the push runs in (`-C <dir>`, else a
-# preceding `cd <dir>`, else the hook's cwd). A push whose remote CANNOT be
+# branch.<cur>.remote / origin) in the repo the push runs in (the last
+# preceding `cd <dir>`, else the hook's cwd, then each `-C <dir>` applied on
+# top, as git applies it). A push whose remote CANNOT be
 # resolved is still denied, naming that it could not tell — an unresolvable remote
 # must not read as "not GitHub". DND-393 extends the rule to gitlab.com: a plain
 # push there goes out on the owner's SSH key and GitLab records the owner, and
 # `glab-athena git` is now the Athena path to point it at. A remote resolving
 # elsewhere (a local path, another host) is allowed silently.
+# DND-1862: which word is the subcommand, which is the repository and which is
+# an option's value is read with git's own grammar, the wrapper's
+# fg_global_opt and fg_push_argv (ai/lib/forge-git-passthrough.sh), in a bash
+# child ("The push's argv, read with git's grammar" below). -C values join as
+# git joins them, and --git-dir, --work-tree, --bare, -c and --config-env
+# apply when a remote NAME is looked up. An option git does not have is
+# denied, since the target cannot be told. A shell redirection
+# (`2>/dev/null`, `> log`) is not argv and is dropped before the reading.
+# Residual (each still allowed): a URL rewrite (insteadOf / pushInsteadOf)
+# applied to a literal URL or path word, since only remote names go through
+# git; config from the environment (`GIT_DIR=… git push`, GIT_CONFIG_*); a
+# redirection placed before `push` (`git 2>x push`), and a quoted value with
+# whitespace in it (`git -c 'k=a b' push`), which each keep the text from
+# matching as a push candidate at all.
+#
+# Later (2026-10-03, DND-1862): the push rule read its own words: -C and -c
+# took a value in the global peel, and -o, --push-option, --receive-pack,
+# --exec and --repo by exact name in the push walk. So `git push -fo
+# /tmp/x.git`, `git push --push-o /tmp/x.git` and `git push --repo=/tmp/x.git
+# --no-repo` read the path as the repository and were allowed, while git
+# pushes to the default remote; `git --namespace ns push` was never seen.
 #
 # SCOPE: EVERY forge write run on plain `gh` / `glab` (DND-1179). Create and
 # merge, and the `gh api` / `glab api` merge and ref-write shapes (DND-728,
@@ -66,7 +88,13 @@
 # Design guarantees (mirror safe-wait-guard):
 #   * FAIL-OPEN — any error (missing jq, unparseable input, non-Bash tool, no
 #     match) exits 0 and ALLOWS silently. A bug here can never wedge Bash.
-#     A deny is only ever emitted for a positive match.
+#     A deny is only ever emitted for a positive match. One exception
+#     denies on an error: when git's grammar cannot be read (the passthrough
+#     unreadable, or no bash), a git push CANDIDATE is denied as the push
+#     rule's unresolved remote, not allowed (DND-1862). A candidate is
+#     lexical and over-matches, so in that state a command that only looks
+#     like a push (`git --no-pager log --grep push`) is denied too: an
+#     accepted false positive, like the mentions below.
 #   * WRAPPER   — only plain gh/glab and plain git push match. The wrapper
 #     path (`gh-athena pr close`, `glab-athena mr note`) is never matched: the
 #     create/merge/api patterns need whitespace after `gh`/`glab` (the wrapper
@@ -266,10 +294,21 @@ bless_wrapper_var() {
 # `W=<wrapper>; "$W" git …` shape to the wrapper form.
 # Newlines become `;` here (not spaces, as in FLAT): a push's arguments end at
 # the end of its line, so `git push<NL>echo done` never reads `echo` as a remote.
-GFLAT=$(printf '%s' "$CMD" | bless_wrapper_var | tr '\n\t' '; ' | tr -d "'\"\\\\" | sed -E 's#(gh|glab)-athena[[:space:]]+git([[:space:]])#FORGE_ATHENA_GIT\2#g')
-# `git`, bare or path-qualified, then only GLOBAL options (-C/-c take a value),
-# then `push`. `git commit -m "push"` does not match: `commit` is not an option.
-GIT_PUSH_RE='(^|[[:space:];&|(/])git([[:space:]]+(-[Cc][[:space:]]+[^[:space:];&|]+|--?[^[:space:];&|]+))*[[:space:]]+push([[:space:]]|$|[;&|)])'
+# An empty quoted word ('' or "") is still a word to git: `git -C '' push`
+# runs in the cwd, and dropping it would make `push` read as -C's value. So it
+# becomes the word FI_EMPTY_WORD before the quotes are dropped, and
+# PUSH_READ_BASH reads it back as "" (DND-1862). Applied twice, so two
+# adjacent empty words (`'' ''`) both survive.
+EMPTY_WORD_SED="s/(^|[[:space:];&|(])(''|\"\")([[:space:];&|)]|\$)/\\1FI_EMPTY_WORD\\3/g"
+GFLAT=$(printf '%s' "$CMD" | bless_wrapper_var | tr '\n\t' '; ' | sed -E "$EMPTY_WORD_SED" | sed -E "$EMPTY_WORD_SED" | tr -d "'\"\\\\" | sed -E 's#(gh|glab)-athena[[:space:]]+git([[:space:]])#FORGE_ATHENA_GIT\2#g')
+# A CANDIDATE push: `git`, bare or path-qualified, then words that each start
+# with `-` (an option), each optionally followed by one word that does not
+# (that option's value), then `push`. This only finds candidates, so it
+# over-matches (`git --no-pager log --grep push`); which word is the
+# subcommand, and which are values, is decided by git's own grammar in
+# PUSH_READ_BASH below (the header's DND-1862 Later label says what it was).
+# `git commit -m "push"` does not match: `commit` is not an option.
+GIT_PUSH_RE='(^|[[:space:];&|(/])git([[:space:]]+--?[^[:space:];&|]+([[:space:]]+[^-[:space:];&|][^[:space:];&|]*)?)*[[:space:]]+push([[:space:]]|$|[;&|)])'
 
 PUSH_FIX='Fix: push through the wrapper, which authenticates as athena-harness[bot] over HTTPS for that one command: `GIT_TERMINAL_PROMPT=0 ~/dev/custom/ai/bin/gh-athena git -c credential.helper= -c url.https://github.com/.insteadOf=git@github.com: push …` (athena:github -> "Pushing as Athena"). If the wrapper refuses or fails, do not work around this; escalate to your admiral with the command + error and wait.'
 GITLAB_PUSH_FIX='Fix: push through the wrapper, which authenticates as athena-amby over HTTPS for that one command: `GIT_TERMINAL_PROMPT=0 ~/dev/custom/ai/bin/glab-athena git push …` (athena:gitlab -> "Pushing as Athena"). If the wrapper refuses or fails, do not work around this; escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can'"'"'t be done as Athena").'
@@ -317,18 +356,138 @@ split_first_push() {
   }'
 }
 
-# push_repo_dir: the repo dir the push runs in — `-C <dir>`, else the last
-# `cd <dir>` before the push, else the hook input cwd. Relative paths resolve
-# against the input cwd (where the command actually runs), not the hook's dir.
+# ---- The push's argv, read with git's grammar (DND-1862) --------------------
+# The words are read with the tables and the walk the wrapper itself uses:
+# fg_global_opt and fg_push_argv in ai/lib/forge-git-passthrough.sh ("git's
+# own argv grammar", DND-1843). The interface read from it: the file stays
+# definition-only at top level; fg_global_opt returns 0 (a value option),
+# 1 (no value), 3 (prints and exits) or 2 (unknown); fg_push_argv fills
+# FG_PA_OPTS (spelled --repo=<r>, --no-repo, --<name>=<value>), FG_PA_POS and
+# FG_PA_BAD. The self-test's DND-1862 cases exercise each, and a missing
+# function or table makes every candidate deny. Naming this hook in that
+# file's own list of readers is a separate change, because that file is an
+# owner-held surface. That file is bash and this hook is POSIX sh, so the
+# reading runs in one `bash` child per candidate push. The child sources the
+# file (it only defines functions and tables), turns FI_EMPTY_WORD back into
+# "", drops shell redirections (a word that starts with optional digits then
+# `<` or `>`, and the word after a bare operator such as `>` or `2>`), and
+# prints one line per finding:
+#   NOTPUSH        git runs no push here: the first non-option word is
+#                  another subcommand, or a global option prints and exits
+#   BAD <word>     an option git's grammar does not have, an ambiguous
+#                  abbreviation, or a value missing: the target is unknown
+#   CD <dir>       a -C value, in order (git joins them)
+#   G <option>     a global option that changes which repository or config
+#                  git reads (--git-dir, --work-tree, --bare, -c,
+#                  --config-env), spelled as one word, for the lookups below
+#   REPO <word>    the repository: the first word, and every --repo value.
+#                  git ignores --repo when a first word is given; checking it
+#                  anyway can only over-deny (the passthrough does the same)
+#   DEFAULT        no repository word is in force: git uses the default remote
+#   ALSO <word>    a later word or an option value; it is checked only when
+#                  it names a configured remote or a forge URL, so a misread
+#                  can only add a check (the passthrough does the same)
+#   OK             the reading finished
+# No OK line (bash missing, the file unreadable, a function or table gone)
+# is not "no push": the candidate is denied as unresolved, with a Fix naming
+# the file. That is the FAIL-OPEN exception the header names.
+# Lexical, like every rule here: the words are the dequoted text split on
+# whitespace, so a quoted value with a space in it splits in two.
+PT_LIB="$(dirname "$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")")/../lib/forge-git-passthrough.sh"
+PUSH_READ_BASH='
+. "$1" 2>/dev/null || exit 70
+declare -F fg_global_opt fg_push_argv >/dev/null 2>&1 || exit 70
+declare -p FG_PA_OPTS FG_PA_POS FG_PA_BAD >/dev/null 2>&1 || exit 70
+shift
+words=(); skip=0
+for a in "$@"; do
+  if [ "$skip" = 1 ]; then skip=0; continue; fi
+  if [[ $a =~ ^[0-9]*[\<\>] ]]; then
+    [[ $a =~ ^[0-9]*[\<\>]+$ ]] && skip=1
+    continue
+  fi
+  [ "$a" = FI_EMPTY_WORD ] && a=""
+  words+=("$a")
+done
+set -- "${words[@]}"
+found=0
+while [ $# -gt 0 ]; do
+  w=$1; shift
+  case "$w" in
+    push) found=1; break ;;
+    -*)
+      fg_global_opt "$w"; rc=$?
+      case "$rc" in
+        0)
+          [ $# -gt 0 ] || break
+          case "$w" in
+            -C) printf "CD %s\n" "$1" ;;
+            -c|--git-dir|--work-tree|--config-env) printf "G %s\nG %s\n" "$w" "$1" ;;
+          esac
+          shift ;;
+        1)
+          case "$w" in
+            --bare|--git-dir=*|--work-tree=*|--config-env=*) printf "G %s\n" "$w" ;;
+          esac ;;
+        3) break ;;
+        *) printf "BAD %s\n" "$w"; echo OK; exit 0 ;;
+      esac ;;
+    *) break ;;
+  esac
+done
+if [ "$found" = 0 ]; then echo NOTPUSH; echo OK; exit 0; fi
+fg_push_argv "$@"
+if [ -n "$FG_PA_BAD" ]; then printf "BAD %s\n" "$FG_PA_BAD"; echo OK; exit 0; fi
+has_repo=0
+for o in "${FG_PA_OPTS[@]}"; do
+  case "$o" in
+    --repo=*) has_repo=1; printf "REPO %s\n" "${o#--repo=}" ;;
+    --no-repo) has_repo=0 ;;
+    --*=*) printf "ALSO %s\n" "${o#*=}" ;;
+  esac
+done
+if [ "${#FG_PA_POS[@]}" -gt 0 ]; then
+  printf "REPO %s\n" "${FG_PA_POS[0]}"
+  for a in "${FG_PA_POS[@]:1}"; do printf "ALSO %s\n" "$a"; done
+elif [ "$has_repo" = 0 ]; then
+  echo DEFAULT
+fi
+echo OK
+'
+
+# expand_home <path> : a leading ~ or $HOME, as the shell would expand it.
+expand_home() {
+  case "$1" in
+    "~"|"~/"*) printf '%s' "$HOME${1#\~}" ;;
+    "\$HOME"*) printf '%s' "$HOME${1#\$HOME}" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+# push_repo_dir <-C values, one per line>: the repo dir the push runs in. It
+# starts in the last `cd <dir>` in BEFORE (the text before the push), else
+# the hook input cwd, and
+# applies each -C in order, as git does (`-C a -C b` is a/b). Relative paths
+# resolve against the input cwd (where the command actually runs), not the
+# hook's dir.
 push_repo_dir() {
   _base=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null)
-  _c=$(split_first_push match | sed -nE 's#.*[[:space:]]-C[[:space:]]+([^[:space:];&|]+).*#\1#p')
-  if [ -z "$_c" ]; then
-    _c=$(split_first_push before | grep -Eo '(^|[[:space:];&|(])cd[[:space:]]+[^[:space:];&|)]+' | tail -n1 | sed -E 's#.*cd[[:space:]]+##')
-  fi
-  [ -n "$_c" ] || _c=$_base
-  case "$_c" in "~"|"~/"*) _c="$HOME${_c#\~}" ;; "\$HOME"*) _c="$HOME${_c#\$HOME}" ;; esac
+  _c=$(printf '%s' "$BEFORE" | grep -Eo '(^|[[:space:];&|(])cd[[:space:]]+[^[:space:];&|)]+' | tail -n1 | sed -E 's#.*cd[[:space:]]+##')
+  [ "$_c" = FI_EMPTY_WORD ] && _c=""   # `cd ''` stays where it is
+  _c=$(expand_home "$_c")
   case "$_c" in /*|'') ;; *) [ -n "$_base" ] && _c="$_base/$_c" ;; esac
+  [ -n "$_c" ] || _c=$_base
+  _ifs=$IFS; IFS='
+'
+  for _d in $1; do
+    _d=$(expand_home "$_d")
+    case "$_d" in
+      '') ;;
+      /*) _c=$_d ;;
+      *) if [ -n "$_c" ]; then _c="$_c/$_d"; else _c=$_d; fi ;;
+    esac
+  done
+  IFS=$_ifs
   printf '%s' "$_c"
 }
 
@@ -342,57 +501,119 @@ add_warning() {
   if [ -n "$WARNINGS" ]; then WARNINGS="$WARNINGS
 $1"; else WARNINGS=$1; fi
 }
+UNRESOLVED_TAIL="GitHub: ${PUSH_FIX} GitLab: ${GITLAB_PUSH_FIX}"
 N=0
 while [ "$N" -lt 10 ] && printf '%s' "$GFLAT" | grep -Eq "$GIT_PUSH_RE"; do
   N=$((N + 1))
-  # The push's own arguments: from `push` to the next separator.
+  BEFORE=$(split_first_push before)
   AFTER=$(split_first_push after)
+  # The push's own arguments: from `push` to the next separator.
   ARGS=$(printf '%s' "$AFTER" | sed -E 's#^[[:space:]]*##; s#[;&|)].*##')
-  # First positional (skipping options; -o/--push-option/--receive-pack/--exec/--repo take a value).
-  TARGET=""; SKIP=0; PREV=""
-  set -f   # word-split ARGS without globbing against the cwd
-  for w in $ARGS; do
-    if [ "$SKIP" = 1 ]; then SKIP=0; case "$PREV" in --repo) TARGET=$w; break ;; esac; continue; fi
-    case "$w" in
-      -o|--push-option|--receive-pack|--exec|--repo) SKIP=1; PREV=$w ;;
-      --repo=*) TARGET=${w#--repo=}; break ;;
-      -*) ;;
-      *) TARGET=$w; break ;;
-    esac
-  done
-  set +f
-  DIR=$(push_repo_dir)
-  URLS=""
-  if [ -n "$DIR" ] && git -C "$DIR" rev-parse --git-dir >/dev/null 2>&1; then
-    if [ -z "$TARGET" ]; then
-      CUR=$(git -C "$DIR" symbolic-ref -q --short HEAD 2>/dev/null)
-      [ -n "$CUR" ] && TARGET=$(git -C "$DIR" config --get "branch.$CUR.pushRemote" 2>/dev/null)
-      [ -n "$TARGET" ] || TARGET=$(git -C "$DIR" config --get remote.pushDefault 2>/dev/null)
-      [ -n "$TARGET" ] || { [ -n "$CUR" ] && TARGET=$(git -C "$DIR" config --get "branch.$CUR.remote" 2>/dev/null); }
-      [ -n "$TARGET" ] || TARGET=origin
-    fi
-    if git -C "$DIR" remote 2>/dev/null | grep -qxF -- "$TARGET"; then
-      URLS=$(git -C "$DIR" remote get-url --push --all "$TARGET" 2>/dev/null)
-    elif looks_like_url_or_path "$TARGET"; then
-      URLS=$TARGET   # a URL literal or a path, classified by host below
-    fi               # else: neither a remote nor a URL -> unresolved (denied below)
-  elif [ -n "$TARGET" ] && [ -n "$(forge_of_url "$TARGET")" ]; then
-    URLS=$TARGET     # a literal forge URL needs no repo to classify
-  fi
-  if [ -z "$URLS" ]; then
-    add_warning "forge-identity: this is a plain \`git push\` and the guard could not resolve its remote (repo dir '${DIR:-unknown}', remote '${TARGET:-default}'), so it cannot tell whether it goes to github.com or gitlab.com. If it does, it authenticates as the machine owner (CJPoll), not Athena. GitHub: ${PUSH_FIX} GitLab: ${GITLAB_PUSH_FIX} If it genuinely goes elsewhere (a local path), re-run it with the repo as a literal \`git -C <absolute dir>\` and a configured remote or a literal URL, so the guard can resolve it."
-  fi
-  set -f
-  for u in $URLS; do
-    case "$(forge_of_url "$u")" in
-      github)
-        add_warning "forge-identity: this is a plain \`git push\` to a github.com remote ('${TARGET}' -> ${u}), which authenticates with the machine owner's SSH key or credential helper — GitHub records the push as CJPoll, not Athena. ${PUSH_FIX}" ;;
-      gitlab)
-        add_warning "forge-identity: this is a plain \`git push\` to a gitlab.com remote ('${TARGET}' -> ${u}), which authenticates with the machine owner's SSH key or credential helper — GitLab records the push as the owner, not athena-amby. ${GITLAB_PUSH_FIX}" ;;
-    esac
-  done
+  # The words after `git`, `push` included: the match minus its leading
+  # boundary, `git` and a trailing separator.
+  BODY=$(split_first_push match | sed -E 's#^[[:space:];&|(/]*git##; s#[;&|)]$##')
+  set -f   # word-split without globbing against the cwd
+  # shellcheck disable=SC2086
+  READ=$(bash -c "$PUSH_READ_BASH" forge-identity-push "$PT_LIB" $BODY $ARGS 2>/dev/null)
   set +f
   GFLAT=$AFTER
+  if [ "$(printf '%s\n' "$READ" | tail -n1)" != OK ]; then
+    add_warning "forge-identity: this looks like a plain \`git push\`, and the guard could not read its arguments with git's push grammar ($PT_LIB, sourced by bash), so it cannot tell which remote it goes to. If that is github.com or gitlab.com, it authenticates as the machine owner (CJPoll), not Athena. Fix: restore ai/lib/forge-git-passthrough.sh beside ai/hooks and make sure \`bash\` is on PATH; meanwhile push through the wrapper. ${UNRESOLVED_TAIL}"
+    continue
+  fi
+  printf '%s\n' "$READ" | grep -qx NOTPUSH && continue
+  BADW=$(printf '%s\n' "$READ" | sed -n 's/^BAD //p' | head -n1)
+  if [ -n "$BADW" ]; then
+    add_warning "forge-identity: this is a plain \`git push\` with \`$BADW\`, which git's grammar does not read as an option it has (unknown, ambiguous, or missing its value), so the guard cannot tell which word is the repository. If it goes to github.com or gitlab.com, it authenticates as the machine owner (CJPoll), not Athena. Fix: spell the option in full as \`git push -h\` (a push option) or \`git -h\` (a global option) lists it, or drop it. ${UNRESOLVED_TAIL}"
+    continue
+  fi
+  DIR=$(push_repo_dir "$(printf '%s\n' "$READ" | sed -n 's/^CD //p')")
+  # One word per line, so it splits the same under the default IFS and the
+  # newline-only IFS of the loops below (a word holds no whitespace).
+  GOPTS=$(printf '%s\n' "$READ" | sed -n 's/^G //p')
+  INREPO=0; REMOTES=""
+  set -f
+  # shellcheck disable=SC2086
+  if [ -n "$DIR" ] && git -C "$DIR" $GOPTS rev-parse --git-dir >/dev/null 2>&1; then
+    INREPO=1
+    # shellcheck disable=SC2086
+    REMOTES=$(git -C "$DIR" $GOPTS remote 2>/dev/null)
+  fi
+  set +f
+  is_remote() { [ -n "$1" ] && printf '%s\n' "$REMOTES" | grep -qxF -- "$1"; }
+  # remote_urls <remote> : its push URLs, as git resolves them in that repo.
+  remote_urls() {
+    # shellcheck disable=SC2086
+    git -C "$DIR" $GOPTS remote get-url --push --all "$1" 2>/dev/null
+  }
+  PAIRS=""; UNRES=""
+  add_pair() { PAIRS="$PAIRS$1 $2
+"; }
+  # strict <word> : a repository git pushes to; a word that resolves to
+  # nothing is unresolved (denied below), never "not a forge".
+  strict() {
+    _t=$1; _found=0
+    if [ "$INREPO" = 1 ] && is_remote "$_t"; then
+      for _u in $(remote_urls "$_t"); do add_pair "$_t" "$_u"; _found=1; done
+    elif [ "$INREPO" = 1 ] && looks_like_url_or_path "$_t"; then
+      add_pair "$_t" "$_t"; _found=1   # a URL literal or a path, classified by host below
+    elif [ -n "$(forge_of_url "$_t")" ]; then
+      add_pair "$_t" "$_t"; _found=1   # a literal forge URL needs no repo to classify
+    fi
+    [ "$_found" = 1 ] || UNRES=${UNRES:-${_t:-default}}
+  }
+  # also <word> : checked only when it names a remote or a forge URL.
+  also() {
+    if [ "$INREPO" = 1 ] && is_remote "$1"; then
+      for _u in $(remote_urls "$1"); do add_pair "$1" "$_u"; done
+    elif [ -n "$(forge_of_url "$1")" ]; then
+      add_pair "$1" "$1"
+    fi
+  }
+  _ifs=$IFS; IFS='
+'
+  set -f
+  for _line in $READ; do
+    case "$_line" in
+      "REPO "*) strict "${_line#REPO }" ;;
+      "ALSO "*) also "${_line#ALSO }" ;;
+      DEFAULT)
+        _def=""
+        if [ "$INREPO" = 1 ]; then
+          # shellcheck disable=SC2086
+          CUR=$(git -C "$DIR" $GOPTS symbolic-ref -q --short HEAD 2>/dev/null)
+          # shellcheck disable=SC2086
+          [ -n "$CUR" ] && _def=$(git -C "$DIR" $GOPTS config --get "branch.$CUR.pushRemote" 2>/dev/null)
+          # shellcheck disable=SC2086
+          [ -n "$_def" ] || _def=$(git -C "$DIR" $GOPTS config --get remote.pushDefault 2>/dev/null)
+          # shellcheck disable=SC2086
+          [ -n "$_def" ] || { [ -n "$CUR" ] && _def=$(git -C "$DIR" $GOPTS config --get "branch.$CUR.remote" 2>/dev/null); }
+          [ -n "$_def" ] || _def=origin
+          strict "$_def"
+        else
+          UNRES=${UNRES:-default}
+        fi ;;
+    esac
+  done
+  IFS=$_ifs
+  set +f
+  if [ -n "$UNRES" ]; then
+    add_warning "forge-identity: this is a plain \`git push\` and the guard could not resolve its remote (repo dir '${DIR:-unknown}', remote '${UNRES}'), so it cannot tell whether it goes to github.com or gitlab.com. If it does, it authenticates as the machine owner (CJPoll), not Athena. ${UNRESOLVED_TAIL} If it genuinely goes elsewhere (a local path), re-run it with the repo as a literal \`git -C <absolute dir>\` and a configured remote or a literal URL, so the guard can resolve it."
+  fi
+  _ifs=$IFS; IFS='
+'
+  set -f
+  for _p in $PAIRS; do
+    _t=${_p%% *}; u=${_p#* }
+    case "$(forge_of_url "$u")" in
+      github)
+        add_warning "forge-identity: this is a plain \`git push\` to a github.com remote ('${_t}' -> ${u}), which authenticates with the machine owner's SSH key or credential helper — GitHub records the push as CJPoll, not Athena. ${PUSH_FIX}" ;;
+      gitlab)
+        add_warning "forge-identity: this is a plain \`git push\` to a gitlab.com remote ('${_t}' -> ${u}), which authenticates with the machine owner's SSH key or credential helper — GitLab records the push as the owner, not athena-amby. ${GITLAB_PUSH_FIX}" ;;
+    esac
+  done
+  IFS=$_ifs
+  set +f
 done
 
 [ -z "$WARNINGS" ] || deny "$WARNINGS"
