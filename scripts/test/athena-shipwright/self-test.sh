@@ -2526,7 +2526,7 @@ if [ "$rc" = 0 ] && [ -e "$a/claude-was-invoked" ]; then
 else
   bad "control copy" "rc=$rc err=$(cat "$a/runner.err")"
 fi
-for lib in dbus-env.sh shipwright-stale-dirt.sh; do
+for lib in dbus-env.sh shipwright-stale-dirt.sh lane-own-commits.sh; do
   r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 0
   RUNNER="$(sx_runner "$a" "$lib")"
   rc="$(run_runner "$r" SHIPWRIGHT_FAIL_ESCALATE=2)"
@@ -2566,7 +2566,7 @@ if [ "$(grep -c 'shipwright-wedged' "$TMP/lib-sw-send-calls" 2>/dev/null || echo
 else
   bad "wedge alert with the lib missing" "sends=$(cat "$TMP/lib-sw-send-calls" 2>&1) err=$(cat "$a/runner.err")"
 fi
-for lib in dbus-env.sh shipwright-stale-dirt.sh; do
+for lib in dbus-env.sh shipwright-stale-dirt.sh lane-own-commits.sh; do
   r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 0
   RUNNER="$(sx_runner "$a" "$lib")"
   printf 'return 1\n' >"$a/sx/scripts/lib/$lib"
@@ -2651,7 +2651,7 @@ dry_case() { # <label> <lib> <expected reason> <mutator: missing|unreadable|unlo
   fi
   chmod 644 -- "$f" 2>/dev/null || true
 }
-for lib in dbus-env.sh shipwright-stale-dirt.sh; do
+for lib in dbus-env.sh shipwright-stale-dirt.sh lane-own-commits.sh; do
   dry_case "$lib missing" "$lib" missing missing
   dry_case "$lib unreadable" "$lib" unreadable unreadable
   dry_case "$lib fails to load" "$lib" 'could not be loaded' unloadable
@@ -2660,6 +2660,7 @@ done
 dry_case "dbus-env.sh loads but defines nothing" dbus-env.sh 'does not define athena_dbus_env_setup' empty
 dry_case "shipwright-stale-dirt.sh loads but defines nothing" shipwright-stale-dirt.sh 'does not define sd_measure sd_state_get sd_next_streak sd_display_paths' empty
 dry_case "shipwright-stale-dirt.sh lacks sd_display_paths" shipwright-stale-dirt.sh 'does not define sd_display_paths' partial
+dry_case "lane-own-commits.sh loads but defines nothing" lane-own-commits.sh 'does not define lane_own_commits' empty
 
 # DND-1729: --dry-run is the same dry run as DRY_RUN=1, because the installer's
 # shared cron_runner_dry_run calls `<runner> --dry-run`. The runner used to read
