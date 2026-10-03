@@ -872,7 +872,7 @@ object with exactly these keys, in this order: `id` (a Slack file id, `F`
 then capital letters and digits: the handle a reader fetches the file by, and
 the argument of the `slack_read_file` tool, `ai/contracts/athena-events.md` →
 *`slack_read_file` reads one Slack file*), `name`, `title`, `filetype`,
-`mimetype`, `size` (an integer, in bytes) and `mode` (`hosted`, `canvas`,
+`mimetype`, `size` (a non-negative integer, in bytes) and `mode` (`hosted`, `canvas`,
 `snippet`, `tombstone`, `hidden_by_limit`, …). Every member but `id` may be
 null: Slack sends a stub with only an `id` under `file_access:
 "check_file_info"`, and a member of the wrong type is written as null.
