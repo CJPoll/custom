@@ -608,3 +608,11 @@ DND-1835 (feature): the inbox backstop's scan lines and `read-inbox` carry each 
 | S109 | `read-inbox`'s text form drops the marker | 1 | the same |
 
 After the restore the suite returned to `VERDICT: PASS (354 cases)`.
+
+Review round (code-reviewer: `slack_files_meta` copied an object-valued member as it came, so a URL nested in one reached the inbox output, and a string `size` printed `big bytes`). Members are now strings or null and `size` a number or null; case 43c added. Baseline `VERDICT: PASS (355 cases)`.
+
+| # | Mutation | Cases reddened | Failure string(s) |
+|---|---|---|---|
+| S110 | `slack_scalar_str` passes any value through (`def slack_scalar_str: .;`) | 1 | `FAIL read-inbox: malformed files members are null, no nested URL passes, a non-list files is none` |
+
+After the restore the suite returned to `VERDICT: PASS (355 cases)`.

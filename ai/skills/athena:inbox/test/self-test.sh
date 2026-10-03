@@ -2733,6 +2733,23 @@ assert_not_contains "DND-1835 f9 the text form carries no file URL" "files.examp
 assert_eq "DND-1835 f10 a plain line renders exactly as before" "1" \
   "$(printf '%s\n' "${OUT}" | grep -A2 -F '[im] D1 1791.2 UFAKE00001 thread_ts=(none) route=channel_route' | sed -n 2,3p | tr '\n' '|' | grep -c -x -F 'plain||')"
 
+# DND-1835 review: a member that is an object or array is null, so a URL
+# nested in one never passes; a newline in a file name cannot start a new
+# line in the marker.
+setup_log_case
+printf '%s\n' \
+  '{"v":1,"ts":"1792.1","channel":"D1","user":"UFAKE00001","kind":"im","event_id":"EvH1","route":"channel_route","text":"hostile","files":[{"id":{"u":"https://files.example.test/?t=xoxe-secret-9"},"name":"two\nlines.jpg","mimetype":["https://files.example.test/m"],"size":5},{"id":"F0FAKE0005","title":{"x":"https://files.example.test/t"}}]}' \
+  > "${LINBOX}"
+JOUT="$(cd "${LPROJ}" && "${BIN}/read-inbox" slack --json --peek 2>/dev/null)"
+OUT="$(cd "${LPROJ}" && "${BIN}/read-inbox" slack --peek 2>/dev/null)"
+assert_eq "DND-1835 f11 object- and array-valued members are null" \
+  '[{"id":null,"name":"two\nlines.jpg","title":null,"filetype":null,"mimetype":null,"size":5,"mode":null},{"id":"F0FAKE0005","name":null,"title":null,"filetype":null,"mimetype":null,"size":null,"mode":null}]' \
+  "$(printf '%s' "${JOUT}" | jq -c '.messages[0].files' 2>/dev/null)"
+assert_not_contains "DND-1835 f12 no nested URL reaches --json or the text form" \
+  "files.example.test" "${JOUT}${OUT}"
+assert_contains "DND-1835 f13 a newline in a name stays on the marker line" \
+  "[2 files: two ⏎ lines.jpg (file, 5 bytes, no id), F0FAKE0005 (file, F0FAKE0005)]" "${OUT}"
+
 # A re-appended duplicate event_id is reported ONCE. At-least-once delivery
 # makes a re-append normal, not an anomaly.
 setup_log_case

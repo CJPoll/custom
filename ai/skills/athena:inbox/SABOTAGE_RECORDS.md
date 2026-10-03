@@ -1697,3 +1697,10 @@ A bug fix, so the evidence is the unfixed code going red, plus one mutation.
 |---|---|---|---|
 | S-1835a | the scan merges the allowlist onto the whole file object (`. + {id: ...}`) | 3 | `FAIL DND-1835 f1 ...` / `FAIL DND-1835 f3 --json: non-object entries drop; a non-number size is null` / `FAIL DND-1835 f5 --json carries no file URL` |
 | S-1835b | the Slack render drops the marker line | 2 | `FAIL DND-1835 f7 the photo DM's marker lists name, mimetype, size and id, inside the fence` / `FAIL DND-1835 f8 an id-only stub is marked with its id and no size` |
+
+- **Review round** (code-reviewer): the projection ran `tostring` on any
+  non-null member, so an object-valued `name` carrying a URL rendered as its
+  JSON text (probe: `[1 file: {"url_private":"https://x/?t=xoxe"} ...]`). A
+  member that is not a string or a number is now null, and a newline in a
+  marker label prints as ` ⏎ `. Cases `f11`-`f13` added; `VERDICT: PASS (1074
+  cases)`.

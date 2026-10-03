@@ -28,7 +28,7 @@ LOGCHAN_RING_CAP=500
 # Label: name, else title, else id. Kind: mode when not "hosted", else
 # mimetype, else filetype. A size Slack did not send is left out.
 LOGCHAN_JQ_FILES_MARK='
-def logchan_first_set(f): [f | select(type == "string" and . != "")] | first;
+def logchan_first_set(f): [f | select(type == "string" and . != "") | gsub("\n"; " ⏎ ")] | first;
 def logchan_files_mark:
   (.files // []) as $f
   | if ($f | length) == 0 then ""
@@ -383,16 +383,21 @@ logchan_scan() {
                                 # dropped here. Absent, null, not an array, or
                                 # no object entry: no `files` key, so a plain
                                 # line renders exactly as before. Never
-                                # unreadable.
-                                + ([ ($o.files | if type == "array" then .[] else empty end)
+                                # unreadable. A member that is not a string
+                                # or a number is null: tostring on an object
+                                # would carry a URL nested inside it.
+                                + ((def scalar_str: if type == "string" then .
+                                                    elif type == "number" then tostring
+                                                    else null end;
+                                    [ ($o.files | if type == "array" then .[] else empty end)
                                      | select(type == "object")
-                                     | {id: (if .id == null then null else (.id | tostring) end),
-                                        name: (if .name == null then null else (.name | tostring) end),
-                                        title: (if .title == null then null else (.title | tostring) end),
-                                        filetype: (if .filetype == null then null else (.filetype | tostring) end),
-                                        mimetype: (if .mimetype == null then null else (.mimetype | tostring) end),
+                                     | {id: (.id | scalar_str),
+                                        name: (.name | scalar_str),
+                                        title: (.title | scalar_str),
+                                        filetype: (.filetype | scalar_str),
+                                        mimetype: (.mimetype | scalar_str),
                                         size: (if (.size | type) == "number" then .size else null end),
-                                        mode: (if .mode == null then null else (.mode | tostring) end)} ]
+                                        mode: (.mode | scalar_str)} ])
                                    | if length > 0 then {files: .} else {} end)
                               else {} end)) ]
                 | (if $eid != null then .ev[$eid] = true else . end)

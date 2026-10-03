@@ -880,6 +880,27 @@ if [[ "$(printf '%s' "${D1835_J}" | jq -c '.[] | select(.ts == "2000.7") | .file
 else bad "read-inbox: a photo DM lists its file's id, name, mimetype and size; no URL; a plain DM has no files" \
   "json='${D1835_J}' out='${OUT}' err='${ERR}'"; fi
 
+# 43c. DND-1835 review: malformed files from the API. A non-array files, a
+#      non-object entry, an object-valued id (carrying a URL) and a string
+#      size: the id and size are null, no URL passes, and the marker says
+#      "no id" with no size.
+setup_case
+seed_caches; seed_state
+seed_inbox_fixtures "[{\"ts\":\"2000.9\",\"user\":\"${CODY}\",\"text\":\"bad\",\"files\":[7,{\"id\":{\"u\":\"https://files.example.test/?t=xoxe-secret-9\"},\"name\":\"x.pdf\",\"mimetype\":\"application/pdf\",\"size\":\"big\"}]},{\"ts\":\"2000.8\",\"user\":\"${CODY}\",\"text\":\"odd\",\"files\":\"nope\"}]" '[]'
+run_bin read-inbox --json --peek
+D1835_J="${OUT}"
+setup_case
+seed_caches; seed_state
+seed_inbox_fixtures "[{\"ts\":\"2000.9\",\"user\":\"${CODY}\",\"text\":\"bad\",\"files\":[7,{\"id\":{\"u\":\"https://files.example.test/?t=xoxe-secret-9\"},\"name\":\"x.pdf\",\"mimetype\":\"application/pdf\",\"size\":\"big\"}]},{\"ts\":\"2000.8\",\"user\":\"${CODY}\",\"text\":\"odd\",\"files\":\"nope\"}]" '[]'
+run_bin read-inbox --peek
+if [[ "$(printf '%s' "${D1835_J}" | jq -c '.[] | select(.ts == "2000.9") | .files' 2>/dev/null || true)" == '[{"id":null,"name":"x.pdf","title":null,"filetype":null,"mimetype":"application/pdf","size":null,"mode":null}]' ]] \
+   && [[ "$(printf '%s' "${D1835_J}" | jq -r '.[] | select(.ts == "2000.8") | has("files")' 2>/dev/null || true)" == "false" ]] \
+   && [[ "${OUT}" == *"bad [1 file: x.pdf (application/pdf, no id)]"* ]] \
+   && [[ "${D1835_J}${OUT}" != *"files.example.test"* ]]; then
+  ok "read-inbox: malformed files members are null, no nested URL passes, a non-list files is none"
+else bad "read-inbox: malformed files members are null, no nested URL passes, a non-list files is none" \
+  "json='${D1835_J}' out='${OUT}' err='${ERR}'"; fi
+
 # 44. --peek shows without consuming.
 setup_case
 seed_caches; seed_state

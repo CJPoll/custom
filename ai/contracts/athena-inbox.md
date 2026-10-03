@@ -881,21 +881,21 @@ sends a stub with only an `id` under `file_access: "check_file_info"`.
   that is absent, null, not an array, or holds no object as no files. A
   malformed `files` never makes a line unreadable. So a reader and a producer
   may ship in either order.
-- **The text form marks the files**, so a message with an attachment never
-  reads as one without:
+- **The text form marks the files**, so a line that carries `files` never
+  renders as one without:
   `[2 files: console.jpg (image/jpeg, 2048 bytes, F…), notes (canvas, 512 bytes, F…)]`.
   The marker is for people; a program reads `--json`.
 
-**Who writes it.** The athena:slack Web API backstop (its `read-inbox`) writes
-`files` from `conversations.history`. The Slack receiver
-(`Athena.SlackEvents.Payload.parse/1` keeps only a `has_files` flag, and
-`Athena.SlackEvents.InboxLine.encode/5` writes no `files` key, gen_saas) omits
-it until the server half of DND-1835 lands. Until then a receiver line for a
-message with a file reads exactly like a line for one without, and the
-backstop does not re-show a message the file channel already delivered
-(the shared `seen_keys`, *State file*). A reader that needs the files of such
-a message reads the thread with athena:slack `read-thread`, which lists them
-(DND-1822).
+**The Slack receiver writes no `files` key** (gen_saas:
+`Athena.SlackEvents.Payload.parse/1` keeps only a `has_files` flag, and
+`Athena.SlackEvents.InboxLine.encode/5` writes the key set above without
+`files`; the server half is DND-1835). So no producer writes `files` onto a
+line, and a receiver line for a message with a file reads like one for a
+message without. The athena:slack Web API backstop lists files in its own
+`read-inbox` output, which is outside this contract (*State file*), but it
+does not re-show a message the receiver's `log` line already delivered (the
+shared `seen_keys`). A reader that needs the files of such a message reads the
+thread with athena:slack `read-thread`, which lists them (DND-1822).
 
 `v` **and `kind`** are mandatory on every line, regardless of producer. The
 remaining fields are the Slack producer's schema; another producer defining a
@@ -3027,7 +3027,8 @@ appends complete newline-terminated lines with `O_APPEND` (`log`) or renames out
 of `tmp/` in the same directory (`maildir`); bumps the doorbell **after** the
 data lands; never rewrites, truncates, rotates, or deletes; never creates a
 state file, a `*.consumer.lock`, a rotated generation, or anything under
-`projects/`; puts no credential in a message; and stops permanently on a
+`projects/`; puts no credential in a message, and no file body or file URL in
+a Slack line's `files` (*Line format*); and stops permanently on a
 partial write rather than resuming.
 
 **Later (2026-09-19):** this clause read "never creates a state file, **a lock
@@ -3055,6 +3056,8 @@ failing; dedupes on `channel:ts` across sources through one shared state file,
 and keys a `slack.interaction` click on its own tuple, never on `channel:ts`;
 collapses repeated frames of one platform delivery on `delivery_id`, and never
 collapses a platform line that has none (*Line format*);
+treats a malformed Slack `files` as no files, never as an unreadable line
+(*Line format*);
 rotates only at EOF, only when the live file is non-empty, and only after
 re-checking `size == offset` under the lock immediately before the rename;
 sweeps a rotated generation more than 14 days past its `rotated_at`;

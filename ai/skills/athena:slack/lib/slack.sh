@@ -459,6 +459,10 @@ slack_read_text() {
 #
 #   slack_files_meta  -- the message's files[] as [{id, name, title, filetype,
 #                        mimetype, size, mode}], or null when it has none.
+#                        Each member is a string (a number is stringified)
+#                        or null, and size a number or null, so a URL nested
+#                        in an object-valued member never passes (DND-1835;
+#                        athena-inbox.md -> Line format, `files`).
 #   slack_room_meta   -- a huddle message's room as {id, name, date_start,
 #                        date_end, has_ended, participants}, or null.
 #   slack_attach_mark -- the text form's marker, "" for a plain message:
@@ -471,11 +475,14 @@ slack_read_text() {
 # name, else its title, else its id. The size is left out when Slack sent
 # none (a file_access=check_file_info stub carries only an id).
 SLACK_JQ_ATTACH_DEFS='
+def slack_scalar_str: if type == "string" then . elif type == "number" then tostring else null end;
 def slack_files_meta:
   [ (.files | if type == "array" then .[] else empty end) | select(type == "object")
-    | {id: (.id // null), name: (.name // null), title: (.title // null),
-       filetype: (.filetype // null), mimetype: (.mimetype // null),
-       size: (.size // null), mode: (.mode // null)} ] as $f
+    | {id: (.id | slack_scalar_str), name: (.name | slack_scalar_str),
+       title: (.title | slack_scalar_str), filetype: (.filetype | slack_scalar_str),
+       mimetype: (.mimetype | slack_scalar_str),
+       size: (if (.size | type) == "number" then .size else null end),
+       mode: (.mode | slack_scalar_str)} ] as $f
   | if ($f | length) > 0 then $f else null end;
 def slack_first_set(f): [f | select(type == "string" and . != "")] | first;
 def slack_room_meta:
