@@ -34,7 +34,8 @@ REPO_DIR="$(cd "${AI_DIR}/.." && pwd)"
 GITIGNORE="${VENDORED_SKILLS_GITIGNORE_UNDER_TEST:-${REPO_DIR}/.gitignore}"
 
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
-  sed -n '2,28p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  # The header comment, up to the first non-comment line.
+  awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "${BASH_SOURCE[0]}"
   exit 0
 fi
 
@@ -45,7 +46,9 @@ if [ ! -f "${GITIGNORE}" ]; then
 fi
 
 # The skill names in ~/.agents/.skill-lock.json (`.skills` keys) as the
-# installer left it on 2026-10-03, v0.8.116.
+# installer left it on 2026-10-03, v0.8.116. Keep this list and the
+# .gitignore block in step: a name dropped from .gitignore fails here, but a
+# name added only to .gitignore is not tested.
 VENDORED=(
   faceless-explainer hyperframes hyperframes-animation hyperframes-audio
   hyperframes-cli hyperframes-core hyperframes-creative hyperframes-keyframes
@@ -57,11 +60,18 @@ PASS=0; FAIL=0
 ok()  { printf '  ok    %s\n' "$1"; PASS=$((PASS+1)); }
 bad() { printf '  FAIL  %s\n        %s\n' "$1" "$2"; FAIL=$((FAIL+1)); }
 
-# A hermetic git config: a user-global excludes file must not be what ignores
-# the dirs, or the test would pass on a machine whose repo still does not.
+# A hermetic git: only the repo .gitignore under test may ignore the dirs, or
+# the test passes on a machine whose repo still does not.
+#   - GIT_CONFIG_GLOBAL replaces the config FILE only; git still reads its
+#     default excludes file ($XDG_CONFIG_HOME/git/ignore) unless
+#     core.excludesFile names another, so it is pinned to /dev/null.
+#   - Inherited GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE/GIT_COMMON_DIR (a git
+#     hook's env) would aim `git -C fixture` at the caller's repo, and
+#     GIT_CONFIG_COUNT/GIT_CONFIG_PARAMETERS can inject an excludes file.
+unset GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR
 export GIT_CONFIG_NOSYSTEM=1
 export GIT_CONFIG_GLOBAL="${TMP}/gitconfig"
-printf '[user]\n\tname = fixture\n\temail = fixture@example.invalid\n[init]\n\tdefaultBranch = main\n' > "${GIT_CONFIG_GLOBAL}"
+printf '[user]\n\tname = fixture\n\temail = fixture@example.invalid\n[init]\n\tdefaultBranch = main\n[core]\n\texcludesFile = /dev/null\n' > "${GIT_CONFIG_GLOBAL}"
 
 FX="${TMP}/repo"
 mkdir -p "${FX}/ai/bin" "${FX}/ai/lib"
@@ -70,7 +80,18 @@ cp "${GITIGNORE}" "${FX}/.gitignore"
 cp "${AI_DIR}/lib/first_party.rb" "${AI_DIR}/lib/harness_tools.rb" "${FX}/ai/lib/"
 printf '#!/bin/sh\ncase "${1:-}" in -h|--help) echo usage; exit 0 ;; esac\n' > "${FX}/ai/bin/first-party-tool"
 chmod +x "${FX}/ai/bin/first-party-tool"
-git -C "${FX}" add -A && git -C "${FX}" commit -qm fixture
+if ! { git -C "${FX}" add -A && git -C "${FX}" commit -qm fixture; }; then
+  echo "vendored-skills-ignore self-test: FAIL -- could not commit the fixture repo in ${FX}" >&2
+  echo "Fix: make git able to commit in a temp dir (user.name/email come from the fixture gitconfig)." >&2
+  exit 1
+fi
+
+# ignored <rel>: 0 ignored, 1 not ignored, 2 git could not answer (exit 128).
+# A git error must never read as "no rule matches".
+ignored() {
+  git -C "${FX}" check-ignore -q "$1" 2>/dev/null
+  case $? in 0) return 0 ;; 1) return 1 ;; *) return 2 ;; esac
+}
 
 # Write the dirs the way the installer does: SKILL.md, an executable script
 # with no --help branch (heygen-tts.mjs's shape), sourced lib code, and
@@ -96,11 +117,15 @@ fi
 
 # --- case 2: each name is ignored (named per skill, so a miss says which) ---
 for name in "${VENDORED[@]}"; do
-  if git -C "${FX}" check-ignore -q "ai/skills/${name}/SKILL.md"; then
+  ignored "ai/skills/${name}/SKILL.md"; rc=$?
+  if [ "${rc}" -eq 0 ]; then
     ok "ai/skills/${name}/ is git-ignored"
-  else
+  elif [ "${rc}" -eq 1 ]; then
     bad "ai/skills/${name}/ is git-ignored" \
         "no .gitignore rule matches ai/skills/${name}/SKILL.md; add '/ai/skills/${name}/' to the third-party skill block"
+  else
+    bad "ai/skills/${name}/ is git-ignored" \
+        "git check-ignore could not answer for ai/skills/${name}/SKILL.md (exit 128)"
   fi
 done
 
@@ -128,12 +153,18 @@ else
 fi
 
 # --- case 5: a NEW first-party skill is NOT hidden --------------------------
-# Both a fresh name and one sharing the installer's prefix: a pattern rule in
-# place of the explicit list would swallow either, silently.
+# Both a fresh name and one sharing the installer's prefix: a broad pattern
+# (`ai/skills/*`, `ai/skills/hyperframes*`) in place of the explicit list would
+# swallow either, silently. A narrower pattern written to dodge these two names
+# would pass; the block's own comment forbids patterns.
 for name in "athena:brand-new-skill" "hyperframes-future"; do
   mkdir -p "${FX}/ai/skills/${name}"
   printf -- '---\nname: %s\n---\n' "${name}" > "${FX}/ai/skills/${name}/SKILL.md"
-  if git -C "${FX}" check-ignore -q "ai/skills/${name}/SKILL.md"; then
+  ignored "ai/skills/${name}/SKILL.md"; rc=$?
+  if [ "${rc}" -eq 2 ]; then
+    bad "a new first-party skill ai/skills/${name}/ stays visible" \
+        "git check-ignore could not answer for ai/skills/${name}/SKILL.md (exit 128)"
+  elif [ "${rc}" -eq 0 ]; then
     bad "a new first-party skill ai/skills/${name}/ stays visible" \
         "it is git-ignored, so 'git add -A' would skip it with no error; list third-party skills one per line, never by pattern"
   elif grep -qF "ai/skills/${name}/SKILL.md" <<<"$(git -C "${FX}" status --porcelain -uall)"; then
