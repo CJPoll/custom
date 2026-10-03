@@ -1529,18 +1529,57 @@ else
 fi
 
 # A signature must never be able to DOWNGRADE a real failure: a session that
-# left its receipt reached the model, so a failing one that happens to mention a
-# rate limit still fails and still feeds the wedge. (Later, DND-833: this used
-# to say "only status==0 can be blocked". A receipt-less non-zero tick with a
-# signature is now BLOCKED; see the DND-833 cases below.)
+# left its receipt and made a commit did work, so a failing one that happens to
+# mention a rate limit still fails and still feeds the wedge. (Later, DND-833:
+# this used to say "only status==0 can be blocked". A receipt-less non-zero tick
+# with a signature is now BLOCKED; see the DND-833 cases below. Later, DND-1560:
+# a receipt alone no longer keeps the failure; a receipt with NO own commit and a
+# signature is BLOCKED, see the DND-1560 cases below.)
 r="$(new_repo)"; a="$(aux "$r")"
-stub_claude_probe "$a/stub-claude" 7 'printf "hit the rate limit\n"'
+stub_claude_probe "$a/stub-claude" 7 'git commit --allow-empty -qm "partial work"; printf "hit the rate limit\n"'
 rc="$(run_runner "$r")"
 if [ "$rc" -eq 7 ] && [ "$(cat "$(sd "$r")/consecutive-failures" 2>/dev/null)" = "1" ] \
    && ! ls "$(sd "$r")/runs/"*.blocked >/dev/null 2>&1; then
-  ok "a FAILING session mentioning a block signature stays a failure (a signature cannot downgrade it)"
+  ok "a FAILING session that made a commit and mentions a block signature stays a failure (a signature cannot downgrade it)"
 else
   bad "signature cannot downgrade a failure" "rc=$rc counter=$(cat "$(sd "$r")/consecutive-failures" 2>/dev/null)"
+fi
+
+# --- a usage limit that lands AFTER the receipt (DND-1560) ---------------------
+#
+# The session wrote its receipt (it reached the model), did no work (no commit of
+# its own) and the provider stopped it with a non-zero exit. That is the same
+# self-clearing outage as a receipt-less one, so it is BLOCKED (69) and never
+# counted. Before the fix it was outcome failed, exit 1, and enough in a row
+# wedged the lane, which needs a manual re-arm.
+r="$(new_repo)"; a="$(aux "$r")"
+stub_claude_probe "$a/stub-claude" 1 'printf "You have hit your weekly limit\n"'
+rc="$(run_runner "$r")"
+m="$(cat "$(sd "$r")/runs/"*.blocked 2>/dev/null || true)"
+if [ "$rc" -eq 69 ] && grep -q 'session_exit=1' <<<"$m" && grep -q 'signature: weekly limit' <<<"$m" \
+   && [ ! -e "$(sd "$r")/consecutive-failures" ] && [ "$(cat "$(sd "$r")/consecutive-blocked" 2>/dev/null)" = "1" ] \
+   && ! ls "$(sd "$r")/runs/"*.failed >/dev/null 2>&1; then
+  ok "a limit after the receipt with no commit is BLOCKED (69), feeds the blocked streak, never the wedge counter"
+else
+  bad "limit after receipt is blocked" "rc=$rc marker=$m failures='$(cat "$(sd "$r")/consecutive-failures" 2>/dev/null)' err=$(cat "$a/runner.err")"
+fi
+r="$(new_repo)"; a="$(aux "$r")"
+stub_claude_probe "$a/stub-claude" 1 'printf "You have hit your weekly limit\n"'
+codes=""
+for _ in 1 2 3 4; do codes="${codes}$(run_runner "$r" SHIPWRIGHT_FAIL_ESCALATE=3) "; done
+if [ "$codes" = "69 69 69 69 " ] && [ ! -e "$(sd "$r")/consecutive-failures" ]; then
+  ok "four limit-after-receipt ticks against a threshold of 3: never wedged"
+else
+  bad "limit after receipt never wedges" "codes='${codes% }' counter='$(cat "$(sd "$r")/consecutive-failures" 2>/dev/null)'"
+fi
+r="$(new_repo)"; a="$(aux "$r")"
+stub_claude_probe "$a/stub-claude" 7 'printf "the pass fell over\n"'
+rc="$(run_runner "$r")"
+if [ "$rc" -eq 7 ] && [ "$(cat "$(sd "$r")/consecutive-failures" 2>/dev/null)" = "1" ] \
+   && ! ls "$(sd "$r")/runs/"*.blocked >/dev/null 2>&1; then
+  ok "a non-zero exit after the receipt with no limit wording stays a counted failure"
+else
+  bad "fail after receipt, no signature" "rc=$rc counter=$(cat "$(sd "$r")/consecutive-failures" 2>/dev/null)"
 fi
 
 # --- a usage limit that exits NON-ZERO (DND-833) ----------------------------
@@ -1599,18 +1638,9 @@ else
   bad "non-zero usage limit never wedges" "codes='${codes% }' spawns=$n counter='$(cat "$(sd "$r")/consecutive-failures" 2>/dev/null)'"
 fi
 
-# The signature must not downgrade a failure that REACHED the model: a receipt
-# is present, so the session ran and failed. (The receipt, not the signature, is
-# still the detector.) Covered above for exit 7; this pins the usage-limit text.
-r="$(new_repo)"; a="$(aux "$r")"
-stub_claude_probe "$a/stub-claude" 1 "printf \"You've hit your weekly limit\\n\""
-rc="$(run_runner "$r")"
-if [ "$rc" -eq 1 ] && [ "$(cat "$(sd "$r")/consecutive-failures" 2>/dev/null)" = "1" ] \
-   && ! ls "$(sd "$r")/runs/"*.blocked >/dev/null 2>&1; then
-  ok "a session that left its receipt and then hit a limit stays a FAILURE (it reached the model)"
-else
-  bad "receipt + limit text stays a failure" "rc=$rc counter=$(cat "$(sd "$r")/consecutive-failures" 2>/dev/null)"
-fi
+# (Later, DND-1560: a receipt plus a limit line with no own commit used to stay
+# a FAILURE here ("it reached the model"). It is BLOCKED now; the DND-1560 cases
+# above pin it, and a receipt plus a commit still keeps the failure.)
 
 # A receipt-less non-zero tick with NO known signature is still a failure (a
 # missing binary or a crash must still wedge), but it must say so: it never
@@ -2526,7 +2556,7 @@ if [ "$rc" = 0 ] && [ -e "$a/claude-was-invoked" ]; then
 else
   bad "control copy" "rc=$rc err=$(cat "$a/runner.err")"
 fi
-for lib in dbus-env.sh shipwright-stale-dirt.sh lane-own-commits.sh; do
+for lib in dbus-env.sh shipwright-stale-dirt.sh lane-own-commits.sh block-signature.sh; do
   r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 0
   RUNNER="$(sx_runner "$a" "$lib")"
   rc="$(run_runner "$r" SHIPWRIGHT_FAIL_ESCALATE=2)"
@@ -2566,7 +2596,7 @@ if [ "$(grep -c 'shipwright-wedged' "$TMP/lib-sw-send-calls" 2>/dev/null || echo
 else
   bad "wedge alert with the lib missing" "sends=$(cat "$TMP/lib-sw-send-calls" 2>&1) err=$(cat "$a/runner.err")"
 fi
-for lib in dbus-env.sh shipwright-stale-dirt.sh lane-own-commits.sh; do
+for lib in dbus-env.sh shipwright-stale-dirt.sh lane-own-commits.sh block-signature.sh; do
   r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 0
   RUNNER="$(sx_runner "$a" "$lib")"
   printf 'return 1\n' >"$a/sx/scripts/lib/$lib"
@@ -2651,7 +2681,7 @@ dry_case() { # <label> <lib> <expected reason> <mutator: missing|unreadable|unlo
   fi
   chmod 644 -- "$f" 2>/dev/null || true
 }
-for lib in dbus-env.sh shipwright-stale-dirt.sh lane-own-commits.sh; do
+for lib in dbus-env.sh shipwright-stale-dirt.sh lane-own-commits.sh block-signature.sh; do
   dry_case "$lib missing" "$lib" missing missing
   dry_case "$lib unreadable" "$lib" unreadable unreadable
   dry_case "$lib fails to load" "$lib" 'could not be loaded' unloadable
@@ -2661,6 +2691,7 @@ dry_case "dbus-env.sh loads but defines nothing" dbus-env.sh 'does not define at
 dry_case "shipwright-stale-dirt.sh loads but defines nothing" shipwright-stale-dirt.sh 'does not define sd_measure sd_next_streak sd_display_paths' empty
 dry_case "shipwright-stale-dirt.sh lacks sd_display_paths" shipwright-stale-dirt.sh 'does not define sd_display_paths' partial
 dry_case "lane-own-commits.sh loads but defines nothing" lane-own-commits.sh 'does not define lane_own_commits' empty
+dry_case "block-signature.sh loads but defines nothing" block-signature.sh 'does not define athena_block_signature' empty
 
 # DND-1729: --dry-run is the same dry run as DRY_RUN=1, because the installer's
 # shared cron_runner_dry_run calls `<runner> --dry-run`. The runner used to read

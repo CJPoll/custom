@@ -611,7 +611,7 @@ shipwright cron never writes Notion, so this is its own runner.
   so the runner copies them into a `--mcp-config`. A missing server, or the
   skill not landed in the main checkout, is exit 78 and counts as a failure.
   So does a `scripts/lib` file the tick sources (`mcp-preflight.sh`,
-  `dbus-env.sh`) that is missing, unreadable, unloadable, or lacks a function
+  `dbus-env.sh`, `block-signature.sh`) that is missing, unreadable, unloadable, or lacks a function
   the tick calls (DND-1603, DND-1728): it leaves a
   `.failed` record, feeds the wedge counter and the one wedge alert, and the
   lead-time runner treats it the same. The shipwright runner does too, for

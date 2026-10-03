@@ -95,18 +95,22 @@
 #       on every machine, so neither depends on it. The exit stays 75 even when
 #       the record or the alert fails; each failure is loud with a Fix: line.
 #   64  EX_USAGE: an unknown argument; nothing ran (DND-1729)
-#   78  a scripts/lib file this tick needs (dbus-env.sh, shipwright-stale-dirt.sh)
+#   78  a scripts/lib file this tick needs (dbus-env.sh, shipwright-stale-dirt.sh,
+#       lane-own-commits.sh, block-signature.sh)
 #       is missing, unreadable or unloadable: no session. It leaves <ts>.failed in runs/ and
 #       counts toward the wedge like any unsuccessful outcome (DND-1603)
 #       --dry-run (or DRY_RUN=1) runs the same lib check and exits 78 on the same faults,
 #       naming each lib with a Fix:, but writes no record and counts nothing
 #       (DND-1725). A lib that loads without defining every function the
 #       tick calls is a fault too.
-#   69  EX_UNAVAILABLE: the session did NO work — it never left its liveness
-#       receipt, so it never reached the model (usually a provider usage limit,
-#       credits, or auth). That is any receipt-less, commit-less session that
-#       exited 0, or that exited non-zero with a known block signature in its
-#       own output (DND-833: `claude -p` exits non-zero on a usage limit).
+#   69  EX_UNAVAILABLE: the session did NO work (usually a provider usage limit,
+#       credits, or auth). That is any commit-less session that left no
+#       liveness receipt and exited 0, or exited non-zero with a known block
+#       signature in its own output (DND-833: `claude -p` exits non-zero on a
+#       usage limit), or that left its receipt, made no commit of its own, and
+#       exited non-zero with such a signature (DND-1560: the limit landed after
+#       the receipt). A commit of its own is evidence of work, so such a
+#       session stays a failure.
 #       Reported every tick and never silent, but the lane is NOT gated and
 #       self-heals; nothing to re-arm. A receipt-less non-zero exit with NO
 #       signature is a failure (below) and leaves a <ts>.failed record.
@@ -317,10 +321,10 @@ esac
 #     temp paths and SHAs.
 #   * classify_block reads the SESSION's output only, measured before teardown
 #     appends git's own chatter to the same log (see section 6).
-BLOCK_PATTERNS='usage limit|session limit|weekly limit|daily limit|rate limit|rate_limit|quota|out of credits|credit balance|insufficient_quota|billing|overloaded|Too Many Requests|(http|status|error|code)[^a-z0-9]{0,3}429\b|authentication|unauthorized|invalid api key'
+# The wordings live in scripts/lib/block-signature.sh (ATHENA_BLOCK_PATTERNS, DND-1560).
 classify_block() { # <log> <bytes> <skip> -> the matched signature in <bytes> of <log> after the first <skip>, or nothing
   [ -r "$1" ] || return 0
-  tail -c "+$(( ${3:-0} + 1 ))" -- "$1" 2>/dev/null | head -c "${2:-0}" 2>/dev/null | grep -m1 -i -E -o "${BLOCK_PATTERNS}" 2>/dev/null || true
+  athena_block_signature "$1" "${2:-0}" "${3:-0}"
 }
 
 # --- failure-counter helpers -------------------------------------------------
@@ -387,6 +391,7 @@ RUNNER_LIBS=(
   "dbus-env.sh:athena_dbus_env_setup"
   "shipwright-stale-dirt.sh:sd_measure sd_next_streak sd_display_paths"
   "lane-own-commits.sh:lane_own_commits"
+  "block-signature.sh:athena_block_signature"
 )
 LIB_FAULTS=""
 LIB_FIX="see what changed first (git -C ${MAIN_CHECKOUT} status -- scripts/lib), then restore the named file(s) (git checkout -- scripts/lib discards uncommitted edits there), restore read permission on an unreadable one (chmod u+r <file>), or fast-forward this checkout to main when the runner is newer than its libs."
@@ -1409,6 +1414,14 @@ if [ ! -e "${RECEIPT}" ] && [ "${own_known}" -eq 1 ] && [ "${own_any}" -eq 0 ]; 
   if [ "${status}" -eq 0 ] || [ -n "${block_sig}" ]; then
     blocked=1
   fi
+elif [ -e "${RECEIPT}" ] && [ "${status}" -ne 0 ] && [ "${own_known}" -eq 1 ] && [ "${own_any}" -eq 0 ] \
+     && [ "${stranded}" -eq 0 ]; then
+  # DND-1560: the limit landed AFTER the receipt. The session reached the model,
+  # made no commit of its own and exited non-zero with a known block signature:
+  # the provider stopped it, so it is BLOCKED and never counted. Without a
+  # signature it stays a failure. The receipt-less rule above is unchanged.
+  block_sig="$(classify_block "${log}" "${session_bytes}" "${pre_bytes}")"
+  [ -z "${block_sig}" ] || blocked=1
 fi
 
 if [ "${blocked}" -eq 1 ]; then
@@ -1416,8 +1429,13 @@ if [ "${blocked}" -eq 1 ]; then
   streak="$(read_count "${BLOCK_COUNT}")"
   marker="${LOG_DIR}/${ts}.blocked"
   {
-    echo "athena-shipwright: run ${ts} did NO retrospective work — the session never reported for duty."
-    echo "receipt=${RECEIPT} (absent)"
+    if [ -e "${RECEIPT}" ]; then
+      echo "athena-shipwright: run ${ts} was stopped by the provider after it reported for duty and made no commit (DND-1560); treat any retrospective work as unfinished."
+      echo "receipt=${RECEIPT} (present)"
+    else
+      echo "athena-shipwright: run ${ts} did NO retrospective work — the session never reported for duty."
+      echo "receipt=${RECEIPT} (absent)"
+    fi
     echo "session_exit=${status}"
     echo "session_output=${session_output}"
     echo "consecutive_blocked=${streak}"
@@ -1435,7 +1453,7 @@ if [ "${blocked}" -eq 1 ]; then
     echo "athena-shipwright: run ${ts} BLOCKED, UNCLASSIFIED — the session did no work and NO known block signature matched ${log}. The signature list is probably stale. Record: ${marker}" >&2
   fi
   if [ -z "${block_sig}" ] || [ "${streak}" -eq 1 ] || [ $(( streak % BLOCK_ESCALATE )) -eq 0 ]; then
-    echo "  Fix: read ${log} (it holds whatever the session managed to print) and ${marker}. This tick did ZERO retrospective work — no artifact mined, no journal entry, no cursor advance — so read the matching gap in ${STATE_DIR}/journal.md as an OUTAGE, not a quiet period. Nothing is wedged and nothing needs re-arming: the lane keeps trying every hour and recovers by itself the moment the block clears; do NOT delete ${FAIL_COUNT} or ${BLOCK_COUNT}. If this says UNCLASSIFIED, the provider reworded its message — add the new wording to BLOCK_PATTERNS in $0 and add a case to scripts/test/athena-shipwright/self-test.sh so the list cannot rot silently again. If ticks stay blocked past the reset time the log states, the cause is NOT transient: check account, billing and auth for ${CLAUDE}. SHIPWRIGHT_BLOCK_ESCALATE only changes how often this paragraph repeats; it never silences the class." >&2
+    echo "  Fix: read ${log} (it holds whatever the session managed to print) and ${marker}. This tick did ZERO retrospective work — no artifact mined, no journal entry, no cursor advance — so read the matching gap in ${STATE_DIR}/journal.md as an OUTAGE, not a quiet period. Nothing is wedged and nothing needs re-arming: the lane keeps trying every hour and recovers by itself the moment the block clears; do NOT delete ${FAIL_COUNT} or ${BLOCK_COUNT}. If this says UNCLASSIFIED, the provider reworded its message — add the new wording to ATHENA_BLOCK_PATTERNS in ${__wrapper_dir}/lib/block-signature.sh and add a case to scripts/test/athena-shipwright/self-test.sh so the list cannot rot silently again. If ticks stay blocked past the reset time the log states, the cause is NOT transient: check account, billing and auth for ${CLAUDE}. SHIPWRIGHT_BLOCK_ESCALATE only changes how often this paragraph repeats; it never silences the class." >&2
   fi
   echo "athena-shipwright: run ${ts} session exited ${status} but did no work; reporting BLOCKED (exit 69); log: ${log}" >&2
   exit 69
@@ -1486,7 +1504,7 @@ if [ "${unreported}" -eq 1 ]; then
   else
     echo "athena-shipwright: run ${ts} session exited ${status} and never reported for duty; its output (${session_output}) matched NO known block signature. Counted as an unsuccessful outcome. Record: ${failed}" >&2
   fi
-  echo "  Fix: read ${log} and ${failed}. The session died before its first instruction, so this is not a harness change gone wrong. If the log shows a provider limit, credits, or auth message, the vendor reworded it: add the wording to BLOCK_PATTERNS in $0 and a case to scripts/test/athena-shipwright/self-test.sh, and the tick becomes BLOCKED (never wedging). If the log is empty or shows a crash, check that ${CLAUDE} runs by hand ('${CLAUDE} --version'). This outcome feeds the wedge counter ${FAIL_COUNT}." >&2
+  echo "  Fix: read ${log} and ${failed}. The session died before its first instruction, so this is not a harness change gone wrong. If the log shows a provider limit, credits, or auth message, the vendor reworded it: add the wording to ATHENA_BLOCK_PATTERNS in ${__wrapper_dir}/lib/block-signature.sh and a case to scripts/test/athena-shipwright/self-test.sh, and the tick becomes BLOCKED (never wedging). If the log is empty or shows a crash, check that ${CLAUDE} runs by hand ('${CLAUDE} --version'). This outcome feeds the wedge counter ${FAIL_COUNT}." >&2
 else
   reset_count "${BLOCK_COUNT}"   # the session reached the model; the streak ends
 fi

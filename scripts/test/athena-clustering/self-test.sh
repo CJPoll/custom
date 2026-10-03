@@ -146,6 +146,9 @@ case "$(cat "$d/mode" 2>/dev/null || echo ok)" in
   limit)     echo "You've hit your weekly limit"; exit 1 ;;
   slimit)    echo "You've hit your session limit · resets 6:30am (America/Denver)"; exit 1 ;;
   crash)     echo "segmentation fault"; exit 3 ;;
+  limit-receipt) : >"$CLUSTERING_RECEIPT"; echo "You've hit your weekly limit"; exit 1 ;;
+  limit-receipt-notice) : >"$CLUSTERING_RECEIPT"; printf 'closed DND-910\n' >>"$notices"; echo "You've hit your weekly limit"; exit 1 ;;
+  limit-receipt-summary) : >"$CLUSTERING_RECEIPT"; echo "moved 1, merged 0, closed 0" >"$CLUSTERING_SUMMARY"; echo "You've hit your weekly limit"; exit 1 ;;
 esac
 EOF
   chmod +x "$c/stub-claude"
@@ -719,6 +722,44 @@ else
   bad "crash" "rc=$rc err=$(cat "$c/runner.err")"
 fi
 
+# DND-1560: the limit lands AFTER the receipt, before any work.
+c="$(new_case)"; echo limit-receipt >"$c/mode"
+rc="$(run_runner "$c")"
+if [ "$rc" = 69 ] && [ ! -e "$(sd "$c")/consecutive-failures" ] && grep -q 'weekly limit' "$(newest "$c" blocked)" \
+   && grep -q 'outcome=blocked exit=69' "$(newest "$c" run)" && [ -z "$(newest "$c" failed)" ]; then
+  ok "a limit after the receipt, no summary, no notice: BLOCKED (69), the wedge counter untouched, no .failed"
+else
+  bad "limit after receipt" "rc=$rc err=$(cat "$c/runner.err")"
+fi
+c="$(new_case)"; echo limit-receipt >"$c/mode"
+r1="$(run_runner "$c")"; r2="$(run_runner "$c")"; r3="$(run_runner "$c")"
+if [ "$r1$r2$r3" = 696969 ] && [ ! -e "$(sd "$c")/consecutive-failures" ] && [ -z "$(newest "$c" wedged)" ]; then
+  ok "three limit-after-receipt ticks never wedge"
+else
+  bad "limit after receipt x3" "rcs=$r1$r2$r3 failures='$(cat "$(sd "$c")/consecutive-failures" 2>/dev/null)'"
+fi
+c="$(new_case)"; echo limit-receipt-notice >"$c/mode"
+rc="$(run_runner "$c")"
+if [ "$rc" = 1 ] && [ "$(cat "$(sd "$c")/consecutive-failures")" = 1 ] && [ -z "$(newest "$c" blocked)" ]; then
+  ok "a limit line after the pass recorded a closure stays a counted failure (the notice is evidence of work)"
+else
+  bad "limit after notice" "rc=$rc err=$(cat "$c/runner.err")"
+fi
+c="$(new_case)"; echo limit-receipt-summary >"$c/mode"
+rc="$(run_runner "$c")"
+if [ "$rc" = 1 ] && [ "$(cat "$(sd "$c")/consecutive-failures")" = 1 ] && [ -z "$(newest "$c" blocked)" ]; then
+  ok "a limit line after the pass wrote its summary stays a counted failure"
+else
+  bad "limit after summary" "rc=$rc err=$(cat "$c/runner.err")"
+fi
+c="$(new_case)"; echo fail >"$c/mode"
+rc="$(run_runner "$c")"
+if [ "$rc" = 7 ] && [ "$(cat "$(sd "$c")/consecutive-failures")" = 1 ] && [ -z "$(newest "$c" blocked)" ]; then
+  ok "a non-zero exit after the receipt with no limit wording stays a counted failure"
+else
+  bad "fail after receipt" "rc=$rc err=$(cat "$c/runner.err")"
+fi
+
 blocked_count() { find "${ALERTS}" -maxdepth 1 -type f -name '*-clustering-blocked.md' 2>/dev/null | grep -c . || true; }
 clear_alerts
 c="$(new_case)"; echo blocked0 >"$c/mode"
@@ -1215,7 +1256,7 @@ for fault in missing empty; do
   fi
 done
 
-for lib in mcp-preflight.sh dbus-env.sh; do
+for lib in mcp-preflight.sh dbus-env.sh block-signature.sh; do
   c="$(new_case)"
   RUNNER="$(sx_runner "$c" "$lib")"
   rm -f "$TMP/lib-send-calls"
@@ -1238,7 +1279,7 @@ for lib in mcp-preflight.sh dbus-env.sh; do
   fi
 done
 
-for lib in mcp-preflight.sh dbus-env.sh; do
+for lib in mcp-preflight.sh dbus-env.sh block-signature.sh; do
   c="$(new_case)"
   RUNNER="$(sx_runner "$c" "$lib")"
   rc="$(run_runner "$c" -- --dry-run)"
@@ -1300,6 +1341,7 @@ lib_dry_case() {
 lib_dry_case dbus-env.sh 'that does not load' 'could not be loaded' return1
 lib_dry_case dbus-env.sh 'with a merge-conflict marker' 'could not be loaded' conflict
 lib_dry_case dbus-env.sh 'that defines nothing' 'loaded but does not define athena_dbus_env_setup' empty
+lib_dry_case block-signature.sh 'that defines nothing' 'loaded but does not define athena_block_signature' empty
 lib_dry_case mcp-preflight.sh 'that defines nothing' 'loaded but does not define clustering_mcp_preflight' empty
 if [ "$(id -u)" != 0 ]; then
   lib_dry_case dbus-env.sh 'unreadable' 'is unreadable' unreadable

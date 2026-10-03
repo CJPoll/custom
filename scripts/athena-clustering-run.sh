@@ -70,7 +70,12 @@
 # Exit codes:
 #   0   the pass ran and reported, or the tick was skipped (lock held)
 #   64  usage error
-#   69  BLOCKED: the session never reached the model (usage limit, auth).
+#   69  BLOCKED: the provider stopped the session before it did any work
+#       (usage limit, auth): no receipt with exit 0 or a known limit or auth
+#       message, or the receipt (the session reached the model) with a
+#       non-zero exit, a known limit or auth message, no summary and no
+#       recorded won't-fix closure (DND-1560). A summary or a closure is
+#       evidence of work, so such a run stays counted.
 #       Never counted toward the wedge and never gates a spawn. After
 #       CLUSTERING_BLOCK_ESCALATE blocked ticks in a row, ONE harness-alert
 #       (clustering-blocked) per episode, since an auth fault never clears
@@ -83,7 +88,7 @@
 #       up (scripts/lib/mcp-preflight.sh, the check setup-clustering-cron
 #       shares): counted. --dry-run runs the same checks and exits 78 on
 #       the first that fails, touching nothing (DND-1571). A scripts/lib
-#       file the tick needs (mcp-preflight.sh, dbus-env.sh) missing,
+#       file the tick needs (mcp-preflight.sh, dbus-env.sh, block-signature.sh) missing,
 #       unreadable, unloadable, or lacking a function the tick calls is 78
 #       too, with a .failed record, counted like the rest (DND-1603).
 #       --dry-run runs the tick's own lib check, so it refuses on the same
@@ -186,6 +191,33 @@ load_dbus_lib() {
   fi
   DBUS_LIB_WHY=""
   [ -z "${reason}" ] || DBUS_LIB_WHY="${DBUS_LIB} ${reason}, so D-Bus autolaunch cannot be suppressed"
+}
+
+# load_block_lib: the check of scripts/lib/block-signature.sh, the one list of
+# provider limit wordings and its reader, shared with the other cron runners
+# (DND-1560). Same shape as load_dbus_lib: sets BLOCK_LIB_WHY to the fault, or ""
+# when the lib is usable.
+BLOCK_LIB="${SCRIPT_DIR}/lib/block-signature.sh"
+BLOCK_LIB_FNS="athena_block_signature"
+BLOCK_LIB_FIX="see what changed first (git -C ${SCRIPT_DIR%/scripts} status -- scripts/lib), then restore it (git checkout -- scripts/lib discards uncommitted edits there), restore read permission on an unreadable one (chmod u+r ${BLOCK_LIB}), or fast-forward this checkout to main when the runner is newer than its libs."
+BLOCK_LIB_WHY=""
+load_block_lib() {
+  local fn absent="" reason=""
+  if [ ! -e "${BLOCK_LIB}" ]; then
+    reason="is missing"
+  elif [ ! -r "${BLOCK_LIB}" ]; then
+    reason="is unreadable"
+  # shellcheck source=scripts/lib/block-signature.sh
+  elif ! . "${BLOCK_LIB}"; then
+    reason="could not be loaded"
+  else
+    for fn in ${BLOCK_LIB_FNS}; do
+      declare -F "${fn}" >/dev/null || absent="${absent:+${absent} }${fn}"
+    done
+    [ -z "${absent}" ] || reason="loaded but does not define ${absent}"
+  fi
+  BLOCK_LIB_WHY=""
+  [ -z "${reason}" ] || BLOCK_LIB_WHY="${BLOCK_LIB} ${reason}, so a provider limit cannot be told from a failure"
 }
 
 FAIL_ESCALATE="${CLUSTERING_FAIL_ESCALATE:-2}"
@@ -331,6 +363,12 @@ if [ "${DRY}" -eq 1 ]; then
   if [ -n "${DBUS_LIB_WHY}" ]; then
     echo "${ME}: ${DBUS_LIB_WHY}; a tick would exit 78 and spawn no session." >&2
     echo "  Fix: ${DBUS_LIB_FIX}" >&2
+    exit 78
+  fi
+  load_block_lib
+  if [ -n "${BLOCK_LIB_WHY}" ]; then
+    echo "${ME}: ${BLOCK_LIB_WHY}; a tick would exit 78 and spawn no session." >&2
+    echo "  Fix: ${BLOCK_LIB_FIX}" >&2
     exit 78
   fi
   if ! run_mcp_preflight; then
@@ -629,6 +667,11 @@ if [ -n "${DBUS_LIB_WHY}" ]; then
   # The cron-environment library, its fault noted at the lock by load_dbus_lib (DND-1603, DND-1728).
   mcp_fail "${DBUS_LIB_WHY}; no session." "${DBUS_LIB_FIX}"
 fi
+# The block-signature library, loaded here so the outcome step can call it (DND-1560).
+load_block_lib
+if [ -n "${BLOCK_LIB_WHY}" ]; then
+  mcp_fail "${BLOCK_LIB_WHY}; no session." "${BLOCK_LIB_FIX}"
+fi
 if ! run_mcp_preflight; then
   mcp_fail "${MCP_PF_WHY}" "${MCP_PF_FIX}"
 fi
@@ -803,17 +846,30 @@ finish() {
 # usage limit clears on its own), but BLOCK_ESCALATE in a row send one alert
 # (an auth or account fault does not clear). Anything else with no receipt is a
 # failure (a missing binary or a crash must still wedge).
-BLOCK_PATTERNS='usage limit|session limit|weekly limit|daily limit|rate limit|rate_limit|quota|out of credits|credit balance|insufficient_quota|billing|overloaded|Too Many Requests|(http|status|error|code)[^a-z0-9]{0,3}429\b|authentication|unauthorized|invalid api key'
+# The wordings live in scripts/lib/block-signature.sh (DND-1560).
 if [ ! -e "${RECEIPT}" ]; then
-  sig="$(grep -m1 -i -E -o "${BLOCK_PATTERNS}" -- "${log}" 2>/dev/null || true)"
+  sig="$(athena_block_signature "${log}")"
   if [ "${status}" -eq 0 ] || [ -n "${sig}" ]; then
     blocked_track "${status}" "${sig}"
     finish 69 blocked
   fi
   record_failure "the session exited ${status} and never reported for duty (no receipt)" "session_exit=${status}"
   echo "${ME}: run ${ts} exited ${status} and never reported for duty. Record: ${LOG_DIR}/${ts}.failed" >&2
-  echo "  Fix: read ${log}; check that ${CLAUDE} runs by hand ('${CLAUDE} --version'). If the log shows a provider limit, add its wording to BLOCK_PATTERNS in $0." >&2
+  echo "  Fix: read ${log}; check that ${CLAUDE} runs by hand ('${CLAUDE} --version'). If the log shows a provider limit, add its wording to ATHENA_BLOCK_PATTERNS in ${BLOCK_LIB}." >&2
   finish "${status}" failed
+fi
+# A limit that lands AFTER the receipt (DND-1560): the session reached the
+# model, did no work (no summary, no recorded won't-fix closure) and exited
+# non-zero with a known limit or auth message. The provider stopped it, so it
+# is BLOCKED and never counted: a limit clears on its own, and a wedge needs a
+# manual re-arm. A summary or a closure is evidence of work, so a run that has
+# either keeps its failure (a closure may be unrecorded; notice_summary says so).
+if [ "${status}" -ne 0 ] && [ ! -s "${SUMMARY}" ] && [ ! -s "${NOTICES}" ]; then
+  sig="$(athena_block_signature "${log}")"
+  if [ -n "${sig}" ]; then
+    blocked_track "${status}" "${sig}"
+    finish 69 blocked
+  fi
 fi
 # The session reached the model: any blocked streak and its episode end here.
 rm -f "${BLOCK_COUNT}" "${BLOCK_STATE}"

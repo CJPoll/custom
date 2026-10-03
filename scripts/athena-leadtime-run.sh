@@ -143,9 +143,13 @@
 #   1   origin/main could not be resolved, so there is no base for a lane: counted
 #   2   the repo is not a git checkout
 #   64  usage error
-#   69  BLOCKED: the session never reached the model (usage limit, auth): no
-#       receipt, no summary and no lane commit, with exit 0 or a known limit
-#       or auth message. Never counted toward the wedge and never gates a spawn. After
+#   69  BLOCKED: the provider stopped the session before it did any work (usage
+#       limit, auth): no summary and no commit of its own, and either no receipt
+#       with exit 0 or a known limit or auth message, or the receipt (the
+#       session reached the model) with a non-zero exit and a known limit or
+#       auth message (DND-1560). A lane commit not on origin/main is still 72,
+#       and a summary, an own commit or a product lane is evidence of work, so
+#       such a run stays counted. Never counted toward the wedge and never gates a spawn. After
 #       LEADTIME_BLOCK_ESCALATE blocked ticks in a row, ONE harness-alert
 #       (leadtime-blocked) per episode, since an auth fault never clears
 #   70  the session exited 0 but wrote no summary: counted
@@ -185,7 +189,7 @@
 #       shares): counted. --dry-run runs the same checks in the same order
 #       and exits 78 on the first that fails, touching nothing (DND-1571).
 #       A scripts/lib file the tick needs (mcp-preflight.sh, dbus-env.sh,
-#       lead-time-repos.sh) missing, unreadable, unloadable, or lacking a
+#       lead-time-repos.sh, lane-own-commits.sh, block-signature.sh) missing, unreadable, unloadable, or lacking a
 #       function the tick calls is 78 too, with a .failed record, counted
 #       like the rest (DND-1603, DND-1604). --dry-run runs the tick's own lib check, so it refuses
 #       on the same faults (DND-1728)
@@ -565,6 +569,21 @@ load_own_lib() {
   [ -z "${LIB_REASON}" ] || OWN_LIB_WHY="${OWN_LIB} ${LIB_REASON}, so the run's own commits cannot be told from a sync"
 }
 
+# load_block_lib: the check of scripts/lib/block-signature.sh, the one list of
+# provider limit wordings and its reader, shared with the other cron runners
+# (DND-1560). Same shape as load_own_lib: sets BLOCK_LIB_WHY to the fault, or ""
+# when the lib is usable.
+BLOCK_LIB="${SCRIPT_DIR}/lib/block-signature.sh"
+BLOCK_LIB_FNS="athena_block_signature"
+BLOCK_LIB_FIX="$(lib_fix "${BLOCK_LIB}")"
+BLOCK_LIB_WHY=""
+load_block_lib() {
+  # shellcheck disable=SC2086 # one word per function name
+  check_lib "${BLOCK_LIB}" ${BLOCK_LIB_FNS}
+  BLOCK_LIB_WHY=""
+  [ -z "${LIB_REASON}" ] || BLOCK_LIB_WHY="${BLOCK_LIB} ${LIB_REASON}, so a provider limit cannot be told from a failure"
+}
+
 # --dry-run checks what the tick's preconditions (6) check, in the same order,
 # so a rendered brief means a tick can start (DND-1571).
 if [ "${DRY}" -eq 1 ]; then
@@ -579,6 +598,8 @@ if [ "${DRY}" -eq 1 ]; then
   [ -z "${DBUS_LIB_WHY}" ] || dry_refuse "${DBUS_LIB_WHY}" "${DBUS_LIB_FIX}"
   load_own_lib
   [ -z "${OWN_LIB_WHY}" ] || dry_refuse "${OWN_LIB_WHY}" "${OWN_LIB_FIX}"
+  load_block_lib
+  [ -z "${BLOCK_LIB_WHY}" ] || dry_refuse "${BLOCK_LIB_WHY}" "${BLOCK_LIB_FIX}"
   run_mcp_preflight || dry_refuse "${MCP_PF_WHY%.}" "${MCP_PF_FIX}"
   build_brief
   printf '%s\n' "${BRIEF}"
@@ -982,6 +1003,11 @@ load_own_lib
 if [ -n "${OWN_LIB_WHY}" ]; then
   precondition_fail "${OWN_LIB_WHY}; no session." "${OWN_LIB_FIX}"
 fi
+# The block-signature library, loaded here so the outcome step can call it (DND-1560).
+load_block_lib
+if [ -n "${BLOCK_LIB_WHY}" ]; then
+  precondition_fail "${BLOCK_LIB_WHY}; no session." "${BLOCK_LIB_FIX}"
+fi
 # The MCP servers, through the one preflight --dry-run and the installer share
 # (scripts/lib/mcp-preflight.sh, DND-1571).
 if ! run_mcp_preflight; then
@@ -1047,7 +1073,7 @@ fi
 # sweep of every open improver PR, read ONCE as it is now: nothing here waits
 # on CI or a deploy, so a PR whose CI is still running is left for the next tick.
 PRODUCT_MANIFEST="${LOG_DIR}/${ts}.product.json"
-PRODUCT_FDS=(); PRODUCT_LOCKS=(); PRODUCT_STRANDED=0
+PRODUCT_FDS=(); PRODUCT_LOCKS=(); PRODUCT_STRANDED=0; PRODUCT_WORKED=0
 product_release() { # close every reserved lane lock and remove the lock files
   local f
   for f in "${PRODUCT_FDS[@]}"; do { exec {f}>&-; } 2>/dev/null || true; done
@@ -1310,6 +1336,9 @@ if [ "${#PRODUCT_LOCKS[@]}" -gt 0 ]; then
   td_rc=0
   td_out="$(product_run "${PRODUCT_TOOL}" teardown 2>&1 </dev/null)" || td_rc=$?
   [ -z "${td_out}" ] || product_note "${td_out}"
+  # A product lane that was cut is evidence of work, whether or not it holds a commit.
+  if grep '^product_lane:' <<<"${td_out}" | grep -qv 'none (no lane cut)$'; then PRODUCT_WORKED=1; fi
+  [ "${td_rc}" -eq 0 ] || PRODUCT_WORKED=1
   if [ "${td_rc}" -ne 0 ]; then
     PRODUCT_STRANDED=1; STRANDED=1
     [ "${td_rc}" -eq 72 ] || product_note "product_teardown=FAILED exit=${td_rc}: the teardown could not finish, so every product branch is kept and counted STRANDED"
@@ -1440,17 +1469,32 @@ fi
 # (an auth or account fault does not clear). Anything else is a failure (a
 # missing binary or a crash must still wedge). The clustering runner's rule;
 # the log holds only the session's output.
-BLOCK_PATTERNS='usage limit|session limit|weekly limit|daily limit|rate limit|rate_limit|quota|out of credits|credit balance|insufficient_quota|billing|overloaded|Too Many Requests|(http|status|error|code)[^a-z0-9]{0,3}429\b|authentication|unauthorized|invalid api key'
+# The wordings live in scripts/lib/block-signature.sh (DND-1560).
 if [ "${REACHED}" -eq 0 ]; then
-  sig="$(grep -m1 -i -E -o "${BLOCK_PATTERNS}" -- "${log}" 2>/dev/null || true)"
+  sig="$(athena_block_signature "${log}")"
   if [ "${status}" -eq 0 ] || [ -n "${sig}" ]; then
     blocked_track "${status}" "${sig}"
     finish 69 blocked
   fi
   record_failure "the session exited ${status} and never reported for duty (no receipt, no summary, no lane commit)" "session_exit=${status}"
   echo "${ME}: run ${ts} exited ${status} and never reported for duty. Record: ${LOG_DIR}/${ts}.failed" >&2
-  echo "  Fix: read ${log}; check that ${CLAUDE} runs by hand ('${CLAUDE} --version'). If the log shows a provider limit, add its wording to BLOCK_PATTERNS in $0." >&2
+  echo "  Fix: read ${log}; check that ${CLAUDE} runs by hand ('${CLAUDE} --version'). If the log shows a provider limit, add its wording to ATHENA_BLOCK_PATTERNS in ${BLOCK_LIB}." >&2
   finish "${status}" failed
+fi
+# A limit that lands AFTER the receipt (DND-1560): the session reached the
+# model, did no work (no summary, no commit of its own, no product lane) and
+# exited non-zero with a known limit or auth message. The provider stopped it,
+# so it is BLOCKED and never counted: a limit clears on its own, and a wedge
+# needs a manual re-arm. A stranded or unreadable lane is excluded, because a
+# kept branch is what the owner has to act on; a summary or a commit is
+# evidence of work, so a run that has either keeps its failure.
+if [ "${status}" -ne 0 ] && [ "${STRANDED}" -eq 0 ] && [ "${LANE_UNREADABLE}" -eq 0 ] \
+   && [ ! -s "${SUMMARY}" ] && [ "${own_rc}" -eq 0 ] && [ -z "${own}" ] && [ "${PRODUCT_WORKED}" -eq 0 ]; then
+  sig="$(athena_block_signature "${log}")"
+  if [ -n "${sig}" ]; then
+    blocked_track "${status}" "${sig}"
+    finish 69 blocked
+  fi
 fi
 # The session reached the model: any blocked streak and its episode end here.
 rm -f "${BLOCK_COUNT}" "${BLOCK_STATE}"

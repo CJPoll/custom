@@ -183,6 +183,10 @@ case "$(cat "$d/mode" 2>/dev/null || echo ok)" in
   blocked0)  exit 0 ;;
   limit)     echo "You've hit your weekly limit"; exit 1 ;;
   crash)     echo "segmentation fault"; exit 3 ;;
+  limit-receipt) : >"$LEADTIME_RECEIPT"; echo "You've hit your weekly limit"; exit 1 ;;
+  limit-receipt-summary) : >"$LEADTIME_RECEIPT"; summary; echo "You've hit your weekly limit"; exit 1 ;;
+  limit-receipt-strand) : >"$LEADTIME_RECEIPT"; echo change >strand.txt; g add strand.txt >/dev/null; g commit -q -m "unlanded change"
+             echo "You've hit your weekly limit"; exit 1 ;;
   strand)    : >"$LEADTIME_RECEIPT"; echo change >strand.txt; g add strand.txt >/dev/null; g commit -q -m "unlanded change"; summary; exit 0 ;;
   corrupt-ref) : >"$LEADTIME_RECEIPT"; b="$(git symbolic-ref --short HEAD)"; echo "$b" >"$d/corrupt-branch"
              printf 'not-a-sha\n' >"$(git rev-parse --path-format=absolute --git-common-dir)/refs/heads/$b"; summary; exit 0 ;;
@@ -909,6 +913,46 @@ else
   bad "blocked0" "rc=$rc err=$(cat "$c/runner.err")"
 fi
 
+# DND-1560: the limit lands AFTER the receipt. The session reached the model,
+# did no work (no summary, no lane commit) and the provider stopped it.
+c="$(new_case)"; echo limit-receipt >"$c/mode"
+echo 1 >"$(mkdir -p "$(sd "$c")" && printf '%s' "$(sd "$c")")/consecutive-failures"
+rc="$(run_runner "$c")"
+if [ "$rc" = 69 ] && [ "$(fails "$c")" = 1 ] && grep -q 'classification=weekly limit' "$(newest "$c" blocked)" \
+   && grep -q 'outcome=blocked exit=69' "$(newest "$c" run)" && [ -z "$(newest "$c" failed)" ] && [ "$(lane_dirs "$c")" = 0 ]; then
+  ok "a limit after the receipt, no summary, no commit: BLOCKED (69), the wedge counter unchanged, no .failed"
+else
+  bad "limit after receipt" "rc=$rc fails=$(fails "$c") run=$(cat "$(newest "$c" run)" 2>/dev/null) err=$(cat "$c/runner.err")"
+fi
+c="$(new_case)"; echo limit-receipt >"$c/mode"
+r1="$(run_runner "$c")"; r2="$(run_runner "$c")"; r3="$(run_runner "$c")"
+if [ "$r1$r2$r3" = 696969 ] && [ "$(fails "$c")" = 0 ] && [ "$(sends "$c" leadtime-blocked)" = 1 ] && [ "$(sends "$c" leadtime-wedged)" = 0 ]; then
+  ok "three limit-after-receipt ticks never wedge; they send the one blocked alert"
+else
+  bad "limit after receipt x3" "rcs=$r1$r2$r3 fails=$(fails "$c") sends=$(cat "$c/send.log")"
+fi
+c="$(new_case)"; echo limit-receipt-summary >"$c/mode"
+rc="$(run_runner "$c")"
+if [ "$rc" = 1 ] && [ "$(fails "$c")" = 1 ] && [ -z "$(newest "$c" blocked)" ]; then
+  ok "a limit line after the session wrote its summary stays a counted failure (the summary is evidence of work)"
+else
+  bad "limit after summary" "rc=$rc fails=$(fails "$c") err=$(cat "$c/runner.err")"
+fi
+c="$(new_case)"; echo limit-receipt-strand >"$c/mode"
+rc="$(run_runner "$c")"
+if [ "$rc" = 72 ] && [ "$(fails "$c")" = 1 ] && [ "$(lane_branches "$c")" = 1 ] && [ -z "$(newest "$c" blocked)" ]; then
+  ok "a limit line with a stranded lane commit stays STRANDED (72, counted), never BLOCKED"
+else
+  bad "limit with stranded commit" "rc=$rc fails=$(fails "$c") err=$(cat "$c/runner.err")"
+fi
+c="$(new_case)"; echo fail >"$c/mode"
+rc="$(run_runner "$c")"
+if [ "$rc" = 7 ] && [ "$(fails "$c")" = 1 ] && [ -z "$(newest "$c" blocked)" ]; then
+  ok "a non-zero exit after the receipt with no limit wording stays a counted failure"
+else
+  bad "fail after receipt" "rc=$rc fails=$(fails "$c") err=$(cat "$c/runner.err")"
+fi
+
 # ---------------------------------------------------------------------------------
 case_ '11. a stranded lane keeps its branch and counts'
 
@@ -1504,7 +1548,7 @@ for fault in missing empty; do
   fi
 done
 
-for lib in mcp-preflight.sh dbus-env.sh lead-time-repos.sh lane-own-commits.sh; do
+for lib in mcp-preflight.sh dbus-env.sh lead-time-repos.sh lane-own-commits.sh block-signature.sh; do
   c="$(new_case)"
   RUNNER="$(sx_runner "$c" "$lib")"
   r1="$(run_runner "$c" LEADTIME_FAIL_ESCALATE=2)"
@@ -1527,7 +1571,7 @@ for lib in mcp-preflight.sh dbus-env.sh lead-time-repos.sh lane-own-commits.sh; 
   fi
 done
 
-for lib in mcp-preflight.sh dbus-env.sh lead-time-repos.sh lane-own-commits.sh; do
+for lib in mcp-preflight.sh dbus-env.sh lead-time-repos.sh lane-own-commits.sh block-signature.sh; do
   c="$(new_case)"
   RUNNER="$(sx_runner "$c" "$lib")"
   rc="$(run_runner "$c" -- --dry-run)"
@@ -1593,6 +1637,7 @@ lib_dry_case dbus-env.sh 'that defines nothing' 'loaded but does not define athe
 lib_dry_case mcp-preflight.sh 'that defines nothing' 'loaded but does not define leadtime_mcp_preflight' empty
 lib_dry_case lead-time-repos.sh 'that does not load' 'could not be loaded' return1
 lib_dry_case lead-time-repos.sh 'that defines nothing' 'loaded but does not define lt_repos_resolve' empty
+lib_dry_case block-signature.sh 'that defines nothing' 'loaded but does not define athena_block_signature' empty
 if [ "$(id -u)" != 0 ]; then
   lib_dry_case dbus-env.sh 'unreadable' 'is unreadable' unreadable
   lib_dry_case mcp-preflight.sh 'unreadable' 'is unreadable' unreadable
