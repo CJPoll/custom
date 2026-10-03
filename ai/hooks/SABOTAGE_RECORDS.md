@@ -1007,3 +1007,25 @@ The canary reads usage under LC_ALL=C. After: `RESULT: 429 passed, 0 failed`.
 | S-1859-9 | a reader piping on never passes the text to the next stage | HS33, HS34 |
 | S-1859-10 | a here-string on fd 3 attributed to its own command | HS35 |
 | S-1859-11 | the operator loop eats a leading `-` of the word | HS32 |
+
+## 2026-10-03 — DND-1897, git-stash-guard: a command substitution joined into a command word
+
+- **Domain:** the PreToolUse git-stash text guard (`ai/hooks/git-stash-guard.sh`):
+  a zsh word that holds an unquoted `$(...)` or backtick substitution
+  joined to other text (zseg's joining scan, the "exp" verdict, and its
+  rule in `analyze`).
+- **Suite run:** `sh ai/hooks/git-stash-guard.self-test.sh`, section CS.
+  Mutations ran on a `mktemp -d` copy of the hook with the committed suite;
+  the committed files were never edited.
+- **Fail-first:** section CS written first. Against the unfixed hook
+  (`7c8f2075`), the first cases gave `RESULT: 609 passed, 12 failed`; the
+  final suite gives `RESULT: 611 passed, 14 failed`: every deny case in
+  section CS, and no other case. After: `RESULT: 625 passed, 0 failed`.
+
+| id | Mutation | Observed failure |
+|---|---|---|
+| S-1897-1 | a joined substitution word gets no "exp" verdict | CS1-CS12, CS19, CS20 |
+| S-1897-2 | `&>`/`>&`/`<&` and line continuations not stripped before the separator test | CS19, CS20 |
+| S-1897-3 | the word judged as a literal git head, not an expanded one | CS21 |
+| S-1897-4 | a separator after the word does not end its arguments | CS17 |
+| S-1897-5 | the arguments after the zsh word are never read | CS1-CS12, CS19, CS20 |
