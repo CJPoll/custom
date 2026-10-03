@@ -727,7 +727,8 @@ check("c3: the Notion adapter maps ticket ids to page ids, and a missing ticket 
                         "Status" => { "type" => "status", "status" => { "name" => "Cancelled" } },
                         "Kind" => { "type" => "select", "select" => nil }, "Severity" => { "type" => "select", "select" => nil },
                         "Path" => { "type" => "select", "select" => nil }, "Area" => { "type" => "select", "select" => nil },
-                        "Control" => { "type" => "select", "select" => nil } } }
+                        "Control" => { "type" => "select", "select" => nil },
+                        "Security" => { "type" => "select", "select" => nil } } }
   end
   hit = FakeTransport.new([:post, "/v1/data_sources/#{TDS}/query"] => { "results" => [page.call(20)], "has_more" => false })
   miss = FakeTransport.new([:post, "/v1/data_sources/#{TDS}/query"] => { "results" => [], "has_more" => false })

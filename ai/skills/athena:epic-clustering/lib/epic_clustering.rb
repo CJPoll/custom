@@ -66,7 +66,14 @@ module EpicClustering
   # code" cannot be read from a property, so every such ticket linked to the
   # epic counts: the restrictive reading.
   def core?(ticket)
-    ticket.kind == "Feature" || ON_PATH.include?(ticket.path) || NextMission.tier1?(nm_ticket(ticket))
+    ticket.kind == "Feature" || ON_PATH.include?(ticket.path) || security_core?(ticket)
+  end
+
+  # Whatever the Security value (DND-1789): next-mission's tier 1 now needs
+  # Security=pre-existing for a Vulnerability, but the restrictive reading here
+  # keeps every CRITICAL/HIGH security-ranked ticket immovable.
+  def security_core?(ticket)
+    NextMission::TIER1_SEVERITIES.include?(ticket.severity) && NextMission.security_ranked?(nm_ticket(ticket))
   end
 
   # epic_tickets: every ticket linked to ONE epic, any status. A closed ticket
@@ -268,7 +275,7 @@ module EpicClustering
   def nm_ticket(t)
     NextMission::Ticket.new(id: t.id, page_id: t.page_id, title: t.title, status: t.status, kind: t.kind,
                             severity: t.severity, path: t.path, area: t.area, depends_on: [], created: t.created,
-                            control: t.control)
+                            control: t.control, security: t.security)
   end
 
   def tier(t) = NextMission.tier_of(nm_ticket(t))
