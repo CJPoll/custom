@@ -451,9 +451,9 @@ slack_read_text() {
 
 # --------------------------------------------------------------- rendering
 
-# SLACK_JQ_ATTACH_DEFS -- jq definitions every message reader prefixes to its
-# filter, so a message with an attachment never reads as one without
-# (DND-1822). Each is an allowlist, never a pass-through: a Slack file object
+# SLACK_JQ_ATTACH_DEFS -- jq definitions slack_render_messages (read-thread,
+# read-channel) prefixes to its filter, so a message with an attachment never
+# reads as one without (DND-1822). Each is an allowlist, never a pass-through: a Slack file object
 # also carries `url_private`, `url_private_download`, thumbnails and permalinks,
 # and some of those embed a token. Only the named metadata leaves this skill.
 #
@@ -462,20 +462,22 @@ slack_read_text() {
 #   slack_room_meta   -- a huddle message's room as {id, name, date_start,
 #                        date_end, has_ended, participants}, or null.
 #   slack_attach_mark -- the text form's marker, "" for a plain message:
-#                        "[2 files: notes (canvas, F..), ...]" and
+#                        "[2 files: notes (canvas, 512 bytes, F..), ...]" and
 #                        "[huddle R..: <name>, ended]".
 #
 # A file's kind in the marker is its `mode` when that is not the ordinary
 # "hosted" (canvas, snippet, tombstone, hidden_by_limit, external all change
-# how it can be read), else its filetype, else its mimetype.
+# how it can be read), else its mimetype, else its filetype. Its label is its
+# name, else its title, else its id. The size is left out when Slack sent
+# none (a file_access=check_file_info stub carries only an id).
 SLACK_JQ_ATTACH_DEFS='
 def slack_files_meta:
-  if ((.files // []) | type) == "array" and ((.files // []) | length) > 0
-  then [ .files[] | select(type == "object")
-         | {id: (.id // null), name: (.name // null), title: (.title // null),
-            filetype: (.filetype // null), mimetype: (.mimetype // null),
-            size: (.size // null), mode: (.mode // null)} ]
-  else null end;
+  [ (.files | if type == "array" then .[] else empty end) | select(type == "object")
+    | {id: (.id // null), name: (.name // null), title: (.title // null),
+       filetype: (.filetype // null), mimetype: (.mimetype // null),
+       size: (.size // null), mode: (.mode // null)} ] as $f
+  | if ($f | length) > 0 then $f else null end;
+def slack_first_set(f): [f | select(type == "string" and . != "")] | first;
 def slack_room_meta:
   if (.room | type) == "object"
   then .room | {id: (.id // null), name: (.name // null),
@@ -489,16 +491,21 @@ def slack_attach_mark:
       else "[" + ($f | length | tostring)
            + (if ($f | length) == 1 then " file: " else " files: " end)
            + ( $f | map(
-                 ((.title // .name // .id // "unnamed") | tostring) + " ("
-                 + ((if (.mode // "hosted") != "hosted" then .mode
-                     else (.filetype // .mimetype // "file") end) | tostring)
-                 + ", " + ((.id // "no id") | tostring) + ")")
+                 (slack_first_set(.name, .title, .id) // "unnamed") + " ("
+                 + ( [ (slack_first_set(
+                          (if (.mode // "hosted") != "hosted" then .mode else empty end),
+                          .mimetype, .filetype) // "file"),
+                       (if .size == null then empty
+                        else (.size | tostring) + " bytes" end),
+                       ((.id // "no id") | tostring) ]
+                     | join(", ") )
+                 + ")")
                | join(", ") )
            + "]"
       end ) as $fm
   | ( if $r == null then ""
       else "[huddle " + (($r.id // "no id") | tostring)
-           + (if $r.name != null then ": " + ($r.name | tostring) else "" end)
+           + ((slack_first_set($r.name) | if . == null then "" else ": " + . end))
            + (if $r.has_ended == true then ", ended" else "" end)
            + "]"
       end ) as $rm

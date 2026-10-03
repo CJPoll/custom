@@ -608,7 +608,7 @@ run_bin read-thread "${ENG_CHANNEL}" 1.0
 D1822_L1="$(printf '%s\n' "${OUT}" | grep '^1\.0' || true)"
 D1822_L3="$(printf '%s\n' "${OUT}" | grep '^3\.0' || true)"
 if [[ "${RC}" == 0 ]] \
-   && [[ "${D1822_L1}" == *"[2 files: console (jpg, F0FAKE0001), notes (canvas, F0FAKE0002)]"* ]] \
+   && [[ "${D1822_L1}" == *"[2 files: console.jpg (image/jpeg, 2048 bytes, F0FAKE0001), notes (canvas, 512 bytes, F0FAKE0002)]"* ]] \
    && [[ "${OUT}" != *"xoxe-secret"* ]] \
    && [[ "$(printf '%s\n' "${OUT}" | grep '^2\.0' || true)" == *"[huddle R0FAKE0001: standup huddle, ended]"* ]] \
    && [[ "${D1822_L3}" == "$(printf '3.0\tcody\tplain\t')" ]]; then
@@ -622,10 +622,38 @@ run_bin read-channel "${ENG_CHANNEL}" --limit 5 --json
 D1822_CF="$(printf '%s\n' "${OUT}" | jq -c '.files | map(.id)' 2>/dev/null || true)"
 run_bin read-channel "${ENG_CHANNEL}" --limit 5
 if [[ "${D1822_CF}" == '["F0FAKE0001","F0FAKE0002"]' ]] \
-   && [[ "${OUT}" == *"[2 files: console (jpg, F0FAKE0001), notes (canvas, F0FAKE0002)]"* ]] \
+   && [[ "${OUT}" == *"[2 files: console.jpg (image/jpeg, 2048 bytes, F0FAKE0001), notes (canvas, 512 bytes, F0FAKE0002)]"* ]] \
    && [[ "${OUT}" != *"xoxe-secret"* ]]; then
   ok "read-channel: files[] pass through in --json and are marked in text"
 else bad "read-channel: files[] pass through in --json and are marked in text" "json-ids='${D1822_CF}' out='${OUT}'"; fi
+
+# A file_access=check_file_info stub carries only an id: one file reads
+# singular, with no size. A live huddle with no name is not marked ended.
+# A files key that is not an array is no files, never fatal.
+setup_case
+seed_caches
+fixture conversations.history "{\"ok\":true,\"messages\":[{\"ts\":\"4.0\",\"user\":\"${CODY}\",\"text\":\"\",\"files\":[{\"id\":\"F0FAKE0003\",\"file_access\":\"check_file_info\"}]},{\"ts\":\"5.0\",\"user\":\"${CODY}\",\"text\":\"\",\"subtype\":\"huddle_thread\",\"room\":{\"id\":\"R0FAKE0002\",\"has_ended\":false}},{\"ts\":\"6.0\",\"user\":\"${CODY}\",\"text\":\"odd\",\"files\":\"not-a-list\"}],\"response_metadata\":{\"next_cursor\":\"\"}}"
+run_bin read-channel "${ENG_CHANNEL}" --limit 5
+if [[ "${RC}" == 0 ]] \
+   && [[ "$(printf '%s\n' "${OUT}" | grep '^4\.0' || true)" == "$(printf '4.0\tcody\t[1 file: F0FAKE0003 (file, F0FAKE0003)]\t')" ]] \
+   && [[ "$(printf '%s\n' "${OUT}" | grep '^5\.0' || true)" == "$(printf '5.0\tcody\t[huddle R0FAKE0002]\t')" ]] \
+   && [[ "$(printf '%s\n' "${OUT}" | grep '^6\.0' || true)" == "$(printf '6.0\tcody\todd\t')" ]]; then
+  ok "read-channel: an id-only file reads singular with no size; a live unnamed huddle; a non-list files is none"
+else bad "read-channel: an id-only file reads singular with no size; a live unnamed huddle; a non-list files is none" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+
+# A files list of non-objects is no files (six keys, no marker), not
+# "[0 files: ]". An empty title falls through to the name.
+setup_case
+seed_caches
+fixture conversations.history "{\"ok\":true,\"messages\":[{\"ts\":\"7.0\",\"user\":\"${CODY}\",\"text\":\"junk\",\"files\":[1,\"a\"]},{\"ts\":\"8.0\",\"user\":\"${CODY}\",\"text\":\"\",\"files\":[{\"id\":\"F0FAKE0004\",\"name\":\"\",\"title\":\"\",\"mimetype\":\"application/pdf\",\"filetype\":\"\",\"size\":10}]}],\"response_metadata\":{\"next_cursor\":\"\"}}"
+run_bin read-channel "${ENG_CHANNEL}" --limit 5 --json
+D1822_K7="$(printf '%s\n' "${OUT}" | jq -c 'select(.ts == "7.0") | keys' 2>/dev/null || true)"
+run_bin read-channel "${ENG_CHANNEL}" --limit 5
+if [[ "${D1822_K7}" == '["name","subtype","text","thread_ts","ts","user"]' ]] \
+   && [[ "$(printf '%s\n' "${OUT}" | grep '^7\.0' || true)" == "$(printf '7.0\tcody\tjunk\t')" ]] \
+   && [[ "$(printf '%s\n' "${OUT}" | grep '^8\.0' || true)" == "$(printf '8.0\tcody\t[1 file: F0FAKE0004 (application/pdf, 10 bytes, F0FAKE0004)]\t')" ]]; then
+  ok "read-channel: a files list of non-objects is no files; empty name and title fall back to the id"
+else bad "read-channel: a files list of non-objects is no files; empty name and title fall back to the id" "keys7='${D1822_K7}' out='${OUT}'"; fi
 
 echo
 echo "-- the hook: when it runs --------------------------------------------------"
