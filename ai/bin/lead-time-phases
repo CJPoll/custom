@@ -63,6 +63,8 @@ HELP = <<~TXT
 
   Standalone-PASS flow (a clean critic PASS stood before integration-gate):
     implement  dispatch stamp -> first harness_gate.run or gate.run for the ticket
+               (after a restart from a park that a local ticket.dispatched
+               records, the first gate run at or after the stamp: DND-1838)
     verify     first gate run -> last critic PASS before integration-gate
     queue      that PASS -> the integration_gate.run start
     integrate  the integration_gate.run's duration

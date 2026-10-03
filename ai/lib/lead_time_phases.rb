@@ -473,8 +473,32 @@ module LeadTimePhases
       runs = Match.for_unit(events.items, landing, GATE_RUN_EVENTS)
       return missing(telemetry_miss(events, "no #{GATE_RUN_DESC} for #{landing['ticket']}")) if runs.empty?
 
+      restart = restart_at(landing, events)
+      if restart
+        since = runs.reject { |e| Match.at(e) < restart }
+        if since.empty?
+          return missing("no #{GATE_RUN_DESC} for #{landing['ticket']} since its restart at #{Util.iso(restart)} " \
+                         "(#{runs.size} before it, from before the park)")
+        end
+        runs = since
+      end
       first = runs.min_by { |e| Match.at(e) }
       found(Match.at(first), "telemetry #{first['event']}")
+    end
+
+    # The dispatch stamp, when a ticket.dispatched for the unit recorded it as
+    # a restart (DND-1838: a re-dispatch from a park restarts the stamp). Gate
+    # runs before it belong to the time before the park, so they are not the
+    # first gate of this dispatch. With no such event (another machine
+    # dispatched it), a gate before the stamp stays value's "invalid".
+    def restart_at(landing, events)
+      start = landing["start"]
+      return nil unless start
+
+      hit = Match.for_unit(events.items, landing, "ticket.dispatched").any? do |e|
+        Match.attr(e, "restart") == true && Match.at(e).to_i == start.to_i
+      end
+      hit ? start : nil
     end
 
     # The last clean critic PASS before the integration run started (with

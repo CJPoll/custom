@@ -1,11 +1,11 @@
 # frozen_string_literal: true
 
-# Deterministic suite for lead time across a Park (DND-1838): the dispatch
+# Deterministic suite for lead time across a park (DND-1838): the dispatch
 # stamp mark-in-progress writes, read back by ai/bin/lead-time's NotionStart,
 # through ONE stateful fake Notion that applies each PATCH to the page. So the
 # lead measured here is the lead the two real tools produce together.
 #
-# Cases (ai/docs/lead-time-tracking.md -> Decisions -> A Park restarts the start):
+# Cases (ai/docs/lead-time-tracking.md -> Decisions -> A park restarts the start):
 #   - a ticket Parked then re-dispatched measures, and the parked span is not
 #     in its lead;
 #   - a ticket never Parked is unchanged;
@@ -143,5 +143,5 @@ end
 warn "park_test: FAIL (#{$failures.size} of #{$checks})"
 $failures.each { |f| warn "  - #{f}" }
 warn "Fix: a re-dispatch from Parked must restamp the dispatch date (mark-in-progress), and lead-time must " \
-     "read that stamp, so a Park is measurable and its span is never lead time (ai/docs/lead-time-tracking.md)."
+     "read that stamp, so a park is measurable and its span is never lead time (ai/docs/lead-time-tracking.md)."
 exit 1

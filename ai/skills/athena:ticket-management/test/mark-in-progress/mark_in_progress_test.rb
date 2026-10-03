@@ -138,13 +138,19 @@ check("a stamped re-dispatch from Attention Given keeps its stamp (no park, no r
   attn_kept.patches.first[2]["properties"].keys == ["Status"]
 end
 
-# --- DND-1838: correcting a stamp that was kept across a Park.
+# --- DND-1838: correcting a stamp that was kept across a park.
 fix = FakeNotion.new(page("2026-09-28T01:00:00.000Z", status: "Done"))
 code, out, = run(["--ref", "DND-1318", "--backfill", "--restart", "--at", "2026-09-30T04:00:00Z"], fix)
 check("DND-1838 --backfill --restart --at overwrites a kept stamp, status untouched") do
   code == 0 && fix.patches.size == 1 &&
     fix.patches.first[2]["properties"] == { "In Progress at" => { "date" => { "start" => "2026-09-30T04:00:00Z" } } } &&
     out.include?("restarted") && out.include?("2026-09-28T01:00:00.000Z")
+end
+blank = FakeNotion.new(page(nil, status: "Done"))
+code, out, = run(["--ref", "DND-1318", "--backfill", "--restart", "--at", "2026-09-30T04:00:00Z"], blank)
+check("DND-1838 --backfill --restart on an unstamped ticket stamps it and says nothing was discarded") do
+  code == 0 && blank.patches.first[2].dig("properties", "In Progress at", "date", "start") == "2026-09-30T04:00:00Z" &&
+    out.include?("discarded no earlier stamp")
 end
 code, _o, err = run(["--ref", "DND-1318", "--restart"], FakeNotion.new(page(nil)))
 check("DND-1838 --restart without --backfill --at is a usage error with Fix:") do
@@ -285,6 +291,11 @@ check("DND-1838 a work re-dispatch from an overlay restart status resets the ove
     "Synthetic stamp" => { "date" => { "start" => "2026-09-30T05:32:00Z" } },
   } && out.include?("restarted") && err.empty?
 end
+wattn = FakeNotion.new(work_page("2026-09-29T01:00:00.000Z", status: "Attention Given"))
+_c, _o, err = run(["--ref", "ZQ-12"], wattn, work: WORK_R)
+check("DND-1838 with the restart key declared, a non-park re-dispatch keeps its stamp and names no key") do
+  wattn.patches.first[2]["properties"].keys == ["Status"] && err.empty?
+end
 wnoprop = FakeNotion.new(work_page(nil, with_property: false))
 code, _o, err = run(["--ref", "ZQ-12"], wnoprop)
 check("a work tracker without the stamp property exits 3 naming it, with Fix:") do
@@ -384,6 +395,15 @@ check("T3d DND-1838 a re-dispatch from Parked gives restart=true and records the
   r.events.size == 1 && r.failures.empty? &&
     e["attrs"] == { "tracker" => "dnd", "first_dispatch" => false, "backfill" => false, "restart" => true,
                     "previous_stamp" => "2026-09-28T01:00:00.000Z" }
+end
+
+fresh_store
+run(["--ref", "DND-9001", "--backfill", "--restart", "--at", "2026-09-30T04:00:00Z"],
+    FakeNotion.new(page(nil, status: "Done")))
+r = dispatched
+check("T3e DND-1838 a restart that discarded nothing gives restart=true and no previous_stamp") do
+  r.events.size == 1 &&
+    r.events.first["attrs"] == { "tracker" => "dnd", "first_dispatch" => false, "backfill" => true, "restart" => true }
 end
 
 fresh_store

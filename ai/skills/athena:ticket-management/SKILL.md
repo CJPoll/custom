@@ -53,13 +53,15 @@ Always refer to a ticket as `<PREFIX>-<number>`, never by raw page id.
    `~/dev/custom/ai/docs/lead-time-tracking.md` → *Decisions*). A move made
    any other way leaves no stamp, and `ai/bin/lead-time` then reports that
    ticket as could-not-measure. For an unstamped ticket whose dispatch time is
-   on record, add `--backfill --at <that time>`; for a stamp kept across a
-   Park, `--backfill --restart --at <re-dispatch time>`. With no private
-   overlay a work ticket is refused (exit 3, nothing written): move it with
-   the connector, and it has no start.
+   on record, add `--backfill --at <that time>` (a stamp kept across a park:
+   *Decisions* → *Correcting a stamp made before this rule*). Resuming only
+   the boarding of a `Parked` ticket's finished PR, with no captain, is not a
+   dispatch: move it with the connector, so the stamp is kept. With no
+   private overlay a work ticket is refused (exit 3, nothing written): move it
+   with the connector, and it has no start.
 
    **Later (2026-10-03, DND-1838):** this read "a re-dispatch keeps the first
-   stamp". Superseded: a stamp kept across a Park counted the park as lead
+   stamp". Superseded: a stamp kept across a park counted the park as lead
    time (DND-1438), and an unstamped ticket re-dispatched from `Parked` got no
    stamp at all (DND-1095).
 3. **→ `Needs Attention`** (only for what needs Cody; see the Notes rule) — set `Assignee` = **Cody**, write the exact step

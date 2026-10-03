@@ -6,6 +6,7 @@
 # takes the DND ids from next_mission_notion's constants.
 #
 # Lead time starts at captain dispatch: the ticket's first move to In Progress,
+# or its re-dispatch from a park, which restarts the stamp (DND-1838),
 # stamped in a date property by
 # ai/skills/athena:ticket-management/scripts/mark-in-progress and read back by
 # ai/bin/lead-time (ai/docs/lead-time-tracking.md -> The START marker). Two

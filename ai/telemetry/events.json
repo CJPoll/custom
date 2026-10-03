@@ -75,7 +75,7 @@
       }
     },
     "ticket.dispatched": {
-      "description": "A ticket moved to In Progress (or backfilled) by mark-in-progress, after its Notion write returned; never on a refusal, a dry run or a run that wrote nothing. at = the dispatch instant (--at, else now), a point event; head = the caller cwd HEAD, not the work. unit = the ticket ref (explicit). first_dispatch = this write set a first stamp. restart = this write replaced the stamp at a re-dispatch from a park, or by --backfill --restart (DND-1838); previous_stamp = the stamp it discarded, absent when there was none. Emitter: DND-1476.",
+      "description": "A ticket moved to In Progress (or backfilled) by mark-in-progress, after its Notion write returned; never on a refusal, a dry run or a run that wrote nothing. at = the dispatch instant (--at, else now), a point event; head = the caller cwd HEAD, not the work. unit = the ticket ref (explicit). first_dispatch = this write set the stamp on a first dispatch (false on every restart, even one that set a ticket's only stamp). restart =this write replaced the stamp at a re-dispatch from a park, or by --backfill --restart (DND-1838); previous_stamp = the stamp it discarded, absent when there was none. Emitter: DND-1476.",
       "attrs": {
         "tracker": "label",
         "first_dispatch": "bool",

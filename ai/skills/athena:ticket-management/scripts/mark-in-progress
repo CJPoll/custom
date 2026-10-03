@@ -25,7 +25,7 @@
 #     Backlog);
 #   - the stamp -> now (or --at), REPLACING any earlier one, when the ticket
 #     is moving from one of the tracker's restart statuses (DND: Parked; the
-#     work tracker: the overlay's optional .work.restart_dispatch_from). A Park
+#     work tracker: the overlay's optional .work.restart_dispatch_from). A park
 #     restarts the start, so the parked span is never lead time and a
 #     re-dispatch from a park is always measurable (DND-1838,
 #     ai/docs/lead-time-tracking.md -> Decisions). The line printed names the
@@ -69,11 +69,13 @@ module MarkInProgress
            mark-in-progress --ref TICKET --backfill [--restart] --at ISO8601 [--dry-run]
            mark-in-progress --help
 
-    Move a ticket to In Progress and, only if it has none yet, stamp its
+    Move a ticket to In Progress at a captain dispatch, and stamp its
     dispatch date: the START ai/bin/lead-time measures lead time from
-    (DND-1318). A re-dispatch from a park (DND: Parked) restarts the stamp at
-    the re-dispatch, so the parked span is never lead time (DND-1838); any
-    other re-dispatch keeps its first stamp. Assignee is not touched.
+    (DND-1318). A first dispatch stamps only an empty date. A re-dispatch from
+    a park (DND: Parked; work: the overlay's .work.restart_dispatch_from)
+    restarts the stamp at the re-dispatch, so the parked span is never lead
+    time (DND-1838). Any other re-dispatch keeps its stamp. Assignee is not
+    touched.
 
       --ref TICKET  DND-N: DND Tickets, date "In Progress at" (notion-personal).
                     <work prefix>-N: the work tracker (notion-work). Its prefix,
@@ -86,7 +88,7 @@ module MarkInProgress
                     past In Progress whose dispatch time is on record. Needs --at.
       --restart     with --backfill: replace an existing stamp with --at, the
                     re-dispatch time of a ticket whose stamp was kept across a
-                    Park. The line printed names the stamp it discarded.
+                    park. The line printed names the stamp it discarded.
       --dry-run     print what would be written; write nothing
       --help        this text
 
@@ -113,7 +115,7 @@ module MarkInProgress
   # says the stamp was reset, previous is the stamp it discarded (or nil);
   # note names an overlay key whose absence could hide a park.
   #
-  # A Park restarts the start (DND-1838, ai/docs/lead-time-tracking.md ->
+  # A park restarts the start (DND-1838, ai/docs/lead-time-tracking.md ->
   # Decisions): a move from one of the tracker's restart statuses stamps the
   # re-dispatch, replacing any earlier stamp, so the parked span is never lead
   # time and a re-dispatch from a park is always measurable.
@@ -194,7 +196,8 @@ module MarkInProgress
     restart = opts.fetch("--restart", false)
     if restart && !backfill
       raise BadUsage, "--restart corrects a recorded stamp and needs --backfill --at, the re-dispatch time. " \
-                      "Fix: pass --backfill --restart --at ISO8601 (a move from Parked restarts by itself)."
+                      "Fix: pass --backfill --restart --at ISO8601 (a move from one of the tracker's park " \
+                      "statuses restarts by itself)."
     end
 
     at = opts["--at"] ? parse_at(opts["--at"]) : now.utc.iso8601

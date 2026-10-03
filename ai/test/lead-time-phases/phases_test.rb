@@ -107,6 +107,30 @@ check("P4 a gate before the dispatch stamp: implement is invalid") { ph4["implem
 check("P4 never negative") { ph4.values.none? { |c| c["s"].is_a?(Integer) && c["s"].negative? } }
 check("P4 the invalid reason names both anchors") { ph4["implement"]["na_reason"].start_with?("invalid: gate_first") }
 
+# DND-1838: a re-dispatch from a park restarts the stamp, and its
+# ticket.dispatched says so. A gate run before it is from before the park.
+restarted = [ev("ticket.dispatched", "2026-10-01T01:00:00.000Z", attrs: { "tracker" => "dnd", "restart" => true })] +
+            early
+ph4b = fixture { L::Phases.compute(anchors(l, S.ok(restarted))) }
+check("P4b DND-1838 after a restart, a gate before it is not the first gate: implement is measured") do
+  ph4b.dig("implement", "s") == 3600 && !ph4b["implement"].key?("invalid")
+end
+check("P4b the phases still sum to landing - dispatch") do
+  ph4b.values.sum { |c| c["s"].to_i } == (l["landed_at"] - l["start"]).to_i
+end
+not_restart = [ev("ticket.dispatched", "2026-10-01T01:00:00.000Z", attrs: { "tracker" => "dnd", "restart" => false })] +
+              early
+check("P4c a dispatch event that is not a restart leaves a gate before the stamp invalid") do
+  fixture { L::Phases.compute(anchors(l, S.ok(not_restart))) }.dig("implement", "invalid") == true
+end
+only_before = [ev("ticket.dispatched", "2026-10-01T01:00:00.000Z", attrs: { "tracker" => "dnd", "restart" => true }),
+               ev("harness_gate.run", "2026-10-01T00:30:00Z", duration_s: 10.0)]
+ph4d = fixture { L::Phases.compute(anchors(l, S.ok(only_before))) }
+check("P4d every gate before the restart: implement is n/a naming the restart, never invalid or 0") do
+  ph4d.dig("implement", "s").nil? && !ph4d["implement"].key?("invalid") &&
+    ph4d.dig("implement", "na_reason").to_s.include?("since its restart at 2026-10-01T01:00:00Z")
+end
+
 json = JSON.parse(JSON.generate(ph2))
 check("P5 a null phase serializes as JSON null plus na_reason, never 0") do
   json["implement"]["s"].nil? && json["implement"].key?("s") && !json["implement"]["na_reason"].to_s.empty?
