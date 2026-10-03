@@ -2106,6 +2106,44 @@ jq -e --arg keep "$FIXTURE_KEEP_HELD" '($keep | split("\n")) as $k | [.surfaces[
   && ok "lb11 every kept-held entry is still a pattern of the manifest" \
   || bad "lb11 FIXTURE_KEEP_HELD names a pattern the manifest no longer holds. Fix: drop or rename the stale entry in FIXTURE_KEEP_HELD in this file."
 
+# ---------------------------------------------------------------- DND-1878
+# One gate per worktree. A second run in the same worktree while one holds the
+# worktree lock exits 7 with a Fix: naming the holder, never reads as a pass,
+# and runs no gate. A run in a DIFFERENT worktree is unaffected. Blocked on
+# events (fifos), never on time. Three slots, so on unfixed code the second run
+# is admitted (and passes) rather than queueing behind the first.
+R="${TMP}/wl"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+record_pass "$R"
+mkfifo "${TMP}/wl-started" "${TMP}/wl-release"
+printf '#!/bin/sh\necho up > "%s"\nread _ < "%s"\nexit 0\n' "${TMP}/wl-started" "${TMP}/wl-release" > "${R}/g.sh"; chmod +x "${R}/g.sh"
+printf '#!/bin/sh\ntouch "%s"\nexit 0\n' "${R}/WL_SECOND_RAN" > "${R}/gp.sh"; chmod +x "${R}/gp.sh"
+printf '/WL_SECOND_RAN\n' >> "${R}/.git/info/exclude"
+( cd "$R" && ATHENA_TEST_SLOTS=3 "$GATE" --target main --no-fetch --gate "${R}/g.sh" >"${TMP}/wl-first.out" 2>&1 ) &
+WL_FIRST=$!
+read -r _ < "${TMP}/wl-started"
+WL_HEAD="$(git -C "$R" rev-parse HEAD)"
+out="$( cd "$R" && ATHENA_TEST_SLOTS=3 "$GATE" --target main --no-fetch --gate "${R}/gp.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 7 ] && ok "wl1 a second run in the same worktree exits 7" || bad "wl1 expected exit 7, got $rc" "$out"
+grep -q 'Fix:' <<<"$out" && grep -q 'tail --pid' <<<"$out" && ok "wl1 Fix: tells the caller to block on the holder" || bad "wl1 Fix: missing or does not name tail --pid" "$out"
+grep -q "pid=${WL_FIRST}\b" <<<"$out" && ok "wl1 names the holder's pid" || bad "wl1 did not name the holder pid ${WL_FIRST}" "$out"
+grep -q 'INTEGRATION OK' <<<"$out" && bad "wl1 the refused run printed INTEGRATION OK" "$out" || ok "wl1 the refused run prints no INTEGRATION OK"
+[ ! -f "${R}/WL_SECOND_RAN" ] && ok "wl1 the refused run did not run its gate" || bad "wl1 the second run was admitted and ran its gate"
+# A different worktree of the same repo is unaffected.
+( cd "$R" && git worktree add -q "${TMP}/wl-other" -b wl-other >/dev/null 2>&1 )
+record_pass "${TMP}/wl-other"
+out="$( cd "${TMP}/wl-other" && ATHENA_TEST_SLOTS=3 "$GATE" --target main --no-fetch --gate "${R}/gp.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && ok "wl2 a run in a different worktree is admitted" || bad "wl2 expected exit 0 in another worktree, got $rc" "$out"
+# The holder finishes; the lock is released with it.
+echo go > "${TMP}/wl-release"
+wait "$WL_FIRST"; wl_rc=$?
+[ "$wl_rc" -eq 0 ] && ok "wl3 the holder still finishes green" || bad "wl3 holder exited ${wl_rc}" "$(cat "${TMP}/wl-first.out")"
+[ -f "$(git -C "$R" rev-parse --path-format=absolute --git-common-dir)/integration-receipts/${WL_HEAD}.json" ] \
+  && ok "wl3 the holder's receipt stands" || bad "wl3 the holder's receipt is missing"
+out="$( cd "$R" && ATHENA_TEST_SLOTS=3 "$GATE" --target main --no-fetch --gate "${R}/gp.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && [ -f "${R}/WL_SECOND_RAN" ] && ok "wl4 the lock is released when the holder exits" || bad "wl4 a later run was refused, rc=$rc" "$out"
+"$GATE" --help 2>&1 | grep -q '^ *7 .*worktree' && ok "wl5 --help documents exit 7" || bad "wl5 --help does not document exit 7"
+
 # ---------------------------------------------------------------- summary
 printf '\nintegration-gate self-test: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
