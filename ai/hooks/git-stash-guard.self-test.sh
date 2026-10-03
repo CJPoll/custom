@@ -1301,6 +1301,18 @@ cat > t.exs <<'X'
 X
 git status
 EOF
+d2 "Z27. prose aside opening with a substitution, after an argument word" allow <<'EOF'
+cat >> notes.md <<X
+## RESTART HANDOFF ($(date -u +%H:%MZ), admiral)
+X
+git status
+EOF
+d2 "Z28. a renaming qualifier on an empty pattern matches no file" allow <<'EOF'
+env (:u) ls; git status
+EOF
+d2 "Z29. a ; inside a group is a zsh parse error" allow <<'EOF'
+./g(x;|i)t stash pop
+EOF
 
 echo "== F: fail-open =="
 run ''

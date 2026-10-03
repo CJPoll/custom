@@ -180,6 +180,35 @@
 # its off-switch was a list of programs that run text, and a program not on
 # it (`... | make -f -`) could still run an encoded alias definition.
 #
+# ZSH GLOB GROUPS AND QUALIFIERS (DND-1858): zsh rewrites a command word
+# through a glob group or a glob qualifier even when the word holds no other
+# glob character (`./(x|g)it stash pop`, `./ab(:s/ab/git/) sp` both run
+# git). The tokenizer splits such a word at its parens, `|` and blanks, so
+# zseg finds the whole zsh word (a blank, newline or `|` inside the paren
+# stays in it) and zcat judges it, checked against zsh 5.9:
+#   * a group or alternation (`(a|b)`, one alternative included, `g(i)t`)
+#     is expanded into its alternatives and matched like a glob word: may
+#     be git when any alternative can be git or git-stash;
+#   * a trailing qualifier list (`(...)` with no `|` or `(`) that holds a
+#     `:` modifier, `e`, `+`, `P`, or an `oe`/`o+` sort can rename the
+#     match or run code: may be git. A filter-only list (`(.)`, `(x)`) keeps
+#     the pattern itself. A list zsh refuses (an unknown character, a
+#     missing number, no closing delimiter) runs nothing: jq `select(.a==1)`,
+#     python `print(a, b)`;
+#   * `(#...)` flags work only under extendedglob, which GLOBOPT already
+#     reads as may be git; under default options `#` in a group is literal
+#     and in a qualifier list is refused;
+#   * nothing runs for a qualifier on an empty pattern (prose `x (written
+#     ...)`), a group holding `/`, an unbalanced paren, or a `;` or `&`
+#     inside the paren (zsh: "bad pattern", "parse error");
+#   * an expansion or backtick in the word, or a leading tilde: may be git.
+# A may-be-git word is judged like a glob command word, with the words
+# after the whole zsh word as its arguments. A zsh word that starts with
+# its own paren is in command position only through the word before it
+# (env, sudo, ...). Accepted false positive: code in a payload or heredoc
+# whose call is qualifier-shaped and holds an expansion or a `:` (awk
+# `length($0)`, ruby `printf("%3d", $.)`).
+#
 # ZSH: the Bash tool runs zsh, so zsh-only word rewrites count too: EQUALS
 # (`=git` is git's path), global aliases (`alias -g`, any word position),
 # suffix aliases (`alias -s`), and the noglob/nocorrect/- precommand modifiers.
