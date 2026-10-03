@@ -1337,7 +1337,7 @@ if [ "${#PRODUCT_LOCKS[@]}" -gt 0 ]; then
   td_out="$(product_run "${PRODUCT_TOOL}" teardown 2>&1 </dev/null)" || td_rc=$?
   [ -z "${td_out}" ] || product_note "${td_out}"
   # A product lane that was cut is evidence of work, whether or not it holds a commit.
-  if grep '^product_lane:' <<<"${td_out}" | grep -qv 'none (no lane cut)$'; then PRODUCT_WORKED=1; fi
+  if grep -qP '^product_lane:(?!.*none \(no lane cut\)$)' <<<"${td_out}"; then PRODUCT_WORKED=1; fi
   [ "${td_rc}" -eq 0 ] || PRODUCT_WORKED=1
   if [ "${td_rc}" -ne 0 ]; then
     PRODUCT_STRANDED=1; STRANDED=1
