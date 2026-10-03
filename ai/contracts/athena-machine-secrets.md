@@ -231,6 +231,7 @@ Each entry:
 | `kind` | yes | `[a-z0-9-]+`. `dotenv` marks a file that holds several secrets (*Where* → *The dotenv carve-out*); `with-secret` refuses it. |
 | `restart` | yes | The exact command that makes each consumer pick up a new value, or `none` with the reason. |
 | `rotate` | yes | Where the new value is minted. |
+| `user` | no | The local account that holds the file, when it is not the account running the check (a CI runner user's `config.toml`, DND-1937). `[a-z_][a-z0-9_-]{0,31}`. `path` must then be absolute, and `copies` is not allowed. |
 
 A top-level key starting with `_` is a comment. Any other unknown key, at the
 top level or in an entry, is malformed.
@@ -246,6 +247,14 @@ as an entry's `name` is never echoed.
 
 The public registry declares the harness's own secrets. A secret that is absent
 on a machine is fine: the check lists it as `not provisioned here: NAME`.
+
+**An entry held by another account (`user`).** Probe (c) checks the file is
+owned by that account, mode `0600`/`0400`, in a directory that is not group- or
+world-writable. The account missing on a machine reads `not provisioned here`.
+A file the checking account cannot stat (it sits in that account's `0700`
+home) reads `not checked as this account: NAME …; run as root or USER to check
+it`: named per entry, never `ok`, and not a finding. `with-secret` refuses such
+an entry: a session never loads another account's secret.
 
 ## The env allowlist
 
@@ -423,8 +432,8 @@ because it carries the process environ.
 `exec`s `cmd` with `NAME` set to the file's content in that process's env
 only. The value never goes in argv, and nothing is printed from it. One
 trailing newline is dropped. It refuses, with a `Fix:` line and no exec: an
-unknown name, a malformed registry, a `dotenv` entry, a name that is not an
-env identifier, a missing, empty, or mis-permissioned file, and a missing
+unknown name, a malformed registry, a `dotenv` entry, an entry held by
+another account (`user`), a name that is not an env identifier, a missing, empty, or mis-permissioned file, and a missing
 command.
 
 ## secret-env-warn

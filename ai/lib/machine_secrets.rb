@@ -46,6 +46,8 @@ module MachineSecrets
   ENTRY_NAME_RE = /\A[A-Za-z0-9][A-Za-z0-9_.-]*\z/.freeze
   ENV_NAME_RE = /\A[A-Za-z_][A-Za-z0-9_]*\z/.freeze
   KIND_RE = /\A[a-z0-9-]+\z/.freeze
+  # A local account name (shadow's useradd rule, at most 32 characters).
+  USER_RE = /\A[a-z_][a-z0-9_-]{0,31}\z/.freeze
   REQUIRED_STRINGS = %w[name path kind restart rotate].freeze
   ALLOWLIST_RULES = %w[file-path git-config-key].freeze
   GIT_CONFIG_KEY_RE = /\AGIT_CONFIG_KEY_\d+\z/.freeze
@@ -87,7 +89,7 @@ module MachineSecrets
 
   # ---------------------------------------------------------------- registry
 
-  Entry = Struct.new(:name, :path, :copies, :consumers, :kind, :restart, :rotate, :source, keyword_init: true)
+  Entry = Struct.new(:name, :path, :copies, :consumers, :kind, :restart, :rotate, :user, :source, keyword_init: true)
 
   # text -> [Entry]. Raises Malformed with a reason that never quotes a value.
   def parse_registry(text, source)
@@ -148,11 +150,14 @@ module MachineSecrets
     path_problem(raw["path"]).then { |p| raise Malformed, "#{where}: path #{p}" if p }
     copies && path_problem(copies).then { |p| raise Malformed, "#{where}: copies #{p}" if p }
 
-    unknown = raw.keys - %w[name path copies consumers kind restart rotate]
+    user = raw["user"]
+    user_problem(user, raw["path"], copies).then { |p| raise Malformed, "#{where}: #{p}" if p }
+
+    unknown = raw.keys - %w[name path copies consumers kind restart rotate user]
     raise Malformed, "#{where}: unknown field(s) #{printable(unknown)}" unless unknown.empty?
 
     Entry.new(name: name, path: raw["path"], copies: copies, consumers: consumers, kind: raw["kind"],
-              restart: raw["restart"], rotate: raw["rotate"], source: source)
+              restart: raw["restart"], rotate: raw["rotate"], user: user, source: source)
   end
 
   # Keys for a message: a plain identifier is shown, anything else is only
@@ -160,6 +165,19 @@ module MachineSecrets
   def printable(keys)
     shown, hidden = keys.map(&:to_s).partition { |k| k.match?(/\A[A-Za-z_][A-Za-z0-9_-]{0,40}\z/) && !looks_secret?(k) }
     [*shown.sort, (hidden.empty? ? nil : "#{hidden.size} unprintable")].compact.join(", ")
+  end
+
+  # nil when an entry's optional `user` (the local account that holds the
+  # file, e.g. a CI runner user) is well formed, else the reason. Such a file
+  # lives in that account's tree, so its path is absolute: `~/` would expand
+  # against the checking session's HOME, a wrongly computed key.
+  def user_problem(user, path, copies)
+    return nil if user.nil?
+    return "user is not a local account name ([a-z_][a-z0-9_-]{0,31})" unless user.is_a?(String) && USER_RE.match?(user)
+    return "path of an entry held by user #{user} is not absolute" unless path.start_with?("/")
+    return "copies is not supported on an entry held by user #{user}" unless copies.nil?
+
+    nil
   end
 
   # nil when path is well formed, else the reason.

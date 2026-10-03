@@ -365,6 +365,49 @@ check -- --probe c
 expect "(c) a landed entry removed on the branch is still checked" 1 "FAIL  landed-only ~/.fx/landed-only: mode 0644"
 restore_repo; rm -f "${FHOME}/.fx/landed-only"
 
+# An entry held by another local account (`user`, DND-1937: a CI runner's
+# config.toml). Its owner must be that account; a file this account cannot
+# stat is named "not checked", never "ok".
+ME="$(id -un)"
+held() { # <name> <abs path> <user> [extra json]
+  printf '{"name":"%s","path":"%s","consumers":["fixture"],"kind":"runner-config","restart":"none","rotate":"fixture","user":"%s"%s}' \
+    "$1" "$2" "$3" "${4:-}"
+}
+mkdir -p "${TMP}/held"; chmod 700 "${TMP}/held"
+( umask 077; printf 'x\n' > "${TMP}/held/config.toml" )
+write_registry "${BASE_ENTRIES[@]}" "$(held fx-held "${TMP}/held/config.toml" "${ME}")"
+check -- --probe c
+expect "(c) a held entry owned by its user, 0600, passes" 0 "ok    fx-held .*held/config.toml \(held by ${ME}\)"
+write_registry "${BASE_ENTRIES[@]}" "$(held fx-held "${TMP}/held/config.toml" root)"
+check -- --probe c
+expect "(c) a held entry owned by another account than its user is a finding" 1 "FAIL  fx-held .*owned by uid"
+expect "(c) its Fix chowns to the user" 1 "Fix: chown root:root "
+write_registry "${BASE_ENTRIES[@]}" "$(held fx-held "${TMP}/held/config.toml" nosuchuser-dnd1937)"
+check -- --probe c
+expect "(c) a held entry whose user does not exist is not provisioned here" 0 "not provisioned here: fx-held .*no local account nosuchuser-dnd1937"
+if [ "$(id -u)" -ne 0 ]; then
+  chmod 000 "${TMP}/held"
+  write_registry "${BASE_ENTRIES[@]}" "$(held fx-held "${TMP}/held/config.toml" "${ME}")"
+  check -- --probe c
+  expect "(c) a held entry this account cannot stat is named not checked, never ok" 0 \
+    "not checked as this account: fx-held .*run as root or ${ME}" "ok    fx-held"
+  chmod 700 "${TMP}/held"
+fi
+write_registry "${BASE_ENTRIES[@]}" "$(held fx-held '~/.fx/token' "${ME}")"
+check -- --probe c
+expect "(c) a held entry with a ~/ path is malformed (it would expand against the wrong HOME)" 3 "held by user .* is not absolute"
+write_registry "${BASE_ENTRIES[@]}" "$(held fx-held "${TMP}/held/config.toml" "${ME}" ',"copies":"/tmp/x*"')"
+check -- --probe c
+expect "(c) a held entry with copies is malformed" 3 "copies is not supported"
+write_registry "${BASE_ENTRIES[@]}" "$(held fx-held "${TMP}/held/config.toml" 'Not A User')"
+check -- --probe c
+expect "(c) a held entry with a bad user name is malformed" 3 "user is not a local account name"
+write_registry "${BASE_ENTRIES[@]}" "$(held HELD_KEY "${TMP}/held/config.toml" "${ME}")"
+run with-secret -- HELD_KEY -- /bin/true
+expect "with-secret: an entry held by another account is refused" 1 "held by the local account"
+has_fix "with-secret: an entry held by another account is refused"
+restore_repo; rm -rf "${TMP}/held"
+
 # ---------------------------------------------------------------- probe (d)
 mkdir -p "${REPO}/ai-artifacts/ctx"
 printf 'note\nKEY=%s\n' "${SYN_A}" > "${REPO}/ai-artifacts/ctx/note.md"

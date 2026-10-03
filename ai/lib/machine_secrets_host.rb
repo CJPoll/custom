@@ -92,8 +92,19 @@ module MachineSecretsHost
 
   # ------------------------------------------------------------- files
 
-  # Stat a declared path. -> { state: :absent | :ok | :bad, shown:, problem: }.
-  def check_secret_file(path, env = ENV)
+  # Stat a declared path. -> { state: :absent | :ok | :bad | :held, shown:, problem: }.
+  # user: the local account that holds the file (a registry entry's `user`),
+  # or nil for the checking account. A held file must be owned by that account;
+  # one this account cannot even stat is :held, named, never :ok.
+  def check_secret_file(path, env = ENV, user: nil)
+    want_uid = Process.uid
+    if user
+      begin
+        want_uid = Etc.getpwnam(user).uid
+      rescue ArgumentError
+        return { state: :absent, shown: tilde(path, env), why: "no local account #{user}" }
+      end
+    end
     lst = File.lstat(path)
     shown = tilde(path, env)
     target = path
@@ -108,8 +119,11 @@ module MachineSecretsHost
     st = File.stat(target)
     return { state: :bad, shown: shown, problem: "not a regular file", fix_path: target } unless st.file?
 
-    problem = MachineSecrets.file_mode_problem(st.mode, st.uid, Process.uid)
-    return { state: :bad, shown: shown, problem: problem, fix: "chmod 600 #{tilde(target, env)}" } if problem
+    problem = MachineSecrets.file_mode_problem(st.mode, st.uid, want_uid)
+    if problem
+      fix = user ? "chown #{user}:#{user} #{target} && chmod 600 #{target}" : "chmod 600 #{tilde(target, env)}"
+      return { state: :bad, shown: shown, problem: problem, fix: fix }
+    end
 
     dir = File.dirname(target)
     problem = MachineSecrets.dir_mode_problem(File.stat(dir).mode)
@@ -118,6 +132,10 @@ module MachineSecretsHost
     { state: :ok, shown: shown }
   rescue Errno::ENOENT
     { state: :absent, shown: tilde(path, env) }
+  rescue Errno::EACCES => e
+    raise e unless user
+
+    { state: :held, shown: tilde(path, env), problem: "held by #{user} in a directory this account cannot read" }
   rescue SystemCallError => e
     { state: :bad, shown: tilde(path, env), problem: "could not stat (#{e.class.name.split('::').last})" }
   end

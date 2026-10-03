@@ -163,6 +163,7 @@ ai/skills/athena:slack/lib/inbox.sh	library	sourced by the athena:slack action b
 ai/skills/athena:slack/lib/slack.sh	library	sourced by the athena:slack action bins; its slack_die reports a Slack API error for an action, not a guard denial
 scripts/lib/cron-entry.sh	guard	
 scripts/lib/dbus-env.sh	library	sourced by the cron wrappers; always exports a bus address (real or sentinel) and never fails
+scripts/lib/gitlab-runner-kit.sh	guard	
 scripts/lib/lead-time-repos.sh	library	sourced by the lead-time runner and its installer; prints nothing, never exits, and returns a fault kind (LT_RES_FAULT) that each caller words with its own Fix:
 scripts/lib/main-checkout.sh	guard	
 scripts/lib/mcp-preflight.sh	library	sourced by the lead-time and clustering runners and installers; prints nothing and returns the why and Fix texts (MCP_PF_WHY, MCP_PF_FIX) that each caller prints with Fix:
@@ -308,9 +309,9 @@ scripts/setup-athena-user	tool	installer for the athena system user (owner-run)
 scripts/setup-github-runner	tool	installer for a GitHub Actions runner (owner-run)
 scripts/setup-github-runner-docker	tool	installer for a dockerized GitHub runner (owner-run)
 scripts/setup-github-runner-user	tool	installer for the GitHub runner user (owner-run)
-scripts/setup-gitlab-runner	tool	installer for a GitLab runner (owner-run)
-scripts/setup-gitlab-runner-docker	tool	installer for a dockerized GitLab runner (owner-run)
-scripts/setup-gitlab-runner-user	tool	installer for the GitLab runner user (owner-run)
+scripts/setup-gitlab-runner	guard	
+scripts/setup-gitlab-runner-docker	guard	
+scripts/setup-gitlab-runner-user	guard	
 scripts/shell-base	tool	argument-parsing framework sourced by personal scripts
 scripts/shh	tool	ssh shortcut to registered hosts
 scripts/single-responsibility	tool	drives Claude to split Elixir functions
