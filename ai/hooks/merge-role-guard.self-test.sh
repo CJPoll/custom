@@ -133,6 +133,8 @@ payload() {
     agent-captain) _r='{"agent_type":"athena-captain"}' ;;
     agent-admiral) _r='{"agent_type":"athena-admiral"}' ;;
     agent-claude) _r='{"agent_type":"claude"}' ;;
+    emptytype) _r='{"agent_type":""}' ;;
+    emptyid-claude) _r='{"agent_id":"","agent_type":"claude"}' ;;
     sub-claude) _r='{"agent_id":"a8888888888888888","agent_type":"claude"}' ;;
     *) echo "FAIL: unknown role $1 in the self-test. Fix: use a role payload() defines."; exit 1 ;;
   esac
@@ -148,6 +150,8 @@ payload() {
 #   cli0:     ENTRYPOINT=cli, ATTENDED=0      (the two disagree)
 #   sdk1:     ENTRYPOINT=sdk-cli, ATTENDED=1  (the two disagree)
 #   cliunset: ENTRYPOINT=cli, ATTENDED unset  (half the signal)
+#   cliTrue:  ENTRYPOINT=cli, ATTENDED=true   (a near miss)
+#   CLI1:     ENTRYPOINT=CLI, ATTENDED=1      (a near miss)
 # A bare role runs with both unset. It runs in a pipeline, so the exports
 # stay in its subshell.
 with_mode() {
@@ -157,6 +161,8 @@ with_mode() {
     cli0:*) export CLAUDE_CODE_ENTRYPOINT=cli CLAUDE_CODE_SESSION_ATTENDED=0 ;;
     sdk1:*) export CLAUDE_CODE_ENTRYPOINT=sdk-cli CLAUDE_CODE_SESSION_ATTENDED=1 ;;
     cliunset:*) export CLAUDE_CODE_ENTRYPOINT=cli ;;
+    cliTrue:*) export CLAUDE_CODE_ENTRYPOINT=cli CLAUDE_CODE_SESSION_ATTENDED=true ;;
+    CLI1:*) export CLAUDE_CODE_ENTRYPOINT=CLI CLAUDE_CODE_SESSION_ATTENDED=1 ;;
     *:*) echo "FAIL: unknown mode in role $1. Fix: use a mode with_mode defines."; exit 1 ;;
   esac
   shift
@@ -515,8 +521,19 @@ expect "mode env unset, --agent claude spawns athena-admiral" agent-claude deny 
 expect "entrypoint cli, attended 0" cli0:agent-claude deny "athena-admiral" "${HOMEREPO}" "Agent"
 expect "entrypoint sdk-cli, attended 1" sdk1:agent-claude deny "athena-admiral" "${HOMEREPO}" "Agent"
 expect "entrypoint cli, attended unset" cliunset:agent-claude deny "athena-admiral" "${HOMEREPO}" "Agent"
-# A session with neither field is top level in every mode.
-expect "no agent fields, headless env" hl:top allow "athena-admiral" "${HOMEREPO}" "Agent"
+expect "entrypoint cli, attended true" cliTrue:agent-claude deny "athena-admiral" "${HOMEREPO}" "Agent"
+expect "entrypoint CLI, attended 1" CLI1:agent-claude deny "athena-admiral" "${HOMEREPO}" "Agent"
+# A deny of the top-level --agent shape names the pair it read.
+expect "cannot tell names what it saw" cliunset:agent-claude deny "athena-admiral" "${HOMEREPO}" "Agent" "seen CLAUDE_CODE_ENTRYPOINT=cli, CLAUDE_CODE_SESSION_ATTENDED=<unset>"
+expect "headless names what it saw" hl:agent-captain deny "${GHA} pr merge 5 --squash" "${HOMEREPO}" "" "seen CLAUDE_CODE_ENTRYPOINT=sdk-cli, CLAUDE_CODE_SESSION_ATTENDED=0"
+run att:captain "${GHA} pr merge 5 --squash"
+if reason | grep -q 'seen CLAUDE_CODE'; then bad "a subagent's deny carries no mode note [att:captain]" "$(reason)"; else ok "a subagent's deny carries no mode note [att:captain]"; fi
+# An agent_id key, even an empty one, is never the attended top-level shape.
+expect "empty agent_id key, attended env" att:emptyid-claude deny "athena-admiral" "${HOMEREPO}" "Agent"
+# A session with neither field is top level in every mode: the shell fast
+# path for no field at all, the ruby test for an empty agent_type.
+expect "no agent fields, headless env (fast path)" hl:top allow "athena-admiral" "${HOMEREPO}" "Agent"
+expect "empty agent_type, no agent_id, headless env" hl:emptytype allow "athena-admiral" "${HOMEREPO}" "Agent"
 
 echo "== fail-open and hook contract =="
 OUT=$(printf '' | "${HOOK}" 2>/dev/null); RC=$?

@@ -12,11 +12,12 @@
 # WHO MAY (an allow-list; deny by default once a call is merge-class):
 #   * a top-level session: no agent_id, and either no agent_type (the human,
 #     the coordinator, a cron runner's parent session) or an attended
-#     interactive `claude --agent X` for any X (DND-1934; FleetView starts
-#     its coordinators as `claude --agent claude`). Attended means Claude
-#     Code's own CLAUDE_CODE_ENTRYPOINT=cli AND CLAUDE_CODE_SESSION_ATTENDED=1
-#     in the hook's environment (MergeRole.attended?). The same test holds for
-#     every merge class below, not only the admiral spawn;
+#     interactive `claude --agent X` for any X with no agent_id key (DND-1934;
+#     the fleet launcher starts its coordinators as `claude --agent claude`).
+#     Attended means Claude Code's own CLAUDE_CODE_ENTRYPOINT=cli AND
+#     CLAUDE_CODE_SESSION_ATTENDED=1 in the hook's environment
+#     (MergeRole.attended?). The same test holds for every merge class below,
+#     not only the admiral spawn;
 #   * agent_type athena-admiral, any merge-class call, any repo;
 #   * agent_type athena-shipwright, ONLY a push to a protected branch run
 #     inside a cron lane of this hook's own repo
@@ -36,7 +37,8 @@
 # payload (agent_type claude, no agent_id) with ENTRYPOINT=cli and
 # ATTENDED=1; its subagents inherit cli + 1 and carry an agent_id; a
 # `claude -p --agent claude` gets sdk-cli + 0 even when launched with cli + 1
-# set, because -p overwrites both.
+# set, in its environment or in a `--settings` env block, because -p
+# overwrites both. A deny of the `--agent X` shape names the pair it saw.
 # A subagent's Bash starts in the session root (the payload cwd) on every
 # call; a top-level session's Bash keeps an earlier call's `cd`, so for it a
 # command with no `cd`/`-C` runs in a directory the guard cannot resolve.
@@ -82,8 +84,10 @@
 # (a script written then run, an encoded command, a git hook, an alias); a
 # headless `claude -p` started from a subagent's Bash (top level, so allowed);
 # likewise an interactive `claude --agent X` a subagent starts in a terminal
-# multiplexer (attended by the mode variables, so allowed; it reaches nothing
-# the plain `claude -p` above does not);
+# multiplexer, and any other separate interactive Claude process an agent
+# starts (an agent-teams teammate, not measured): attended by the mode
+# variables, so allowed if it sends no agent_id; it reaches nothing the plain
+# `claude -p` above does not;
 # the shared forge identity (server-side separation is owner-gated); a stacked
 # PR whose target is a sibling feature branch; trusted top-level sessions; and
 # a look-alike lane: a hand-spawned shipwright that adds its own worktree under
@@ -110,8 +114,9 @@ merge-role-guard.sh -- Claude Code PreToolUse hook (matchers Bash, mcp__.*,
 Agent|Task). Reads the hook JSON on stdin. Denies a merge or a landing onto a
 protected branch (pr/mr merge, locked-merge, API merge and ref-write
 endpoints, a push to main, a local landing on main, wt/gt merge, an MCP merge
-tool) and a spawn of athena-admiral, unless the caller is a top-level session,
-athena-admiral, or athena-shipwright pushing from its cron lane. Every other
+tool) and a spawn of athena-admiral, unless the caller is a top-level session
+(including an attended interactive `claude --agent X`), athena-admiral, or
+athena-shipwright pushing from its cron lane. Every other
 call passes untouched. Fails open on input it cannot evaluate. Denies are
 logged to $XDG_STATE_HOME/athena/merge-role-guard.log.
   --self-test   run ai/hooks/merge-role-guard.self-test.sh

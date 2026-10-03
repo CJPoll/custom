@@ -13,6 +13,11 @@
 # hand-spawned shipwright are denied too. There is no env var, file or marker
 # that widens the list (~/dev/custom/CLAUDE.md -> "A check's own bar must not
 # live in the diff it is checking"); widening it is a reviewed diff here.
+# The one environment read, Claude Code's own session-mode variables
+# (attended?), is not such a marker: Claude Code sets both itself, a
+# subagent's Bash cannot change the process env the hook inherits, `claude -p`
+# overwrites an inherited pair, and a subagent is denied by its agent_id
+# whatever the pair says.
 #
 # Matching is LEXICAL and over-reads on purpose: subcommand tokens anywhere in
 # the command, quotes and backslash escapes removed the way the shell removes
@@ -524,41 +529,59 @@ module MergeRole
 
   # attended?(entrypoint, attended) -> true only when Claude Code's own mode
   # variables both say an attended interactive session: CLAUDE_CODE_ENTRYPOINT
-  # "cli" and CLAUDE_CODE_SESSION_ATTENDED "1" (DND-1934). Measured on Claude
-  # Code 2.1.286 in the hook's own environment: interactive `claude [--agent
-  # X]` gives cli + 1 (its subagents inherit it); `claude -p [--agent X]` gives
-  # sdk-cli + 0, and overwrites an inherited cli + 1. Anything else, a missing
-  # value, half the signal or a contradiction, cannot tell: false.
+  # exactly "cli" and CLAUDE_CODE_SESSION_ATTENDED exactly "1" (DND-1934).
+  # Measured on Claude Code 2.1.286 in a PreToolUse hook's own environment:
+  # interactive `claude [--agent X]` gives cli + 1 (its subagents inherit
+  # it); `claude -p [--agent X]` gives sdk-cli + 0, and overwrites both an
+  # inherited cli + 1 and a cli + 1 set in a `--settings` env block. Anything
+  # else, a missing value, half the signal or a contradiction, cannot tell:
+  # false. The same two-signal test is inbox_wait_mode in
+  # ai/skills/athena:inbox/lib/budget.sh; a change to these variables sweeps
+  # both.
   def attended?(entrypoint, attended)
     entrypoint.to_s == "cli" && attended.to_s == "1"
   end
 
-  # top_level?(agent_id, agent_type, attended) -> true for a session no
-  # subagent runs in: no agent_id, and either no agent_type (a plain session)
-  # or an attended interactive one (`claude --agent X` with a person at it,
-  # FleetView's default launch). A headless `claude -p --agent X` carries the
-  # same agent_type and no agent_id, so without the attended signal it is NOT
-  # top level here: that keeps its DND-726 verdict. Every merge class uses
-  # this one test (decide).
-  def top_level?(agent_id, agent_type, attended)
-    return false unless agent_id.to_s.empty?
+  # top_level?(agent_id, agent_type, mode) -> true for a session no subagent
+  # runs in. Either it carries neither field (a plain session: the human, the
+  # coordinator, a cron runner's parent), or it carries an agent_type, NO
+  # agent_id key at all, and mode says attended (an interactive `claude
+  # --agent X` with a person at it, the fleet launcher's default being
+  # `--agent claude`). A headless `claude -p --agent X` carries that same
+  # payload, so without the attended signal it is NOT top level: it keeps its
+  # DND-726 verdict. mode is {entrypoint:, attended:}, the raw variable values
+  # (nil when unset). Every merge class uses this one test (decide).
+  def top_level?(agent_id, agent_type, mode)
+    return true if agent_id.to_s.empty? && agent_type.to_s.empty?
 
-    agent_type.to_s.empty? || attended == true
+    agent_id.nil? && attended?(mode[:entrypoint], mode[:attended])
   end
 
-  # decide(found, agent_id:, agent_type:, attended:, lane_of:) -> nil (allow)
-  # or {role:, finding:} (deny). attended is attended?'s answer for the hook's
-  # environment. lane_of.call(dir) is true when dir is a cron lane of the
-  # hook's own repo.
-  def decide(found, agent_id:, agent_type:, attended:, lane_of:)
+  # decide(found, agent_id:, agent_type:, mode:, lane_of:) -> nil (allow) or
+  # {role:, finding:, mode_seen:} (deny). mode is top_level?'s. mode_seen is
+  # set when the caller has the top-level `--agent X` shape (an agent_type, no
+  # agent_id) and was read as headless, so the reason can name what the guard
+  # saw. lane_of.call(dir) is true when dir is a cron lane of the hook's own
+  # repo.
+  def decide(found, agent_id:, agent_type:, mode:, lane_of:)
     return nil if found.empty?
 
     type = agent_type.to_s
-    return nil if top_level?(agent_id, type, attended) # the human, the coordinator, a cron parent
+    return nil if top_level?(agent_id, type, mode)
     return nil if type == ADMIRAL
     return nil if type == SHIPWRIGHT && shipwright_lane_push?(found, lane_of)
 
-    { role: type.empty? ? :unknown : type, finding: found.first }
+    verdict = { role: type.empty? ? :unknown : type, finding: found.first }
+    verdict[:mode_seen] = mode_seen(mode) if agent_id.to_s.empty? && !type.empty?
+    verdict
+  end
+
+  # mode_seen(mode) -> "CLAUDE_CODE_ENTRYPOINT=<v>, CLAUDE_CODE_SESSION_ATTENDED=<v>",
+  # <unset> for a missing value: what the attended test read.
+  def mode_seen(mode)
+    show = ->(v) { v.nil? ? "<unset>" : v.to_s }
+    "CLAUDE_CODE_ENTRYPOINT=#{show.call(mode[:entrypoint])}, " \
+      "CLAUDE_CODE_SESSION_ATTENDED=#{show.call(mode[:attended])}"
   end
 
   # The cron shipwright's documented landing: `push origin HEAD:main` from its
@@ -574,7 +597,21 @@ module MergeRole
              "real merge to slip past this guard. If you ARE the admiral and see this, your agent_type was not " \
              "recognised: stop and escalate with this message; do not work around it."
 
+  # deny_reason(verdict) -> the deny text, with the mode note when the caller
+  # had the top-level `--agent X` shape and was read as headless: a person at
+  # an interactive session whose mode variables did not read cli + 1 sees what
+  # the guard saw, instead of advice meant for a subagent.
   def deny_reason(verdict)
+    base = role_reason(verdict)
+    return base unless verdict[:mode_seen]
+
+    "#{base} This call has an agent_type and no agent_id, the shape of a headless `claude -p --agent X`, " \
+      "and the session-mode variables did not both say attended (seen #{verdict[:mode_seen]}; attended is " \
+      "cli and 1). Fix, if a person is attending this interactive session: stop and escalate with this " \
+      "message; do not work around it."
+  end
+
+  def role_reason(verdict)
     f = verdict[:finding]
     role = verdict[:role]
     if role == :unknown

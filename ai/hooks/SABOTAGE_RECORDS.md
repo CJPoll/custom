@@ -785,24 +785,25 @@ external`: `expected [external .../settings.json.bak-20261001-142204], got [suit
 ## 2026-10-03 — DND-1934, merge-role-guard: an attended interactive `--agent` session is top level
 
 - **Domain:** the top-level test in `ai/lib/merge_role.rb` (`attended?`,
-  `top_level?`, used by `decide` for every merge class) and the mode read in
-  `ai/lib/merge_role_io.rb` (`attended_session?`).
+  `top_level?`, `mode_seen`, used by `decide` for every merge class) and the
+  mode read in `ai/lib/merge_role_io.rb` (`session_mode`).
 - **Suite run:** `sh ai/hooks/merge-role-guard.self-test.sh`, as DND-726. Each
   mutation was applied to a COPY of `ai/hooks` and `ai/lib` and run with
   `MRG_SRC=<copy>`; the committed files were never edited.
-- **Fail-first:** the 22 new cases against the unfixed guard (main
-  c7362f87): `434 passed, 6 failed`, led by `FAIL  attended --agent claude
-  spawns athena-admiral [att:agent-claude] -- expected allow, got deny:` with
-  the reason "`claude` may not spawn athena-admiral". After the fix:
-  `440 passed, 0 failed`.
+- **Fail-first:** the 29 new cases against the unfixed guard (the hook files
+  of main c7362f87, via `MRG_SRC`): `439 passed, 8 failed`, led by `FAIL
+  attended --agent claude spawns athena-admiral [att:agent-claude] --
+  expected allow, got deny:` with the reason "`claude` may not spawn
+  athena-admiral". After the fix: `447 passed, 0 failed`.
 
 | id | Mutation | Observed failure |
 |---|---|---|
 | S-DND1934-1 | `attended?` returns false | 6 FAILs: every `[att:agent-claude]` / `[att:agent-captain]` allow case: `expected allow, got deny` |
-| S-DND1934-2 | `top_level?` keys on agent_id alone (`agent_type.to_s.empty? \|\| attended == true` replaced by `true`) | 12 FAILs: every headless and cannot-tell `--agent` case, among them `headless --agent claude spawns athena-admiral [hl:agent-claude]`: `expected deny, got allow` |
-| S-DND1934-3 | `attended?` reads ATTENDED alone | `entrypoint sdk-cli, attended 1 [sdk1:agent-claude]`: `expected deny, got allow` |
-| S-DND1934-4 | `attended?` reads ENTRYPOINT alone | `entrypoint cli, attended 0 [cli0:agent-claude]`, `entrypoint cli, attended unset [cliunset:agent-claude]`: `expected deny, got allow` |
-| S-DND1934-5 | `top_level?`'s agent_id check deleted | 8 FAILs, among them `subagent of an attended session spawns athena-admiral [att:gp]`: `expected deny, got allow` |
+| S-DND1934-2 | `top_level?` keys on agent_id alone (`agent_id.nil?`, no attended test) | 16 FAILs: every headless and cannot-tell `--agent` case, among them `headless --agent claude spawns athena-admiral [hl:agent-claude]`: `expected deny, got allow` |
+| S-DND1934-3 | `attended?` reads ATTENDED alone | `entrypoint sdk-cli, attended 1 [sdk1:agent-claude]`, `entrypoint CLI, attended 1 [CLI1:agent-claude]`: `expected deny, got allow` |
+| S-DND1934-4 | `attended?` reads ENTRYPOINT alone | 4 FAILs: `[cli0:agent-claude]`, `[cliunset:agent-claude]`, `[cliTrue:agent-claude]`, `cannot tell names what it saw`: `expected deny, got allow` |
+| S-DND1934-5 | `top_level?`'s `agent_id.nil?` dropped from the attended branch | 7 FAILs, among them `subagent of an attended session spawns athena-admiral [att:gp]` and `empty agent_id key, attended env [att:emptyid-claude]`: `expected deny, got allow` |
+| S-DND1934-6 | `decide` sets no `mode_seen` | `cannot tell names what it saw`, `headless names what it saw`: `reason lacks 'seen CLAUDE_CODE_ENTRYPOINT=…'` |
 
 ## 2026-10-03 — DND-726, merge-role-guard: only athena-admiral merges or lands
 
