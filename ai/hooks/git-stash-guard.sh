@@ -799,7 +799,6 @@ done
 # ai/hooks, found through the hook's real path. One the evaluator cannot read
 # exits it 3, a fault (fault_verdict), never "no wrappers".
 WOPTS="$(dirname -- "$(readlink -f -- "$0" 2>/dev/null || printf '%s' "$0")")/../lib/wrapper-opts.tsv"
-[ -f "$WOPTS" ] && [ -r "$WOPTS" ] || { FAULT="the wrapper option table ai/lib/wrapper-opts.tsv cannot be read beside the hook"; fault_verdict; }
 VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/shaliases" \
   -v cfgov="$UNREAD_CONFIG" -v bif="$GSG_TMP/builtins" -v go="$GLOBOPT" -v wof="$WOPTS" '
   # slurp(f): the whole file, lines joined by newlines. An unreadable file

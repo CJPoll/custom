@@ -1085,39 +1085,55 @@ The canary reads usage under LC_ALL=C. After: `RESULT: 429 passed, 0 failed`.
 
 - **Domain:** the PreToolUse git-stash text guard (`ai/hooks/git-stash-guard.sh`):
   which word a literal wrapper (env, timeout, nice, sudo, xargs, ...) runs
-  once its options and operands are skipped (wload, wwalk, WCP in cp and
-  zcp), read from the wrapper option table `ai/lib/wrapper-opts.tsv` that
-  `ai/hooks/worktree-escape-guard.sh` now loads too.
+  once its options and operands are skipped (wload, wbad, wwalk, WCP in cp
+  and zcp), read from the wrapper option table `ai/lib/wrapper-opts.tsv`
+  that `ai/hooks/worktree-escape-guard.sh` now loads too.
 - **Suite run:** `sh ai/hooks/git-stash-guard.self-test.sh`, sections WO
   and F (F14-F17). Mutations ran on a `mktemp -d` copy of the hook, the
   table and the committed suite; the committed files were never edited.
 - **Fail-first:** section WO written first. Against the unfixed hook
-  (`e23fddbe`) the final suite gives `RESULT: 689 passed, 32 failed`:
-  WO1-WO4, WO6-WO19, WO21-WO29a, F14-F17. WO5 and WO20 were already denied
-  by other rules and are kept as regression cases. After: `RESULT: 721
-  passed, 0 failed`. worktree-escape-guard's suite stays green (179 passed,
-  0 failed, three new cases for a missing table), and its WRAPPER_OPTS
-  loaded from the table equals the old literal key for key.
+  (`e23fddbe`) the final suite gives `RESULT: 693 passed, 37 failed`;
+  against the first cut (`61464168`), `RESULT: 724 passed, 6 failed`
+  (WO46, WO47, WO49, WO50, WO51, F17). WO5, WO20, WO48 and WO52 were
+  already denied by other rules and are kept as regression cases. After:
+  `RESULT: 730 passed, 0 failed`. worktree-escape-guard's suite stays
+  green (182 passed, 0 failed, with cases for a missing and a malformed
+  table), and its WRAPPER_OPTS loaded from the table equals the old
+  literal key for key.
 - **Self-review:** WO29 and WO29a (a zsh word opening with its group paren
   after a wrapper's options, `timeout 5 (x|g)it stash pop`) were allowed by
-  the first cut; each case was written before its fix. WO44 and WO45 were
-  added to kill S-1898-6 and S-1898-11, which survived a suite of deny
-  cases only: the unknown-option fallback is conservative, so table
-  precision shows up as an allow, not a deny.
+  the first cut. WO44 and WO45 kill S-1898-6 and S-1898-11, which survived
+  a suite of deny cases only: the unknown-option fallback is conservative,
+  so table precision shows up as an allow, not a deny.
+- **Review floor:** WO46-WO52 (an unknown option's value before an
+  operand; a value or operand built by expansion, glob or substitution)
+  and F17 (a malformed table named in the fault). Each case was written
+  before its fix.
+- **Equivalent mutants:** S-1898-15 and S-1898-16 survive. wwalk marks
+  every word it passes and the word it stops on, so with pending words
+  counted, spending them before or after the operands, or capping one
+  cluster's unknown options at one, moves the stop by at most the word it
+  marks anyway. The ordering follows getopt (an option's value comes
+  before the operands); no input tells the variants apart.
 
 | id | Mutation | Observed failure |
 |---|---|---|
-| S-1898-1 | cp ignores the words wwalk marks | WO1-WO4, WO6-WO19, WO21-WO28 |
+| S-1898-1 | cp ignores the words wwalk marks | WO1-WO4, WO6-WO19, WO21-WO28, WO46, WO47, WO49-WO51 |
 | S-1898-2 | zcp ignores the words wwalk marks | WO29, WO29a |
-| S-1898-3 | an unknown option keeps no command position on the next word | WO18 |
-| S-1898-4 | a word built by expansion in an option slot keeps none either | WO19 |
+| S-1898-3 | an unknown option adds no pending word | WO18, WO46, WO47 |
+| S-1898-4 | an expansion in the command slot adds no pending word | WO19 |
 | S-1898-5 | a wrapper matched by its full word, not its last path component | WO14 |
 | S-1898-6 | no GNU unique long prefix match | WO44 |
-| S-1898-7 | a value option skips no value | WO3, WO4, WO6, WO8, WO12, WO15, WO22 |
-| S-1898-8 | no operand skipped (timeout's DURATION, flock's file) | WO2, WO8, WO9, WO15, WO24, WO26, WO28, WO29 |
-| S-1898-9 | the wrappers with no table are not walked | WO17, WO18, WO23, WO24, WO25 |
-| S-1898-10 | table: `env -u` read as a switch | WO6 |
+| S-1898-7 | a value option skips no value | WO3, WO4, WO6, WO8, WO12, WO15, WO22, WO51 |
+| S-1898-8 | no operand skipped (timeout's DURATION, flock's file) | WO2, WO8, WO9, WO15, WO24, WO26, WO28, WO29, WO46, WO47 |
+| S-1898-9 | the wrappers with no table are not walked | WO17, WO18, WO23-WO25, WO46, WO47 |
+| S-1898-10 | table: `env -u` read as a switch | WO6, WO51 |
 | S-1898-11 | table: nice has no `-N` adjustment | WO45 |
 | S-1898-12 | wload accepts a malformed row | F16, F17 |
-| S-1898-13 | no unreadable-table pre-check in the hook | F15 |
+| S-1898-13 | (removed: a shell pre-check for an unreadable table, which wload's own read made redundant; the pre-check was deleted) | — |
 | S-1898-14 | no paren-opened command after a walk that ran out | WO29, WO29a |
+| S-1898-15 | operands spent before pending words | survives (equivalent, see above) |
+| S-1898-16 | pending words a flag, not a count | survives (equivalent, see above) |
+| S-1898-17 | a value or operand built by expansion or glob is one word | WO49, WO50, WO51 |
+| S-1898-18 | no walk across a substitution in a value or operand slot | WO50 |
+| S-1898-19 | the malformed-table fault does not name the table | F17 |
