@@ -926,3 +926,15 @@ The canary reads usage under LC_ALL=C. After: `RESULT: 429 passed, 0 failed`.
 | S-D2-16 | the round-1 narrowing back (`stash` only after a closing paren) | 8 cases: O32, D2-30, D2-30a, D2-49r, D2-49s, D2-67, ... |
 | S-D2-17 | a glob in a directory part read as literal | D2-49f, D2-49g, D2-49i |
 | S-D2-18 | the test-operand skip after eval again | D2-49n, D2-49o |
+
+- **Round 3 (critic round 9 on 1af49793):** D1's fix 2 (the stash verb
+  table) let `printf '...\172sh -c "\141lias -g W=pop; \145val git stash W"' |
+  make -f -` through: its off-switch named the programs that run text, and
+  make was not on the list. This is the third finding on that one switch
+  (review round 1, critic round 3, critic round 9), so per
+  athena:critic-convergence the mechanism was deleted, not patched again.
+  D1-66 added first; against 1af49793 `RESULT: 519 passed, 5 failed`
+  (D1-9, D1-10, D1-11, D1-60 now expected deny, and D1-66). After:
+  `RESULT: 524 passed, 0 failed`. The D1 records S-D1-2, S-D1-6, S-D1-10,
+  S-D1-11, S-D1-12 and S-D1-14..18 name code that no longer exists; the
+  D1-36 canary and its fake-git cases (D1-61..65) went with it.

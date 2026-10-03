@@ -124,27 +124,12 @@
 # glob or brace command word is judged as at cbac851." Superseded: a word
 # that cannot expand to git or git-stash is no longer a glob-head finding.
 #
-# PRECISION (DND-1095 D1): three readings the shell itself never makes, each
+# PRECISION (DND-1095 D1): readings the shell itself never makes, each
 # fixed without relying on the DND-775 git layer, so no coverage moves:
 #   * a shell alias is not expanded again inside its own expansion (zsh and
 #     sh mark it in use), so the owner's `grep='grep --color ...'` runs grep
 #     once; before, it recursed to the nesting bound, where any `stash` text
 #     denied (`grep -i stash f`). A chain to a different alias still expands.
-#   * `git stash <word>` for a literal word outside git's stash verb table
-#     (GSG_STASH_VERBS, compared on its letters in any case) is refused by
-#     git with exit 128 and writes nothing (`git stash guard` in prose). Only
-#     while the installed git is a measured version (GSG_STASH_VERBS_GIT),
-#     and only for a plain word ([A-Za-z0-9._,:%+@/-]) that names no snapshot
-#     alias, in a command that shows no way to redefine a word or run text
-#     (no expansion, substitution or glob character, and no definition,
-#     re-parse, shell or interpreter word; see STASH_TABLE_OK). Otherwise
-#     zsh can turn the word into a verb at run time (`~P`, `^x`, an alias
-#     after `alias x='git stash '`, a global alias defined then eval'd, by
-#     any spelling), so it stays a write. A bare or
-#     option-first stash, a verb built by expansion, glob or brace, and every
-#     snapshot global alias (substituted, see ZSH) are still judged.
-#     Residual: the version probed is the git first on the hook's PATH, so a
-#     command running another git binary is judged by this table too.
 #   * a word the shell reads as an assignment (an unquoted, unescaped
 #     NAME=..., at the start of a simple command, after a keyword, or after
 #     another such assignment; never after a CLOSING `)` or backtick, where
@@ -190,7 +175,11 @@
 # word in a payload (`{print $6}` after `$6==id`, `${n},$((n+1))p`), a
 # literal stash write or stash alias named in a payload, and `stash` after
 # any separator in a payload (`grep -E 'a|stash|b'`): `xargs -d` can split
-# such text on any delimiter and hand `stash pop` to git.
+# such text on any delimiter and hand `stash pop` to git. Also
+# `git stash <word>` for a word git refuses (`git stash guard` in prose):
+# the D1 verb table that let it through was deleted in D2 round 3, because
+# its off-switch was a list of programs that run text, and a program not on
+# it (`... | make -f -`) could still run an encoded alias definition.
 #
 # ZSH: the Bash tool runs zsh, so zsh-only word rewrites count too: EQUALS
 # (`=git` is git's path), global aliases (`alias -g`, any word position),
@@ -270,7 +259,7 @@ if [ -n "$GSG_TMP" ] && [ -d "$GSG_TMP" ]; then
   trap 'exit 130' INT
   trap 'exit 143' TERM
   : > "$GSG_TMP/shaliases"; : > "$GSG_TMP/shalias.re"; : > "$GSG_TMP/aliases"
-  : > "$GSG_TMP/autocorrect"; : > "$GSG_TMP/shnames"
+  : > "$GSG_TMP/autocorrect"
   printf '%s' "$CMD" > "$GSG_TMP/cmd" || FAULT="the command could not be written to a work file"
 else
   GSG_TMP=""; FAULT="mktemp could not create a work dir"
@@ -306,11 +295,6 @@ if [ -z "$FAULT" ] && [ -d "$SNAPDIR" ]; then
     > "$GSG_TMP/shaliases.raw" 2>/dev/null
   sort -u "$GSG_TMP/shaliases.raw" > "$GSG_TMP/shaliases.uniq" 2>/dev/null \
     || FAULT="the shell snapshot aliases could not be sorted"
-  # Every alias NAME, whatever its value (DND-1095 D1): a word after `git
-  # stash` that names one is never read as a word git refuses, since zsh may
-  # expand it (after an alias ending in a space, or as a global alias).
-  [ -n "$FAULT" ] || sed -E 's/^alias (-[gs] )?(-- )?([^=]+)=.*/\3/' "$GSG_TMP/shaliases.uniq" \
-    > "$GSG_TMP/shnames" 2>/dev/null || FAULT="${FAULT:-the shell alias names could not be written}"
   # Relevant: a value naming git, stash, an expansion or a glob, or one whose
   # first word is itself a relevant alias (a chain), to a fixpoint.
   [ -n "$FAULT" ] || awk '
@@ -319,8 +303,8 @@ if [ -z "$FAULT" ] && [ -d "$SNAPDIR" ]; then
         split(v, w, /[ \t]+/); first[NR] = w[1]; line[NR] = $0
         if (v ~ /git|stash|[$`*?[{]/) rel[name[NR]] = 1
         # Every zsh GLOBAL alias is kept, whatever its value: it can stand
-        # for the verb after `git stash` (`alias -g V=pop`), which the stash
-        # verb table must see substituted (DND-1095 D1).
+        # for the verb after `git stash` (`alias -g V=pop`), so it is read
+        # substituted wherever it stands (DND-1095 D1).
         if ($0 ~ /^alias -g /) rel[name[NR]] = 1 }
       END {
         do { grew = 0
@@ -528,58 +512,6 @@ case $? in
   *) FAULT="the prefilter grep failed"; fault_verdict ;;
 esac
 
-# ---- git's stash verb table (DND-1095 D1) ------------------------------------
-# `git stash <word>` for a word outside this table is refused by git before it
-# touches the list (see stash_write in the evaluator). The table is every verb
-# `LC_ALL=C git stash -h` lists in each version named in GSG_STASH_VERBS_GIT
-# (major.minor, space-separated). A version is added only once measured: its
-# usage lists exactly these verbs and it refuses an unknown word with exit 128
-# and the list untouched. 2.54 (desktop) and 2.55 (laptop) measured
-# 2026-09-29. Only on a measured version is a word outside the table let
-# through: a newer git may add a writing verb (2.51 added import and export).
-# An unreadable or unmeasured version keeps every non-read word a write, as
-# before D1. The self-test's D1-36 then passes with a note that fix 2 is
-# inactive, and fails only when a MEASURED version lists a verb the table
-# lacks (real drift); its Fix says what to update.
-GSG_STASH_VERBS='apply branch clear create drop export import list pop push save show store'
-GSG_STASH_VERBS_GIT='2.54 2.55'
-# Probed for every command that reaches the evaluator, not only one naming
-# stash: a git alias (`git s guard`, s = stash) reaches the stash verdict
-# with no stash text in the command.
-# The table is sound only when the word reaches git as typed: no zsh that
-# parses it can have defined an alias, named directory or option first, or
-# be running text built at run time (DND-1095 D1, critic round 3). The hook
-# reads only the snapshot's aliases, so it applies the table ONLY to a
-# command that shows no way to do either. It is off when the command holds:
-#   * any expansion, substitution or glob/brace/tilde character (`$`, a
-#     backtick, `* ? [ { ~`): a command word, or text a shell runs, may be
-#     built from it (`${:-alias} -g W=pop; ${:-eval} 'git stash W'`);
-#   * a word (quotes removed, `-` counts as a boundary) that defines what
-#     zsh expands (alias, galiases, hash, nameddirs, setopt, ...), re-reads
-#     text (eval, source, `.`, trap, fc, autoload, sched, ...), or runs text
-#     in a shell or another interpreter (sh, zsh, python, perl, awk, sed,
-#     xargs, find, env, sudo, ssh, ...; escaped text such as
-#     `printf '\141lias ...' | zsh` needs one of them to run).
-# What it does not see is the NOT CATCHABLE class: a script file, or text
-# computed and run by a program not named here.
-# The probe is the git first on the hook's PATH. A command that runs another
-# git binary (`/opt/x/bin/git stash <verb>`) is judged by this table too: a
-# residual only if that git adds a writing verb.
-STASH_TABLE_OK=0
-_gv=$(cd / && git --version 2>/dev/null | sed -nE 's/^git version ([0-9]+\.[0-9]+).*/\1/p')
-case " $GSG_STASH_VERBS_GIT " in
-  *" $_gv "*) [ -n "$_gv" ] && STASH_TABLE_OK=1 ;;
-esac
-case $CMD in
-  *'$'* | *'`'* | *'*'* | *'?'* | *'['* | *'{'* | *'~'*) STASH_TABLE_OK=0 ;;
-esac
-if [ "$STASH_TABLE_OK" = 1 ] && printf '%s' "$FLAT" | grep -Eiq \
-  -e '(^|[^[:alnum:]_])(alias|unalias|aliases|galiases|saliases|dis_[a-z]*aliases|hash|nameddirs|setopt|unsetopt|set|options|emulate|enable|disable|eval|source|trap|fc|autoload|zmodload|functions|sched|builtin|command|exec|noglob|nocorrect)([^[:alnum:]_]|$)' \
-  -e '(^|[^[:alnum:]_])(sh|bash|zsh|dash|ksh|mksh|yash|fish|csh|tcsh|busybox|python[0-9.]*|pypy[0-9.]*|perl|ruby|node|nodejs|deno|bun|php|lua|luajit|tclsh|wish|expect|osascript|awk|gawk|mawk|nawk|sed|gsed|xargs|find|parallel|env|nohup|setsid|timeout|nice|sudo|doas|su|runuser|ssh|script|tmux|screen|watch)([^[:alnum:]_]|$)' \
-  -e '(^|[;&|(]|[[:space:]])\.[[:space:]]'; then
-  STASH_TABLE_OK=0
-fi
-
 # ---- glob options (DND-1095) ---------------------------------------------------
 # globcat in the evaluator reads a glob as zsh and bash read it under their
 # DEFAULT options. GLOBOPT=1 turns that reading off (every glob or brace
@@ -658,8 +590,7 @@ done
 # ---- git stash, through every head the header lists -------------------------
 # Its inputs are files (BOUNDED HAND-OFF): argv carries only their paths.
 VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/shaliases" \
-  -v cfgov="$UNREAD_CONFIG" -v bif="$GSG_TMP/builtins" -v go="$GLOBOPT" \
-  -v stv="$GSG_STASH_VERBS" -v stok="$STASH_TABLE_OK" -v anf="$GSG_TMP/shnames" '
+  -v cfgov="$UNREAD_CONFIG" -v bif="$GSG_TMP/builtins" -v go="$GLOBOPT" '
   # slurp(f): the whole file, lines joined by newlines. An unreadable file
   # exits 3, which the caller reads as a fault.
   function slurp(f,   s, l, n, rc) {
@@ -672,28 +603,10 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   function is_read(v) { sub(/[<>].*/, "", v); return v ~ /^(list|show|create)$/ }
   # stash_write(v): `git stash v` writes the stash list (v is "" when no
   # word follows). Every verb but the three reads writes, and so do a bare
-  # or option-first stash (an implicit push) and a verb built by expansion,
-  # glob or brace. The one exception (DND-1095 D1): a literal word that is,
-  # in any letter case, no verb of the stash table (STV, from
-  # GSG_STASH_VERBS). git refuses it before touching the list ("push can not
-  # be assumed due to unexpected token", exit 128): `git stash guard` in
-  # prose. Only when stok says the installed git is the version that table
-  # was read from; otherwise every non-read word writes, as before.
-  function stash_write(v) {
-    if (is_read(v)) return 0
-    sub(/[<>].*/, "", v)
-    if (!stok || v == "" || v ~ /^-/ || v ~ /[$`\001\002]/) return 1
-    # Only a plain word: zsh can still rewrite anything else at run time
-    # into a verb (`~P` a named directory, `^x` / `a~b` / `a#` extendedglob).
-    # The name of ANY snapshot alias stays a write too: an alias whose value
-    # ends in a space makes zsh expand the next word (`gsx V`).
-    if (v !~ /^[A-Za-z0-9._,:%+@\/-]+$/ || (v in ANYAL)) return 1
-    # Compared on its letters alone, so prose punctuation around a verb
-    # (`pop.`, `(drop)`) still reads as that verb; a word with no letters
-    # stays a write.
-    v = tolower(v); gsub(/[^a-z]/, "", v)
-    return v == "" || (v in STV)
-  }
+  # or option-first stash (an implicit push), a verb built by expansion,
+  # glob or brace, and a word git would refuse (DND-1095 D2 deleted the
+  # D1 verb table: no denylist of runners could keep it sound).
+  function stash_write(v) { return !is_read(v) }
   function mentions_stash(v) { return v ~ /(^|[^[:alnum:]_.-])stash([^[:alnum:]_.-]|$)/ }
   function is_sep(c) { return c ~ /[ \t\n;&|()`]/ }
   # globcat(w, qm, ad) (DND-1095): what an unquoted glob or brace command
@@ -1312,10 +1225,6 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   }
   BEGIN {
     GO = (go != "0")
-    nv = split(stv, vl, " ")
-    for (k = 1; k <= nv; k++) STV[vl[k]] = 1
-    nv = split(slurp(anf), vl, "\n")
-    for (k = 1; k <= nv; k++) if (vl[k] != "") ANYAL[vl[k]] = 1
     na = split(slurp(alf), lines, "\n")
     for (k = 1; k <= na; k++) {
       l = lines[k]
