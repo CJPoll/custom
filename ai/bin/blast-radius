@@ -4009,7 +4009,7 @@ def self_test
         end
         # DND-1905: a config file a held enforcer (the merge guard's red-main content declaration) reads its bar
         # from is a candidate, so loosening it cannot read COLD. Only the LITERAL forms ai/config/X.json and
-        # ../config/X.json are read, comment lines included (an over-include is harmless; File.file? bounds it).
+        # ../config/X.json are read, on CODE lines only (a comment line is skipped above; File.file? bounds it).
         line.scan(%r{(?:ai/|\.\./)config/([A-Za-z0-9_.-]+\.json)}) do |(name)|
           cfg = "ai/config/#{name}"
           candidates << cfg if File.file?(File.join(repo_root, cfg))
