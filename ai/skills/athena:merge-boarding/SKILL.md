@@ -818,13 +818,16 @@ then do you bring main in and re-gate: merge
 unpublished one, resolve, and re-gate. Stop the line on a red main or a failed
 deploy: land nothing more until it is fixed.
 
-A **semantic conflict** is a collision git cannot see. A text-clean merge is
-not proof of a clean integration. Before every merge or push to main, compare
-the head's migration versions with current `origin/main`. A version both sides
-added is a conflict and takes the same re-gate. Where a repo has a merge-time
-version check (gen_saas DND-1754), it is the mechanical form of this rule.
-This widens what counts as a conflict. It does not restore a re-gate after
-every rebase: the DND-1463 decision stands.
+A **semantic conflict**, for this rule, is a migration-version collision. A
+text-clean merge is not proof of a clean integration. Before every merge or
+push to main, compare the head's migration versions with current
+`origin/main`. A version both sides added is a conflict and takes the same
+re-gate. Where a repo has a merge-time version check (gen_saas DND-1754), it
+is the mechanical form of this rule. Other collisions git cannot see, such as
+the shared budgets and registries in *Green-alone is not green-merged*, stay
+in the accepted-risk class. This widens what counts as a conflict by one
+named case. It does not restore a re-gate after every rebase: the DND-1463
+decision stands.
 
 **Later (2026-10-03, DND-1901):** this rule treated "conflict" as a textual
 conflict only, so a clean merge of a head and a moved main never needed a
