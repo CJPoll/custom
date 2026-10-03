@@ -190,7 +190,7 @@ gmg_refuse() {
 # An unreadable file or an empty mark is false.
 gmg_refusal_has_reason() {
   local line rest
-  [ -r "$1" ] && [ -n "$2" ] || return 1
+  [ -r "$1" ] && [ -n "$2" ] && [ -n "${GMG_REFUSE_WORD}" ] || return 1
   while IFS= read -r line || [ -n "${line}" ]; do
     case "${line}" in
       *": ${GMG_REFUSE_WORD} \`"*) ;;
