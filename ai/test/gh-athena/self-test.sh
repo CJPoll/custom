@@ -338,9 +338,27 @@ git -C "${SM}" config --unset submodule.recurse
 R="$(new_repo sm-none "${SUPBARE}")"
 gha "${R}" -c submodule.recurse=true push origin HEAD:refs/heads/plain
 sm_passed "S17. submodule.recurse=true in a repo with no submodules: the push is unchanged"
+gha "${R}" push --recurse-submodules=on-demand origin HEAD:refs/heads/plain
+sm_refused "S18. an explicit --recurse-submodules=on-demand is refused in a repo with no submodule markers too"
 git -C "${R}" update-index --add --cacheinfo "160000,$(git -C "${SM}/s" rev-parse HEAD),lib"
 gha "${R}" -c submodule.recurse=true push origin HEAD:refs/heads/plain
-sm_refused "S18. a gitlink in the index with no .gitmodules still counts as a submodule -> refused"
+sm_refused "S19. a gitlink in the index with no .gitmodules still counts as a submodule -> refused"
+gha "${SM}" push -o -- --recurse-submodules=on-demand origin HEAD:refs/heads/feat
+sm_refused "S20. \`-o --\`: the -- is -o's value, not the end of options, so the next flag counts -> refused"
+gha "${SM}" -c submodule.recurse=true push --recurse-submodules check origin HEAD:refs/heads/feat
+sm_passed "S21. --recurse-submodules check (the value as a separate word) passes"
+gha "${SM}" -c 'alias.pq=push "--recurse-submodules=on-demand"' pq origin HEAD:refs/heads/feat
+if is_refusal && [[ "${ERR}" == *"quotes or backslashes"* ]]; then
+  ok "S22. an alias with a quoted flag (split differently by git) -> refused"
+else bad "S22. quoted alias refused" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+git -C "${SM}" config submodule.recurse true
+gha "${SM}" subtree push -P s "${SUBBARE}" feat
+if is_refusal && [[ "${ERR}" == *"-c push.recurseSubmodules=no subtree push"* ]]; then
+  ok "S23. subtree push refusal names the -c push.recurseSubmodules=no Fix (subtree has no --no-recurse-submodules)"
+else bad "S23. subtree push Fix" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+gha "${SM}" -c push.recurseSubmodules=no subtree push -P s "${SUBBARE}" feat
+sm_passed "S24. that Fix works: -c push.recurseSubmodules=no subtree push passes"
+git -C "${SM}" config --unset submodule.recurse
 
 echo
 echo "--- DND-1475: a push that moves the remote's default branch is merge.landed ---"

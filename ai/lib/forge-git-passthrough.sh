@@ -21,10 +21,12 @@
 #     included, submodule URLs when it recurses) and the command is REFUSED if
 #     any still reaches <host> over SSH or another non-HTTPS transport
 #     (ssh://, git://, http://, a pushurl override, an insteadOf that forces
-#     SSH). A shell alias (`!...`) and a push (or subtree push) that recurses
-#     into submodules, by flag, push.recurseSubmodules or submodule.recurse
-#     (fg_push_recurses), are refused outright. A refusal is exit 3 with a
-#     Fix: line.
+#     SSH). Refused outright: a shell alias (`!...`), an alias with quotes or
+#     backslashes (split differently here than by git), and a push (or
+#     subtree push) that recurses into submodules: by an explicit flag, or by
+#     push.recurseSubmodules / submodule.recurse in a repository that has
+#     submodules (fg_push_recurses says what counts). A refusal is exit 3
+#     with a Fix: line.
 #   * fg_refuse_red_main (DND-1482): a push to main is refused while
 #     ai/bin/main-health has recorded origin/main RED, unless it lands a gated
 #     fix. Also exit 3 with a Fix: line. See "Red-main refusal" below.
@@ -37,7 +39,9 @@
 # forge host (`myalias:owner/repo`); ext:: transports; `clone
 # --recurse-submodules` (the submodule URLs are unknown until the clone lands);
 # git-lfs transfers; third-party `git-<name>` subcommands; any subcommand not
-# named above.
+# named above; a push whose recursion comes from config, in a repository where
+# only the pushed commit (not the index, .gitmodules or config) records a
+# populated nested repository as a gitlink (fg_push_recurses).
 #
 # Usage: set the variables below, then call `fg_refuse_non_https "$@"` (it
 # exits 3 on a refusal) and then `fg_git_exec <basic-user> <token> "$@"` (it
@@ -103,10 +107,19 @@ EOF
   exit 3
 }
 
+fg_refuse_quoted_alias() {
+  cat >&2 <<EOF
+$FG_TOOL: REFUSING \`git $1\`: it is an alias with quotes or backslashes ('$2'), which $FG_TOOL does not split the way git does, so it cannot check which remote it reaches or what it pushes.
+  Fix: run the underlying git command directly through the wrapper — \`~/dev/custom/ai/bin/$FG_TOOL git <the expanded command>\`. $FG_ESCALATE
+EOF
+  exit 3
+}
+
+# fg_refuse_unchecked <subcommand> <why> [<how to turn recursion off>]
 fg_refuse_unchecked() {
   cat >&2 <<EOF
 $FG_TOOL: REFUSING \`git $1\`: $2, so it could reach $FG_HOST as $FG_OWNER unchecked.
-  Fix: push with --no-recurse-submodules (or drop the --recurse-submodules / push.recurseSubmodules / submodule.recurse that turns it on), and push each submodule separately from its own directory through \`~/dev/custom/ai/bin/$FG_TOOL git -C <submodule> push …\`. $FG_ESCALATE
+  Fix: ${3:-push with --no-recurse-submodules (or drop the --recurse-submodules / push.recurseSubmodules / submodule.recurse that turns it on)}, and push each submodule separately from its own directory through \`~/dev/custom/ai/bin/$FG_TOOL git -C <submodule> push …\`. $FG_ESCALATE
 EOF
   exit 3
 }
@@ -117,10 +130,10 @@ EOF
 # sources this file and calls it too.
 #
 # fg_push_recurses <probe> [<push args>...] : 0 when the push would also push
-# submodules, in a repository that has them. <probe> is a command (a function
-# name) that runs git with the push's own global options (-C, -c, ...), so
-# every config read sees what the push will see. Sets FG_RECURSE_SRC to the
-# source that decided it, for the refusal message.
+# submodules. <probe> is a command (a function name) that runs git with the
+# push's own global options (-C, -c, ...), so every config read sees what the
+# push will see. Sets FG_RECURSE_SRC to the source that decided it, for the
+# refusal message.
 #
 # How git decides, measured on git 2.54 against real pushes (DND-1841):
 #   * A --recurse-submodules flag beats config. The LAST flag wins. Its value
@@ -132,16 +145,18 @@ EOF
 #     contributes its own last value; submodule.recurse true means on-demand.
 #
 # Conservative, so a parse slip can only over-refuse, never let one through:
-#   * any "on" flag anywhere counts, whatever follows it;
-#   * an "off" flag counts only when the word before it is not an option that
-#     takes a separate value (-o, --push-option, --repo, ...), since there it
-#     may be that option's value and not a flag at all;
+#   * any "on" flag anywhere counts, whatever follows it, and is refused in
+#     any repository: an explicit flag asks for recursion by name;
+#   * an "off" flag, or the `--` that ends the options, counts only when the
+#     word before it is not an option that takes a separate value (-o,
+#     --push-option, --repo, ...), since there it may be that option's value;
 #   * a value that is not a known "off" reads as on (git rejects most of them);
 #   * config that cannot be read reads as on.
-# "Has submodules" is any of: a .gitmodules at the top level, a
-# submodule.<name>.url in config, a gitlink in the index, or a modules
-# directory in the git dir. Residual: a populated nested repository that only
-# a pushed commit (not the index) records as a gitlink.
+# Recursion that comes from config is refused only in a repository that has
+# submodules (fg_has_submodules), so a global submodule.recurse=true does not
+# block every push in a repository with none. Residual, config-sourced only: a
+# populated nested repository that only a pushed commit, not the index,
+# records as a gitlink.
 FG_RECURSE_SRC=""
 fg_push_recurses() {
   local probe="$1"; shift
@@ -149,7 +164,7 @@ fg_push_recurses() {
   FG_RECURSE_SRC=""
   while [ $# -gt 0 ]; do
     a="$1"; shift
-    [ "$a" = -- ] && break
+    if [ "$a" = -- ] && ! fg_takes_value "$prev"; then break; fi
     case "$a" in
       --no-*)
         name="${a#--no-}"
@@ -173,42 +188,47 @@ fg_push_recurses() {
   done
   if [ -n "$on_src" ]; then
     FG_RECURSE_SRC="the flag $on_src"
-  elif [ "$cli" = off ]; then
-    return 1
-  else
-    # Config, in git's order. -z: each record is "key\nvalue" (or a bare key
-    # for a valueless entry), NUL-terminated, so a value cannot forge a record.
-    local -a recs=()
-    local re='^(push\.recursesubmodules|submodule\.recurse)$'
-    rc=0; "$probe" config --get-regexp "$re" >/dev/null 2>&1 || rc=$?
-    case "$rc" in
-      0) mapfile -d '' -t recs < <("$probe" config -z --get-regexp "$re" 2>/dev/null) ;;
-      1) return 1 ;;
-      *) FG_RECURSE_SRC="git config that cannot be read (exit $rc)"; state=on ;;
-    esac
-    if [ "$rc" = 0 ]; then
-      for rec in "${recs[@]}"; do
-        [ "${rec%%$'\n'*}" = push.recursesubmodules ] || continue
-        case "$rec" in *$'\n'*) last_push="${rec#*$'\n'}" ;; *) last_push=$'\001' ;; esac
-      done
-      for rec in "${recs[@]}"; do
-        [ -n "$rec" ] || continue
-        k="${rec%%$'\n'*}"
-        case "$rec" in *$'\n'*) v="${rec#*$'\n'}" ;; *) v=$'\001' ;; esac
-        case "$k" in
-          submodule.recurse)
-            # git's bool: a valueless key is true.
-            if [ "$v" != $'\001' ] && fg_bool_false "$v"; then state=off
-            else state=on; cfg_src="submodule.recurse=${v/$'\001'/true} in git config"; fi ;;
-          push.recursesubmodules)
-            if [ "$last_push" != $'\001' ] && fg_recurse_off "$last_push"; then state=off
-            else state=on; cfg_src="push.recurseSubmodules=${last_push/$'\001'/(no value)} in git config"; fi ;;
-        esac
-      done
-      FG_RECURSE_SRC="$cfg_src"
-    fi
-    [ "$state" = on ] || return 1
+    return 0
   fi
+  [ "$cli" = off ] && return 1
+  # Config, in git's order. -z: each record is "key\nvalue" (or a bare key for
+  # a valueless entry), NUL-terminated, so a value cannot forge a record. The
+  # read's own exit status rides in as a last, unterminated record (an && ||
+  # list, so a caller's set -e, inherited here, cannot drop it).
+  local -a recs=()
+  mapfile -d '' -t recs < <("$probe" config -z --get-regexp '^(push\.recursesubmodules|submodule\.recurse)$' 2>/dev/null \
+                              && printf 'rc=0' || printf 'rc=%s' "$?")
+  rc=""
+  if [ "${#recs[@]}" -gt 0 ]; then
+    rc="${recs[${#recs[@]}-1]}"
+    unset 'recs[${#recs[@]}-1]'
+  fi
+  case "$rc" in rc=[0-9]*) rc="${rc#rc=}" ;; *) rc="unknown" ;; esac
+  case "$rc" in
+    0) ;;
+    1) return 1 ;;
+    *) FG_RECURSE_SRC="git config that cannot be read (exit $rc)"; return 0 ;;
+  esac
+  for rec in "${recs[@]}"; do
+    [ "${rec%%$'\n'*}" = push.recursesubmodules ] || continue
+    case "$rec" in *$'\n'*) last_push="${rec#*$'\n'}" ;; *) last_push=$'\001' ;; esac
+  done
+  for rec in "${recs[@]}"; do
+    [ -n "$rec" ] || continue
+    k="${rec%%$'\n'*}"
+    case "$rec" in *$'\n'*) v="${rec#*$'\n'}" ;; *) v=$'\001' ;; esac
+    case "$k" in
+      submodule.recurse)
+        # git's bool: a valueless key is true.
+        if [ "$v" != $'\001' ] && fg_bool_false "$v"; then state=off
+        else state=on; cfg_src="submodule.recurse=${v/$'\001'/true} in git config"; fi ;;
+      push.recursesubmodules)
+        if [ "$last_push" != $'\001' ] && fg_recurse_off "$last_push"; then state=off
+        else state=on; cfg_src="push.recurseSubmodules=${last_push/$'\001'/(no value)} in git config"; fi ;;
+    esac
+  done
+  [ "$state" = on ] || return 1
+  FG_RECURSE_SRC="$cfg_src"
   fg_has_submodules "$probe"
 }
 
@@ -216,19 +236,19 @@ fg_push_recurses() {
 # --recurse-submodules (the full name, or an abbreviation of at least `recu`;
 # `rec` is ambiguous with --receive-pack and git refuses it).
 fg_recurse_name() {
-  [ "${#1}" -ge 4 ] && [ "${1}" = "$(printf '%s' recurse-submodules | head -c "${#1}")" ]
+  [ "${#1}" -ge 4 ] && [[ recurse-submodules == "$1"* ]]
 }
 
 # fg_recurse_off <value> : 0 when a --recurse-submodules / push.recurseSubmodules
 # value pushes no submodule (no, check, or git's false). Anything else is on.
 fg_recurse_off() {
-  case "$(tr 'A-Z' 'a-z' <<<"$1")" in check) return 0 ;; esac
+  [ "${1,,}" = check ] && return 0
   fg_bool_false "$1"
 }
 
 # fg_bool_false <value> : 0 when git's bool parse reads it as false.
 fg_bool_false() {
-  case "$(tr 'A-Z' 'a-z' <<<"$1")" in ''|false|no|off|0) return 0 ;; esac
+  case "${1,,}" in ''|false|no|off|0) return 0 ;; esac
   return 1
 }
 
@@ -243,23 +263,30 @@ fg_takes_value() {
     --?*)
       n="${w#--}"
       for long in push-option receive-pack exec repo recurse-submodules; do
-        [ "$n" = "$(printf '%s' "$long" | head -c "${#n}")" ] && return 0
+        [[ "$long" == "$n"* ]] && return 0
       done ;;
   esac
   return 1
 }
 
-# fg_has_submodules <probe> : 0 when the repository has submodules (see the
-# fg_push_recurses header for what counts).
+# fg_has_submodules <probe> : 0 when the repository has submodules: a
+# submodule.<name>.url in config, a modules directory in the git dir, a
+# .gitmodules at the top level, or a gitlink in the index. A probe that
+# fails reads as "has submodules": could not look is not "none".
 fg_has_submodules() {
-  local probe="$1" top mods
+  local probe="$1" mods inside top idx
   "$probe" config --get-regexp '^submodule\..*\.url$' >/dev/null 2>&1 && return 0
-  top="$("$probe" rev-parse --show-toplevel 2>/dev/null || true)"
-  [ -n "$top" ] && [ -f "$top/.gitmodules" ] && return 0
-  mods="$("$probe" rev-parse --path-format=absolute --git-path modules 2>/dev/null || true)"
-  [ -n "$mods" ] && [ -d "$mods" ] && return 0
-  # grep reads all of it (no -q), so a pipefail caller never sees a SIGPIPE.
-  "$probe" ls-files --stage 2>/dev/null | grep '^160000 ' >/dev/null
+  mods="$("$probe" rev-parse --path-format=absolute --git-path modules 2>/dev/null)" || return 0
+  [ -n "$mods" ] || return 0
+  [ -d "$mods" ] && return 0
+  inside="$("$probe" rev-parse --is-inside-work-tree 2>/dev/null)" || return 0
+  # A repository with no work tree has no populated submodule to push.
+  [ "$inside" = true ] || return 1
+  top="$("$probe" rev-parse --show-toplevel 2>/dev/null)" || return 0
+  [ -n "$top" ] || return 0
+  [ -f "$top/.gitmodules" ] && return 0
+  idx="$("$probe" ls-files --stage 2>/dev/null)" || return 0
+  [[ $'\n'"$idx" == *$'\n160000 '* ]]
 }
 
 # fg_refuse_non_https <git args...> : resolve every URL the network op would
@@ -303,6 +330,10 @@ fg_refuse_non_https() {
     [ -n "$alias_val" ] || break
     case "$alias_val" in
       '!'*) fg_refuse_shell_alias "$sub" "$alias_val" ;;
+      # git strips quotes and backslashes when it splits an alias; a plain
+      # word split here would not, so a quoted flag would pass unread
+      # (DND-1841: `push "--recurse-submodules=on-demand"`). Refuse instead.
+      *[\"\'\\]*) fg_refuse_quoted_alias "$sub" "$alias_val" ;;
     esac
     read -ra ex <<<"$alias_val"
     set -- "${ex[@]}" "$@"
@@ -331,7 +362,8 @@ fg_refuse_non_https() {
           # git-subtree's own `git push` carries no recursion flag, but it
           # reads the same config: judge that with no flags.
           fg_push_recurses G \
-            && fg_refuse_unchecked "subtree push" "its inner git push pushes submodules too ($FG_RECURSE_SRC), and each submodule push goes through its own remote, which $FG_TOOL does not inspect" ;;
+            && fg_refuse_unchecked "subtree push" "its inner git push pushes submodules too ($FG_RECURSE_SRC), and each submodule push goes through its own remote, which $FG_TOOL does not inspect" \
+                 "turn recursion off for this one command with \`~/dev/custom/ai/bin/$FG_TOOL git -c push.recurseSubmodules=no subtree push …\` (git subtree push has no --no-recurse-submodules)" ;;
         pull|add) mode=fetch ;;
         *) return 0 ;;
       esac

@@ -245,6 +245,8 @@ refused "F10. push.recurseSubmodules=no in the repo, then -c submodule.recurse=t
 "${REAL_G}" -C "${R}" config --unset push.recurseSubmodules
 run "${R}" git -c submodule.recurse=true push --no-recurse-submodules origin HEAD
 passed "F11. submodule.recurse=true with --no-recurse-submodules to a local remote passes" 'REAL-GIT'
+run "${R}" git push -o -- --recurse-submodules=on-demand origin HEAD
+refused "F12. \`-o --\`: the -- is -o's value, so the next flag still counts" git 'no-recurse-submodules' 'REAL-GIT'
 mkdir -p "${TMP}/not-isolated"
 run "${R}" env GH_TOKEN=forged GH_HOST=github.com GH_CONFIG_DIR="${TMP}/not-isolated" gh pr create --title t --body b
 refused "F5. gh with a config dir that is not gh-athena's" gh gh-athena 'REAL-GH'

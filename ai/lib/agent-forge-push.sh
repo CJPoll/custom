@@ -24,10 +24,12 @@
 # push's own config, as git will rewrite it. A URL whose host is the forge host
 # or a subdomain of it (a trailing dot ignored) is a forge push. Refused
 # outright: a forge push over SSH or another non-HTTPS transport (the owner's
-# SSH key would carry it), and a push that recurses into submodules, by
-# argument, push.recurseSubmodules or submodule.recurse, in a repository that
-# has submodules (each submodule push runs through git's exec-path, where no
-# wrapper sees it). A local path or another host is allowed.
+# SSH key would carry it), and a push that recurses into submodules, by an
+# explicit flag, or by push.recurseSubmodules or submodule.recurse in a
+# repository that has submodules (each submodule push runs through git's
+# exec-path, where no wrapper sees it). The recursion rule is the
+# passthrough's fg_push_recurses, the one copy both routes share (DND-1841).
+# A local path or another host is allowed.
 #
 # WHAT IS ROUTED. A forge push is allowed only when it carries the credential
 # isolation the Athena passthrough (fg_git_exec) gives git, for that host:

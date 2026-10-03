@@ -153,12 +153,11 @@ is_refusal && [[ "${ERR}" == *"shell alias"* ]] && ok "12. a shell alias (!...) 
   || bad "12. shell alias refused" "rc=${RC} out='${OUT}' err='${ERR}'"
 
 R="$(new_repo submod 'https://gitlab.com/example-group/example-app.git')"
-# A repo with a submodule: recursion in a repo with none pushes nothing more
-# and is not refused (DND-1841, fg_push_recurses).
-printf '[submodule "lib"]\n\tpath = lib\n\turl = https://gitlab.com/example-group/lib.git\n' > "${R}/.gitmodules"
 gla "${R}" push --recurse-submodules=on-demand origin HEAD
 is_refusal && ok "13. \`push --recurse-submodules=on-demand\` -> refused" \
   || bad "13. recursive push refused" "rc=${RC} out='${OUT}' err='${ERR}'"
+# Recursion from config is judged in a repo that has submodules (DND-1841).
+printf '[submodule "lib"]\n\tpath = lib\n\turl = https://gitlab.com/example-group/lib.git\n' > "${R}/.gitmodules"
 gla "${R}" -c submodule.recurse=true push origin HEAD
 is_refusal && [[ "${ERR}" == *"submodule.recurse"* ]] && ok "13b. \`-c submodule.recurse=true push\` -> refused (DND-1841)" \
   || bad "13b. submodule.recurse push refused" "rc=${RC} out='${OUT}' err='${ERR}'"
