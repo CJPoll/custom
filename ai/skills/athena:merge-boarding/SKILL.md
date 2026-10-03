@@ -87,9 +87,8 @@ The landing, as Cody confirmed it (2026-10-01):
    `origin/main` if main moved. Record the fetched `origin/main` SHA: it is
    the landed range's base in steps 3 and 5.
 3. A **clean** rebase (no textual or semantic conflict, *Merge one at a time*)
-   lands with no re-gate. After the rebase, compare the head's migration
-   versions with the fetched `origin/main`'s; a shared version is a semantic
-   conflict, so go to step 4. Push the rebased head
+   lands with no re-gate. Run *Merge one at a time*'s migration-version
+   check first; a collision is a semantic conflict, so go to step 4. Push the rebased head
    fast-forward (`gh-athena git push origin <sha>:main`), still under the
    lock, then release it. The pushed SHA is not the reported one; the clean
    rebase carries the reported head's gate and verdict. `gh-athena` checks
