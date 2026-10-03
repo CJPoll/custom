@@ -6,8 +6,9 @@
 # checkout's path, never a linked worktree's: a worktree path vanishes on
 # cleanup, and whatever names it (a crontab line, a settings.json hook, an MCP
 # headersHelper) then fires a missing file with no error. The cron installers
-# (through cron_main_checkout in cron-entry.sh), scripts/setup-hooks and
-# scripts/add-athena-mcp all resolve it here.
+# (through cron_main_checkout in cron-entry.sh), scripts/setup-hooks,
+# scripts/add-athena-mcp, the lead-time and clustering cron runners and
+# ai/bin/slack-roots-tick (DND-1722) all resolve it here.
 #
 # main_checkout <script-dir> [<who>]
 #   Run it in the caller's shell, not in $(...): it sets two globals.
