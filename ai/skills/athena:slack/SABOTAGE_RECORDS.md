@@ -585,13 +585,16 @@ DND-1822: `read-thread` and `read-channel` rendered six keys per message and dro
 
 | # | Mutation | Cases reddened | Failure string(s) |
 |---|---|---|---|
-Review round (code-reviewer: a `files` list of non-objects printed `[0 files: ]`, and an empty title printed an empty label; adr-reviewer: the room allowlist had no sabotage row and two marker branches no case). Baseline `VERDICT: PASS (353 cases)`.
+| S103 | `slack_files_meta` merges onto the whole file object (`. + {id: ...}`), so the allowlist passes everything through | 2 | `FAIL read-thread --json: a message's files[] keep id, name, title, filetype, mimetype, size, mode` / `FAIL read-thread --json: no tokened or private file URL is printed` |
+| S104 | the JSON form drops the `files` merge | 2 | `FAIL read-thread --json: a message's files[] keep ...` / `FAIL read-channel: files[] pass through in --json and are marked in text` |
+| S105 | the text form drops the attachment marker | 2 | `FAIL read-thread text: marks files and a huddle; a plain message is unchanged` / `FAIL read-channel: files[] pass through in --json and are marked in text` |
+
+After the restore the suite returned to `VERDICT: PASS (351 cases)`.
+
+Review round (code-reviewer: a `files` list of non-objects printed `[0 files: ]`, and an empty title printed an empty label; adr-reviewer: the room allowlist had no sabotage row and two marker branches no case). Two cases added; baseline `VERDICT: PASS (353 cases)`. S103-S105 re-run on that baseline, each alone, the same way: S103 and S104 redden the same 2 cases; S105 reddens 4, the 2 above plus `FAIL read-channel: an id-only file reads singular with no size; ...` and `FAIL read-channel: a files list of non-objects is no files; ...`.
 
 | # | Mutation | Cases reddened | Failure string(s) |
 |---|---|---|---|
-| S103 | `slack_files_meta` merges onto the whole file object (`. + {id: ...}`), so the allowlist passes everything through | 2 | `FAIL read-thread --json: a message's files[] keep id, name, title, filetype, mimetype, size, mode` / `FAIL read-thread --json: no tokened or private file URL is printed` |
-| S104 | the JSON form drops the `files` merge | 2 | `FAIL read-thread --json: a message's files[] keep ...` / `FAIL read-channel: files[] pass through in --json and are marked in text` |
-| S105 | the text form drops the attachment marker | 4 | `FAIL read-thread text: marks files and a huddle; a plain message is unchanged` / `FAIL read-channel: files[] pass through in --json and are marked in text` / `FAIL read-channel: an id-only file reads singular with no size; ...` / `FAIL read-channel: a files list of non-objects is no files; ...` |
 | S106 | `slack_room_meta` merges onto the whole room object | 2 | `FAIL read-thread --json: no tokened or private file URL is printed` / `FAIL read-thread --json: a huddle message keeps its room metadata` |
 | S107 | `slack_files_meta` tests the raw list's length, not the filtered one | 1 | `FAIL read-channel: a files list of non-objects is no files; empty name and title fall back to the id` |
 
