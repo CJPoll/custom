@@ -198,7 +198,7 @@ load_dbus_lib() {
 # (DND-1560). Same shape as load_dbus_lib: sets BLOCK_LIB_WHY to the fault, or ""
 # when the lib is usable.
 BLOCK_LIB="${SCRIPT_DIR}/lib/block-signature.sh"
-BLOCK_LIB_FNS="athena_block_signature"
+BLOCK_LIB_FNS="athena_block_signature athena_block_signature_final"
 BLOCK_LIB_FIX="see what changed first (git -C ${SCRIPT_DIR%/scripts} status -- scripts/lib), then restore it (git checkout -- scripts/lib discards uncommitted edits there), restore read permission on an unreadable one (chmod u+r ${BLOCK_LIB}), or fast-forward this checkout to main when the runner is newer than its libs."
 BLOCK_LIB_WHY=""
 load_block_lib() {
@@ -574,7 +574,7 @@ wedge_track() {
   episode_alert wedged "${record}" "${WEDGE_STATE}" "${body:-}"
 }
 
-# blocked_track <exit> <signature> — the session never reached the model. Write
+# blocked_track <exit> <signature> — the provider stopped the session before it did any work. Write
 # runs/<ts>.blocked; from BLOCK_ESCALATE in a row, alert once per episode. Never
 # gates a spawn and never touches the wedge counter.
 blocked_track() {
@@ -601,7 +601,7 @@ blocked_track() {
     return 0
   fi
   body="$(new_body)" && {
-    printf 'The epic-clustering cron on this machine is BLOCKED: %s ticks in a row never reached the model, so no clustering pass or daily digest ran (DND-983). It keeps trying every tick; nothing is wedged.\n' "${streak}"
+    printf 'The epic-clustering cron on this machine is BLOCKED: %s ticks in a row were stopped before they did any work, so no clustering pass or daily digest ran (DND-983). It keeps trying every tick; nothing is wedged.\n' "${streak}"
     printf 'This is a report. The blocked record named in re: is the authority.\n\n'
     printf 'checkout: %s\nepisode: %s\nfirst_blocked: %s\nconsecutive_blocked: %s\nthreshold: %s\nclassification: %s\nlog: %s\n' \
       "${MAIN_CHECKOUT}" "${ep_id}" "${ep_first}" "${streak}" "${BLOCK_ESCALATE}" "${sig:-UNCLASSIFIED}" "${log}"
@@ -841,7 +841,8 @@ finish() {
   exit "${rc}"
 }
 
-# A session with no receipt never reached the model. Exit 0, or a known block
+# A session with no receipt never reached the model (a limit can still land
+# after the receipt; see the DND-1560 rule below). Exit 0, or a known block
 # signature on a non-zero exit, is BLOCKED: never counted toward the wedge (a
 # usage limit clears on its own), but BLOCK_ESCALATE in a row send one alert
 # (an auth or account fault does not clear). Anything else with no receipt is a
@@ -864,8 +865,13 @@ fi
 # is BLOCKED and never counted: a limit clears on its own, and a wedge needs a
 # manual re-arm. A summary or a closure is evidence of work, so a run that has
 # either keeps its failure (a closure may be unrecorded; notice_summary says so).
+# Cluster moves and merges leave no record, so a limit that lands after some
+# of them is still BLOCKED: the pass is idempotent and the next one redoes it.
+# Only the closing bytes of the log are read for the wording
+# (athena_block_signature_final), so a failure that merely mentions
+# "authentication" earlier stays a failure.
 if [ "${status}" -ne 0 ] && [ ! -s "${SUMMARY}" ] && [ ! -s "${NOTICES}" ]; then
-  sig="$(athena_block_signature "${log}")"
+  sig="$(athena_block_signature_final "${log}")"
   if [ -n "${sig}" ]; then
     blocked_track "${status}" "${sig}"
     finish 69 blocked

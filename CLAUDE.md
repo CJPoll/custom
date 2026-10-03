@@ -611,11 +611,12 @@ shipwright cron never writes Notion, so this is its own runner.
   so the runner copies them into a `--mcp-config`. A missing server, or the
   skill not landed in the main checkout, is exit 78 and counts as a failure.
   So does a `scripts/lib` file the tick sources (`mcp-preflight.sh`,
-  `dbus-env.sh`, `block-signature.sh`) that is missing, unreadable, unloadable, or lacks a function
-  the tick calls (DND-1603, DND-1728): it leaves a
-  `.failed` record, feeds the wedge counter and the one wedge alert, and the
-  lead-time runner treats it the same. The shipwright runner does too, for
-  `dbus-env.sh` and `shipwright-stale-dirt.sh`.
+  `dbus-env.sh`, `block-signature.sh`) that is missing, unreadable,
+  unloadable, or lacks a function the tick calls (DND-1603, DND-1728): it
+  leaves a `.failed` record, feeds the wedge counter and the one wedge alert,
+  and the lead-time runner treats it the same. The shipwright runner does too,
+  for `dbus-env.sh`, `shipwright-stale-dirt.sh`, `lane-own-commits.sh` and
+  `block-signature.sh`.
 - **Install / restore / verify:** `scripts/setup-clustering-cron`
   (`--dry-run`, `--check`, `--remove`, `--backup <file>`). `--check`, the
   install, the installer's install `--dry-run` and the runner's `--dry-run`
@@ -630,7 +631,9 @@ shipwright cron never writes Notion, so this is its own runner.
   2 failures in a row exit 75 and write a `runs/<ts>.wedged` record. The first
   wedged tick of an episode sends ONE `harness-alerts` message (slug
   `clustering-wedged`). Re-arm: `rm ai-artifacts/clustering/consecutive-failures`.
-  A session that never reaches the model is BLOCKED (exit 69). It never
+  A session the provider stops before it does any work is BLOCKED (exit 69):
+  no receipt, or a receipt, a non-zero exit, a known limit or auth message, no
+  summary and no recorded won't-fix closure (DND-1560). It never
   wedges, but 2 in a row send ONE `clustering-blocked` alert per episode,
   because an auth or account fault does not clear by itself. Every run that
   spawned a session ends with one `harness-lane-drain` request, which

@@ -326,6 +326,10 @@ classify_block() { # <log> <bytes> <skip> -> the matched signature in <bytes> of
   [ -r "$1" ] || return 0
   athena_block_signature "$1" "${2:-0}" "${3:-0}"
 }
+classify_block_final() { # <log> <bytes> <skip> -> as classify_block, over the closing bytes of that range only (DND-1560)
+  [ -r "$1" ] || return 0
+  athena_block_signature_final "$1" "${2:-0}" "${3:-0}"
+}
 
 # --- failure-counter helpers -------------------------------------------------
 read_count() { # <path>
@@ -391,7 +395,7 @@ RUNNER_LIBS=(
   "dbus-env.sh:athena_dbus_env_setup"
   "shipwright-stale-dirt.sh:sd_measure sd_next_streak sd_display_paths"
   "lane-own-commits.sh:lane_own_commits"
-  "block-signature.sh:athena_block_signature"
+  "block-signature.sh:athena_block_signature athena_block_signature_final"
 )
 LIB_FAULTS=""
 LIB_FIX="see what changed first (git -C ${MAIN_CHECKOUT} status -- scripts/lib), then restore the named file(s) (git checkout -- scripts/lib discards uncommitted edits there), restore read permission on an unreadable one (chmod u+r <file>), or fast-forward this checkout to main when the runner is newer than its libs."
@@ -1420,7 +1424,7 @@ elif [ -e "${RECEIPT}" ] && [ "${status}" -ne 0 ] && [ "${own_known}" -eq 1 ] &&
   # made no commit of its own and exited non-zero with a known block signature:
   # the provider stopped it, so it is BLOCKED and never counted. Without a
   # signature it stays a failure. The receipt-less rule above is unchanged.
-  block_sig="$(classify_block "${log}" "${session_bytes}" "${pre_bytes}")"
+  block_sig="$(classify_block_final "${log}" "${session_bytes}" "${pre_bytes}")"
   [ -z "${block_sig}" ] || blocked=1
 fi
 
@@ -1453,7 +1457,7 @@ if [ "${blocked}" -eq 1 ]; then
     echo "athena-shipwright: run ${ts} BLOCKED, UNCLASSIFIED — the session did no work and NO known block signature matched ${log}. The signature list is probably stale. Record: ${marker}" >&2
   fi
   if [ -z "${block_sig}" ] || [ "${streak}" -eq 1 ] || [ $(( streak % BLOCK_ESCALATE )) -eq 0 ]; then
-    echo "  Fix: read ${log} (it holds whatever the session managed to print) and ${marker}. This tick did ZERO retrospective work — no artifact mined, no journal entry, no cursor advance — so read the matching gap in ${STATE_DIR}/journal.md as an OUTAGE, not a quiet period. Nothing is wedged and nothing needs re-arming: the lane keeps trying every hour and recovers by itself the moment the block clears; do NOT delete ${FAIL_COUNT} or ${BLOCK_COUNT}. If this says UNCLASSIFIED, the provider reworded its message — add the new wording to ATHENA_BLOCK_PATTERNS in ${__wrapper_dir}/lib/block-signature.sh and add a case to scripts/test/athena-shipwright/self-test.sh so the list cannot rot silently again. If ticks stay blocked past the reset time the log states, the cause is NOT transient: check account, billing and auth for ${CLAUDE}. SHIPWRIGHT_BLOCK_ESCALATE only changes how often this paragraph repeats; it never silences the class." >&2
+    echo "  Fix: read ${log} (it holds whatever the session managed to print) and ${marker}. $( [ -e "${RECEIPT}" ] && echo "The session reached the model but the provider stopped it before it made a commit, so any journal entry or cursor advance it made is unfinished; read the matching gap in ${STATE_DIR}/journal.md as an OUTAGE." || echo "This tick did ZERO retrospective work — no artifact mined, no journal entry, no cursor advance — so read the matching gap in ${STATE_DIR}/journal.md as an OUTAGE, not a quiet period." ) Nothing is wedged and nothing needs re-arming: the lane keeps trying every hour and recovers by itself the moment the block clears; do NOT delete ${FAIL_COUNT} or ${BLOCK_COUNT}. If this says UNCLASSIFIED, the provider reworded its message — add the new wording to ATHENA_BLOCK_PATTERNS in ${__wrapper_dir}/lib/block-signature.sh and add a case to scripts/test/athena-shipwright/self-test.sh so the list cannot rot silently again. If ticks stay blocked past the reset time the log states, the cause is NOT transient: check account, billing and auth for ${CLAUDE}. SHIPWRIGHT_BLOCK_ESCALATE only changes how often this paragraph repeats; it never silences the class." >&2
   fi
   echo "athena-shipwright: run ${ts} session exited ${status} but did no work; reporting BLOCKED (exit 69); log: ${log}" >&2
   exit 69

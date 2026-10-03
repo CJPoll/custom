@@ -574,7 +574,7 @@ load_own_lib() {
 # (DND-1560). Same shape as load_own_lib: sets BLOCK_LIB_WHY to the fault, or ""
 # when the lib is usable.
 BLOCK_LIB="${SCRIPT_DIR}/lib/block-signature.sh"
-BLOCK_LIB_FNS="athena_block_signature"
+BLOCK_LIB_FNS="athena_block_signature athena_block_signature_final"
 BLOCK_LIB_FIX="$(lib_fix "${BLOCK_LIB}")"
 BLOCK_LIB_WHY=""
 load_block_lib() {
@@ -786,7 +786,7 @@ wedge_track() {
   episode_alert wedged "${record}" "${WEDGE_STATE}" "${body:-}"
 }
 
-# blocked_track <exit> <signature> — the session never reached the model. Write
+# blocked_track <exit> <signature> — the provider stopped the session before it did any work. Write
 # runs/<ts>.blocked; from BLOCK_ESCALATE in a row, alert once per episode. Never
 # gates a spawn and never touches the wedge counter.
 blocked_track() {
@@ -813,7 +813,7 @@ blocked_track() {
     return 0
   fi
   body="$(new_body)" && {
-    printf 'The lead-time improver cron on this machine is BLOCKED: %s ticks in a row never reached the model, so no lead-time run happened (DND-1479). It keeps trying every tick; nothing is wedged.\n' "${streak}"
+    printf 'The lead-time improver cron on this machine is BLOCKED: %s ticks in a row were stopped before they did any work, so no lead-time run happened (DND-1479). It keeps trying every tick; nothing is wedged.\n' "${streak}"
     printf 'This is a report. The blocked record named in re: is the authority.\n\n'
     printf 'checkout: %s\nepisode: %s\nfirst_blocked: %s\nconsecutive_blocked: %s\nthreshold: %s\nclassification: %s\nlog: %s\n' \
       "${MAIN_CHECKOUT}" "${ep_id}" "${ep_first}" "${streak}" "${BLOCK_ESCALATE}" "${sig:-UNCLASSIFIED}" "${log}"
@@ -1359,7 +1359,7 @@ fi
 # never ok. Only a tick whose session reached the model is checked, and only
 # with a resolved repo list (an unresolved one never reaches a session).
 UNMEASURABLE_TOOL="${MAIN_CHECKOUT}/ai/skills/athena:lead-time-improve/scripts/unmeasurable"
-OBSERVE_LINES="observe=not checked (the session never reported for duty)"
+OBSERVE_LINES="observe=not checked (the session never reported for duty, or was stopped by the provider before it did any work)"
 OBSERVE_MISSING=""; OBSERVE_UNREADABLE=""; OBSERVE_FAILED=""; OBSERVE_INGEST=""
 observe_check() {
   local name mode rest out rc err want why head
@@ -1455,7 +1455,8 @@ finish() {
   exit "${rc}"
 }
 
-# Did the session reach the model? The receipt says so, but it rests on the
+# Did the session reach the model? (A limit can still land after it; see the
+# DND-1560 rule below.) The receipt says so, but it rests on the
 # outer session obeying the brief's first line. A summary (only the shipwright
 # writes it) or a lane that moved off its base proves it too, so a working run
 # that skipped the touch is never read as BLOCKED.
@@ -1487,10 +1488,14 @@ fi
 # so it is BLOCKED and never counted: a limit clears on its own, and a wedge
 # needs a manual re-arm. A stranded or unreadable lane is excluded, because a
 # kept branch is what the owner has to act on; a summary or a commit is
-# evidence of work, so a run that has either keeps its failure.
+# evidence of work, so a run that has either keeps its failure. The ledger,
+# the journal and ticket edits are not read as evidence: a limit that stops a
+# session mid-run leaves them for the next tick to redo. Only the closing bytes
+# of the log are read for the wording (athena_block_signature_final), so a
+# failure that merely mentions "authentication" earlier stays a failure.
 if [ "${status}" -ne 0 ] && [ "${STRANDED}" -eq 0 ] && [ "${LANE_UNREADABLE}" -eq 0 ] \
    && [ ! -s "${SUMMARY}" ] && [ "${own_rc}" -eq 0 ] && [ -z "${own}" ] && [ "${PRODUCT_WORKED}" -eq 0 ]; then
-  sig="$(athena_block_signature "${log}")"
+  sig="$(athena_block_signature_final "${log}")"
   if [ -n "${sig}" ]; then
     blocked_track "${status}" "${sig}"
     finish 69 blocked

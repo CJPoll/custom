@@ -47,6 +47,19 @@ pre="$(printf 'before: fine\n' | wc -c | tr -d ' ')"
 len="$(printf 'SESSION: rate limit\n' | wc -c | tr -d ' ')"
 expect "wording inside the slice matches" "rate limit" "$(athena_block_signature "${T}/slice2" "${len}" "${pre}")"
 
+printf '\nathena_block_signature_final — only the closing bytes\n'
+{ printf 'tool said: authentication ok\n'; head -c 4000 /dev/zero | tr '\0' x; printf '\nYou have hit your weekly limit\n'; } >"${T}/final-end"
+expect "a limit message at the end of a long log matches" "weekly limit" "$(athena_block_signature_final "${T}/final-end")"
+{ printf 'tool said: authentication ok\n'; head -c 4000 /dev/zero | tr '\0' x; printf '\nthe run fell over\n'; } >"${T}/final-mid"
+expect "a wording only far from the end does not match" "" "$(athena_block_signature_final "${T}/final-mid")"
+expect "the full reader still finds it" "authentication" "$(athena_block_signature "${T}/final-mid")"
+printf "You've hit your weekly limit\n" >"${T}/final-short"
+expect "a short log is read whole" "weekly limit" "$(athena_block_signature_final "${T}/final-short")"
+expect "an absent log matches nothing, exit 0" "0|" "$(athena_block_signature_final "${T}/absent"; printf '%s' "0|")"
+printf 'old: usage limit\n' >"${T}/final-slice"; printf 'SESSION: fine\n' >>"${T}/final-slice"
+pre="$(printf 'old: usage limit\n' | wc -c | tr -d ' ')"; len="$(printf 'SESSION: fine\n' | wc -c | tr -d ' ')"
+expect "with a slice, only the closing bytes of that slice are read" "" "$(athena_block_signature_final "${T}/final-slice" "${len}" "${pre}")"
+
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || echo "Fix: read each FAIL line above; it names the claim that broke. Re-run with: bash scripts/test/block-signature/self-test.sh"
 [ "$FAIL" -eq 0 ]

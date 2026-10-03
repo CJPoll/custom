@@ -1573,6 +1573,15 @@ else
   bad "limit after receipt never wedges" "codes='${codes% }' counter='$(cat "$(sd "$r")/consecutive-failures" 2>/dev/null)'"
 fi
 r="$(new_repo)"; a="$(aux "$r")"
+stub_claude_probe "$a/stub-claude" 1 'printf "the authentication step passed\n"; head -c 4000 /dev/zero | tr "\0" x; printf "\nthe pass fell over\n"'
+rc="$(run_runner "$r")"
+if [ "$rc" -eq 1 ] && [ "$(cat "$(sd "$r")/consecutive-failures" 2>/dev/null)" = "1" ] \
+   && ! ls "$(sd "$r")/runs/"*.blocked >/dev/null 2>&1; then
+  ok "a limit word far from the end of the log (a tool's output, not the provider's last word) stays a counted failure"
+else
+  bad "limit word mid-log" "rc=$rc counter=$(cat "$(sd "$r")/consecutive-failures" 2>/dev/null)"
+fi
+r="$(new_repo)"; a="$(aux "$r")"
 stub_claude_probe "$a/stub-claude" 7 'printf "the pass fell over\n"'
 rc="$(run_runner "$r")"
 if [ "$rc" -eq 7 ] && [ "$(cat "$(sd "$r")/consecutive-failures" 2>/dev/null)" = "1" ] \
@@ -2691,7 +2700,7 @@ dry_case "dbus-env.sh loads but defines nothing" dbus-env.sh 'does not define at
 dry_case "shipwright-stale-dirt.sh loads but defines nothing" shipwright-stale-dirt.sh 'does not define sd_measure sd_next_streak sd_display_paths' empty
 dry_case "shipwright-stale-dirt.sh lacks sd_display_paths" shipwright-stale-dirt.sh 'does not define sd_display_paths' partial
 dry_case "lane-own-commits.sh loads but defines nothing" lane-own-commits.sh 'does not define lane_own_commits' empty
-dry_case "block-signature.sh loads but defines nothing" block-signature.sh 'does not define athena_block_signature' empty
+dry_case "block-signature.sh loads but defines nothing" block-signature.sh 'does not define athena_block_signature athena_block_signature_final' empty
 
 # DND-1729: --dry-run is the same dry run as DRY_RUN=1, because the installer's
 # shared cron_runner_dry_run calls `<runner> --dry-run`. The runner used to read

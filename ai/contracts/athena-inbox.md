@@ -2945,11 +2945,19 @@ also reports:
   no capture, so retention ignores it. The reader relays it like
   `shipwright-wedged`, composing the re-arm command itself. The same runner
   sends ONE `clustering-blocked` message per BLOCKED episode (consecutive
-  ticks whose session never reached the model). Its `re:` is the tick's
+  ticks the provider stopped before they did any work, with or without a
+  receipt). Its `re:` is the tick's
   `.blocked` record in the same directory; there is no re-arm to relay. It
   also sends ONE `harness-lane-drain` request at the end of every run that
   spawned a session, re: that run's `.run` record. Its reader is
   `athena:inbox-attend` → *A fourth writer* (DND-987).
+
+  **Later (2026-10-03, DND-1560):** a BLOCKED episode was "consecutive ticks
+  whose session never reached the model", so a tick with a receipt could not
+  be one. Superseded: a non-zero exit with a known limit or auth message, no
+  summary and no recorded closure is BLOCKED even with a receipt, because a
+  limit that lands after the receipt clears on its own and a wedge needs a
+  manual re-arm.
   A fourth program, `scripts/athena-leadtime-run.sh` (the lead-time improver
   cron, DND-1479), sends ONE `leadtime-wedged` message per wedge episode and
   ONE `leadtime-blocked` message per BLOCKED episode, on the clustering

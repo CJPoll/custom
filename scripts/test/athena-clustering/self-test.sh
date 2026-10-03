@@ -148,6 +148,7 @@ case "$(cat "$d/mode" 2>/dev/null || echo ok)" in
   crash)     echo "segmentation fault"; exit 3 ;;
   limit-receipt) : >"$CLUSTERING_RECEIPT"; echo "You've hit your weekly limit"; exit 1 ;;
   limit-receipt-notice) : >"$CLUSTERING_RECEIPT"; printf 'closed DND-910\n' >>"$notices"; echo "You've hit your weekly limit"; exit 1 ;;
+  limit-receipt-midlog) : >"$CLUSTERING_RECEIPT"; echo "the authentication step passed"; head -c 4000 /dev/zero | tr '\0' 'x'; echo; echo "the pass fell over"; exit 1 ;;
   limit-receipt-summary) : >"$CLUSTERING_RECEIPT"; echo "moved 1, merged 0, closed 0" >"$CLUSTERING_SUMMARY"; echo "You've hit your weekly limit"; exit 1 ;;
 esac
 EOF
@@ -744,6 +745,13 @@ if [ "$rc" = 1 ] && [ "$(cat "$(sd "$c")/consecutive-failures")" = 1 ] && [ -z "
   ok "a limit line after the pass recorded a closure stays a counted failure (the notice is evidence of work)"
 else
   bad "limit after notice" "rc=$rc err=$(cat "$c/runner.err")"
+fi
+c="$(new_case)"; echo limit-receipt-midlog >"$c/mode"
+rc="$(run_runner "$c")"
+if [ "$rc" = 1 ] && [ "$(cat "$(sd "$c")/consecutive-failures")" = 1 ] && [ -z "$(newest "$c" blocked)" ]; then
+  ok "a limit word far from the end of the log (a tool's output, not the provider's last word) stays a counted failure"
+else
+  bad "limit word mid-log" "rc=$rc err=$(cat "$c/runner.err")"
 fi
 c="$(new_case)"; echo limit-receipt-summary >"$c/mode"
 rc="$(run_runner "$c")"

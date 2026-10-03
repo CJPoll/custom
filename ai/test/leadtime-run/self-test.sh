@@ -184,6 +184,7 @@ case "$(cat "$d/mode" 2>/dev/null || echo ok)" in
   limit)     echo "You've hit your weekly limit"; exit 1 ;;
   crash)     echo "segmentation fault"; exit 3 ;;
   limit-receipt) : >"$LEADTIME_RECEIPT"; echo "You've hit your weekly limit"; exit 1 ;;
+  limit-receipt-midlog) : >"$LEADTIME_RECEIPT"; echo "the authentication step passed"; head -c 4000 /dev/zero | tr '\0' 'x'; echo; echo "the run fell over"; exit 1 ;;
   limit-receipt-summary) : >"$LEADTIME_RECEIPT"; summary; echo "You've hit your weekly limit"; exit 1 ;;
   limit-receipt-strand) : >"$LEADTIME_RECEIPT"; echo change >strand.txt; g add strand.txt >/dev/null; g commit -q -m "unlanded change"
              echo "You've hit your weekly limit"; exit 1 ;;
@@ -930,6 +931,13 @@ if [ "$r1$r2$r3" = 696969 ] && [ "$(fails "$c")" = 0 ] && [ "$(sends "$c" leadti
   ok "three limit-after-receipt ticks never wedge; they send the one blocked alert"
 else
   bad "limit after receipt x3" "rcs=$r1$r2$r3 fails=$(fails "$c") sends=$(cat "$c/send.log")"
+fi
+c="$(new_case)"; echo limit-receipt-midlog >"$c/mode"
+rc="$(run_runner "$c")"
+if [ "$rc" = 1 ] && [ "$(fails "$c")" = 1 ] && [ -z "$(newest "$c" blocked)" ]; then
+  ok "a limit word far from the end of the log (a tool's output, not the provider's last word) stays a counted failure"
+else
+  bad "limit word mid-log" "rc=$rc fails=$(fails "$c") err=$(cat "$c/runner.err")"
 fi
 c="$(new_case)"; echo limit-receipt-summary >"$c/mode"
 rc="$(run_runner "$c")"

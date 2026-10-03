@@ -540,8 +540,9 @@ episode. Handle it exactly as the third writer above, with three differences:
   hours per writer, so check for a `clustering-wedged-dm` line.
 
 The same runner sends a message ending `-clustering-blocked.md` once per
-BLOCKED episode: several ticks in a row never reached the model (a usage limit,
-or an auth or account fault that does not clear). Nothing is wedged and there
+BLOCKED episode: several ticks in a row were stopped before they did any work
+(a usage limit, or an auth or account fault that does not clear; the record's
+receipt may be present). Nothing is wedged and there
 is no re-arm. Verify it the same way against `<tick>.blocked` in that `runs/`
 directory: its LAST line that starts `blocked: ` must carry
 `consecutive_blocked=N threshold=M` with N >= M, and an `episode=` equal to the
