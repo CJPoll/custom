@@ -885,3 +885,32 @@ The canary reads usage under LC_ALL=C. After: `RESULT: 429 passed, 0 failed`.
 | S-D1-16 | an unmeasured version FAILS the canary (the rule at 73a7b23b) | D1-61 (fake git 2.99: expected PASS with the inactive note) |
 | S-D1-17 | the canary reads `git stash -h` in the caller's locale | D1-62, D1-63 (German usage: "could not measure") |
 | S-D1-18 | the hook measured only 2.54 | D1-63 (2.55 read as unmeasured), D1-65 (the hook on fake git 2.55 denies `git stash guard`) |
+
+## 2026-10-03 — DND-1095 D2, git-stash-guard: payload words judged by what the shell does
+
+- **Domain:** the PreToolUse git-stash text guard (`ai/hooks/git-stash-guard.sh`):
+  glob/brace command words that cannot be git (`globcat`), `stash` after a
+  separator, test operands, alias-reason attribution (DND-1216), quoted alias
+  names, and the glob-option switch (GLOBOPT).
+- **Suite run:** `sh ai/hooks/git-stash-guard.self-test.sh`. Mutations ran on a
+  `mktemp -d` copy of the hook and suite; the committed files were never edited.
+- **Fail-first:** section D2 (D2-1..76) written first, run against the unfixed
+  hook (D1 head `fc7f5a87`): `RESULT: 471 passed, 32 failed` (29 read-only
+  shapes denied, D2-42a/42b allowed by the base, D2-75 reported as "shell
+  alias"). After: `RESULT: 503 passed, 0 failed`.
+
+| id | Mutation | Observed failure |
+|---|---|---|
+| S-D2-1 | `globcat` never answers "git" | 38 cases: I44, I45, I53, I54, I56, I57, Z6, O20-O24, ... |
+| S-D2-2 | GLOBOPT ignored by `globcat` | O85, O86, O89, O91, D2-60..63, D2-71..74 |
+| S-D2-3 | AD (qualifier or group joined to the word) ignored | O112, O113, D2-29b, D2-29c, D2-46..49, D2-75 |
+| S-D2-4 | a non-git glob no longer keeps the next word in command position | D2-42a (`[e]nv nohup g?t ...`), D2-42b (`[e]nv A=1 g?t ...`) |
+| S-D2-5 | a heredoc line starting `stash` no longer git's argument (`SN` dropped) | O32, D2-67 (`xargs git` fed a heredoc) |
+| S-D2-6 | the old rule: `stash` after any separator | D2-30 (`grep -E 'a\|stash\|b'`) |
+| S-D2-7 | quote state dropped (every character unquoted) | O70, O71, D2-53, D2-54 |
+| S-D2-8 | every `$` in a glob word read as an expansion | D2-26 (`.*$/` in a sed script) |
+| S-D2-9 | a quoted snapshot alias name kept quoted | O95 (`alias -- 'gs?'=...`) |
+| S-D2-10 | test operands judged by the expanded-head rule | D2-31, D2-32 |
+| S-D2-11 | a brace with commas read as literal | O54, O55, O57, O71, O122, D2-54, D2-56 |
+| S-D2-12 | a glob wrapper's expanded first argument no longer denied | D2-45 (`[s]udo -- $G`) |
+| S-D2-13 | DND-1216 reason fix removed | D2-75 |

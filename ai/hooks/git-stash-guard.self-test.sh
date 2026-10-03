@@ -955,6 +955,274 @@ check "D1-64. the hook on an unmeasured git keeps git stash <non-verb> a write" 
 fake_env_on 2.55.0 "$_fullverbs"; runin "$D1CFG" "$GIT_CONFIG_GLOBAL" "$_d1j"; fake_env_off
 check "D1-65. the hook on measured git 2.55 applies fix 2" allow
 
+echo "== D2: words in payloads judged by what the shell does (DND-1095 D2) =="
+# Every allow case is a read-only command the guard denied on the live
+# hook, from DND-1095, DND-786, DND-787, DND-799, DND-800, DND-1216 and the
+# PR #124 evidence comments. Each deny case is a real stash write next to a
+# rule this section narrows. The D1 snapshot (the owner's `grep` alias) is
+# in force. ZDOTDIR points at an empty dir, so the machine's ~/.zshenv
+# cannot switch the default-option reading off (GLOBOPT is tested below).
+D2Z="$TMP/d2zdot"; mkdir -p "$D2Z"
+# d2 <label> <deny|allow> : the command is read from stdin, so quotes and
+# heredocs need no escaping.
+d2() {
+  _d2c=$(cat)
+  OUT=$(json "$WT" "$_d2c" | ZDOTDIR="$D2Z" CLAUDE_CONFIG_DIR="$D1CFG" sh "$HOOK" 2>/dev/null); STATUS=$?
+  check "$1" "$2"
+}
+# -- glob or brace words that cannot be git (globcat) --
+d2 "D2-1. grep -E with ? and .* (tests?, failures?)" allow <<'EOF'
+grep -E 'tests?, .*failures?' log
+EOF
+d2 "D2-2. jq .[] filter with an interpolated string" allow <<'EOF'
+gh run list --json databaseId -q '.[] | "\(.databaseId)"'
+EOF
+d2 "D2-3. DND-787: gh -q '.[]|...' piped to a while-read loop" allow <<'EOF'
+cd /tmp && git fetch -q; gh run list -R o/r --workflow "Post-Merge Deploy" --limit 5 --json databaseId,headSha,status,conclusion -q '.[]|"\(.databaseId) \(.headSha) \(.status) \(.conclusion)"' | while read id sha st c; do anc=$(git merge-base --is-ancestor cc2e0b5c $sha 2>/dev/null && echo contains-549 || echo no); echo "$id ${sha:0:8} $st $c $anc"; done
+EOF
+d2 "D2-4. awk print block with a comma" allow <<'EOF'
+gh pr checks 459 | awk '{print $1,$2}'
+EOF
+d2 "D2-5. awk /re/ with a braces action" allow <<'EOF'
+awk '/x/{print $1,$2}' f
+EOF
+d2 "D2-6. jq object construction (DND-786 b)" allow <<'EOF'
+gh run view 1 --json status,conclusion,jobs --jq '{status,conclusion,jobs:[.jobs[]|{name,conclusion}]}'
+EOF
+d2 "D2-7. docker Go template" allow <<'EOF'
+docker ps --format '{{.Names}} {{.Status}}'
+EOF
+d2 "D2-8. curl -w with %{...}" allow <<'EOF'
+curl -s -o /dev/null -w '%{http_code} %{time_total}' https://example.com
+EOF
+d2 "D2-9. python heredoc with slices and subscripts" allow <<'EOF'
+python3 - <<'PY'
+x = opts[:adapter]
+reps=[1, 2]
+y = s[:a]+s[b:]
+PY
+EOF
+d2 "D2-10. ruby ARGV.each block" allow <<'EOF'
+ruby -rjson -e 'ARGV.each{|f| puts JSON.parse(File.read(f))["files"].size }' a.json
+EOF
+d2 "D2-11. grep -E group at the start of a quoted pattern" allow <<'EOF'
+grep -n -E '(2026-09-30T00|23:[0-5][0-9]Z)' f
+EOF
+d2 "D2-12. grep -E group then classes (subshell-shaped, not a glob group)" allow <<'EOF'
+grep -nE '(exit|rc|code)[^a-z]{0,3}[0-9]' f
+EOF
+d2 "D2-13. BRE alternation under the grep alias (DND-800)" allow <<'EOF'
+grep -n "1229\|shared.*worktree.*volume" -r ai/bin/locked-merge
+EOF
+d2 "D2-14. grep a\|b* under the grep alias" allow <<'EOF'
+grep "a\|b*" f
+EOF
+d2 "D2-15. grep -v '^[MADR] '" allow <<'EOF'
+git status --porcelain | grep -v '^[MADR] '
+EOF
+d2 "D2-16. sed range with classes" allow <<'EOF'
+sed -n '/[Cc]ontract/,/^## [^C]/p' f
+EOF
+d2 "D2-17. jq string with a slice" allow <<'EOF'
+gh pr view 1 --json number,headRefOid -q '"\(.number) head=\(.headRefOid[0:8])"'
+EOF
+d2 "D2-18. heredoc prose with ** {} [] ? * %{" allow <<'EOF'
+cat >> journal.md <<'MD'
+**Suite:** {} [] ? * %{x}
+- tests?, foo[0] bar{a,b}
+MD
+EOF
+d2 "D2-19. grep -rhoE with {32,36} (reported as gstp, DND-1216)" allow <<'EOF'
+grep -rhoE '"?data_source"?: *"[0-9a-f-]{32,36}"' a b
+EOF
+d2 "D2-20. grep -E ^[0-9a-f]{8} (DND-1216)" allow <<'EOF'
+grep -E '^[0-9a-f]{8} ' f
+EOF
+d2 "D2-21. jq -c object after .[]" allow <<'EOF'
+jq -c '.[] | {id,use_case}' f.json
+EOF
+d2 "D2-22. gh --template with {{range}}" allow <<'EOF'
+gh pr list --template '{{range .}}{{.number}} {{.title}}{{end}}'
+EOF
+d2 "D2-23. sed with # delimiters after .*" allow <<'EOF'
+sed -E 's#.*foo#bar#' f
+EOF
+d2 "D2-24. heredoc message body naming hyphenated tools" allow <<'EOF'
+cat > /tmp/msg.md <<'MD'
+the athena-harness[bot] push-guard and git-stash-guard both pass.
+MD
+EOF
+d2 "D2-25. a glob command word that cannot be git, options only" allow <<'EOF'
+./run-*.sh -v
+EOF
+d2 "D2-26. sed regex with .*\$/ (a \$ before / is literal)" allow <<'EOF'
+sed -i 's/^| DND-1 | IN_PROGRESS | .*$/| DND-1 | DONE |/' state.md
+EOF
+d2 "D2-27. ruby %r{} and #{} in a heredoc" allow <<'EOF'
+ruby <<'RB'
+x = %r{a/b}
+s = "@@KEEP#{i}@@"
+RB
+EOF
+d2 "D2-28. JSON array heredoc" allow <<'EOF'
+cat > f.json <<'JS'
+[{"tracker":"a","ref":"b"}]
+JS
+EOF
+d2 "D2-29. awk array assignment and END loop" allow <<'EOF'
+awk '{t[NR]=1} END{for (b in t) print b}' f
+EOF
+# Residuals, still denied as before (see the hook header): an expansion in a
+# re-read command word, a mid-word or qualifier-shaped group.
+d2 "D2-29a. residual: an expansion inside an awk brace word" deny <<'EOF'
+awk '{t[$2]=$1} END{for (b in t) print b}' f
+EOF
+d2 "D2-29b. residual: a subscript inside a call" deny <<'EOF'
+python3 -c 'import json,sys; r=json.load(sys.stdin); print(r["id"][:8])'
+EOF
+d2 "D2-29c. residual: a mid-word regex group" deny <<'EOF'
+grep -E 'dnd-(9[0-9]|1[01][0-9])' f
+EOF
+# -- `stash` after | or ( is a command named stash --
+d2 "D2-30. grep -E alternation naming stash" allow <<'EOF'
+grep -n -i -E 'friction|harness|guard|stash|In Review' f
+EOF
+# -- test operands are never run --
+d2 "D2-31. [ -n \"\$d\" ] after git -C \"\$d\"" allow <<'EOF'
+for d in a b; do [ -n "$d" ] && git -C "$d" status --porcelain; done
+EOF
+d2 "D2-32. [ \"\$m\" = sha ] in a sh -c payload" allow <<'EOF'
+sh -c 'm=$(cat f); [ "$m" = cc2e0b5c ] && echo merge'
+EOF
+# -- the real writes next to each narrowed rule still deny --
+d2 "D2-40. glob that can be git" deny <<'EOF'
+/usr/bin/g?t stash pop
+EOF
+d2 "D2-41. glob that can be git-stash, no verb" deny <<'EOF'
+/usr/libexec/git-core/git-st*sh
+EOF
+d2 "D2-42. a glob that cannot be git, then a glob git (wrapper)" deny <<'EOF'
+/usr/bin/x* /usr/bin/g?t stash pop
+EOF
+d2 "D2-42a. a glob wrapper, then nohup, then a glob git" deny <<'EOF'
+/usr/bin/[e]nv nohup /usr/bin/g?t stash pop
+EOF
+d2 "D2-42b. a glob wrapper, then an assignment, then a glob git" deny <<'EOF'
+/usr/bin/[e]nv A=1 /usr/bin/g?t stash pop
+EOF
+d2 "D2-43. a glob wrapper with an option, then a glob git" deny <<'EOF'
+/usr/bin/[x]args -0 /usr/bin/g?t stash pop
+EOF
+d2 "D2-44. a glob wrapper, then \$G stash pop" deny <<'EOF'
+/usr/bin/[e]nv $G stash pop
+EOF
+d2 "D2-45. a glob wrapper, then an expanded argument" deny <<'EOF'
+/usr/bin/[s]udo -- $G
+EOF
+d2 "D2-46. a qualifier joined to a glob word" deny <<'EOF'
+/usr/bin/[x]args(:s/xargs/git/) -C . stash pop
+EOF
+d2 "D2-47. an argument-position group with a suffix (env (x|?)it)" deny <<'EOF'
+/usr/bin/env (x|?)it stash pop
+EOF
+d2 "D2-48. a glob inside a mid-word group" deny <<'EOF'
+/usr/bin/g(a|x?|b)t stash pop
+EOF
+d2 "D2-49. a group closing right before a glob" deny <<'EOF'
+/usr/bin/env (g|x)?t stash pop
+EOF
+d2 "D2-50. a tilde before a glob" deny <<'EOF'
+~x/g?t stash pop
+EOF
+d2 "D2-51. EQUALS inside a brace alternative" deny <<'EOF'
+{=git,x} stash pop
+EOF
+d2 "D2-52. a POSIX class that can match g" deny <<'EOF'
+/usr/bin/[[:alpha:]]it stash pop
+EOF
+d2 "D2-53. an escaped ] inside a class" deny <<'EOF'
+/usr/bin/[g\]i]it stash pop
+EOF
+d2 "D2-54. a quoted } inside brace alternatives" deny <<'EOF'
+/usr/bin/{x"}",g}it stash pop
+EOF
+d2 "D2-55. a letter range brace" deny <<'EOF'
+/usr/bin/{f..h}it stash pop
+EOF
+d2 "D2-56. a brace cross product spelling git" deny <<'EOF'
+/usr/bin/{x,g}{a,i}{r,t} stash pop
+EOF
+d2 "D2-57. a brace holding a path" deny <<'EOF'
+{/usr/bin/git,x} stash pop
+EOF
+d2 "D2-58. \$ before a name is an expansion" deny <<'EOF'
+/usr/bin/g?$X stash pop
+EOF
+d2 "D2-59. a glob git in a quoted sh -c payload" deny <<'EOF'
+sh -c '/usr/bin/g?t stash pop'
+EOF
+d2 "D2-60. a remote shell's options are unknown (ssh)" deny <<'EOF'
+ssh h '/usr/bin/^x* stash pop'
+EOF
+d2 "D2-61. setopt in the command" deny <<'EOF'
+setopt extendedglob; /usr/bin/^x* stash pop
+EOF
+d2 "D2-62. an option name in the command (--extended-glob)" deny <<'EOF'
+zsh --extended-glob -c '/usr/bin/^x* stash pop'
+EOF
+d2 "D2-63. a login shell reads rc files" deny <<'EOF'
+zsh -l -c '/usr/bin/^x* stash pop'
+EOF
+d2 "D2-64. default options: ^ is a literal character" allow <<'EOF'
+/usr/bin/^x* stash pop
+EOF
+d2 "D2-65. \$(command -v git) stash after a closing paren" deny <<'EOF'
+$(command -v git) stash pop
+EOF
+d2 "D2-66. a backtick then stash" deny <<'EOF'
+`command -v git` stash pop
+EOF
+d2 "D2-67. a heredoc line starting stash, fed to xargs git" deny <<'EOF'
+xargs git <<'X'
+stash pop
+X
+EOF
+d2 "D2-68. [ ... ] && a real expanded git stash" deny <<'EOF'
+[ -n "$d" ] && $G stash pop
+EOF
+d2 "D2-69. the grep alias, then a literal stash write" deny <<'EOF'
+grep -i stash f; git stash drop
+EOF
+d2 "D2-70. a literal stash write in a payload (accepted false positive)" deny <<'EOF'
+grep -n 'git stash pop' f
+EOF
+# GLOBOPT from outside the command: a snapshot, zshenv, BASH_ENV.
+D2S="$TMP/d2snap"; mkdir -p "$D2S/shell-snapshots"
+cp "$D1CFG/shell-snapshots/snapshot-zsh-1-fixture.sh" "$D2S/shell-snapshots/"
+printf 'setopt extendedglob\n' >> "$D2S/shell-snapshots/snapshot-zsh-1-fixture.sh"
+OUT=$(json "$WT" '/usr/bin/^x* stash pop' | ZDOTDIR="$D2Z" CLAUDE_CONFIG_DIR="$D2S" sh "$HOOK" 2>/dev/null); STATUS=$?
+check "D2-71. a snapshot that sets extendedglob at top level" deny
+D2E="$TMP/d2zenv"; mkdir -p "$D2E"; printf 'setopt EXTENDED_GLOB\n' > "$D2E/.zshenv"
+OUT=$(json "$WT" '/usr/bin/^x* stash pop' | ZDOTDIR="$D2E" CLAUDE_CONFIG_DIR="$D1CFG" sh "$HOOK" 2>/dev/null); STATUS=$?
+check "D2-72. a zshenv that sets extendedglob" deny
+D2U="$TMP/d2zunr"; mkdir -p "$D2U"; : > "$D2U/.zshenv"; chmod 000 "$D2U/.zshenv"
+OUT=$(json "$WT" '/usr/bin/^x* stash pop' | ZDOTDIR="$D2U" CLAUDE_CONFIG_DIR="$D1CFG" sh "$HOOK" 2>/dev/null); STATUS=$?
+if [ -r "$D2U/.zshenv" ]; then record "D2-73. an unreadable zshenv (skipped: running as a user who can read mode 000)" PASS
+else check "D2-73. an unreadable zshenv" deny; fi
+chmod 600 "$D2U/.zshenv"
+OUT=$(json "$WT" '/usr/bin/^x* stash pop' | BASH_ENV=/tmp/x ZDOTDIR="$D2Z" CLAUDE_CONFIG_DIR="$D1CFG" sh "$HOOK" 2>/dev/null); STATUS=$?
+check "D2-74. BASH_ENV in the environment" deny
+# DND-1216: a finding from the words passed to the grep alias names its own
+# rule, not "shell alias".
+OUT=$(json "$WT" "grep -E 'dnd-(9[0-9]|1[01][0-9])' f" | ZDOTDIR="$D2Z" CLAUDE_CONFIG_DIR="$D1CFG" sh "$HOOK" 2>/dev/null); STATUS=$?
+if is_deny && printf '%s' "$OUT" | grep -q 'glob or brace expansion' && ! printf '%s' "$OUT" | grep -q 'runs a shell alias'; then
+  record "D2-75. a glob under the grep alias reports the glob rule (DND-1216)" PASS
+else record "D2-75. a glob under the grep alias reports the glob rule (DND-1216)" FAIL; fi
+OUT=$(json "$WT" 'gstp' | ZDOTDIR="$D2Z" CLAUDE_CONFIG_DIR="$D1CFG" sh "$HOOK" 2>/dev/null); STATUS=$?
+if is_deny && printf '%s' "$OUT" | grep -q 'runs a shell alias'; then
+  record "D2-76. an alias whose value is the write still reports the alias" PASS
+else record "D2-76. an alias whose value is the write still reports the alias" FAIL; fi
+
 echo "== F: fail-open =="
 run ''
 check "F1. empty stdin" allow
