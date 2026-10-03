@@ -302,6 +302,13 @@ Exit codes: 0 integration OK | 1 gate RED on the integrated head
               cannot remove it still exits 2, never 5
             6 gate NOT RUN: no machine test slot within the wait, or
               test-slot left no outcome (neither OK nor RED; re-run)
+            7 another integration-gate holds this worktree's lock (DND-1878):
+              one gate per worktree, held for the whole run by a flock on
+              <git dir>/integration-gate.lock. The refused run starts
+              nothing and writes no receipt; its Fix: names the holder's
+              pid. Block on it (timeout 1500 tail --pid=<pid> -f /dev/null),
+              then read its receipt. Neither OK nor RED. Runs in other
+              worktrees are unaffected.
 EOF
 }
 
@@ -380,7 +387,7 @@ ig_emit_run() {
   [ -n "$head" ] || head="${HEAD0:-}"
   case "$rc" in
     0) outcome=ok ;; 1) outcome=red ;; 2) outcome=refused ;; 3) outcome=no_critic_pass ;;
-    4) outcome=held ;; 5) outcome=receipt_error ;; 6) outcome=not_run ;;
+    4) outcome=held ;; 5) outcome=receipt_error ;; 6) outcome=not_run ;; 7) outcome=tree_busy ;;
     *) if [ "$rc" -gt 128 ]; then outcome=interrupted; else outcome=other; fi ;;
   esac
   dur="$(athena_telemetry_seconds_since "$IG_TEL_T0")"
@@ -394,6 +401,42 @@ ig_emit_run() {
   return 0
 }
 trap 'ig_emit_run $?' EXIT
+
+# --- 0w. one gate per worktree (DND-1878) -----------------------------------
+# Two runs in one worktree share its HEAD, its working tree, its receipt and
+# its rebase, and each tears down what the other is using. So the OUTER run
+# takes a non-blocking flock keyed on this worktree's git dir for the whole
+# run, before anything else writes (the receipt clear in 0a included). A held
+# lock is exit 7, never a pass, and the refused run touches no receipt. The
+# held flock is the liveness signal; the pid in the lock file is only the name
+# the refusal prints. The run inside the slot (INTEGRATION_GATE_IN_SLOT, with
+# the lock held by its outer run) takes none: the outer holds it for both.
+IG_WT_GITDIR="$(git rev-parse --absolute-git-dir 2>/dev/null)"
+case "$IG_WT_GITDIR" in
+  /*) ;;
+  *) echo "${PROG}: cannot resolve this worktree's git dir (got '${IG_WT_GITDIR}'), so it cannot take its per-worktree lock." >&2
+     echo "Fix: run integration-gate from inside a normal checkout or linked worktree of the repo (git rev-parse --absolute-git-dir must print an absolute path)." >&2
+     exit 2 ;;
+esac
+IG_WT_LOCK="${IG_WT_GITDIR}/integration-gate.lock"
+if ! { exec {IG_WT_FD}<>"$IG_WT_LOCK"; } 2>/dev/null; then
+  echo "${PROG}: cannot open the worktree lock ${IG_WT_LOCK}." >&2
+  echo "Fix: make ${IG_WT_GITDIR} writable and re-run; a gate that cannot take its lock could run beside another in this worktree." >&2
+  exit 2
+fi
+if flock -n "$IG_WT_FD"; then
+  printf '%s\n' "$$" >"$IG_WT_LOCK" 2>/dev/null
+elif [ "${INTEGRATION_GATE_IN_SLOT:-}" != 1 ]; then
+  IG_WT_HOLDER="$(head -n 1 "$IG_WT_LOCK" 2>/dev/null)"
+  [[ "$IG_WT_HOLDER" =~ ^[1-9][0-9]*$ ]] || IG_WT_HOLDER="unknown"
+  echo "${PROG}: another integration-gate is running in this worktree (holder pid=${IG_WT_HOLDER}); this run did not start and wrote no receipt." >&2
+  if [ "$IG_WT_HOLDER" = unknown ]; then
+    echo "Fix: find the holder (fuser '${IG_WT_LOCK}'), block on it with timeout 1500 tail --pid=<pid> -f /dev/null, then read its receipt under \$(git rev-parse --path-format=absolute --git-common-dir)/integration-receipts/ or re-run. This exit is neither OK nor RED." >&2
+  else
+    echo "Fix: block on the holder with timeout 1500 tail --pid=${IG_WT_HOLDER} -f /dev/null, then read its receipt under \$(git rev-parse --path-format=absolute --git-common-dir)/integration-receipts/<head>.json (or re-run if it left none). This exit is neither OK nor RED." >&2
+  fi
+  exit 7
+fi
 
 # --- 0a. clear the head's receipt before any refusal ------------------------
 # A run that does not end in INTEGRATION OK leaves no pass for its head, and

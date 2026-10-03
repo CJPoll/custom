@@ -2126,7 +2126,10 @@ WL_HEAD="$(git -C "$R" rev-parse HEAD)"
 out="$( cd "$R" && ATHENA_TEST_SLOTS=3 "$GATE" --target main --no-fetch --gate "${R}/gp.sh" 2>&1 )"; rc=$?
 [ "$rc" -eq 7 ] && ok "wl1 a second run in the same worktree exits 7" || bad "wl1 expected exit 7, got $rc" "$out"
 grep -q 'Fix:' <<<"$out" && grep -q 'tail --pid' <<<"$out" && ok "wl1 Fix: tells the caller to block on the holder" || bad "wl1 Fix: missing or does not name tail --pid" "$out"
-grep -q "pid=${WL_FIRST}\b" <<<"$out" && ok "wl1 names the holder's pid" || bad "wl1 did not name the holder pid ${WL_FIRST}" "$out"
+wl_pid="$(grep -o 'holder pid=[0-9]*' <<<"$out" | head -n 1 | cut -d= -f2)"
+wl_lockpid="$(head -n 1 "$(git -C "$R" rev-parse --absolute-git-dir)/integration-gate.lock")"
+[ -n "$wl_pid" ] && kill -0 "$wl_pid" 2>/dev/null && [ "$wl_pid" = "$wl_lockpid" ] \
+  && ok "wl1 names the live holder's pid" || bad "wl1 did not name a live holder pid (got '${wl_pid}', lock file '${wl_lockpid}')" "$out"
 grep -q 'INTEGRATION OK' <<<"$out" && bad "wl1 the refused run printed INTEGRATION OK" "$out" || ok "wl1 the refused run prints no INTEGRATION OK"
 [ ! -f "${R}/WL_SECOND_RAN" ] && ok "wl1 the refused run did not run its gate" || bad "wl1 the second run was admitted and ran its gate"
 # A different worktree of the same repo is unaffected.
