@@ -463,7 +463,14 @@ Dir.mktmpdir("lead-time-test") do |root|
   check("a title two base commits share never lands a squash, and the reason says so") do
     c = sq.call([{ sha: "m1", pid: "o", pid0: "w0", subject: "DND-1: all" },
                  { sha: "m2", pid: "p", pid0: "x0", subject: "DND-1: all" }])
-    c[:status] == :unknown && c[:reason].include?("2 base commits share that subject")
+    c[:status] == :unknown && c[:reason].include?("2 base commits carry that title")
+  end
+  check("a suffixed twin of the title counts toward its uniqueness") do
+    sq.call([{ sha: "m1", pid: "o", pid0: "w0", subject: "DND-1: all" },
+             { sha: "m2", pid: "p", pid0: "x0", subject: "DND-1: all (#9)" }])[:status] == :unknown
+  end
+  check("a title that itself ends in ' (#N)' matches a plain squash subject") do
+    sq.call([{ sha: "ms", pid: "o", pid0: "w0", subject: "DND-1: all" }], title: "DND-1: all (#4)")[:status] == :landed
   end
   check("a different whole-diff zero-context patch-id is not a squash match") do
     sq.call([{ sha: "ms", pid: "o", pid0: "q0", subject: "DND-1: all" }])[:status] == :not_landed

@@ -322,17 +322,18 @@ module LeadTime
     hits = main.select { |m| m[:pid0] == combined_pid0 }
     return {} if hits.empty?
 
-    same = hits.select { |m| title && m[:subject].sub(/ \(#\d+\)\z/, "") == title.strip }
-    if same.size == 1 && main.count { |m| m[:subject] == same[0][:subject] } == 1
-      return { sha: same[0][:sha] }
-    end
+    bare = ->(s) { s.to_s.strip.sub(/ \(#\d+\)\z/, "") }
+    want = title && bare.call(title)
+    same = hits.select { |m| want && bare.call(m[:subject]) == want }
+    titled = want ? main.count { |m| bare.call(m[:subject]) == want } : 0
+    return { sha: same[0][:sha] } if same.size == 1 && titled == 1
 
     m = hits.first
     where = "as #{m[:sha].to_s[0, 12]} ('#{m[:subject]}')"
     why = if same.empty?
             "under a subject other than its title ('#{title}')"
           else
-            "but #{main.count { |x| x[:subject] == same[0][:subject] }} base commits share that subject"
+            "but #{titled} base commits carry that title"
           end
     { reason: "its whole change is on the base branch #{where} with a different context, #{why}, " \
               "so nothing proves this is its landing" }

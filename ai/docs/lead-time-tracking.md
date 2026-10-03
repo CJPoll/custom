@@ -82,27 +82,24 @@ A PR that is CLOSED with no `mergedAt` is judged by its **change**, not its stat
   zero-context patch-id (`git diff -U0`): the base edited a line next to the
   change before it landed, so only the context differs (DND-1491). The second
   kind counts only when that subject names one base commit in the range, so a
-  generic subject never pairs on a near-empty patch. The landing time is the **push** to
+  generic subject never pairs on a near-empty patch. A multi-commit PR squashed
+  after such a context edit matches neither patch-id kind; its whole diff's
+  zero-context patch-id then names the squash, counted only when that base
+  commit's subject is the PR title (a trailing ` (#N)` aside) and names one
+  base commit in the range (DND-1520). The landing time is the **push** to
   `refs/heads/<base>` that first carried that commit, read from GitHub's
   repository activity log (`gh api repos/{owner}/{repo}/activity`). The row
   carries `landed_via: "push"` and `landed_commit`; a forge merge carries
   `landed_via: "merge"`.
-- **Closed** (`via=closed`, no lead) when none of it is on the base. Known
-  residual: none for a squash under the PR's own title. A multi-commit PR
-  squashed AFTER the base edited its diff context matches neither its
-  whole-diff patch-id nor any per-commit one. Its whole diff's zero-context
-  patch-id (`git diff -U0`) then names the squash, and it counts as landed
-  only when that base commit's subject is the PR title (a trailing ` (#N)`
-  aside) and names one base commit in the range (DND-1520). The same squash
-  under another subject reads could-not-measure, with that reason.
+- **Closed** (`via=closed`, no lead) when none of it is on the base.
 
-  **Later (2026-10-03, DND-1520):** this bullet named the squash under a new
-  subject, after a context edit, as a known residual that read closed. The
-  title-gated zero-context match above closes it for the PR's own title; any
-  other subject stays could-not-measure.
+  **Later (2026-10-03, DND-1520):** a multi-commit PR squashed after the base
+  edited its diff context read closed, as a known residual. The title-gated
+  zero-context match in the Landed bullet closes it for the PR's own title;
+  under any other subject it reads could-not-measure.
 - **Could not measure** (`via=unmeasured`, with the reason on the row and on
   stderr) when only some of its commits are on the base, or its change is on
-  the base only under another subject, or a base commit (named in the reason)
+  the base only under another subject (a context-edited squash, retitled, included), or a base commit (named in the reason)
   shares a commit subject with it but not its change (a conflict-resolved or
   edited landing), or it has no commit of its own off the base, or no push carried the
   landed commit, or a push before the carrying one could not be read.
