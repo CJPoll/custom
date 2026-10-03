@@ -3927,11 +3927,12 @@ def self_test
       check.call("policy: #{path} is not a receipt-trust surface and stays COLD",
                  code.zero? && out.include?("BLAST-RADIUS COLD"), "exit=#{code} out=#{out}")
     end
-    # DND-1873: every tracked file that sources the receipt reader to ENFORCE a merge or push is
-    # held. A new sourcer (the GitLab guard, DND-1845, was one) reads COLD until the manifest
+    # DND-1873: every tracked file that directly sources the receipt reader to ENFORCE a merge or
+    # push is held. A new sourcer (the GitLab guard, DND-1845, was one) reads COLD until the manifest
     # names it; this walks the tree so the next one fails here instead of landing unheld.
-    # The readers below only REPORT or time a receipt and decide nothing (merge-boarding names
-    # each); a new entry here is a decision about what the file does, made in a held file.
+    # The readers below only REPORT or time a receipt and decide nothing; a new entry here is a
+    # decision about what the file does, made in this held file. An indirect sourcer (one that
+    # reaches the reader through another library) is not found: the chain's libraries are held.
     non_enforcing = %w[ai/bin/ready-and-idle ai/bin/test-slot ai/lib/lead_time_phases_io.rb]
     repo_root = File.expand_path("../..", __dir__)
     tracked = IO.popen(["git", "-C", repo_root, "ls-files", "ai/bin", "ai/lib", "ai/hooks", "ai/skills", "scripts"], &:read).split("\n")
