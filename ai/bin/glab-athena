@@ -192,7 +192,9 @@ unset TOKEN
 # Every merge path must pin the MR's exact head SHA, and the MR's head pipeline
 # must have PASSED on that head: `mr merge`/`mr accept` need --sha <head>;
 # merge-train boarding (`api -X POST projects/<p>/merge_trains/merge_requests/
-# <iid>`) needs -f sha=<head>. A REST PUT …/merge_requests/<iid>/merge and the
+# <iid>`) needs -f sha=<head>. Both also need integration-gate's sealed receipt
+# for that head, read from the checkout the wrapper runs in (DND-1845).
+# A REST PUT …/merge_requests/<iid>/merge and the
 # GraphQL mergeRequestAccept are REFUSED outright, and so is `mcp serve`. The
 # mechanism, its measurements and its named residuals live in
 # ai/lib/glab-merge-guard.sh. The GitHub counterpart is gh-athena's (DND-609).

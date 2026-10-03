@@ -137,3 +137,41 @@ the shared parser or scan must show in each.
 
 X2 first showed NONE in the glab suite. It had no scan-failure case, so F1 and
 F2 were added.
+
+## DND-1845: the integration-gate receipt
+
+The defect: the guard pinned the head and its passed pipeline, but never asked
+whether integration-gate passed that head. An MR integration-gate held at
+exit 4 (which writes no receipt) could be merged or boarded on the train.
+
+### Old vs new (fail-first)
+
+Recorded 2026-10-03 on origin/main 16848545's `ai/bin` and `ai/lib` (the
+unfixed code, run with `GLAB_ATHENA_UNDER_TEST`), with the final tests:
+
+- `RESULT: 132 passed, 51 failed`.
+- Red: every R case except R5a-R5g (non-merge writes, which ran before and
+  still run), and D3. The old wrapper read no receipt, so each miss merged:
+  R1 printed `rc=0 out=stub: ran mr merge 4242 --sha 4cc5665… --yes` with no
+  receipt in the store, and R2 the same for the train POST.
+
+On the fixed code: `RESULT: 183 passed, 0 failed`.
+
+The mutation table below was recorded before the review round added R26-R31
+(remote shapes, the host pin); S22 kills R24b, and R31b is its twin on the
+merge-command path.
+
+### Mutations of the guard
+
+Each row changes `ai/lib/glab-merge-guard.sh` once, in place, and runs the
+suite. Every mutation turns at least one case red.
+
+| id | mutation | red |
+|----|----------|-----|
+| S16 | the train path skips the receipt check | R2 R3b R4 R4b R6b R9c R9d R24 R24b |
+| S17 | the remote match drops its host anchor (`evil-host` matches `host`) | R16 |
+| S18 | `NO RECEIPT` reads as a pass | R1 R1c R2 R2b R4 R8-* R8b-* R9 R9b-R9e R18 D3 |
+| S19 | a missing target_branch is not refused | R23 |
+| S20 | the re-pushed-head wording is never used | R9b R9d |
+| S21 | the merge-command path skips the receipt check | R1-R3, R6, R7, R8-*, R9, R9b, R9e, R10-R23, R25, D3 |
+| S22 | the target-tip read drops `--hostname` | R24b |

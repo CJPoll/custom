@@ -44,6 +44,26 @@
 #   * `--auto-merge` on any command but `mr merge` (e.g. `mr create
 #     --auto-merge`) is REFUSED: it schedules a merge with no pin.
 #
+# AND integration-gate passed that head (DND-1845, glmg_receipt_gate). Both
+# paths it lets through (`mr merge`/`mr accept --sha`, train boarding) read
+# integration-gate's sealed receipt for exactly the MR's head, never a
+# merged-results or train commit, recorded against the target branch's tip or
+# an ancestor of it (DND-1463). The reader is ai/lib/integration-receipt.sh's
+# ir_read_receipt, the one gh-athena and locked-merge use. Before this, an MR
+# integration-gate held at exit 4 (no receipt) could be merged or boarded
+# here; the owner-approval hold failed open on GitLab. Unlike gh-merge-guard,
+# the check does not ask whether the project's main DECLARES a gate: the
+# GitLab project this guards declares none at its root, its gate runs take a
+# caller-supplied --gate, and a declaration-keyed check would never fire. So
+# every project merged through glab-athena needs a receipt. The receipt lives
+# in the git common dir, so the merge runs from a checkout of the MR's project
+# (matched on the MR's web_url against `git remote -v`); anywhere else is
+# COULD NOT LOOK and refused. An owner-approved exit 4 writes a pass receipt
+# that records the approval, so it passes. A head re-pushed after a gate needs
+# its own receipt; the refusal names the earlier gated head when the MR's
+# diff versions show one. Non-merge writes (labels, notes, approvals, job
+# plays) read nothing and need no receipt.
+#
 # How "the head pipeline passed on the head" is decided (glmg_check_head). The
 # MR's head_pipeline must have status `success`, and be tied to the head one of
 # two ways:
@@ -93,13 +113,19 @@
 #     pipeline that passed while a later, still-running pipeline exists for the
 #     same head is not seen.
 #   * A merge mutation or route GitLab adds after 2026-09-26.
+#   * The receipt check's own residuals are integration-receipt.sh's: the
+#     sealer is an oracle to any same-uid process (OPEN, DND-1808 (a)). And a
+#     receipt on an older base passes, so the head plus the target's newer
+#     commits was never gated (DND-1463, accepted by the owner); the merge
+#     train re-tests that integrated result before the car merges.
 #
 # Test seam: GLAB_ATHENA_MERGE_DRY_RUN=1 (read by ai/bin/glab-athena) runs this
 # guard (reads only) and prints the command instead of running glab.
 #
 # Usage: `glmg_guard "$@"` after glab-athena's isolation exports. It returns 0
 # when the command may run, and exits 3 with a REFUSING line and a Fix: line
-# otherwise. Its reads run `glab` as the caller has set it up.
+# otherwise. Its reads run `glab` as the caller has set it up, and `git` in
+# the current directory for the receipt check.
 
 # shellcheck source=forge-api-scan.sh
 . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/forge-api-scan.sh" || {
@@ -108,9 +134,21 @@
   exit 3
 }
 
+# The integration-gate receipt reader, shared with gh-merge-guard.sh,
+# integration-gate and locked-merge so they cannot drift (DND-969, DND-1845).
+# shellcheck source=integration-receipt.sh
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/integration-receipt.sh" || {
+  echo "glab-athena: REFUSING: cannot load ai/lib/integration-receipt.sh, so no merge can be judged." >&2
+  echo "  Fix: run glab-athena from a full ~/dev/custom checkout (ai/bin and ai/lib side by side)." >&2
+  exit 3
+}
+
 GLMG_TOOL=glab-athena
 GLMG_ESCALATE='Never merge around this (a bare `glab mr merge`, a `glab api` merge call, or the owner'"'"'s login); if the pipeline cannot pass, escalate to your admiral with the MR number and this output.'
-GLMG_SAFE_PATH="read the MR's head and its head pipeline (\`glab mr view <iid> -F json\`: .sha and .head_pipeline.status must be success), then board it on the merge train — \`~/dev/custom/ai/bin/$GLMG_TOOL api -X POST \"projects/:id/merge_trains/merge_requests/<iid>\" -f sha=<head sha>\` — or, on a project with no merge train, \`~/dev/custom/ai/bin/$GLMG_TOOL mr merge <iid> --sha <head sha> --yes\`"
+GLMG_IG="~/dev/custom/ai/bin/integration-gate"
+GLMG_BOARD="read the MR's head and its head pipeline (\`glab mr view <iid> -F json\`: .sha and .head_pipeline.status must be success), then board it on the merge train — \`~/dev/custom/ai/bin/$GLMG_TOOL api -X POST \"projects/:id/merge_trains/merge_requests/<iid>\" -f sha=<head sha>\` — or, on a project with no merge train, \`~/dev/custom/ai/bin/$GLMG_TOOL mr merge <iid> --sha <head sha> --yes\`, running either from a checkout of the MR's project"
+GLMG_SAFE_PATH="gate the MR's head with \`$GLMG_IG\` (athena:merge-boarding -> Landing onto a moving main), then $GLMG_BOARD"
+GLMG_HOST=""
 GLMG_MERGE_MUTATIONS="mergeRequestAccept"
 
 # `glab api` flags (glab 1.112).
@@ -268,6 +306,143 @@ glmg_check_head() {
     "run a fresh pipeline on the MR (\`~/dev/custom/ai/bin/$GLMG_TOOL api -X POST \"projects/:id/merge_requests/$iid/pipelines\"\`), wait for it to pass, then $GLMG_SAFE_PATH"
 }
 
+# ---- the integration-gate receipt (DND-1845) --------------------------------
+# glmg_checkout_for <host> <project path> : sets GLMG_TOP and GLMG_COMMON to
+# the cwd's checkout when one of its remotes is <host>/<project path>
+# (ssh `git@host:path`, `ssh://…@host[:port]/path` or `https://host/path`,
+# any case, with or without .git). Returns 1 with GLMG_WHY otherwise. The host
+# must be the whole host (`evil-host` is not `host`), and the path the whole
+# path. <host> carries no port: a web port and an ssh port differ.
+# Residual: a GitLab served under a relative URL root (web_url
+# https://host/root/group/project) matches no scp-style remote, so it is
+# refused (COULD NOT LOOK), never passed.
+glmg_checkout_for() {
+  local host="${1,,}" want="${2,,}" u urls found=0 re
+  GLMG_TOP="" GLMG_COMMON="" GLMG_WHY=""
+  if ! GLMG_TOP="$(git rev-parse --show-toplevel 2>/dev/null)" || [ -z "$GLMG_TOP" ]; then
+    GLMG_WHY="the current directory ($(pwd)) is not inside a git checkout"; return 1
+  fi
+  GLMG_COMMON="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || GLMG_COMMON=""
+  case "$GLMG_COMMON" in
+    /*) ;;
+    *) GLMG_WHY="the git common dir of ${GLMG_TOP} did not resolve to an absolute path (got '${GLMG_COMMON}'; git >= 2.31 is needed)"; return 1 ;;
+  esac
+  if ! urls="$(git remote -v 2>/dev/null)"; then
+    GLMG_WHY="the remotes of ${GLMG_TOP} could not be listed (\`git remote -v\` failed), so whether it is a checkout of ${host}/${want} is unknown"; return 1
+  fi
+  urls="$(awk '{print $2}' <<<"$urls" | sort -u)"
+  re="^([a-z][a-z0-9+.-]*://)?([^@/]*@)?${host//./\\.}(:[0-9]+)?[:/]${want//./\\.}$"
+  while IFS= read -r u; do
+    [ -n "$u" ] || continue
+    u="${u,,}"; u="${u%/}"; u="${u%.git}"
+    [[ "$u" =~ $re ]] && found=1
+  done <<<"$urls"
+  if [ "$found" != 1 ]; then
+    GLMG_WHY="${GLMG_TOP} is not a checkout of ${host}/${want} (its remotes: $(tr '\n' ' ' <<<"${urls:-none}"))"; return 1
+  fi
+  return 0
+}
+
+# glmg_gate_fix <head> : the Fix: text for a head integration-gate has not passed.
+glmg_gate_fix() {
+  printf 'run `%s` on head %s, in a checkout of the MR'"'"'s project with that head checked out (add `--gate '"'"'<the project'"'"'s gate command>'"'"'` when its main declares no gate: --help says which); it records the receipt only on INTEGRATION OK, and an exit 4 needs the owner'"'"'s --owner-approval first. Then %s' \
+    "$GLMG_IG" "$1" "$GLMG_BOARD"
+}
+
+# glmg_regated_head <project id> <iid> <head> : sets GLMG_OLD_HEAD to the newest
+# EARLIER head of the MR (its diff versions) that has a receipt file in the
+# store, or "". The file is not verified here: the refusal says only that it
+# exists. Wording only: a failed read leaves it "", and the refusal
+# stands either way.
+glmg_regated_head() {
+  local pid="$1" iid="$2" head="$3" out h
+  local -a read=(api)
+  GLMG_OLD_HEAD=""
+  [ -n "$GLMG_HOST" ] && read+=(--hostname "$GLMG_HOST")
+  read+=("projects/$pid/merge_requests/$iid/versions")
+  out="$(glab "${read[@]}" 2>/dev/null)" || return 0
+  out="$(jq -r 'if type == "array" then .[].head_commit_sha // empty else empty end' <<<"$out" 2>/dev/null)" || return 0
+  while IFS= read -r h; do
+    [[ "$h" =~ ^[0-9a-f]{40}$ ]] && [ "$h" != "$head" ] || continue
+    if [ -e "$(ir_receipt_path "$GLMG_COMMON" "$h")" ]; then GLMG_OLD_HEAD="$h"; return 0; fi
+  done <<<"$out"
+  return 0
+}
+
+# glmg_receipt_gate <shown> <mr json> : returns 0 when integration-gate's sealed
+# receipt covers the MR's head against its target branch's tip (or an ancestor
+# of it, DND-1463); exits 3 otherwise. Called after glmg_check_head, so the
+# pinned sha IS the MR's head: the receipt is read for the head, never for a
+# merged-results or train commit.
+#
+# Every merge is checked, whether or not the project's main DECLARES a gate
+# (ir_declared_gate_on). The GitLab project this guards declares none at its
+# root, so its integration-gate runs take a caller-supplied --gate and still
+# write the same receipt. A check keyed on the declaration would never fire.
+# A project gated with any command (a backend suite, a mobile one) is covered
+# alike: the receipt says the gate passed, and this does not ask which ran.
+glmg_receipt_gate() {
+  local shown="$1" mr="$2" head iid pid url host proj branch enc tip json err rc why look fix
+  local -a read=(api)
+  head="$(jq -r .sha <<<"$mr")"; iid="$(jq -r .iid <<<"$mr")"; pid="$(jq -r .project_id <<<"$mr")"
+  url="$(jq -r '.web_url // ""' <<<"$mr" 2>/dev/null)" || url=""
+  branch="$(jq -r '.target_branch // ""' <<<"$mr" 2>/dev/null)" || branch=""
+  look="COULD NOT LOOK: $GLMG_TOOL cannot read integration-gate's receipt for !$iid's head $head"
+  fix="$(glmg_gate_fix "$head")"
+  if ! [[ "$url" =~ ^https?://([^/@]+)/(.+)/-/merge_requests/[0-9]+$ ]]; then
+    glmg_refuse "$shown" "$look: the MR as read has no usable web_url ('$url'), so its project, and the checkout that holds the receipt, cannot be named" \
+      "make the MR readable (right iid, right -R <group>/<project>), then $fix"
+  fi
+  host="${BASH_REMATCH[1]}"; proj="${BASH_REMATCH[2]}"
+  # Every read below goes to the MR's own host. A --hostname that names
+  # another host would read the tip on one host and the receipt for another.
+  if [ -n "$GLMG_HOST" ] && [ "${GLMG_HOST,,}" != "${host,,}" ]; then
+    glmg_refuse "$shown" "$look: --hostname '$GLMG_HOST' is not the MR's host ('$host', from its web_url)" \
+      "pass --hostname $host, or drop it; then $fix"
+  fi
+  GLMG_HOST="$host"
+  if [ -z "$branch" ]; then
+    glmg_refuse "$shown" "$look: the MR as read has no target_branch, so the tip the receipt must cover cannot be read" \
+      "make the MR readable (right iid, right -R <group>/<project>), then $fix"
+  fi
+  if ! glmg_checkout_for "${host%%:*}" "$proj"; then
+    glmg_refuse "$shown" "$look, because $GLMG_WHY. The receipt lives in the git common dir of a checkout of $proj, so it can only be read from one" \
+      "cd into a checkout or worktree of $host/$proj (\`git remote -v\` names it), then $fix"
+  fi
+  if ! enc="$(jq -rn --arg b "$branch" '$b | @uri' 2>/dev/null)" || [ -z "$enc" ]; then
+    glmg_refuse "$shown" "$look: the target branch name '$branch' could not be URL-encoded (jq failed)" \
+      "make jq work on PATH (\`jq --version\`), then $fix"
+  fi
+  read+=(--hostname "$GLMG_HOST")
+  read+=("projects/$pid/repository/branches/$enc")
+  err="$(mktemp)"
+  if json="$(glab "${read[@]}" 2>"$err")"; then rc=0; else rc=$?; fi
+  why="$(tr '\n' ' ' <"$err")"; rm -f "$err"
+  tip="$(jq -r '.commit.id // empty' <<<"$json" 2>/dev/null)" || tip=""
+  if [ "$rc" != 0 ] || ! [[ "$tip" =~ ^[0-9a-f]{40}$ ]]; then
+    glmg_refuse "$shown" "$look: the tip of its target branch '$branch' could not be read (\`glab ${read[*]}\` exit $rc: ${why:-body '$(head -c 200 <<<"$json" | tr '\n' ' ')'})" \
+      "make the target branch readable (right project, network up), then $fix"
+  fi
+  if ! ir_read_receipt "$GLMG_COMMON" "$head" "$tip"; then
+    if [ "$IR_KIND" = "NO RECEIPT" ]; then
+      glmg_regated_head "$pid" "$iid" "$head"
+      if [ -n "$GLMG_OLD_HEAD" ]; then
+        glmg_refuse "$shown" "$IR_KIND: $IR_WHY. an EARLIER head of !$iid, $GLMG_OLD_HEAD, has a receipt file in the store; the MR was re-pushed since (a head pushed after integration-gate --rebase that is not the one it gated, or a later commit), and a receipt covers only the exact head it gated" \
+          "re-gate the new head: $fix"
+      fi
+    fi
+    glmg_refuse "$shown" "$IR_KIND: !$iid's head $head (target '$branch' at $tip): $IR_WHY" \
+      "${IR_HOW:+$IR_HOW }$fix"
+  fi
+  if [ "$IR_BASE_MOVED" = 1 ]; then
+    printf '%s: RECEIPT %s base %s recorded %s; BASE MOVED: %s is an ancestor of the tip %s, so the head with the newer %s commits was never gated (DND-1463)\n' \
+      "$GLMG_TOOL" "$IR_RECEIPT" "$IR_BASE" "$IR_RECORDED_AT" "$IR_BASE" "$tip" "$branch" >&2
+  else
+    printf '%s: RECEIPT %s base %s recorded %s\n' "$GLMG_TOOL" "$IR_RECEIPT" "$tip" "$IR_RECORDED_AT" >&2
+  fi
+  return 0
+}
+
 # glmg_mr_merge <shown> <args...> : `mr merge` / `mr accept`.
 glmg_mr_merge() {
   local shown="$1" mr err rc
@@ -292,6 +467,7 @@ glmg_mr_merge() {
   fi
   rm -f "$err"
   glmg_check_head "$shown" "$mr" "$GLMG_SHA" "pass --sha <the MR's head sha>: $GLMG_SAFE_PATH"
+  glmg_receipt_gate "$shown" "$mr"
 }
 
 # glmg_route <lower-cased normalised path> : classifies a REST path. Sets
@@ -364,6 +540,8 @@ glmg_train_board() {
     glmg_refuse "$shown" "the MR read back for the merge-train endpoint is not !$GLMG_IID" "spell the endpoint plainly; to board, $GLMG_SAFE_PATH"
   fi
   glmg_check_head "$shown" "$mr" "$pin" "pass -f sha=<the MR's head sha>: $GLMG_SAFE_PATH"
+  GLMG_HOST="$FAS_HOSTNAME"
+  glmg_receipt_gate "$shown" "$mr"
 }
 
 # glmg_api_guard <shown> <glab api args (after the word api)...>

@@ -578,7 +578,8 @@ exit 4, cleared by the owner's verified decision (*Owner approval policy* ->
 *Asking, and what counts as approval*). The gate judges with the manifest as
 landed on the target, so a new hold binds after it lands, never in the PR that
 adds it. Not held: `confirm-merged`, `ai/bin/test-slot`,
-`ai/lib/glab-merge-guard.sh`, `ai/bin/ready-and-idle` (it reads a receipt to
+`ai/lib/glab-merge-guard.sh` (it decides GitLab merges on the receipt since
+DND-1845, but the manifest does not name it), `ai/bin/ready-and-idle` (it reads a receipt to
 report, and decides nothing), `ai/lib/critic_prompt.rb` (the rubric text, not a
 trust decision) and the judge-set utilities `proc-stat.sh` and
 `telemetry-emit.sh`, which write no verdict.
@@ -827,12 +828,15 @@ So the merge step is a critical section on every GitHub-merged repo:
   it cannot read), `RECEIPT FOR ANOTHER BASE` (the recorded base is not an
   ancestor of `origin/<base>`), or `RECEIPT BASE UNKNOWN (COULD NOT LOOK)` (an
   object is missing, so ancestry cannot be read). Each reader of the receipt
-  (`locked-merge`, gh-athena's merge and push guards, `main-health`,
-  `ready-and-idle`) reads it through `ai/lib/integration-receipt.sh`, so each
-  applies the same seal check. The fix is to run
-  `integration-gate` on that head and merge the SHA its `INTEGRATION OK` names.
-  The gh-athena merge guard applies the same receipt rule to a bare
-  `gh-athena pr merge` (DND-969); it has no tree check.
+  (`locked-merge`, gh-athena's merge and push guards, glab-athena's merge
+  guard, `main-health`, `ready-and-idle`) reads it through
+  `ai/lib/integration-receipt.sh`, so each applies the same seal check. The
+  fix is to run `integration-gate` on that head and merge the SHA its
+  `INTEGRATION OK` names. The gh-athena merge guard applies the same receipt
+  rule to a bare `gh-athena pr merge` (DND-969); it has no tree check.
+  glab-athena's merge guard applies it to every `mr merge`/`mr accept` and
+  train boarding, declared gate or not (DND-1845); it has no tree check
+  either.
 
   **Later (2026-10-01, DND-1463):** `locked-merge` asserted `origin/<base>`
   was contained in the gated head (exit 3, "re-gate"), required the receipt's
@@ -947,8 +951,10 @@ ancestor of current main.
 - **The POST pins the head** (DND-742): `~/dev/custom/ai/bin/glab-athena api -X
   POST "projects/:id/merge_trains/merge_requests/<iid>" -f sha=<head sha>`.
   `glab-athena` refuses a boarding with no `sha` field, a sha that is not the
-  head, or a head pipeline that has not passed on that head. That enforces the
-  first checklist item below; the other two stay yours. A refusal carries a
+  head, a head pipeline that has not passed on that head, or a head with no
+  integration-gate receipt (DND-1845). Run it from a checkout of the MR's
+  project, where the receipt is. That enforces the first checklist item below;
+  the other two stay yours. A refusal carries a
   `Fix:`; follow it, never board with plain `glab`. See [[athena:gitlab]] →
   *Merging*.
 - **Board in parallel.** Every MR at the bar goes on the train immediately, all

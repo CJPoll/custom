@@ -165,12 +165,28 @@ Athena*.
 
 ## Merging (athena-admiral only)
 
-**The rule:** a merge pins the MR's exact head SHA, and the MR's head pipeline
-has PASSED on that head. `glab-athena` enforces it before glab runs (DND-742,
+**The rule:** a merge pins the MR's exact head SHA, the MR's head pipeline
+has PASSED on that head, and `integration-gate` passed that head (its sealed
+receipt). `glab-athena` enforces all three before glab runs (DND-742, DND-1845,
 `ai/lib/glab-merge-guard.sh`). It is the GitLab side of the rule `gh-athena`
-enforces on GitHub (DND-609).
+enforces on GitHub (DND-609, DND-969).
 
-Read the head and its pipeline first:
+Gate the head first, from a checkout of the MR's project with that head
+checked out ([[athena:merge-boarding]] → *Landing onto a moving main*). A
+project whose main declares no gate takes `--gate '<its gate command>'`:
+
+```sh
+cd <checkout of the MR's project> && ~/dev/custom/ai/bin/integration-gate --gate '<cmd>'
+```
+
+The receipt lands in that checkout's git common dir, so run the merge or
+boarding below from the same checkout or any worktree of it. Every merge
+through the wrapper needs it, whatever part of the project the MR touches: the
+receipt records which gate ran, and the wrapper does not ask. An exit 4
+writes no receipt; cleared with `--owner-approval`, the gate writes a pass
+receipt that records the approval, and that passes.
+
+Read the head and its pipeline:
 
 ```sh
 glab mr view <iid> -F json | jq '{sha, detailed_merge_status, p: .head_pipeline.status}'
@@ -204,6 +220,12 @@ What the wrapper refuses, exit 3 with a `Fix:`:
 - Any other method on the merge route: REST `PUT …/merge_requests/<iid>/merge` is
   refused outright. So is GraphQL `mergeRequestAccept`, and `glab mcp serve`.
   GET/DELETE of a train car (read it, take it off the train) pass.
+- Either one with no integration-gate receipt for the MR's head (`NO
+  RECEIPT`), a receipt that does not verify or is not a pass, or one recorded
+  on a base the target tip does not descend from. A head re-pushed after the
+  gate needs its own receipt: the `Fix:` says to re-gate the new head. Run
+  outside a checkout of the MR's project, or with the target tip unreadable,
+  it is `COULD NOT LOOK` and refused.
 - `--auto-merge` on anything but `mr merge`, e.g. `mr create --auto-merge`. It
   schedules a merge of a head nobody pinned.
 - A flag other than `-R`/`--repo` placed before the subcommand (`mr -ym merge`,
