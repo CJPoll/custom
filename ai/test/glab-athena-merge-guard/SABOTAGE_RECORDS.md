@@ -4,6 +4,16 @@
 synthetic stand-in. The records first carried a real work-repo MR iid; the
 public repo no longer holds it. The measurements are unchanged.
 
+**Later (2026-10-03, DND-1936):** glab-athena now picks its bot from the
+project's namespace before the guard runs, and refuses what it cannot key: any
+`api graphql`, a numeric project id, a dot segment, %-encoding past the project
+path, an absolute URL. So G1–G12, F1 and F2 (and the original shapes of A3,
+A7, A9 and A12, as A3g, A7g, A9g, A12g) run the guard itself (`glmg_guard`,
+sourced) instead of the wrapper, and still kill the mutants credited to them
+below (S7, X2, X3, X6). W1–W3 pin that the wrapper refuses those shapes. The
+other route cases name the project by path (`example-group%2Fexample-app`)
+instead of `1`.
+
 The suite is `ai/test/glab-athena-merge-guard/self-test.sh` (a stub `glab` on
 PATH, no network). The hook cases live in
 `ai/hooks/forge-identity-guard.self-test.sh` (2c2, 2q–2z4).
