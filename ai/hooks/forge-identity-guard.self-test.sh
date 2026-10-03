@@ -453,6 +453,13 @@ allow_each "R4 wrappers and prose" \
   '~/dev/custom/ai/bin/glab-athena api -X POST projects/:id/issues -f title=x' \
   'echo the gh CLI is fine' 'ls ~/dev/gh-pages' 'git log --oneline -3'
 
+echo "--- DND-1843: -h / --help as a flag's VALUE is not help ---"
+deny_each "X0 help word read as a value or an argument" \
+  'gh issue create --title -h --body b' 'gh release create --notes --help v1' \
+  'gh label create -- --help' 'glab issue create --title --help'
+allow_each "X0b help where the CLI reads it as help" \
+  'gh issue create -h' 'gh label create --help' 'gh issue create --title=t --help' 'glab mr note --help'
+
 echo "--- DND-1179 review round: writes that passed, reads that were denied ---"
 deny_each "X1 placeholder braces stay inside the word" \
   'gh api repos/{owner}/{repo}/issues -f title=x -f body=y' \

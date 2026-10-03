@@ -24,7 +24,9 @@
 #
 # Known gaps (each a false deny of a read, one retry through the wrapper):
 # `gh issue develop --list`, `gh codespace ssh|code|cp`, a read flag placed
-# between the group and the verb that takes a value valued() does not know.
+# between the group and the verb that takes a value valued() does not know,
+# and --help / -h right after a bare flag (`--web --help`), which may be that
+# flag's value (DND-1843).
 # The hook's self-test (K1, K2) reads the installed CLIs and fails on any group
 # that is in neither AG nor RD, so a CLI upgrade turns it red instead of
 # failing open. glab does not list its group aliases; those (var, project,
@@ -139,7 +141,7 @@ function api_write(s,    k, x, m, method, field, ovr, ep, fromfile) {
   return field
 }
 # judge(i): t[i] is the command word gh/glab; prints the verdict and exits on a write.
-function judge(i,    cli, j, g, key, k, v1, v2) {
+function judge(i,    cli, j, g, key, k, v1, v2, dd) {
   cli = t[i]; sub(/.*\//, "", cli)
   j = i + 1
   while (j <= n && t[j] ~ /^-/) { if (valued(t[j])) j++; j++ }
@@ -149,10 +151,20 @@ function judge(i,    cli, j, g, key, k, v1, v2) {
   if (key in AG) return
   if (g == "api") { if (api_write(j + 1)) { printf "%s\tapi\t\t\n", cli; exit } ; return }
   if (!(key in RD)) return
-  v1 = ""; v2 = ""
+  v1 = ""; v2 = ""; dd = 0
   for (k = j + 1; k <= n; k++) {
-    if (t[k] == "--help" || t[k] == "-h") { if (v2 == "") return; break }
-    if (t[k] ~ /^-/) { if (valued(t[k])) k++; continue }
+    # After `--` every word is an argument, so a --help there is not help.
+    if (!dd && t[k] == "--") { dd = 1; continue }
+    # --help / -h is help only where the CLI (cobra/pflag) parses it as a
+    # flag: right after the group, after a non-flag word, or after a
+    # --flag=value. After a bare flag it may be that flag's value
+    # (`--title --help` creates a PR titled --help), so it is read as one
+    # (DND-1843). That denies `--web --help` too: a false deny of help.
+    if (!dd && (t[k] == "--help" || t[k] == "-h")) {
+      if (k == j + 1 || t[k - 1] !~ /^-/ || t[k - 1] ~ /^--[^=]+=/) { if (v2 == "") return; break }
+      continue
+    }
+    if (!dd && t[k] ~ /^-/) { if (valued(t[k])) k++; continue }
     if (v1 == "") v1 = t[k]; else if (v2 == "") v2 = t[k]; else break
     if (v2 != "") break
   }

@@ -25,7 +25,10 @@
 #     backslashes (split differently here than by git), and a push (or
 #     subtree push) that recurses into submodules: by an explicit flag, or by
 #     push.recurseSubmodules / submodule.recurse in a repository that has
-#     submodules (fg_push_recurses says what counts). A refusal is exit 3
+#     submodules (fg_push_recurses says what counts). Also refused: a global
+#     option, or a push option, that git's grammar does not have, since the
+#     word after it could be its value (DND-1843; "git's own argv grammar"
+#     below holds the tables every walk here reads). A refusal is exit 3
 #     with a Fix: line.
 #   * fg_refuse_red_main (DND-1482): a push to main is refused while
 #     ai/bin/main-health has recorded origin/main RED, unless it lands a gated
@@ -115,6 +118,17 @@ EOF
   exit 3
 }
 
+# fg_refuse_option <word> <what it is> : an option this wrapper cannot read by
+# git's grammar, so which word is the subcommand, repository or refspec is
+# unknown (DND-1843). The word is a flag, never a URL, so it is safe to print.
+fg_refuse_option() {
+  cat >&2 <<EOF
+$FG_TOOL: REFUSING \`git … $1 …\`: $2, so $FG_TOOL cannot tell which word git reads as the subcommand, repository or refspec, or whether it reaches $FG_HOST as $FG_OWNER.
+  Fix: spell the option in full as \`git -h\` / \`git push -h\` list it (no abbreviation that matches two options), give it the value it needs, or drop it, then run \`~/dev/custom/ai/bin/$FG_TOOL git …\` again. $FG_ESCALATE
+EOF
+  exit 3
+}
+
 # fg_refuse_unchecked <subcommand> <why> [<how to turn recursion off>]
 fg_refuse_unchecked() {
   cat >&2 <<EOF
@@ -147,9 +161,10 @@ EOF
 # Conservative, so a parse slip can only over-refuse, never let one through:
 #   * any "on" flag anywhere counts, whatever follows it, and is refused in
 #     any repository: an explicit flag asks for recursion by name;
-#   * an "off" flag, or the `--` that ends the options, counts only when the
-#     word before it is not an option that takes a separate value (-o,
-#     --push-option, --repo, ...), since there it may be that option's value;
+#   * an "off" flag, or the `--` or `--end-of-options` that ends the
+#     options, counts only when the word before it is not an option that
+#     takes a separate value (-o, --push-option, --repo, ...), since there it
+#     may be that option's value;
 #   * a value that is not a known "off" reads as on (git rejects most of them);
 #   * config that cannot be read reads as on.
 # Recursion that comes from config is refused only in a repository that has
@@ -164,7 +179,7 @@ fg_push_recurses() {
   FG_RECURSE_SRC=""
   while [ $# -gt 0 ]; do
     a="$1"; shift
-    if [ "$a" = -- ] && ! fg_takes_value "$prev"; then break; fi
+    if { [ "$a" = -- ] || [ "$a" = --end-of-options ]; } && ! fg_takes_value "$prev"; then break; fi
     case "$a" in
       --no-*)
         name="${a#--no-}"
@@ -262,11 +277,136 @@ fg_takes_value() {
     --*=*|--) return 1 ;;
     --?*)
       n="${w#--}"
-      for long in push-option receive-pack exec repo recurse-submodules; do
+      for long in $FG_PUSH_VALUE_OPTS; do
         [[ "$long" == "$n"* ]] && return 0
       done ;;
   esac
   return 1
+}
+
+# ---- git's own argv grammar (DND-1843) ---------------------------------------
+# An option VALUE read as a word of its own was a fail-open, in each walk that
+# made it: `push -o -h` read as help, `--attr-source HEAD push` read HEAD as
+# the subcommand, `push --push-o x` read x as the repository and so never
+# judged the default remote, `push --push-o --dry-run … :main` read a dry run.
+# So these walks read argv by git's own tables, measured on git 2.54 (`git -h`,
+# `git push -h`, and real runs), in one place.
+#
+# Global options (git.c handle_options). Value as the next word:
+FG_GLOBAL_VALUE_OPTS="-C -c --git-dir --work-tree --namespace --config-env --attr-source --shallow-file --super-prefix"
+# Switches, and the options that print and exit before any subcommand runs:
+FG_GLOBAL_SWITCHES="-p -P --paginate --no-pager --bare --no-replace-objects --no-lazy-fetch --literal-pathspecs --no-literal-pathspecs --glob-pathspecs --noglob-pathspecs --icase-pathspecs --no-optional-locks --no-advice -v --version -h --help --exec-path --html-path --man-path --info-path"
+# Plus the --name=value spellings of --git-dir, --work-tree, --namespace,
+# --config-env, --attr-source, --exec-path and --list-cmds.
+FG_GLOBAL_STICKY="git-dir work-tree namespace config-env attr-source exec-path list-cmds super-prefix"
+
+# fg_global_opt <word> : 0 a global option whose value is the next word; 1 a
+# global option with no separate value; 2 an option git does not have (or a
+# word that is no option). Exact names only: git does not abbreviate these.
+fg_global_opt() {
+  local w="$1" o
+  for o in $FG_GLOBAL_VALUE_OPTS; do [ "$w" = "$o" ] && return 0; done
+  for o in $FG_GLOBAL_SWITCHES; do [ "$w" = "$o" ] && return 1; done
+  case "$w" in
+    --?*=*) for o in $FG_GLOBAL_STICKY; do [ "${w%%=*}" = "--$o" ] && return 1; done ;;
+  esac
+  return 2
+}
+
+# git push's options (`git push -h`). Value as the next word or after `=`:
+FG_PUSH_VALUE_OPTS="repo recurse-submodules receive-pack exec push-option"
+# A value only after `=`:
+FG_PUSH_OPTARG_OPTS="force-with-lease signed"
+# No value:
+FG_PUSH_SWITCHES="verbose quiet all branches mirror delete tags dry-run porcelain force force-if-includes thin set-upstream progress prune follow-tags atomic"
+# Every option above also has a --no- form (no value); these four do not:
+FG_PUSH_PLAIN="verify no-verify ipv4 ipv6"
+# Short options and their long names. -o takes a value; -h is help.
+FG_PUSH_SHORT="v:verbose q:quiet d:delete n:dry-run f:force u:set-upstream 4:ipv4 6:ipv6 o:push-option"
+
+# fg_push_long <name> : sets FG_PL_NAME to the long option git resolves
+# --<name> to: an exact name, else the one name it is a prefix of. Returns 1
+# when it is none, or a prefix of more than one (git refuses both).
+FG_PL_NAME=""
+fg_push_long() {
+  local want="$1" o x hit="" n=0
+  FG_PL_NAME=""
+  [ -n "$want" ] || return 1
+  for o in $FG_PUSH_VALUE_OPTS $FG_PUSH_OPTARG_OPTS $FG_PUSH_SWITCHES; do
+    for x in "$o" "no-$o"; do
+      [ "$x" = "$want" ] && { FG_PL_NAME="$x"; return 0; }
+      [[ "$x" == "$want"* ]] && { hit="$x"; n=$((n + 1)); }
+    done
+  done
+  for o in $FG_PUSH_PLAIN; do
+    [ "$o" = "$want" ] && { FG_PL_NAME="$o"; return 0; }
+    [[ "$o" == "$want"* ]] && { hit="$o"; n=$((n + 1)); }
+  done
+  [ "$n" = 1 ] || return 1
+  FG_PL_NAME="$hit"
+}
+
+# fg_push_argv <push args...> : read the args after `push` as git does. Sets
+#   FG_PA_OPTS   every option, spelled in full: --<long> or --<long>=<value>
+#                (a short option becomes its long name; -h stays -h);
+#   FG_PA_POS    the non-option words in order: the repository, then refspecs;
+#   FG_PA_BAD    the first word git push would reject as an option (unknown,
+#                ambiguous, a value it does not take, a value missing), or "".
+# git's rules: a value-taking option takes the next word whatever it looks
+# like (`-o --`, `-o -h`); options and words may mix, until a `--` or
+# `--end-of-options` in option position, after which every word is a word.
+FG_PA_OPTS=()
+FG_PA_POS=()
+FG_PA_BAD=""
+fg_push_argv() {
+  local a n v has_v rest c pair long end=0
+  FG_PA_OPTS=(); FG_PA_POS=(); FG_PA_BAD=""
+  while [ $# -gt 0 ]; do
+    a="$1"; shift
+    if [ "$end" = 1 ]; then FG_PA_POS+=("$a"); continue; fi
+    case "$a" in
+      -- | --end-of-options) end=1 ;;
+      --?*)
+        n="${a#--}"; v=""; has_v=0
+        case "$n" in *=*) v="${n#*=}"; n="${n%%=*}"; has_v=1 ;; esac
+        case "$n" in help | help-all) FG_PA_OPTS+=("--$n"); continue ;; esac
+        if ! fg_push_long "$n"; then FG_PA_BAD="${FG_PA_BAD:-$a}"; FG_PA_OPTS+=("$a"); continue; fi
+        n="$FG_PL_NAME"
+        if [[ " $FG_PUSH_VALUE_OPTS " == *" $n "* ]]; then
+          if [ "$has_v" = 0 ]; then
+            if [ $# -eq 0 ]; then FG_PA_BAD="${FG_PA_BAD:-$a}"; FG_PA_OPTS+=("--$n"); continue; fi
+            v="$1"; shift
+          fi
+          FG_PA_OPTS+=("--$n=$v")
+        elif [ "$has_v" = 1 ] && [[ " $FG_PUSH_OPTARG_OPTS " == *" $n "* ]]; then
+          FG_PA_OPTS+=("--$n=$v")
+        elif [ "$has_v" = 1 ]; then
+          FG_PA_BAD="${FG_PA_BAD:-$a}"; FG_PA_OPTS+=("$a")
+        else
+          FG_PA_OPTS+=("--$n")
+        fi ;;
+      -?*)
+        rest="${a#-}"
+        while [ -n "$rest" ]; do
+          c="${rest:0:1}"; rest="${rest:1}"
+          if [ "$c" = h ]; then FG_PA_OPTS+=("-h"); continue; fi
+          long=""
+          for pair in $FG_PUSH_SHORT; do [ "${pair%%:*}" = "$c" ] && long="${pair#*:}"; done
+          if [ -z "$long" ]; then FG_PA_BAD="${FG_PA_BAD:-$a}"; FG_PA_OPTS+=("-$c"); continue; fi
+          if [ "$long" = push-option ]; then
+            # -o takes the rest of the cluster, else the next word.
+            if [ -z "$rest" ]; then
+              if [ $# -eq 0 ]; then FG_PA_BAD="${FG_PA_BAD:-$a}"; FG_PA_OPTS+=("--$long"); break; fi
+              rest="$1"; shift
+            fi
+            FG_PA_OPTS+=("--$long=$rest"); rest=""
+          else
+            FG_PA_OPTS+=("--$long")
+          fi
+        done ;;
+      *) FG_PA_POS+=("$a") ;;
+    esac
+  done
 }
 
 # fg_has_submodules <probe> : 0 when the repository has submodules: a
@@ -313,13 +453,17 @@ fg_refuse_non_https() {
   # options (`alias.p=-c url...pushInsteadOf=... push`; git accepts -c there),
   # so the peel runs again on every expansion. A shell alias (`!...`) can run
   # anything, so it is refused outright rather than guessed at.
+  local grc
   while :; do
     while [ $# -gt 0 ]; do
-      case "$1" in
-        -C|-c|--git-dir|--work-tree|--namespace|--config-env|--super-prefix)
-          [ $# -ge 2 ] || return 0; glob+=("$1" "$2"); shift 2 ;;
-        -*) glob+=("$1"); shift ;;
-        *) break ;;
+      case "$1" in -*) ;; *) break ;; esac
+      grc=0; fg_global_opt "$1" || grc=$?
+      case "$grc" in
+        0) [ $# -ge 2 ] || return 0; glob+=("$1" "$2"); shift 2 ;;
+        1) glob+=("$1"); shift ;;
+        # An option git does not have: git refuses it too, but if it took a
+        # value, this walk would read that value as the subcommand (DND-1843).
+        *) fg_refuse_option "$1" "it is no option git takes before the subcommand (FG_GLOBAL_VALUE_OPTS and FG_GLOBAL_SWITCHES in ai/lib/forge-git-passthrough.sh list them)" ;;
       esac
     done
     [ $# -gt 0 ] || return 0
@@ -351,7 +495,12 @@ fg_refuse_non_https() {
       # from git's exec-path, which this check does not inspect: refuse rather
       # than half-check. Every source git reads (fg_push_recurses).
       fg_push_recurses G "$@" \
-        && fg_refuse_unchecked push "it pushes submodules too ($FG_RECURSE_SRC), and each submodule push goes through its own remote, which $FG_TOOL does not inspect" ;;
+        && fg_refuse_unchecked push "it pushes submodules too ($FG_RECURSE_SRC), and each submodule push goes through its own remote, which $FG_TOOL does not inspect"
+      # Which word is the repository, and which are refspecs, by git's push
+      # grammar (DND-1843). An option git push would reject is refused here.
+      fg_push_argv "$@"
+      [ -z "$FG_PA_BAD" ] \
+        || fg_refuse_option "$FG_PA_BAD" "it is no option of git push, an abbreviation that matches more than one, or an option missing its value or given one it does not take" ;;
     fetch|pull|ls-remote|clone) mode=fetch ;;
     remote) [ "${1:-}" = update ] || return 0; mode=fetch ;;
     submodule) mode=fetch; recurse=1 ;;
@@ -371,8 +520,12 @@ fg_refuse_non_https() {
     *) return 0 ;;
   esac
   # The subcommand's own args, alias-expanded, for the red-main refusal
-  # (DND-1482): it must parse what git will run, not the raw argv.
+  # (DND-1482): it must parse what git will run, not the raw argv. For a push
+  # that is fg_push_argv's reading: every option in full with its value
+  # attached, then `--` and the words (DND-1843), so a value spelled like
+  # --dry-run is never read as a dry run.
   local -a sub_args=( "$@" )
+  [ "$sub" = push ] && sub_args=( "${FG_PA_OPTS[@]}" -- "${FG_PA_POS[@]}" )
 
   local -a remotes=()
   mapfile -t remotes < <(G remote 2>/dev/null || true)
@@ -396,7 +549,25 @@ fg_refuse_non_https() {
                  && G config -f "$top/.gitmodules" --get-regexp '^submodule\..*\.url$' 2>/dev/null; } || true)
     set --   # submodule's own args name paths, not repositories
   fi
+  if [ "$sub" = push ]; then
+    # fg_push_argv read the args by git's push grammar: the first word is the
+    # repository, and --repo names it when there is none. An option value
+    # that names a remote or mentions the forge host is checked too.
+    local o ov
+    for o in "${FG_PA_OPTS[@]}"; do
+      case "$o" in
+        --repo=*) has_repo=1; targets+=("${o#--repo=}") ;;
+        --*=*) ov="${o#*=}"; { is_remote "$ov" || [[ "$ov" == *"$FG_HOST"* ]]; } && targets+=("$ov") ;;
+      esac
+    done
+    for a in "${FG_PA_POS[@]}"; do
+      if [ -z "$positional" ]; then positional="$a"; targets+=("$a")
+      elif is_remote "$a" || [[ "$a" == *"$FG_HOST"* ]]; then targets+=("$a"); fi
+    done
+    set --
+  fi
   if [ "$mode" = push ]; then
+    # subtree push. A plain push was read by fg_push_argv above.
     takes_value='^(-o|--push-option|--receive-pack|--exec|--repo|-P|--prefix|-m|--message)$'
   else
     takes_value='^(-P|--prefix|-m|--message|-o|--upload-pack|-j|--jobs|--depth|--deepen|--shallow-since|--shallow-exclude|--refmap|--server-option|--negotiation-tip|-s|--strategy|-X|--strategy-option|--origin|-b|--branch|-u|--reference|--reference-if-able|--separate-git-dir|-c|--config|--template|--filter|--bundle-uri|--ref-format)$'
@@ -577,10 +748,8 @@ fg_push_sent() {
   while [ $# -gt 0 ]; do
     a="$1"; shift
     if [ "$seen_push" -eq 0 ]; then
-      case "$a" in
-        -C|-c|--git-dir|--work-tree|--namespace|--config-env|--super-prefix) [ $# -gt 0 ] && shift ;;
-        push) seen_push=1 ;;
-      esac
+      if [ "$a" = push ]; then seen_push=1
+      elif fg_global_opt "$a"; then [ $# -gt 0 ] && shift; fi
       continue
     fi
     case "$a" in

@@ -821,6 +821,61 @@ FIRST="${COV##*|}"; FIRST="${FIRST%%:*}"
   && ok "48. two gated heads of one change both cover the rebase: IR_COVER_HEADS lists both; IR_RECEIPT is the first cover's (DND-1809)" \
   || bad "48. every covering head listed" "cov='${COV}' want heads='${WANT_HEADS}'"
 
+echo
+echo "--- DND-1843: an option VALUE is never read as the subcommand, the repository or a flag ---"
+# git's own grammar: a global option that takes a value (--attr-source,
+# --shallow-file) consumes the next word; a push option that takes a value
+# consumes the next word under any unambiguous abbreviation (--push-o) and
+# at the end of a short cluster (-vo). Each spelling below once hid the push,
+# its repository, or its destination from the checks.
+R="$(new_repo v1843 'ssh://git@github.com/o/r.git')"
+gha "${R}" --attr-source HEAD push origin HEAD
+is_refusal && ok "S25. --attr-source HEAD push: the value is not the subcommand, the ssh:// origin is refused" \
+  || bad "S25. --attr-source push judged" "rc=${RC} out='${OUT}' err='${ERR}'"
+gha "${R}" --shallow-file "${TMP}/no-shallow" push origin HEAD
+is_refusal && ok "S26. --shallow-file <file> push: judged, the ssh:// origin is refused" \
+  || bad "S26. --shallow-file push judged" "rc=${RC} out='${OUT}' err='${ERR}'"
+gha "${R}" push --push-o ci.skip
+is_refusal && ok "S27. push --push-o ci.skip: the default remote (ssh://) is judged, not ci.skip" \
+  || bad "S27. abbreviated push option" "rc=${RC} out='${OUT}' err='${ERR}'"
+gha "${R}" push -vo ci.skip
+is_refusal && ok "S28. push -vo ci.skip: a cluster ending in o takes the value; the default remote is refused" \
+  || bad "S28. short cluster value" "rc=${RC} out='${OUT}' err='${ERR}'"
+gha "${R}" push --recurse-submodules no
+is_refusal && ok "S29. push --recurse-submodules no: the value is not the repository; the default remote is refused" \
+  || bad "S29. recurse-submodules separate value" "rc=${RC} out='${OUT}' err='${ERR}'"
+gha "${R}" push --synth-unknown origin HEAD
+if is_refusal && [[ "${ERR}" == *"--synth-unknown"* ]]; then ok "S30. a push option git push does not have is refused (deny by default)"
+else bad "S30. unknown push option" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+gha "${R}" --synth-unknown push origin HEAD
+if is_refusal && [[ "${ERR}" == *"--synth-unknown"* ]]; then ok "S31. a global option git does not have is refused (deny by default)"
+else bad "S31. unknown global option" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+R="$(new_repo v1843b 'https://github.com/o/r.git')"
+gha "${R}" push --push-opt ci.skip --force-with-lease origin HEAD:refs/heads/feat
+if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: url https://github.com/o/r.git"* ]]; then
+  ok "S32. an abbreviated push option and an optional-value flag still push to the named HTTPS remote"
+else bad "S32. abbreviated option happy path" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+gha "${R}" --version
+if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: exec git"* ]]; then ok "S33. --version (no subcommand) still passes"
+else bad "S33. --version passes" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+
+# The red-main and ungated-main refusals read the refspecs from the same parse:
+# a value spelled like --dry-run or -n is a value, not a dry run.
+origin_with_main v1843r; red_marker "${W}" "${BEFORE}"
+gha "${W}" push --push-o --dry-run origin HEAD:main
+is_red_refusal && ok "S34. main RED: push --push-o --dry-run origin HEAD:main is refused (--dry-run is a value)" \
+  || bad "S34. red main, dry-run as a value" "rc=${RC} out='${OUT}' err='${ERR}'"
+gha "${W}" push -vo -n origin HEAD:main
+is_red_refusal && ok "S35. main RED: push -vo -n origin HEAD:main is refused (-n is the cluster's value)" \
+  || bad "S35. red main, -n as a value" "rc=${RC} out='${OUT}' err='${ERR}'"
+gha "${W}" push --dry origin HEAD:main
+[ "${RC}" = 0 ] && ok "S36. main RED: push --dry (an abbreviated --dry-run) proceeds: it lands nothing" \
+  || bad "S36. abbreviated dry-run" "rc=${RC} out='${OUT}' err='${ERR}'"
+gated_origin v1843g
+gha "${W}" push --push-option --delete origin HEAD:main
+is_gate_refusal && ok "S37. gated repo: push --push-option --delete origin HEAD:main needs a receipt (--delete is a value)" \
+  || bad "S37. gated, delete as a value" "rc=${RC} out='${OUT}' err='${ERR}'"
+
 # DND-1667: no git call may have fallen through past its shim.
 if fsg_verify; then ok "no git call fell through past its shim (DND-1667)"
 else bad "no git call fell through past its shim (DND-1667)" "see the forge-stub-guard FAIL above"; fi

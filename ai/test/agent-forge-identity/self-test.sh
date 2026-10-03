@@ -95,7 +95,7 @@ cat > "${STUBS}/git" <<'EOF'
 args=("$@")
 while [ $# -gt 0 ]; do
   case "$1" in
-    -C|-c|--git-dir|--work-tree|--namespace|--config-env) shift 2; continue ;;
+    -C|-c|--git-dir|--work-tree|--namespace|--config-env|--attr-source|--shallow-file) shift 2; continue ;;
     -*) shift; continue ;;
   esac
   break
@@ -250,6 +250,54 @@ refused "F12. \`-o --\`: the -- is -o's value, so the next flag still counts" gi
 mkdir -p "${TMP}/not-isolated"
 run "${R}" env GH_TOKEN=forged GH_HOST=github.com GH_CONFIG_DIR="${TMP}/not-isolated" gh pr create --title t --body b
 refused "F5. gh with a config dir that is not gh-athena's" gh gh-athena 'REAL-GH'
+
+echo
+echo "--- DND-1843: an option VALUE is never read as help, a flag or the repository ---"
+# git reads the word after -o / --push-option (or any abbreviation of a long
+# option that takes a value, or a short cluster ending in o) as that option's
+# value. Read as help, it skipped the whole check; read as the repository, it
+# hid the default remote. Each push below reaches github.com as the owner.
+SYNTH_GH='https://github.com/synth-owner/synth-repo.git'
+repo "${TMP}/nowhere.git"
+run "${R}" git push -o -h "${SYNTH_GH}" HEAD
+refused "K1. push -o -h <github url>: -h is -o's value, not help" git gh-athena 'REAL-GIT'
+run "${R}" git push --push-option=--help "${SYNTH_GH}" HEAD
+refused "K2. push --push-option=--help <github url>" git gh-athena 'REAL-GIT'
+run "${R}" git push --push-option --help "${SYNTH_GH}" HEAD
+refused "K3. push --push-option --help <github url>" git gh-athena 'REAL-GIT'
+run "${R}" git push -o -- -h "${SYNTH_GH}" HEAD
+refused "K4. push -o -- -h <github url>: the -- is -o's value" git gh-athena 'REAL-GIT'
+repo 'ssh://git@github.com/synth-owner/synth-repo.git'
+run "${R}" git push --push-o ci.skip
+refused "K5. push --push-o ci.skip: an abbreviated -o takes the value, the default remote is judged" git gh-athena 'REAL-GIT'
+run "${R}" git push -vo ci.skip
+refused "K6. push -vo ci.skip: a short cluster ending in o takes the value" git gh-athena 'REAL-GIT'
+run "${R}" git push --recurse-submodules no
+refused "K7. push --recurse-submodules no: the value is not the repository" git gh-athena 'REAL-GIT'
+repo "${TMP}/nowhere.git"
+"${REAL_G}" -C "${R}" config url.ssh://git@github.com/.insteadOf synthgh:
+run "${R}" git push --push-o x synthgh:synth-owner/synth-repo.git HEAD
+refused "K8. push --push-o x <insteadOf alias for ssh github>: the real repository is judged" git gh-athena 'REAL-GIT'
+repo "${SYNTH_GH}"
+run "${R}" git --attr-source HEAD push origin HEAD
+refused "K9. git --attr-source HEAD push: the global option's value is not the subcommand" git gh-athena 'REAL-GIT'
+run "${R}" git --shallow-file "${TMP}/no-shallow" push origin HEAD
+refused "K10. git --shallow-file <file> push" git gh-athena 'REAL-GIT'
+run "${R}" git --no-literal-pathspecs push origin HEAD
+refused "K11. git --no-literal-pathspecs push (a global switch git accepts)" git gh-athena 'REAL-GIT'
+run "${R}" git --synth-unknown-opt push origin HEAD
+refused "K12. an unknown global option before push is refused (deny by default)" git gh-athena 'REAL-GIT'
+run "${R}" git push --help
+if [[ "${OUT}" != *"REFUSED"* ]] && [[ "${CALLS}" == *"REAL-GIT push --help"* ]]; then ok "K13. git push --help in a github.com repo is not judged"
+else bad "K13. git push --help" "rc=${RC} calls=[${CALLS}] out=$(printf '%s' "${OUT}" | head -c 400)"; fi
+run "${R}" gh pr create --title --help --body b
+refused "K14. gh pr create --title --help: --help is --title's value, so it is a write" gh 'gh-athena pr create' 'REAL-GH'
+run "${R}" glab mr create --title -h
+refused "K15. glab mr create --title -h: -h is --title's value" glab 'glab-athena mr create' 'REAL-GLAB'
+run "${R}" gh pr create -- --help
+refused "K16. gh pr create -- --help: after --, --help is an argument" gh 'gh-athena pr create' 'REAL-GH'
+run "${R}" gh pr create --help
+passed "K17. gh pr create --help is help: a read" 'REAL-GH pr create --help'
 
 echo
 echo "--- the Athena routes still work (against the fixtures) ---"

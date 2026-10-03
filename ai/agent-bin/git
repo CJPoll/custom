@@ -37,8 +37,11 @@
 #      to recognise this file (ai/lib/agent-free-git.sh, harness-gate's
 #      stash_fixture_optout_env, the agent-stash-guard suite): keep it there.
 #   2. git's global options are parsed by git's own grammar (-C, -c,
-#      --config-env, --git-dir, --work-tree, --namespace, -p/-P/--no-pager, ...).
-#      An option it does not know passes through for git to judge.
+#      --config-env, --git-dir, --work-tree, --namespace, --attr-source,
+#      --shallow-file, -p/-P/--no-pager, ...). The options that print and exit
+#      (--version, --help, --exec-path, ...) pass through for git. An option it
+#      does not know is refused (DND-1843): if it took a value, the word after
+#      it would read as the subcommand and a push behind it would go unjudged.
 #   3. Aliases are resolved by ASKING git: `<real git> <same global options>
 #      config --get alias.<name>`, in the same cwd and env git will use, so -c
 #      alias.*, --config-env, GIT_CONFIG_* and include files all count. Chains
@@ -268,7 +271,7 @@ while :; do
   # Global options, git's grammar (git.c handle_options).
   while [ $# -gt 0 ]; do
     case "$1" in
-      -C | --git-dir | --work-tree | --namespace | --super-prefix | --attr-source | -c | --config-env)
+      -C | --git-dir | --work-tree | --namespace | --super-prefix | --attr-source | --shallow-file | -c | --config-env)
         [ $# -ge 2 ] || break
         case "$1" in -c | --config-env) check_tamper_key "${2%%=*}" ;; esac
         sq "$1"; globals="$globals $SQ"; sq "$2"; globals="$globals $SQ"; shift 2 ;;
@@ -279,14 +282,21 @@ while :; do
       --git-dir=* | --work-tree=* | --namespace=* | --super-prefix=* | --exec-path=* | \
       --list-cmds=* | --attr-source=* | \
       -p | -P | --paginate | --no-pager | --bare | --no-replace-objects | --no-lazy-fetch | \
-      --literal-pathspecs | --glob-pathspecs | --noglob-pathspecs | --icase-pathspecs | \
-      --no-optional-locks | --no-advice)
+      --literal-pathspecs | --no-literal-pathspecs | --glob-pathspecs | --noglob-pathspecs | \
+      --icase-pathspecs | --no-optional-locks | --no-advice)
         sq "$1"; globals="$globals $SQ"; shift ;;
       *) break ;;
     esac
   done
   if [ $# -eq 0 ]; then sub=; break; fi
-  case "$1" in -*) sub=; break ;; esac   # --version, --help, --exec-path, unknown: git decides
+  case "$1" in
+    # git prints and exits on these; no subcommand runs.
+    -v | --version | -h | --help | --exec-path | --html-path | --man-path | --info-path) sub=; break ;;
+    # An option git does not take before the subcommand (DND-1843). If it
+    # took a value, a push behind it would never be judged here: refuse.
+    -*) refuse "git $1 …: $1 is no global option this wrapper knows (git 2.54's grammar), so whether a push follows it is unknown" \
+          "Fix: drop $1 or move it after the subcommand; to push to a forge, use ~/dev/custom/ai/bin/gh-athena git push … or ~/dev/custom/ai/bin/glab-athena git push …." ;;
+  esac
   sub=$1
   shift
   is_builtin "$sub" && break

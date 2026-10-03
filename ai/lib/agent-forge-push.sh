@@ -7,7 +7,10 @@
 # The wrapper passes the argv it resolved (aliases expanded, global options
 # kept). Exit 0: the push may run. Exit 1: refused, one stderr line ending in a
 # Fix:. The wrapper exits with that status before git runs. `push -h` and
-# `push --help` are not judged.
+# `push --help` are not judged when -h or --help is the first push argument;
+# anywhere else it is judged, since there it may be an option's value
+# (DND-1843). Every argv walk here reads git's own option tables, kept once in
+# the passthrough ("git's own argv grammar").
 #
 # WHY. ai/hooks/forge-identity-guard.sh reads the Bash command TEXT. A `git
 # push` inside a script run as `bash <script>` is not in that text, and on
@@ -94,7 +97,8 @@ git() { "$AFP_REAL" "$@"; }
 
 AFP_LIB="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/forge-git-passthrough.sh"
 # shellcheck source=forge-git-passthrough.sh
-if ! . "$AFP_LIB" 2>/dev/null || ! declare -F fg_refuse_non_https >/dev/null || ! declare -F fg_push_recurses >/dev/null; then
+if ! . "$AFP_LIB" 2>/dev/null || ! declare -F fg_refuse_non_https >/dev/null || ! declare -F fg_push_recurses >/dev/null \
+   || ! declare -F fg_global_opt >/dev/null; then
   afp_refuse "git push: cannot load $AFP_LIB, so whether this push goes to a forge is unknown." \
     "restore ai/lib/forge-git-passthrough.sh beside ai/lib/agent-forge-push.sh in the checkout that holds ai/agent-bin; to push to a forge meanwhile, use ~/dev/custom/ai/bin/gh-athena git push … or ~/dev/custom/ai/bin/glab-athena git push …."
 fi
@@ -107,19 +111,23 @@ fg_rewrite() { printf 'agentforgepush.noop=1'; }
 # take a separate value), for the config probes below; the push's own args.
 AFP_GLOB=()
 while [ $# -gt 0 ]; do
-  case "$1" in
-    -C | -c | --git-dir | --work-tree | --namespace | --super-prefix | --attr-source | --config-env)
-      [ $# -ge 2 ] || break
-      AFP_GLOB+=("$1" "$2"); shift 2 ;;
-    push) break ;;
-    *) AFP_GLOB+=("$1"); shift ;;
-  esac
+  [ "$1" = push ] && break
+  if fg_global_opt "$1"; then
+    [ $# -ge 2 ] || break
+    AFP_GLOB+=("$1" "$2"); shift 2
+  else
+    AFP_GLOB+=("$1"); shift
+  fi
 done
 AFP_ARGV=("${AFP_GLOB[@]}" "$@")
 [ "${1:-}" = push ] && shift
-for a in "$@"; do
-  case "$a" in -h | --help) exit 0 ;; --) break ;; esac
-done
+# Help goes unjudged only where git always prints it and pushes nothing: -h
+# or --help as the FIRST push argument (git.c turns `push --help` into `git
+# help push`; parse-options exits on a leading -h). Anywhere else it is judged
+# like any push (DND-1843): there it may be an option's value (`-o -h`,
+# `--push-option --help`), which git pushes with. Where git would print help
+# after all (`push origin -h`, `push -o -- -h`), a refusal costs only the help.
+case "${1:-}" in -h | --help) exit 0 ;; esac
 
 # afp_reaches <host> : sets AFP_URL to the first resolved URL on <host> (or a
 # subdomain); returns 3 when the passthrough refuses the push for that host
@@ -181,8 +189,8 @@ for host in github.com gitlab.com; do
   rc=0; afp_reaches "$host" || rc=$?
   case "$rc" in
     0) ;;
-    3) afp_refuse "this git push${AFP_URL:+ to $(afp_shown "$AFP_URL")}: it would reach $host over SSH or another non-HTTPS transport, or recurse into submodules, so it can go out with the machine owner's SSH key, not Athena's (DND-1803)." \
-         "$(afp_fix "$host") Point the remote at https://$host/<owner>/<repo>.git (or git@$host:<owner>/<repo>.git, which the route rewrites) and push each submodule separately." ;;
+    3) afp_refuse "this git push${AFP_URL:+ to $(afp_shown "$AFP_URL")}: it would reach $host over SSH or another non-HTTPS transport, or recurse into submodules, or it carries an option or alias the check cannot read by git's grammar, so it can go out with the machine owner's SSH key, not Athena's (DND-1803, DND-1843)." \
+         "$(afp_fix "$host") Point the remote at https://$host/<owner>/<repo>.git (or git@$host:<owner>/<repo>.git, which the route rewrites), push each submodule separately, and spell every option in full as \`git push -h\` lists it." ;;
     *) afp_refuse "this git push: its remote could not be resolved (exit $rc), so whether it goes to $host as the machine owner is unknown (DND-1803)." \
          "run it again from inside the repository with a configured remote; to push to a forge, $(afp_fix "$host")" ;;
   esac
