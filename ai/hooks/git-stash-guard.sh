@@ -185,7 +185,9 @@
 # glob character (`./(x|g)it stash pop`, `./ab(:s/ab/git/) sp` both run
 # git). The tokenizer splits such a word at its parens, `|` and blanks, so
 # zseg finds the whole zsh word (a blank, newline or `|` inside the paren
-# stays in it) and zcat judges it, checked against zsh 5.9:
+# stays in it, and so does a `$(...)` or backtick substitution joined to
+# it, `./g$(:)(i|x)t`; a `(` after a mid-word `=` is a qualifier, not an
+# array, `./a=(:s/a=/git/)`) and zwcat judges it, checked against zsh 5.9:
 #   * a group or alternation (`(a|b)`, one alternative included, `g(i)t`)
 #     is expanded into its alternatives and matched like a glob word: may
 #     be git when any alternative can be git or git-stash;
@@ -200,14 +202,21 @@
 #     and in a qualifier list is refused;
 #   * nothing runs for a qualifier on an empty pattern (prose `x (written
 #     ...)`), a group holding `/`, an unbalanced paren, or a `;` or `&`
-#     inside the paren (zsh: "bad pattern", "parse error");
+#     inside the paren (zsh: "bad pattern", "parse error"). This holds
+#     before the next rule: an empty pattern matches no file whatever its
+#     qualifier expands to;
 #   * an expansion or backtick in the word, or a leading tilde: may be git.
 # A may-be-git word is judged like a glob command word, with the words
 # after the whole zsh word as its arguments. A zsh word that starts with
 # its own paren is in command position only through the word before it
-# (env, sudo, ...). Accepted false positive: code in a payload or heredoc
-# whose call is qualifier-shaped and holds an expansion or a `:` (awk
-# `length($0)`, ruby `printf("%3d", $.)`).
+# (env, sudo, ...). A word that also holds a glob character is judged by
+# globcat first, as before (a joined group makes it may be git), so the
+# "Still denied" groups stay denied. Not caught, as for glob command
+# words: a group word after a prefix that takes its own argument
+# (`timeout 5 ./(x|g)it stash pop`). Accepted false positive: code in a
+# payload or heredoc whose call is qualifier-shaped and holds an expansion
+# or a `:`, in command position (awk `length($0) > 80`, ruby
+# `printf("%3d", $.)`).
 #
 # ZSH: the Bash tool runs zsh, so zsh-only word rewrites count too: EQUALS
 # (`=git` is git's path), global aliases (`alias -g`, any word position),
@@ -353,10 +362,11 @@ if [ -z "$FAULT" ] && [ -s "$GSG_TMP/shaliases" ]; then
 fi
 # prefilter <extra ERE> : does FLAT match the extra pattern, a glob/brace
 # character, a paren joined to a word, or a relevant shell alias name? 0
-# yes, 1 no, 2 grep failed. A joined paren (ZGRP_RE) is a zsh glob group or
-# qualifier, which can build a command word with no glob character
-# (`./(x|g)it-st(a|b)sh`, DND-1858).
-ZGRP_RE='[^[:space:];&|(<>$=][(]|[)][^[:space:];&|)<>]'
+# yes, 1 no, 2 grep failed. A joined paren or an alternation in parens
+# (ZGRP_RE) is a zsh glob group or qualifier, which can build a command
+# word with no glob character (`./(x|g)it-st(a|b)sh`; `env (GIT|x)` under
+# a nocaseglob set outside the command; `./a=(:s/a=/git/)`; DND-1858).
+ZGRP_RE='[^[:space:];&|(<>$=][(]|[^[:space:];&|(<>]=[(]|[)][^[:space:];&|)<>]|[(][^()]*[|]'
 prefilter() {
   if [ -n "$GSG_TMP" ]; then
     printf '%s' "$FLAT" | grep -Eq -e "$1" -e '[*?[{]' -e "$ZGRP_RE" -f "$GSG_TMP/shalias.re" 2>/dev/null
@@ -748,53 +758,90 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
     if ("git" ~ re || "git-stash" ~ re) return "git"
     return GISG ? "glob" : "lit"
   }
-  # zseg(text, L, n, WS, SB, BRK, OPC, GG, ZV, ZA, ZB) (DND-1858): find
+  # asgpre(text, j, BRK, OPC) (DND-1858): 1 when the `=` at j does NOT end
+  # a plain name (a subscript or `+` allowed) that starts its word, and
+  # does not start the word itself. Only then is a `(` after it a glob
+  # group or qualifier rather than an array or `=(...)`.
+  function asgpre(text, j, BRK, OPC,    k, w) {
+    for (k = j - 1; k >= 1 && !(k in BRK) && !(k in OPC); k--) ;
+    w = substr(text, k + 1, j - k - 1)
+    return !(w == "" || w ~ /^[A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?\+?$/)
+  }
+  # zseg(text, L, n, WS, SB, BRK, OPC, GG, ZV, ZA, ZB, ZP) (DND-1858): find
   # each zsh word in text that holds a glob group or qualifier (a GG `(`)
-  # and judge it whole with zcat. The tokenizer splits such a word at every
+  # and judge it whole with zwcat. The tokenizer splits such a word at every
   # paren and `|`, and at blanks, but zsh keeps it one word: a blank, a
   # newline or `|` inside a GG paren belongs to the word (`./g(x |i)t`
   # runs git). A `;` or `&` there is a zsh parse error, so nothing runs
-  # ("err").
-  # Outside parens, a break, an operator, a `)` that closes nothing here,
-  # or a `(` that is no group (a subshell, `$(`) ends the word. The verdict
-  # goes on the first tokenized word inside it (ZV); its arguments are the
-  # words after it up to the next simple-command start, read only when
-  # nothing but blanks separates them from it (else ZA is 0, so a bare
-  # verdict is given: a redirection there costs a false deny, never a miss).
-  function zseg(text, L, n, WS, SB, BRK, OPC, GG, ZV, ZA, ZB, ZP,    i, c, d, s, hg, pe, ns, SS, SE, SH, SP, g, k, a) {
-    ns = 0; d = 0; s = 0; hg = 0; pe = 0
+  # ("err"). Outside parens, a break, an operator, a `)` that closes
+  # nothing here, or a `(` that is no group (a subshell, `$(`) ends the
+  # word. A second scan (zscan joining) keeps each `$(...)` or backtick
+  # substitution inside the word, and reads a `(` right after one as a
+  # group (`./g$(:)(i|x)t` runs git); it judges only the words that hold a
+  # substitution, which the first scan split, while the first scan still
+  # finds the words inside the substitution, which zsh runs too.
+  # The verdict goes on the first tokenized word inside the zsh word (ZV);
+  # its arguments are the words after it up to the next simple-command
+  # start, read only when nothing but blanks separates them from it (ZA).
+  # When a redirection or a line continuation separates them, ZA is -1 and
+  # analyze judges a may-be-git or wrapper word as may be git with no
+  # arguments, which denies: a false deny, never a miss. When a command
+  # separator ends the command right after the word, ZA is 0: the word
+  # has no arguments.
+  function zseg(text, L, n, WS, SB, BRK, OPC, GG, ZV, ZA, ZB, ZP,    jm, ns, SS, SE, SH, SP, SX, g, k, a, gp) {
+    for (jm = 0; jm <= 1; jm++) {
+      ns = zscan(text, L, jm, BRK, OPC, GG, SS, SE, SH, SP, SX)
+      for (g = 1; g <= ns; g++) {
+        if (!SH[g] || (jm && !SX[g])) continue
+        for (k = 1; k <= n && WS[k] < SS[g]; k++) ;
+        if (k > n || WS[k] > SE[g] || (k in ZV)) continue
+        # Text before the first word that is no group paren was dropped by
+        # the tokenizer: the zsh word is a redirection target, not a
+        # command (`-> IO.inspect(reason)` in a heredoc).
+        if (WS[k] > SS[g] && substr(text, SS[g], WS[k] - SS[g]) !~ /^[(]+$/) continue
+        ZV[k] = SP[g] ? "err" : zwcat(substr(text, SS[g], SE[g] - SS[g] + 1)); ZA[k] = 0; ZB[k] = 0; ZP[k] = (WS[k] > SS[g])
+        for (a = k; a <= n && WS[a] <= SE[g]; a++) ;
+        if (a > n) continue
+        gp = substr(text, SE[g] + 1, WS[a] - SE[g] - 1)
+        if (gp ~ /[<>]/ || gp ~ /^[ \t]*(\\\n[ \t]*)+$/) { ZA[k] = -1; continue }
+        if (gp !~ /^[ \t]*$/) continue
+        ZA[k] = a; ZB[k] = a
+        while (ZB[k] < n && !SB[ZB[k] + 1]) ZB[k]++
+      }
+    }
+  }
+  # zscan(text, L, jm, BRK, OPC, GG, SS, SE, SH, SP, SX): split text into
+  # zsh words for zseg; returns how many. SS..SE the span, SH 1 when it
+  # holds a group paren, SP 1 when a `;` or `&` sits inside that paren, SX
+  # 1 when it holds a substitution (jm only: joining mode, see zseg).
+  function zscan(text, L, jm, BRK, OPC, GG, SS, SE, SH, SP, SX,    i, c, d, s, hg, pe, sd, bq, sx, ls, ns) {
+    ns = 0; d = 0; s = 0; hg = 0; pe = 0; sd = 0; bq = 0; sx = 0; ls = 0
     for (i = 1; i <= L; i++) {
       c = substr(text, i, 1)
+      if (sd > 0) {
+        if (i in OPC) { if (c == "(") sd++; else if (c == ")" && --sd == 0) ls = i }
+        continue
+      }
+      if (bq) { if (c == "`" && (i in BRK)) { bq = 0; ls = i }; continue }
+      if (jm && c == "`" && (i in BRK)) { if (!s) s = i; bq = 1; sx = 1; continue }
+      if (jm && c == "(" && (i in OPC) && i > 1 && substr(text, i - 1, 1) == "$" && d == 0) { if (!s) s = i; sd = 1; sx = 1; continue }
       if (d > 0) {
         if (i in OPC) { if (c == "(") d++; else if (c == ")") d-- }
         else if ((i in BRK) && c ~ /[;&]/) pe = 1
         continue
       }
-      if ((i in BRK) || ((i in OPC) && !(c == "(" && (i in GG)))) {
-        if (s) { ns++; SS[ns] = s; SE[ns] = i - 1; SH[ns] = hg; SP[ns] = pe }
-        s = 0; hg = 0; pe = 0
+      if ((i in BRK) || ((i in OPC) && !(c == "(" && ((i in GG) || (ls && ls == i - 1))))) {
+        if (s) { ns++; SS[ns] = s; SE[ns] = i - 1; SH[ns] = hg; SP[ns] = pe; SX[ns] = sx }
+        s = 0; hg = 0; pe = 0; sx = 0; ls = 0
         continue
       }
       if (!s) s = i
       if (c == "(" && (i in OPC)) { hg = 1; d = 1 }
     }
-    if (s) { ns++; SS[ns] = s; SE[ns] = L; SH[ns] = hg; SP[ns] = pe }
-    for (g = 1; g <= ns; g++) {
-      if (!SH[g]) continue
-      for (k = 1; k <= n && WS[k] < SS[g]; k++) ;
-      if (k > n || WS[k] > SE[g]) continue
-      # Text before the first word that is no group paren was dropped by
-      # the tokenizer: the zsh word is a redirection target, not a command
-      # (`-> IO.inspect(reason)` in a heredoc).
-      if (WS[k] > SS[g] && substr(text, SS[g], WS[k] - SS[g]) !~ /^[(]+$/) continue
-      ZV[k] = SP[g] ? "err" : zcat(substr(text, SS[g], SE[g] - SS[g] + 1)); ZA[k] = 0; ZB[k] = 0; ZP[k] = (WS[k] > SS[g])
-      for (a = k; a <= n && WS[a] <= SE[g]; a++) ;
-      if (a > n || substr(text, SE[g] + 1, WS[a] - SE[g] - 1) !~ /^[ \t]*$/) continue
-      ZA[k] = a; ZB[k] = a
-      while (ZB[k] < n && !SB[ZB[k] + 1]) ZB[k]++
-    }
+    if (s) { ns++; SS[ns] = s; SE[ns] = L; SH[ns] = hg; SP[ns] = pe; SX[ns] = sx }
+    return ns
   }
-  # zcat(z) (DND-1858): what the raw zsh word z, which holds a glob group
+  # zwcat(z) (DND-1858): what the raw zsh word z, which holds a glob group
   # or qualifier, can run as. Verified against zsh 5.9 under default
   # options (a fake git in a scratch dir):
   #   "git"  it may be git or git-stash, or this hook cannot tell;
@@ -813,7 +860,7 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   # zqual. Every other paren is a group: each alternative is expanded
   # (zgexp), then braces (gbexp), and each word is matched like a glob
   # command word (gword).
-  function zcat(z,    n, i, c, st, cw, cu, d, p, r, g, k, any, hx) {
+  function zwcat(z,    n, i, c, st, cw, cu, d, p, r, g, k, any, hx) {
     if (GO) return "git"
     cw = ""; cu = ""; st = 0; hx = 0; n = length(z)
     for (i = 1; i <= n; i++) {
@@ -879,7 +926,7 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
     for (i = p + 1; i < n; i++) if (substr(cu, i, 1) == "u" && substr(cw, i, 1) ~ /[|()]/) return 0
     return 1
   }
-  # zhasgrp(cw, cu): cw holds an unquoted `(`, a group (zcat has removed
+  # zhasgrp(cw, cu): cw holds an unquoted `(`, a group (zwcat has removed
   # any trailing qualifier by then).
   function zhasgrp(cw, cu,    i) {
     for (i = 1; i <= length(cw); i++) if (substr(cw, i, 1) == "(" && substr(cu, i, 1) == "u") return 1
@@ -1077,8 +1124,9 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   # is no group.
   # ZV[k], ZA[k], ZB[k], ZP[k] (DND-1858) are set by zseg for word k when
   # it is the first word of a zsh word holding a glob group or qualifier:
-  # ZV the zcat verdict, ZA..ZB the words that follow that zsh word as its
-  # arguments (ZA 0 when none can be read), ZP 1 when the zsh word starts
+  # ZV the zwcat verdict, ZA..ZB the words that follow that zsh word as its
+  # arguments (ZA 0 when there are none, -1 when they cannot be read), ZP 1
+  # when the zsh word starts
   # with its group paren (`env (x|g)it`), so k has SB only from that paren.
   function tokenize(text, W, QF, SB, UX, PQ, AS, SC, QM, AD, ZV, ZA, ZB, ZP,    n, i, L, c, st, cur, curm, has, q, ns, skip, ux, rq, asg, fk, bt, wsi, wei, WS, WE, BRK, OPC, GG, CS, JC, MT, PS, ps, k, j, d) {
     n = 0; st = 0; cur = ""; curm = ""; has = 0; q = 0; ns = 1; skip = 0; ux = 0; rq = 0; asg = 0; fk = 0; bt = 0; L = length(text)
@@ -1105,15 +1153,17 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
         # GG: a `(` that zsh reads as a glob group or qualifier: joined to
         # the text before it (`g(`, `x?(`), or after a blank that follows an
         # argument word (`env (x|?)it`). Not a subshell at a command start,
-        # nor `$(`, `<(`, `>(`, `=(` or an array `a=(`. MT: the `(` a `)`
+        # nor `$(`, `<(`, `>(`, `=(` or an array `a=(`. A `=` that does not
+        # end a plain name at the word start opens no array, so `./a=(` is a
+        # qualifier (DND-1858, asgpre). MT: the `(` a `)`
         # closes (0 when none in this text). JC: a `)` joined to the text
         # after it (`)it`, `)(`).
         if (c == "(") {
           PS[++ps] = i; j = i - 1
-          if (j >= 1 && !(j in BRK) && !(j in OPC) && substr(text, j, 1) !~ /[$=]/) GG[i] = 1
+          if (j >= 1 && !(j in BRK) && !(j in OPC) && substr(text, j, 1) != "$" && (substr(text, j, 1) != "=" || asgpre(text, j, BRK, OPC))) GG[i] = 1
           else if (j >= 1 && (j in BRK) && substr(text, j, 1) ~ /[ \t]/) {
             while (j >= 1 && (j in BRK) && substr(text, j, 1) ~ /[ \t]/) j--
-            if (j >= 1 && !(j in BRK) && !(j in OPC) && substr(text, j, 1) !~ /[$=]/) GG[i] = 1
+            if (j >= 1 && !(j in BRK) && !(j in OPC) && substr(text, j, 1) != "$" && (substr(text, j, 1) != "=" || asgpre(text, j, BRK, OPC))) GG[i] = 1
           }
           # CS: a plain subshell `(` (at a command start, or after an
           # operator), not a group and not a substitution (`$(`, `<(`, `=(`).
@@ -1505,7 +1555,11 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       zcp = (k in ZP) && ZP[k] ? (k == pgc || (pcp && k > 1 && cmd_prefix(W[k - 1]))) : cp
       if (zcp && !asgw && gc != "git" && (k in ZV) && (ZV[k] == "git" || (ZV[k] == "glob" && gc == ""))) {
         gc = ZV[k]; delete sw; m = 0; ne = k
-        if (ZA[k]) { for (i = ZA[k]; i <= ZB[k]; i++) sw[++m] = W[i]; so = ZA[k] - 1; ne = ZB[k] }
+        if (ZA[k] > 0) { for (i = ZA[k]; i <= ZB[k]; i++) sw[++m] = W[i]; so = ZA[k] - 1; ne = ZB[k] }
+        # A wrapper pattern whose arguments cannot be read (ZA -1: a
+        # redirection or a line continuation after it) may run anything:
+        # judge it as may be git, with no arguments, which denies.
+        else if (ZA[k] < 0 && gc == "glob") gc = "git"
       }
       if (gc == "git") {
         for (i = 1; i <= m && sw[i] ~ /^-/; i++) ;
@@ -1636,7 +1690,7 @@ case "$V_CAT" in
   shell-alias) deny 'this runs a shell alias loaded into the Bash tool from the owner profile (oh-my-zsh defines `gstp` = `git stash pop`) that expands to a stash write.'"$MATCHED" ;;
   alias) deny 'this runs a git alias that resolves to a stash write (or a shell alias that mentions stash).'"$MATCHED" ;;
   expanded) deny 'this runs git with a subcommand built by expansion (`git $X`, a glob `git st?sh`, a brace `git {stash,pop}`), which may be a stash write and cannot be read here. Spell the subcommand (and a stash verb) out literally, quoting any glob or brace characters.'"$MATCHED" ;;
-  glob-head) deny 'this runs a command word the shell rewrites by glob or brace expansion (`/usr/bin/g?t`, `git-st*sh`), which may be git or git-stash writing the stash list. Spell the command word literally.'"$MATCHED" ;;
+  glob-head) deny 'this runs a command word the shell rewrites by glob or brace expansion, or by a zsh glob group or qualifier (`/usr/bin/g?t`, `git-st*sh`, `./(x|g)it`, `./ab(:s/ab/git/)`), which may be git or git-stash writing the stash list. Spell the command word literally.'"$MATCHED" ;;
   unread-config) deny 'this runs a git subcommand that is neither a builtin nor an alias this guard read, where git may resolve it to a stash write: the command points git at a config this guard does not read (`--git-dir`, GIT_DIR, GIT_CONFIG_GLOBAL/SYSTEM, HOME, XDG_CONFIG_HOME, `include.path`, a `cd`/`-C` target that is expanded or holds whitespace, or an alias defined from an expansion), or help.autocorrect is on and git would run the closest command for a typo. Spell a builtin subcommand out, or drop the override.'"$MATCHED" ;;
   expanded-git) deny 'this runs `stash` through a command word built by expansion (`$GIT stash`, `$(command -v git) stash`), which may be git writing the stash list.'"$MATCHED" ;;
 esac

@@ -1207,7 +1207,7 @@ if is_deny && printf '%s' "$OUT" | grep -q 'runs a shell alias'; then
 else record "D2-76. an alias whose value is the write still reports the alias" FAIL; fi
 
 
-echo "== Z: zsh glob group, qualifier and modifier command words (DND-1858) =="
+echo "== ZG: zsh glob group, qualifier and modifier command words (DND-1858) =="
 # A command word with no glob character that zsh still rewrites: a group or
 # alternation `(a|b)`, or a trailing glob qualifier `(...)` that renames the
 # match (`:` modifiers, P), runs code (e, +, oe, o+), or a word under
@@ -1215,103 +1215,133 @@ echo "== Z: zsh glob group, qualifier and modifier command words (DND-1858) =="
 # case was ALLOWED before DND-1858. A qualifier that ends the word is
 # followed by the `sp` alias or nothing: a literal `stash` right after its
 # `)` was already denied by the substitution-tail rule.
-d2 "Z1. an alternation group spelling git" deny <<'EOF'
+d2 "ZG1. an alternation group spelling git" deny <<'EOF'
 ./(x|g)it stash pop
 EOF
-d2 "Z2. a :s modifier qualifier renaming a word to git" deny <<'EOF'
+d2 "ZG2. a :s modifier qualifier renaming a word to git" deny <<'EOF'
 ./ab(:s/ab/git/) sp
 EOF
-d2 "Z2a. a :s modifier renaming a word to git-stash, no verb" deny <<'EOF'
+d2 "ZG2a. a :s modifier renaming a word to git-stash, no verb" deny <<'EOF'
 ./ab(:s/ab/git-stash/)
 EOF
-d2 "Z3. a :l modifier lowering GIT" deny <<'EOF'
+d2 "ZG3. a :l modifier lowering GIT" deny <<'EOF'
 ./GIT(:l) sp
 EOF
-d2 "Z4. an e qualifier setting REPLY" deny <<'EOF'
+d2 "ZG4. an e qualifier setting REPLY" deny <<'EOF'
 ./ab(e:REPLY=./git:) sp
 EOF
-d2 "Z5. a + qualifier calling a function" deny <<'EOF'
+d2 "ZG5. a + qualifier calling a function" deny <<'EOF'
 ./ab(+f) sp
 EOF
-d2 "Z6. a P qualifier prepending a word" deny <<'EOF'
+d2 "ZG6. a P qualifier prepending a word" deny <<'EOF'
 ./ab(P:./git:) sp
 EOF
-d2 "Z7. a one-alternative group" deny <<'EOF'
+d2 "ZG7. a one-alternative group" deny <<'EOF'
 ./g(i)t stash pop
 EOF
-d2 "Z8. a blank inside a group stays one zsh word" deny <<'EOF'
+d2 "ZG8. a blank inside a group stays one zsh word" deny <<'EOF'
 ./g(x |i)t stash pop
 EOF
-d2 "Z9. groups spelling git-stash, no verb" deny <<'EOF'
+d2 "ZG9. groups spelling git-stash, no verb" deny <<'EOF'
 ./(x|g)it-st(a|b)sh
 EOF
-d2 "Z10. a group word after env" deny <<'EOF'
+d2 "ZG10. a group word after env" deny <<'EOF'
 env ./(x|g)it stash pop
 EOF
-d2 "Z11. a modifier in a second qualifier set" deny <<'EOF'
+d2 "ZG11. a modifier in a second qualifier set" deny <<'EOF'
 ./ab(.,:s/ab/git/) sp
 EOF
-d2 "Z12. an oe sort qualifier runs code" deny <<'EOF'
+d2 "ZG12. an oe sort qualifier runs code" deny <<'EOF'
 ./ab(oe:REPLY=./git:) sp
 EOF
-d2 "Z13. a blank and a glob inside a group" deny <<'EOF'
+d2 "ZG13. a blank and a glob inside a group" deny <<'EOF'
 /usr/bin/g(x |?)t stash pop
 EOF
-d2 "Z14. a partly quoted word with a modifier qualifier" deny <<'EOF'
+d2 "ZG14. a partly quoted word with a modifier qualifier" deny <<'EOF'
 ./"ab"(:s/ab/git/) sp
 EOF
-d2 "Z15. a (#i) flag under extendedglob" deny <<'EOF'
+d2 "ZG15. a (#i) flag under extendedglob" deny <<'EOF'
 setopt extendedglob; ./(#i)GIT stash pop
 EOF
-d2 "Z16. a filter qualifier on a group that is git" deny <<'EOF'
+d2 "ZG16. a filter qualifier on a group that is git" deny <<'EOF'
 ./g(i)t(.) sp
 EOF
-d2 "Z17. a blank inside a modifier qualifier" deny <<'EOF'
+d2 "ZG17. a blank inside a modifier qualifier" deny <<'EOF'
 ./ab(:s/ab/git/ ) sp
 EOF
-d2 "Z18. a newline inside a group stays one zsh word" deny <<'EOF'
+d2 "ZG18. a newline inside a group stays one zsh word" deny <<'EOF'
 ./g(x
 |i)t stash pop
 EOF
+d2 "ZG33. a group wrapper whose arguments follow a redirection (review floor)" deny <<'EOF'
+/usr/bin/(e|x)nv 2>/dev/null ./g?t stash pop
+EOF
+d2 "ZG33a. a group wrapper whose arguments follow a line continuation (review floor)" deny <<'EOF'
+/usr/bin/(e|x)nv \
+ ./g?t stash pop
+EOF
+d2 "ZG34. a group joined after a command substitution (review floor)" deny <<'EOF'
+./g$(:)(i|x)t stash pop
+EOF
+d2 "ZG35. a group joined after a backtick substitution (review floor)" deny <<'EOF'
+./g`:`(i|x)t stash pop
+EOF
+d2 "ZG36. a qualifier after a mid-word = is no array (review floor)" deny <<'EOF'
+./a=(:s/a=/git/) sp
+EOF
+d2 "ZG37. a group git inside a backtick substitution" deny <<'EOF'
+echo `./(x|g)it stash pop`
+EOF
+OUT=$(json "$WT" 'env (GIT|x) sp' | ZDOTDIR="$D2Z" CLAUDE_CONFIG_DIR="$D2S" sh "$HOOK" 2>/dev/null); STATUS=$?
+check "ZG19. a bare alternation group under a glob option set outside the command" deny
 # Precision: qualifier-shaped code in a payload that zsh rejects or only
 # filters. These pass before and after: they pin the false-positive bound.
-d2 "Z20. jq select(.x) is a filter qualifier on select" allow <<'EOF'
+d2 "ZG20. jq select(.x) is a filter qualifier on select" allow <<'EOF'
 git log -1; gh pr list --json number -q '.[] | select(.x) | .number'
 EOF
-d2 "Z21. jq select(.a==1) is a qualifier zsh rejects" allow <<'EOF'
+d2 "ZG21. jq select(.a==1) is a qualifier zsh rejects" allow <<'EOF'
 git log -1; gh pr list --json state -q '.[] | select(.state=="OPEN")'
 EOF
-d2 "Z22. python print(a, b) is a qualifier zsh rejects" allow <<'EOF'
+d2 "ZG22. python print(a, b) is a qualifier zsh rejects" allow <<'EOF'
 git status && python3 -c 'print(a, b)'
 EOF
-d2 "Z23. python nested calls make a group that cannot be git" allow <<'EOF'
+d2 "ZG23. python nested calls make a group that cannot be git" allow <<'EOF'
 git rev-parse HEAD | python3 -c 'import sys; print(len(sys.stdin.read()))'
 EOF
-d2 "Z24. grep for a call with an unbalanced paren (bad pattern)" allow <<'EOF'
+d2 "ZG24. grep for a call with an unbalanced paren (bad pattern)" allow <<'EOF'
 git log -1; grep -rn "Runs.close(" lib
 EOF
-d2 "Z25. prose with a parenthesized aside in a heredoc" allow <<'EOF'
+d2 "ZG25. prose with a parenthesized aside in a heredoc" allow <<'EOF'
 cat >> notes.md <<'X'
 ## HANDOFF (written 2026-10-02 00:38Z by admiral, ~2h restart; git status clean)
 X
 EOF
-d2 "Z26. elixir call with a qualifier-shaped argument in a heredoc" allow <<'EOF'
+d2 "ZG26. elixir call with a qualifier-shaped argument in a heredoc" allow <<'EOF'
 cat > t.exs <<'X'
 {:error, reason} -> IO.inspect(reason)
 X
 git status
 EOF
-d2 "Z27. prose aside opening with a substitution, after an argument word" allow <<'EOF'
+d2 "ZG27. prose aside opening with a substitution, after an argument word" allow <<'EOF'
 cat >> notes.md <<X
 ## RESTART HANDOFF ($(date -u +%H:%MZ), admiral)
 X
 git status
 EOF
-d2 "Z28. a renaming qualifier on an empty pattern matches no file" allow <<'EOF'
-env (:u) ls; git status
+d2 "ZG28. a renaming qualifier on an empty pattern matches no file" allow <<'EOF'
+git status; env (:u) sp
 EOF
-d2 "Z29. a ; inside a group is a zsh parse error" allow <<'EOF'
+d2 "ZG29. a ; inside a group is a zsh parse error" allow <<'EOF'
 ./g(x;|i)t stash pop
+EOF
+d2 "ZG30. python print(sys.argv) is a qualifier zsh rejects (y)" allow <<'EOF'
+git status; python3 -c 'import sys; print(sys.argv)'
+EOF
+d2 "ZG31. a group word that is a redirection target is no command" allow <<'EOF'
+env > ./(x|g)it sp
+EOF
+d2 "ZG32. a group git with a read-only verb after the whole zsh word" allow <<'EOF'
+./(x|g)it log -1
 EOF
 
 echo "== F: fail-open =="
