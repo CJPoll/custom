@@ -88,9 +88,18 @@ A PR that is CLOSED with no `mergedAt` is judged by its **change**, not its stat
   carries `landed_via: "push"` and `landed_commit`; a forge merge carries
   `landed_via: "merge"`.
 - **Closed** (`via=closed`, no lead) when none of it is on the base. Known
-  residual: a multi-commit PR squashed under a new subject AFTER the base
-  edited its diff context matches neither its whole-diff patch-id nor any
-  per-commit one, so it reads closed though it landed.
+  residual: none for a squash under the PR's own title. A multi-commit PR
+  squashed AFTER the base edited its diff context matches neither its
+  whole-diff patch-id nor any per-commit one. Its whole diff's zero-context
+  patch-id (`git diff -U0`) then names the squash, and it counts as landed
+  only when that base commit's subject is the PR title (a trailing ` (#N)`
+  aside) and names one base commit in the range (DND-1520). The same squash
+  under another subject reads could-not-measure, with that reason.
+
+  **Later (2026-10-03, DND-1520):** this bullet named the squash under a new
+  subject, after a context edit, as a known residual that read closed. The
+  title-gated zero-context match above closes it for the PR's own title; any
+  other subject stays could-not-measure.
 - **Could not measure** (`via=unmeasured`, with the reason on the row and on
   stderr) when only some of its commits are on the base, or its change is on
   the base only under another subject, or a base commit (named in the reason)

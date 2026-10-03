@@ -239,6 +239,10 @@ module LeadTime
   #                 (nil when that diff is empty)
   #   main:         [{sha:, pid:, pid0:, subject:}] the base's non-merge
   #                 commits that are not in the request, newest first
+  #   combined_pid0: zero-context patch-id of the whole diff (nil when
+  #                 unknown or empty); title: the request's title (nil when
+  #                 unknown). Together they read a multi-commit squash whose
+  #                 context the base edited (DND-1520; see squash_by_title).
   #
   # -> {status: :landed, sha:}  every commit is on main, one for one, by its
   #                             patch or, under its own subject, by its patch
@@ -253,7 +257,7 @@ module LeadTime
   #                             not its change (a conflict-resolved or edited
   #                             landing)
   #    {status: :not_landed}    nothing of it is on main
-  def classify_landing(pr_only:, combined_pid:, main:)
+  def classify_landing(pr_only:, combined_pid:, main:, combined_pid0: nil, title: nil)
     order = main.each_with_index.to_h { |m, i| [m[:sha], i] }
     found = match_commits(pr_only, main)
     if !pr_only.empty? && found.none?(&:nil?)
@@ -261,11 +265,16 @@ module LeadTime
     end
     squash = combined_pid && main.find { |m| m[:pid] == combined_pid }
     return { status: :landed, sha: squash[:sha] } if squash
+
+    by_title = squash_by_title(combined_pid0, title, main)
+    return { status: :landed, sha: by_title[:sha] } if by_title[:sha]
     # No commit of its own and no diff to match: nothing here can say whether
     # it landed, so it is not "closed".
     if pr_only.empty?
       return { status: :unknown, reason: "it has no commit of its own off the base branch to match" }
     end
+
+    return { status: :unknown, reason: by_title[:reason] } if by_title[:reason]
 
     hits = found.compact.size
     if hits.positive?
@@ -297,6 +306,36 @@ module LeadTime
     end
 
     { status: :not_landed }
+  end
+
+  # DND-1520: a multi-commit request squashed under a new subject after the
+  # base edited its diff context matches neither its whole-diff patch-id nor
+  # any commit's. Its whole diff's zero-context patch-id (the changed lines and
+  # their files only) names the squash. That is weaker than a full match, so it
+  # counts only when the base commit's subject is the request's title (a
+  # squash merge's own " (#123)" suffix aside) and names ONE base commit in
+  # the range. Anything weaker is a reason, never a landing.
+  # -> {sha:} landed, {reason:} could not be decided, {} no such commit.
+  def squash_by_title(combined_pid0, title, main)
+    return {} unless combined_pid0
+
+    hits = main.select { |m| m[:pid0] == combined_pid0 }
+    return {} if hits.empty?
+
+    same = hits.select { |m| title && m[:subject].sub(/ \(#\d+\)\z/, "") == title.strip }
+    if same.size == 1 && main.count { |m| m[:subject] == same[0][:subject] } == 1
+      return { sha: same[0][:sha] }
+    end
+
+    m = hits.first
+    where = "as #{m[:sha].to_s[0, 12]} ('#{m[:subject]}')"
+    why = if same.empty?
+            "under a subject other than its title ('#{title}')"
+          else
+            "but #{main.count { |x| x[:subject] == same[0][:subject] }} base commits share that subject"
+          end
+    { reason: "its whole change is on the base branch #{where} with a different context, #{why}, " \
+              "so nothing proves this is its landing" }
   end
 
   # The base commit each request commit landed as, one for one (a base commit
@@ -639,7 +678,7 @@ class GitHubForge
     closed = false
     unmeasured = nil
     if merged_at.nil? && d["state"] == "CLOSED"
-      land = landing(d["number"], d["headRefOid"], d["baseRefName"])
+      land = landing(d["number"], d["headRefOid"], d["baseRefName"], d["title"])
       case land[:status]
       when :landed
         merged_at, merge_sha, landed_via = land[:at], land[:sha], "push"
@@ -669,7 +708,7 @@ class GitHubForge
   # cannot run is a recorded probe failure (the scan then reports INCOMPLETE),
   # and a lookup that runs but cannot decide is :unknown with a reason. Neither
   # ever reads as open. -> {status:, sha:, at:, reason:}
-  def landing(number, head, base)
+  def landing(number, head, base, title = nil)
     unless head && base
       return { status: :unknown, reason: "the forge gave no head commit or base branch for this PR" }
     end
@@ -689,7 +728,7 @@ class GitHubForge
       return { status: :unknown, reason: "landing probe failed (see SCAN INCOMPLETE)" }
     end
 
-    verdict = classify(head, tip)
+    verdict = classify(head, tip, title)
     return verdict unless verdict[:status] == :landed
 
     at, reason = LeadTime.landing_push(verdict[:sha], pushes_since(pushes, verdict[:sha]),
@@ -764,7 +803,7 @@ class GitHubForge
     end
   end
 
-  def classify(head, tip)
+  def classify(head, tip, title = nil)
     return { status: :landed, sha: head } if ancestor?(head, tip)
 
     pr_range = ["--no-merges", head, "^#{tip}"]
@@ -788,7 +827,13 @@ class GitHubForge
     main = with_pid0(main, main_range)
     return probe_failed unless pr_only && main
 
-    LeadTime.classify_landing(pr_only: pr_only, combined_pid: combined, main: main)
+    # DND-1520: the whole diff's zero-context patch-id, for a squash.
+    diff0 = base && git_ok(*PATCH_CONFIG, "diff", "-U0", *PATCH_FLAGS, base.strip, head)
+    combined0_ids = diff0 && patch_ids(diff0)
+    return probe_failed unless combined0_ids
+
+    LeadTime.classify_landing(pr_only: pr_only, combined_pid: combined, main: main,
+                              combined_pid0: combined0_ids.first&.first, title: title)
   end
 
   # commits with pid0, the zero-context patch-id, added; nil on a git failure.

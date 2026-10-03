@@ -70,6 +70,11 @@ def build_fixture(root)
   o = {}
   File.write(File.join(work, "k.txt"), "k1\nk2\nk3\n")
   sh_git(work, "add", "k.txt")
+  # PR 21 and PR 22 (DND-1520) each edit two lines of their own file.
+  %w[m.txt p.txt].each do |f|
+    File.write(File.join(work, f), "1\n2\n3\n4\n5\n6\n7\n8\n9\n")
+    sh_git(work, "add", f)
+  end
   o[:c0] = commit_file(work, "a.txt", "a\n", "init", "2026-09-28T00:00:00Z")
   sh_git(work, "push", "-q", "origin", "HEAD:refs/heads/main")
 
@@ -91,6 +96,14 @@ def build_fixture(root)
     commit_file(work, "h.txt", "eleven-2\n", "DND-11: part two", "2026-09-28T05:10:00Z")
   end
   o[:p15] = pr.call(15) { commit_file(work, "k.txt", "k1\nk2\nk3-pr\n", "DND-15: edit k", "2026-09-28T06:00:00Z") }
+  two_edit = lambda do |n, file|
+    pr.call(n) do
+      commit_file(work, file, "1\n2-pr\n3\n4\n5\n6\n7\n8\n9\n", "DND-#{n}: edit two", "2026-09-28T07:00:00Z")
+      commit_file(work, file, "1\n2-pr\n3\n4\n5\n6\n7-pr\n8\n9\n", "DND-#{n}: edit seven", "2026-09-28T07:10:00Z")
+    end
+  end
+  o[:p21] = two_edit.call(21, "m.txt")
+  o[:p22] = two_edit.call(22, "p.txt")
 
   sh_git(work, "checkout", "-q", "-B", "main", o[:c0])
   o[:c1] = commit_file(work, "z.txt", "z\n", "unrelated", "2026-09-29T06:00:00Z")
@@ -112,6 +125,16 @@ def build_fixture(root)
   # lines are PR 15's; its context is not, so its patch-id differs.
   o[:m15] = commit_file(work, "k.txt", "k1-main\nk2\nk3\n", "unrelated k", "2026-09-29T10:30:00Z")
   o[:l15] = commit_file(work, "k.txt", "k1-main\nk2\nk3-pr\n", "DND-15: edit k", "2026-09-29T10:40:00Z")
+  # PRs 21 and 22 (DND-1520): two commits each; main edits a line next to each
+  # of their changes, then the PR lands as ONE squash commit. PR 21's squash
+  # keeps its title; PR 22's is retitled.
+  squash = lambda do |file, subject, date|
+    commit_file(work, file, "1\n2-pr\n3-main\n4\n5\n6-main\n7-pr\n8\n9\n", subject, date)
+  end
+  commit_file(work, "m.txt", "1\n2\n3-main\n4\n5\n6-main\n7\n8\n9\n", "unrelated m", "2026-09-29T11:00:00Z")
+  o[:l21] = squash.call("m.txt", "DND-21: t", "2026-09-29T11:10:00Z")
+  commit_file(work, "p.txt", "1\n2\n3-main\n4\n5\n6-main\n7\n8\n9\n", "unrelated p", "2026-09-29T11:20:00Z")
+  o[:l22] = squash.call("p.txt", "DND-22: renamed", "2026-09-29T11:30:00Z")
   sh_git(work, "push", "-q", "origin", "HEAD:refs/heads/main")
   sh_git(work, "push", "-q", "origin", "#{o[:c0]}:refs/heads/start")
   o[:origin] = origin
@@ -130,6 +153,10 @@ end
 # first, one page per inner array (gh api --paginate --slurp).
 def activity(o)
   [[
+    { "timestamp" => "2026-09-29T11:30:30Z", "activity_type" => "push", "ref" => "refs/heads/main",
+      "before" => o[:l21], "after" => o[:l22] },
+    { "timestamp" => "2026-09-29T11:10:30Z", "activity_type" => "push", "ref" => "refs/heads/main",
+      "before" => o[:l15], "after" => o[:l21] },
     { "timestamp" => "2026-09-29T10:45:30Z", "activity_type" => "push", "ref" => "refs/heads/main",
       "before" => o[:p11b], "after" => o[:l15] },
     { "timestamp" => "2026-09-29T10:00:30Z", "activity_type" => "push", "ref" => "refs/heads/main",
@@ -225,6 +252,8 @@ Dir.mktmpdir("lead-time-test") do |root|
     # Its head itself was fast-forwarded onto main (no rebase).
     14 => pr_view(o, 14, state: "CLOSED", head: :c1, commits: ["2026-09-29T05:00:00Z"]),
     15 => pr_view(o, 15, state: "CLOSED", head: :p15, commits: ["2026-09-28T06:00:00Z"]),
+    21 => pr_view(o, 21, state: "CLOSED", head: :p21, commits: %w[2026-09-28T07:00:00Z 2026-09-28T07:10:00Z]),
+    22 => pr_view(o, 22, state: "CLOSED", head: :p22, commits: %w[2026-09-28T07:00:00Z 2026-09-28T07:10:00Z]),
     # MERGED, but the forge named no merge commit.
     16 => pr_view(o, 16, state: "MERGED", merged_at: "2026-09-29T06:30:00Z",
                          closed_at: "2026-09-29T06:30:00Z", head: :p8, commits: ["2026-09-28T02:00:00Z"])
@@ -292,6 +321,19 @@ Dir.mktmpdir("lead-time-test") do |root|
     r9[:end_kind] == :unmeasured && r9[:landed_commit].nil?
   end
   check("its reason names the base commit it clashed with") { r9[:unmeasured_reason].to_s.include?(o[:y9][0, 12]) }
+
+  # --- DND-1520: a two-commit PR whose diff context main edited, squashed.
+  r21 = analyze(forge, 21, starts)
+  check("REGRESSION (DND-1520): a multi-commit PR squashed under its own title after a context edit is landed") do
+    r21[:end_kind] == :merge && r21[:landed_via] == "push" && r21[:landed_commit] == o[:l21] &&
+      r21[:merged] == "2026-09-29T11:10:30Z"
+  end
+  r22 = analyze(forge, 22, starts)
+  check("the same squash under a DIFFERENT title is could-not-measure, never landed or closed") do
+    r22[:end_kind] == :unmeasured && r22[:landed_commit].nil? &&
+      r22[:unmeasured_reason].to_s.include?("DND-22: renamed") &&
+      r22[:unmeasured_reason].to_s.include?("title")
+  end
 
   # --- DND-1491, the class: every row has a landed commit, or says why not.
   check("REGRESSION (DND-1491): a could-not-measure row names why it has no landed commit") do
@@ -399,6 +441,32 @@ Dir.mktmpdir("lead-time-test") do |root|
   check("only one commit on main, by either tier, is a partial landing, never closed") do
     c = two.call([{ sha: "mb", pid: "other", pid0: "b0", subject: "DND-1: two" }])
     c[:status] == :unknown && c[:reason].include?("1 of 2")
+  end
+  sq = lambda do |main, title: "DND-1: all", pid0: "w0"|
+    LeadTime.classify_landing(pr_only: [{ pid: "a", pid0: "a0", subject: "DND-1: one" },
+                                        { pid: "b", pid0: "b0", subject: "DND-1: two" }],
+                              combined_pid: "ab", combined_pid0: pid0, title: title, main: main)
+  end
+  check("a squash with only its context changed lands under the PR's title (DND-1520)") do
+    sq.call([{ sha: "ms", pid: "o", pid0: "w0", subject: "DND-1: all" }]) == { status: :landed, sha: "ms" }
+  end
+  check("the forge's ' (#N)' suffix on the squash subject still matches the title") do
+    sq.call([{ sha: "ms", pid: "o", pid0: "w0", subject: "DND-1: all (#12)" }])[:status] == :landed
+  end
+  check("a squash under another subject is could-not-measure and names the title") do
+    c = sq.call([{ sha: "ms", pid: "o", pid0: "w0", subject: "DND-1: renamed" }])
+    c[:status] == :unknown && c[:reason].include?("title") && c[:reason].include?("ms")
+  end
+  check("an unknown title never lands a squash") do
+    sq.call([{ sha: "ms", pid: "o", pid0: "w0", subject: "DND-1: all" }], title: nil)[:status] == :unknown
+  end
+  check("a title two base commits share never lands a squash, and the reason says so") do
+    c = sq.call([{ sha: "m1", pid: "o", pid0: "w0", subject: "DND-1: all" },
+                 { sha: "m2", pid: "p", pid0: "x0", subject: "DND-1: all" }])
+    c[:status] == :unknown && c[:reason].include?("2 base commits share that subject")
+  end
+  check("a different whole-diff zero-context patch-id is not a squash match") do
+    sq.call([{ sha: "ms", pid: "o", pid0: "q0", subject: "DND-1: all" }])[:status] == :not_landed
   end
   check("one base commit never carries two request commits") do
     two.call([{ sha: "mx", pid: "a", pid0: "a0", subject: "DND-1: one" }])[:status] == :unknown
