@@ -3908,6 +3908,15 @@ def self_test
      ["the merge role guard hook", "ai/hooks/merge-role-guard.sh", "[owner-approval-policy]"],
      ["the merge role library", "ai/lib/merge_role.rb", "[owner-approval-policy]"],
      ["the merge role IO library", "ai/lib/merge_role_io.rb", "[owner-approval-policy]"],
+     # DND-1892: the push and forge-write identity enforcers (DND-1803, DND-1862, DND-1881)
+     ["the forge identity guard hook", "ai/hooks/forge-identity-guard.sh", "[owner-approval-policy]"],
+     ["the agent PATH git wrapper", "ai/agent-bin/git", "[owner-approval-policy]"],
+     ["the agent forge push check", "ai/lib/agent-forge-push.sh", "[owner-approval-policy]"],
+     ["the agent PATH gh wrapper", "ai/agent-bin/gh", "[owner-approval-policy]"],
+     ["the agent PATH glab wrapper", "ai/agent-bin/glab", "[owner-approval-policy]"],
+     ["the agent forge cli library", "ai/lib/agent-forge-cli.sh", "[owner-approval-policy]"],
+     ["the forge write classifier", "ai/lib/forge-write-class.awk", "[owner-approval-policy]"],
+     ["the agent session env that puts the wrappers on PATH", "ai/agent-env/session-env.sh", "[owner-approval-policy]"],
      ["locked-merge", "ai/skills/athena:merge-boarding/scripts/locked-merge", "[owner-approval-policy]"],
      ["the push-guard fix-push exception", "ai/lib/main-health.sh", "[owner-approval-policy]"],
      ["the main-health CLI", "ai/bin/main-health", "[owner-approval-policy]"],
@@ -3956,6 +3965,43 @@ def self_test
       check.call("policy: #{path} sources integration-receipt.sh and is held (exit 4)",
                  code == 4 && out.include?("BLAST-RADIUS HOT") && out.include?("hold: yes, always"),
                  "exit=#{code} out=#{out}. Fix: add #{path} to the receipt-chain patterns in ai/blast-radius/surfaces.json, or, if it only reports or times a receipt, add it to non_enforcing in this self-test.")
+    end
+    # DND-1892: every candidate enforcer of the merge or push bar is classified. Three held-set
+    # gaps landed in one night (DND-1873, DND-1888, DND-1892), each a guard that read COLD until a
+    # reviewer noticed. The candidates are computed, not listed: every script wired in
+    # ai/hooks/registry.json, every file under ai/agent-bin, ai/agent-env and ai/git-hooks, and
+    # every ai/lib file whose name says forge, merge, receipt, seal or agent. Each one either holds
+    # (exit 4, hold: yes, always) or sits in the manifest's `enforcers.excluded` with a reason.
+    # A new file under those roots fails here until someone classifies it.
+    enforcer_manifest = JSON.parse(File.read(DEFAULT_MANIFEST))
+    enf = enforcer_manifest["enforcers"]
+    excluded = enf.is_a?(Hash) && enf["excluded"].is_a?(Hash) ? enf["excluded"] : nil
+    check.call("policy: the manifest declares enforcers.excluded, the classified non-enforcers of the merge and push bar",
+               !excluded.nil?,
+               "enforcers=#{enf.inspect}. Fix: add an `enforcers` object with an `excluded` map {path: reason} to ai/blast-radius/surfaces.json.")
+    excluded ||= {}
+    registry = JSON.parse(File.read(File.join(repo_root, "ai/hooks/registry.json")))
+    candidates = registry.fetch("hooks", []).map { |h| h["script"] }.compact
+    candidates += IO.popen(["git", "-C", repo_root, "ls-files", "ai/agent-bin", "ai/agent-env", "ai/git-hooks"], &:read).split("\n")
+    candidates += IO.popen(["git", "-C", repo_root, "ls-files", "ai/lib"], &:read).split("\n")
+                    .select { |f| File.basename(f).match?(/forge|merge|receipt|seal|agent/i) }
+    candidates = candidates.reject { |f| f.include?("/test/") || f.end_with?(".md") }.uniq.sort
+    anchors = %w[ai/hooks/forge-identity-guard.sh ai/hooks/merge-role-guard.sh ai/agent-bin/git ai/lib/forge-git-passthrough.sh]
+    check.call("policy: the enforcer walk finds the known enforcers (an empty walk would pass for nothing)",
+               (anchors - candidates).empty?,
+               "missing=#{(anchors - candidates).inspect} candidates=#{candidates.inspect}. Fix: the enforcer walk in ai/bin/blast-radius --self-test no longer sees a known enforcer; repair the walk, never shrink it.")
+    excluded.each do |path, reason|
+      check.call("policy: enforcers.excluded #{path} is a current candidate with a reason",
+                 candidates.include?(path) && reason.is_a?(String) && !reason.strip.empty?,
+                 "reason=#{reason.inspect}. Fix: a stale or unreasoned exclusion in ai/blast-radius/surfaces.json enforcers.excluded; give it a reason, or remove it if the file is gone.")
+    end
+    (candidates - excluded.keys).each do |path|
+      dd = File.join(tmp, "policy-enforcer-#{path.tr('/.:', '___')}")
+      bb, hh = mkrepo.call(dd) { |r| FileUtils.mkdir_p(File.dirname(File.join(r, path))); File.write(File.join(r, path), "x\n") }
+      out, _, code = run_br.call(["--base", bb, "--head", hh, "--repo", dd] + real)
+      check.call("policy: enforcer candidate #{path} is held (exit 4)",
+                 code == 4 && out.include?("[owner-approval-policy]") && out.include?("hold: yes, always"),
+                 "exit=#{code} out=#{out}. Fix: if #{path} decides whether a merge or push is accepted, or as whom, add it to the owner-approval-policy patterns in ai/blast-radius/surfaces.json and name it in athena:merge-boarding; if it does not, add it to enforcers.excluded there with the reason.")
     end
     # the approval table: only its SECTION holds
     claude = lambda do |extra_policy, extra_other, dup: false|

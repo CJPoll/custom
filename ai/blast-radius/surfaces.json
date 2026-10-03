@@ -37,7 +37,7 @@
   "surfaces": [
     {
       "class": "owner-approval-policy",
-      "why": "merging changes WHAT NEEDS THE OWNER'S APPROVAL (KEEP 6): the owner approval grant allowlist, the approval table, or the classifier and verifiers that enforce them, and the receipt chain a merge or push to main is accepted on (integration-gate and its shim, the receipt reader and seal, the merge and push guards and what they load, the merge role guard that keeps merging with the admiral, locked-merge, gh-athena and glab-athena, main-health and the critic verdict producer; athena:merge-boarding names each). No owner approval grant class covers this surface. The owner's verified click (--owner-approval click:<delivery_id>, ai/lib/owner_click.rb) clears it like any other hold: owner decision, Cody, 2026-10-02 (DND-1784), \"Gate accepts a verified owner click, without hesitation.\"",
+      "why": "merging changes WHAT NEEDS THE OWNER'S APPROVAL (KEEP 6): the owner approval grant allowlist, the approval table, or the classifier and verifiers that enforce them, and the receipt chain a merge or push to main is accepted on (integration-gate and its shim, the receipt reader and seal, the merge and push guards and what they load, the merge role guard that keeps merging with the admiral, the forge identity guard hook and the agent PATH git, gh and glab wrappers that refuse a forge write or push not made as Athena with what they load and the session env that puts them on PATH, locked-merge, gh-athena and glab-athena, main-health and the critic verdict producer; athena:merge-boarding names each). No owner approval grant class covers this surface. The owner's verified click (--owner-approval click:<delivery_id>, ai/lib/owner_click.rb) clears it like any other hold: owner decision, Cody, 2026-10-02 (DND-1784), \"Gate accepts a verified owner click, without hesitation.\"",
       "patterns": [
         "**/athena/owner_approvals/action_class.ex",
         "**/athena/owner_approvals/action_class_test.exs",
@@ -57,6 +57,14 @@
         "ai/lib/merge_role.rb",
         "ai/lib/merge_role_io.rb",
         "ai/lib/forge-git-passthrough.sh",
+        "ai/hooks/forge-identity-guard.sh",
+        "ai/agent-bin/git",
+        "ai/lib/agent-forge-push.sh",
+        "ai/agent-bin/gh",
+        "ai/agent-bin/glab",
+        "ai/lib/agent-forge-cli.sh",
+        "ai/lib/forge-write-class.awk",
+        "ai/agent-env/session-env.sh",
         "ai/bin/gh-athena",
         "ai/bin/glab-athena",
         "ai/lib/main-health.sh",
@@ -282,5 +290,40 @@
       "hold": "never",
       "hold_why": "Dropped by the owner 2026-09-28 (\"non-security exit 4, deploy-workflow edits too\"). Still walked and REPORTED on every run, so the owner sees what merging changed; never held."
     }
-  ]
+  ],
+  "enforcers": {
+    "comment": [
+      "Candidates for the merge and push bar that do NOT enforce it, each with the reason (DND-1892).",
+      "Not read by the classifier. `blast-radius --self-test` computes the candidates: every script",
+      "wired in ai/hooks/registry.json, every file under ai/agent-bin, ai/agent-env and",
+      "ai/git-hooks, and every ai/lib file whose name says forge, merge, receipt, seal or agent.",
+      "Each candidate must either hold in the owner-approval-policy class or appear here. A new",
+      "candidate fails the self-test until it is classified. An exclusion is a decision that the",
+      "file does not decide whether a merge or push is accepted, or as whom; this file is held, so",
+      "adding one needs the owner's record like any other change here."
+    ],
+    "excluded": {
+      "ai/git-hooks/agent-stash-guard.sh": "refuses stash-list writes (DND-775); it decides nothing about a merge or push",
+      "ai/git-hooks/outbound-pre-push.sh": "scans pushed CONTENT for work values bound for a public repo (private overlay); it does not decide whether a push to main is accepted or as whom",
+      "ai/hooks/athena-inbox-poll.sh": "SessionStart inbox count; no deny path",
+      "ai/hooks/athena-slack-poll.sh": "SessionStart Slack notice; no deny path",
+      "ai/hooks/flaky-marker-sweep.sh": "SessionStart flaky-lane marker sweep; no deny path",
+      "ai/hooks/fleet-drain-guard.sh": "pauses agent spawns while the fleet drains; it decides nothing about a merge or push",
+      "ai/hooks/fleet-lifecycle.sh": "records agent lifecycle telemetry; no merge or push decision",
+      "ai/hooks/fleet-report.sh": "reports to the fleet registry; no merge or push decision",
+      "ai/hooks/forge-auth-guard.sh": "denies agent changes to forge credential state (login, refresh, token mint); a credential guard, not a judge of which merge or push is accepted or as whom, and credentials are already Cody-only steps",
+      "ai/hooks/git-stash-guard.sh": "refuses stash-list writes (DND-670); it decides nothing about a merge or push",
+      "ai/hooks/inbox-untrusted-guard.sh": "keeps inbox bodies untrusted; no merge or push decision",
+      "ai/hooks/main-session-policy.sh": "SessionStart policy text for the top-level session; no deny path",
+      "ai/hooks/notify-idle.sh": "Stop-hook desktop notification; no deny path",
+      "ai/hooks/pronoun-guard.sh": "prose style guard; no merge or push decision",
+      "ai/hooks/safe-wait-guard.sh": "denies spinning shell waits; no merge or push decision",
+      "ai/hooks/scratch-rm-guard.sh": "denies glob deletes in a session scratchpad (DND-1653); no merge or push decision",
+      "ai/hooks/workflow-phase-guard.sh": "gates first-party tools by declared workflow phase and risk class; it decides nothing about a merge or push",
+      "ai/hooks/worktree-escape-guard.sh": "denies writes to a main checkout's working tree; the sanctioned --ff-only publish passes it, and it decides nothing about which merge or push to main is accepted",
+      "ai/lib/agent-free-git.sh": "test-fixture helper that finds the real git behind the agent wrapper; no production caller decides a merge or push with it",
+      "ai/lib/agent_stash_env.rb": "reports the agent-stash env's install state for check-hooks-registered; it decides nothing about a merge or push",
+      "ai/lib/forge-stub-guard.sh": "test-suite guard that keeps a stubbed gh, glab or git off the real tool; not on any production merge or push path"
+    }
+  }
 }

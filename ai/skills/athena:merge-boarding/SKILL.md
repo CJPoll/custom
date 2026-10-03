@@ -570,9 +570,14 @@ one.
 (`ai/lib/gh-merge-guard.sh`, `ai/lib/glab-merge-guard.sh`,
 `ai/lib/forge-git-passthrough.sh`), the merge role guard
 (`ai/hooks/merge-role-guard.sh`, `ai/lib/merge_role.rb`,
-`ai/lib/merge_role_io.rb`) and what they
+`ai/lib/merge_role_io.rb`), the forge identity guards that refuse a forge
+write or push not made as Athena (`ai/hooks/forge-identity-guard.sh`, the agent
+PATH wrappers `ai/agent-bin/git`, `ai/agent-bin/gh` and `ai/agent-bin/glab`,
+`ai/lib/agent-forge-push.sh`, `ai/lib/agent-forge-cli.sh`, and
+`ai/agent-env/session-env.sh`, which puts the wrappers on PATH) and what they
 load to decide a call is a merge or a push (`ai/lib/forge-api-scan.sh`,
-`ai/lib/forge-cli-isolation.sh`), `ai/bin/gh-athena`, `ai/bin/glab-athena`,
+`ai/lib/forge-cli-isolation.sh`, `ai/lib/forge-write-class.awk`),
+`ai/bin/gh-athena`, `ai/bin/glab-athena`,
 `locked-merge`,
 `ai/bin/main-health` and `ai/lib/main-health.sh` (the push guard's fix-push
 exception reads a receipt), or the critic verdict producer
@@ -600,6 +605,17 @@ guard, so DND-1865's change to it read COLD. It enforces that merging is the
 admiral's alone (DND-726) and now sits in the same class: a diff that weakens
 who may merge needs the owner's record. `blast-radius --self-test` has a case
 per file.
+
+**Later (2026-10-03, DND-1892):** this paragraph did not name the forge
+identity guards, so DND-1881's and DND-1887's changes to them read COLD: a diff
+that let an agent push to a forge on the owner's key needed no owner record.
+They now sit in the same class. The third such gap in one night, so the class
+is closed by a walk, not a list: `blast-radius --self-test` computes the
+candidate enforcers (every hook wired in `ai/hooks/registry.json`, every file
+under `ai/agent-bin`, `ai/agent-env` and `ai/git-hooks`, and every `ai/lib` file
+named for forge, merge, receipt, seal or agent) and fails, with a `Fix:`, on one
+that neither holds nor sits in the manifest's `enforcers.excluded` with a
+reason.
 
 **The gate comes from the landed target, not from you.** The first of
 `bin/prep-commit.sh` (gen_saas) and `ai/bin/harness-gate` (`~/dev/custom`) that
