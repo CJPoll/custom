@@ -134,7 +134,8 @@ mh_may_land() {
 # Residual, said out loud: refspecs that come from config (remote.<r>.push,
 # push.default=upstream from a branch tracking main) are not read: with no
 # refspec this reads "on <default>" as "pushes <default>". `git subtree push`
-# is not covered. Every Athena landing spells `<sha>:main` explicitly.
+# and `send-pack` are not read here; the Athena route refuses both
+# (DND-1867). Every Athena landing spells `<sha>:main` explicitly.
 mh_push_main_sources() {
   local def="$1" cur="$2" a src dst seen_repo=0 refspecs=0 dry=0 del=0 pre suf mid end=0
   local -a out=()

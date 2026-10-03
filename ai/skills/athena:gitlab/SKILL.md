@@ -120,7 +120,10 @@ gitlab.com over SSH or plain HTTP: an `ssh://git@gitlab.com/…` remote or URL, 
 `pushurl` override, an `insteadOf`/`pushInsteadOf` that forces SSH, a shell
 alias, a push that recurses into submodules, or a form that makes git run a
 command itself (`submodule foreach`, `bisect run`, `rebase --exec`, an `ext::`
-address, …; run such a command per submodule, or with plain git). A missing
+address, …; run such a command per submodule, or with plain git), a command
+that writes a remote ref other than `git push` (`send-pack`, `http-push`, a
+`remote-<name>` helper, `subtree push`; push with `glab-athena git push`
+instead), or a subcommand git does not know (DND-1867). A missing
 token file is refused too; `glab-athena refresh` is owner-gated, so do not run
 it. The mechanism and its named residuals (an `~/.ssh/config` Host alias, a
 command from config or a hook, git-lfs, …) are

@@ -302,7 +302,10 @@ sm_refused "S2. submodule.recurse=true in the repo config -> refused"
 gha "${SM}" -c alias.pp=push pp origin HEAD:refs/heads/feat
 sm_refused "S3. an alias to push, submodule.recurse=true in the repo config -> refused"
 gha "${SM}" subtree push -P s "${SUBBARE}" feat
-sm_refused "S4. subtree push (its inner git push reads submodule.recurse too) -> refused"
+# DND-1867: subtree push is refused outright now, whatever its recursion.
+if is_refusal && [[ "${ERR}" == *"writes a remote ref"* ]]; then
+  ok "S4. subtree push (its inner git push reads submodule.recurse too) -> refused (outright, DND-1867)"
+else bad "S4. subtree push refused" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
 git -C "${SM}" config --unset submodule.recurse
 git -C "${SM}" config push.recurseSubmodules no
 gha "${SM}" -c submodule.recurse=true push origin HEAD:refs/heads/feat
@@ -353,11 +356,13 @@ if is_refusal && [[ "${ERR}" == *"quotes or backslashes"* ]]; then
 else bad "S22. quoted alias refused" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
 git -C "${SM}" config submodule.recurse true
 gha "${SM}" subtree push -P s "${SUBBARE}" feat
-if is_refusal && [[ "${ERR}" == *"-c push.recurseSubmodules=no subtree push"* ]]; then
-  ok "S23. subtree push refusal names the -c push.recurseSubmodules=no Fix (subtree has no --no-recurse-submodules)"
+if is_refusal && [[ "${ERR}" == *"git subtree split -P <prefix> -b <branch>"* ]]; then
+  ok "S23. subtree push refusal names the split-then-push Fix (DND-1867)"
 else bad "S23. subtree push Fix" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
 gha "${SM}" -c push.recurseSubmodules=no subtree push -P s "${SUBBARE}" feat
-sm_passed "S24. that Fix works: -c push.recurseSubmodules=no subtree push passes"
+if is_refusal && [[ "${ERR}" == *"writes a remote ref"* ]]; then
+  ok "S24. -c push.recurseSubmodules=no subtree push is refused too: no flag makes subtree push judged (DND-1867)"
+else bad "S24. subtree push with recursion off refused" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
 git -C "${SM}" config --unset submodule.recurse
 
 echo
@@ -1026,6 +1031,107 @@ gha "${SM}" log --grep=ext::x
 rc_passed "C52. an ext:: word in a subcommand that names no repository (log --grep) passes"
 gha "${SM}" fetch "${SUBBARE}"
 rc_passed "C53. fetch from a local path with no command option passes"
+
+echo
+echo "--- DND-1867: a command that writes a remote ref other than \`git push\` is REFUSED ---"
+# send-pack, http-push, a transport helper called directly (remote-<name>) and
+# subtree push each write a remote ref, but only \`push\` is judged for its
+# remote, its recursion, a red main and the gate. Each is refused, with a Fix:
+# that names the routed \`git push\`. So is a subcommand git does not know: under
+# help.autocorrect git runs the closest command (pusj -> push) unjudged.
+# rw_refused <label> [<text the Fix must carry>] : exit 3 with the remote-ref
+# refusal and its Fix, and git never ran.
+rw_refused() {
+  if is_refusal && [[ "${ERR}" == *"writes a remote ref"* ]] && [[ "${OUT}" != *"dry-run: exec git"* ]] \
+    && [[ "${ERR}" == *"${2:-git push}"* ]]; then ok "$1"
+  else bad "$1" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+}
+# un_refused <label> : exit 3, the unknown-subcommand refusal, git never ran.
+un_refused() {
+  if is_refusal && [[ "${ERR}" == *"no command git knows"* ]] && [[ "${ERR}" == *"help.autocorrect"* ]] \
+    && [[ "${OUT}" != *"dry-run: exec git"* ]]; then ok "$1"
+  else bad "$1" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+}
+AC="help.autocorrect"
+
+# W1. THE DEFECT: a gated repo on a green main; the head has no receipt. A
+# routed push to main is refused (35); send-pack to the same main landed.
+gated_origin w1
+ghpush "${W}" "${TMP}/w1-store" send-pack "${O}" HEAD:refs/heads/main
+if is_refusal && [[ "${ERR}" == *"writes a remote ref"* ]] && [[ "${ERR}" == *"git push"* ]] \
+  && [ "$(git --git-dir="${O}" rev-parse main)" = "${B}" ]; then
+  ok "W1. gated repo, no receipt: send-pack <origin> HEAD:refs/heads/main refused (exit 3, Fix: git push), origin main unmoved"
+else bad "W1. send-pack to main refused" "rc=${RC} err='${ERR}' main=$(git --git-dir="${O}" rev-parse main) base=${B}"; fi
+ghpush "${W}" "${TMP}/w1-store" -c alias.sp=send-pack sp "${O}" HEAD:refs/heads/main
+if is_refusal && [[ "${ERR}" == *"writes a remote ref"* ]] && [ "$(git --git-dir="${O}" rev-parse main)" = "${B}" ]; then
+  ok "W2. the same through an alias (alias.sp=send-pack): refused, origin main unmoved"
+else bad "W2. alias to send-pack refused" "rc=${RC} err='${ERR}' main=$(git --git-dir="${O}" rev-parse main)"; fi
+ghpush "${W}" "${TMP}/w1-store" -c "${AC}=immediate" pusj -q origin HEAD:main
+un_refused "W3. -c ${AC}=immediate pusj (git runs push) to main: refused"
+ghpush "${W}" "${TMP}/w1-store" -c "${AC}=immediate" send-pak "${O}" HEAD:refs/heads/main
+un_refused "W4. -c ${AC}=immediate send-pak (git runs send-pack): refused"
+git -C "${W}" config "${AC}" immediate
+gha "${W}" pusj origin HEAD:main
+un_refused "W5. ${AC} from the repository's own config, then pusj: refused"
+git -C "${W}" config --unset "${AC}"
+[ "$(git --git-dir="${O}" rev-parse main)" = "${B}" ] && ok "W6. after W1-W5 origin main is still the gated base" \
+  || bad "W6. origin main moved" "main=$(git --git-dir="${O}" rev-parse main) base=${B}"
+
+# W7. main RED: send-pack to main is refused there too, and to any branch.
+origin_with_main w7; red_marker "${W}" "${BEFORE}"
+gha "${W}" send-pack "${O}" HEAD:refs/heads/main
+rw_refused "W7. main RED: send-pack HEAD:refs/heads/main -> refused"
+origin_with_main w8
+gha "${W}" send-pack "${O}" HEAD:refs/heads/topic
+rw_refused "W8. send-pack to a topic branch on a green main -> refused too (Fix: git push)"
+gha "${W}" send-pack --all "${O}"
+rw_refused "W9. send-pack --all -> refused"
+gha "${W}" -c alias.send-pack=status send-pack "${O}" HEAD:refs/heads/main
+rw_refused "W10. an alias named send-pack (git ignores it and runs send-pack) -> refused"
+gha "${W}" http-push https://github.com/o/r.git main
+rw_refused "W11. http-push <url> <ref> -> refused"
+gha "${W}" -c alias.http-push=status http-push https://github.com/o/r.git main
+rw_refused "W12. an alias named http-push (git runs the git-http-push command, not the alias) -> refused"
+for h in remote-https remote-http remote-ftps remote-ftp remote-fd; do
+  gha "${W}" "${h}" origin https://github.com/o/r.git </dev/null
+  rw_refused "W13. ${h} <remote> <url> (a transport helper called directly; it pushes what stdin asks) -> refused"
+done
+gha "${W}" -c alias.rh=remote-https rh origin https://github.com/o/r.git </dev/null
+rw_refused "W14. an alias to remote-https -> refused"
+
+# W15. subtree push: a real split history on a local bare origin, main RED.
+# A plain push of the split to main is refused (control); subtree push landed.
+ST_O="${TMP}/st-origin.git"; ST_W="${TMP}/st-wt"
+git init -q --bare -b main "${ST_O}"
+git init -q -b main "${ST_W}" && git -C "${ST_W}" remote add origin "${ST_O}"
+mkdir -p "${ST_W}/lib"; printf 'a\n' > "${ST_W}/lib/a"
+git -C "${ST_W}" add -A && git -C "${ST_W}" commit -q -m base
+git -C "${ST_W}" subtree split -q -P lib -b split >/dev/null 2>&1
+git -C "${ST_W}" push -q origin split:main 2>/dev/null; git -C "${ST_W}" fetch -q origin
+ST_B="$(git --git-dir="${ST_O}" rev-parse main)"
+printf 'b\n' > "${ST_W}/lib/b"; git -C "${ST_W}" add -A && git -C "${ST_W}" commit -q -m more
+red_marker "${ST_W}" "${ST_B}"
+ghpush "${ST_W}" "${TMP}/st-store" subtree push -q -P lib origin main
+if is_refusal && [[ "${ERR}" == *"writes a remote ref"* ]] && [[ "${ERR}" == *"subtree split"* ]] \
+  && [ "$(git --git-dir="${ST_O}" rev-parse main)" = "${ST_B}" ]; then
+  ok "W15. main RED: subtree push -P lib origin main refused (Fix: split, then git push), origin main unmoved"
+else bad "W15. subtree push to a red main refused" "rc=${RC} err='${ERR}' main=$(git --git-dir="${ST_O}" rev-parse main) base=${ST_B}"; fi
+ghpush "${ST_W}" "${TMP}/st-store" subtree -P lib push origin main
+if is_refusal && [[ "${ERR}" == *"writes a remote ref"* ]] && [ "$(git --git-dir="${ST_O}" rev-parse main)" = "${ST_B}" ]; then
+  ok "W16. subtree -P lib push origin main (the option before the command) refused, origin main unmoved"
+else bad "W16. subtree option-first push refused" "rc=${RC} err='${ERR}' main=$(git --git-dir="${ST_O}" rev-parse main)"; fi
+gha "${ST_W}" subtree push --prefix=lib origin topic
+rw_refused "W17. subtree push to a topic branch -> refused too" "subtree split"
+
+# What must still pass.
+gha "${ST_W}" subtree split -P lib
+rc_passed "W18. subtree split (local, writes no remote ref) passes"
+gha "${W}" -c alias.st=status st
+rc_passed "W19. an alias to a builtin (alias.st=status) passes"
+gha "${W}" fetch-pack "${O}" refs/heads/main
+rc_passed "W20. fetch-pack with no command option (read-only) passes"
+gha "${W}" push -q origin HEAD:refs/heads/topic
+rc_passed "W21. a routed push to a topic branch still passes"
 
 # DND-1667: no git call may have fallen through past its shim.
 if fsg_verify; then ok "no git call fell through past its shim (DND-1667)"

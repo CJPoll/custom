@@ -172,6 +172,20 @@ gla "${R}" submodule status
 [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: exec git"* ]] && [[ "${ERR}" != *"REFUSING"* ]] \
   && ok "13d. \`submodule status\` is unchanged (DND-1844)" \
   || bad "13d. submodule status passes" "rc=${RC} out='${OUT}' err='${ERR}'"
+# DND-1867: a remote-ref writer other than push, and an unknown subcommand
+# (help.autocorrect runs the closest command), are refused on this route too.
+gla "${R}" send-pack https://gitlab.com/example-group/example-app.git HEAD:refs/heads/main
+is_refusal && [[ "${ERR}" == *"writes a remote ref"* ]] && [[ "${ERR}" == *"glab-athena git push"* ]] \
+  && ok "13e. \`send-pack <url> HEAD:refs/heads/main\` -> refused, Fix: glab-athena git push (DND-1867)" \
+  || bad "13e. send-pack refused" "rc=${RC} out='${OUT}' err='${ERR}'"
+gla "${R}" subtree push -P lib origin main
+is_refusal && [[ "${ERR}" == *"subtree split"* ]] \
+  && ok "13f. \`subtree push\` -> refused, Fix: split, then glab-athena git push (DND-1867)" \
+  || bad "13f. subtree push refused" "rc=${RC} out='${OUT}' err='${ERR}'"
+gla "${R}" -c help.autocorrect=immediate pusj origin HEAD:main
+is_refusal && [[ "${ERR}" == *"no command git knows"* ]] \
+  && ok "13g. an unknown subcommand under help.autocorrect (pusj) -> refused (DND-1867)" \
+  || bad "13g. autocorrect refused" "rc=${RC} out='${OUT}' err='${ERR}'"
 
 R="$(new_repo notoken 'git@gitlab.com:example-group/example-app.git')"
 ( cd "${R}" && GITLAB_ATHENA_TOKEN_FILE="${TMP}/no-such-token" GLAB_ATHENA_GIT_DRY_RUN=1 "${WRAPPER}" git push origin HEAD ) \

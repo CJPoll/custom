@@ -104,11 +104,16 @@ no-prompt setting itself, so the flags above are belt-and-braces. It also
 github.com over SSH or plain HTTP after the rewrite: an `ssh://` URL, a
 `pushurl` override, or an `insteadOf`/`pushInsteadOf` that forces SSH. It
 checks `push`, `fetch`, `pull`, `ls-remote`, `clone`, `remote update`,
-`submodule`, `subtree push/pull/add`, and git aliases that expand to them. It
+`submodule`, `subtree pull/add`, and git aliases that expand to them. It
 refuses a shell alias and a push that recurses into submodules outright, and
 any form that makes git run a command itself (`submodule foreach`, `bisect
 run`, `rebase --exec`, an `ext::` address, …): run such a command per
 submodule through the route, or with plain git when it reaches no forge. It
+refuses every command that writes a remote ref other than `git push`
+(`send-pack`, `http-push`, a `remote-<name>` helper, `subtree push`), since
+only a push is judged for a red or ungated main: push with `gh-athena git
+push` (for a subtree, `git subtree split` first). It refuses a subcommand git
+does not know too, because `help.autocorrect` would run another one (DND-1867). It
 does **not** see an `~/.ssh/config` Host alias for github.com, a command git
 runs from config or a hook, `clone --recurse-submodules`, git-lfs, or other
 subcommands; the

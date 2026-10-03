@@ -16,14 +16,14 @@
 #     fallback source of the owner's credentials; a bot-auth failure FAILS.
 #   * fg_refuse_non_https: before exec, for the network subcommands it knows —
 #     push, fetch, pull, ls-remote, clone, remote update, submodule, subtree
-#     push/pull/add, and git aliases that expand to them — every URL the command
+#     pull/add, and git aliases that expand to them — every URL the command
 #     would reach is resolved (rewrite applied, pushurl and pushInsteadOf
 #     included, submodule URLs when it recurses) and the command is REFUSED if
 #     any still reaches <host> over SSH or another non-HTTPS transport
 #     (ssh://, git://, http://, a pushurl override, an insteadOf that forces
 #     SSH). Refused outright: a shell alias (`!...`), an alias with quotes or
-#     backslashes (split differently here than by git), and a push (or
-#     subtree push) that recurses into submodules: by an explicit flag, or by
+#     backslashes (split differently here than by git), and a push that
+#     recurses into submodules: by an explicit flag, or by
 #     push.recurseSubmodules / submodule.recurse in a repository that has
 #     submodules (fg_push_recurses says what counts). Also refused: a global
 #     option, or a push option, that git's grammar does not have, since the
@@ -33,8 +33,13 @@
 #     (submodule foreach, bisect run, rebase --exec, an ext:: address,
 #     --exec-path, ...), since that command inherits the bot's credential
 #     and pushes past every check here (DND-1844; "Commands git runs
-#     itself" below lists them and the residual). A refusal is exit 3
-#     with a Fix: line.
+#     itself" below lists them and the residual). Also refused: a command
+#     that writes a remote ref other than `git push` (send-pack, http-push,
+#     a remote-<name> transport helper, subtree push), since only a push is
+#     judged for its remote, recursion, a red main and the gate; a
+#     subcommand git does not know, which help.autocorrect may turn into
+#     one; and an alias chain more than 10 deep (DND-1867; "Remote-ref
+#     writers other than push" below). A refusal is exit 3 with a Fix: line.
 #   * fg_refuse_red_main (DND-1482): a push to main is refused while
 #     ai/bin/main-health has recorded origin/main RED, unless it lands a gated
 #     fix. Also exit 3 with a Fix: line. See "Red-main refusal" below.
@@ -46,8 +51,10 @@
 # Residual (NOT checked; each still runs): an ~/.ssh/config Host alias for the
 # forge host (`myalias:owner/repo`); `clone
 # --recurse-submodules` (the submodule URLs are unknown until the clone lands);
-# git-lfs transfers; third-party `git-<name>` subcommands; any subcommand not
-# named above; a command git runs from config, the environment or a hook
+# git-lfs transfers; third-party `git-<name>` subcommands on PATH, which may
+# write a remote ref; any other subcommand of git's not named above (each
+# shown unable to write a remote ref, "Remote-ref writers other than push"
+# says how); a command git runs from config, the environment or a hook
 # ("Commands git runs itself" names them); a push whose recursion comes
 # from config, in a repository where
 # only the pushed commit (not the index, .gitmodules or config) records a
@@ -125,6 +132,15 @@ EOF
   exit 3
 }
 
+# fg_refuse_alias_depth <alias> : an alias chain longer than this route reads.
+fg_refuse_alias_depth() {
+  cat >&2 <<EOF
+$FG_TOOL: REFUSING \`git $1\`: it is an alias chain more than 10 aliases deep, which $FG_TOOL does not read to its end, so it cannot check which command it reaches, which remote, or what it pushes.
+  Fix: run the underlying git command directly through the wrapper — \`~/dev/custom/ai/bin/$FG_TOOL git <the expanded command>\`. $FG_ESCALATE
+EOF
+  exit 3
+}
+
 # fg_refuse_option <word> <what it is> : an option this wrapper cannot read by
 # git's grammar, so which word is the subcommand, repository or refspec is
 # unknown (DND-1843). The word is a flag, never a URL, so it is safe to print.
@@ -146,7 +162,8 @@ EOF
 }
 
 # ---- Push recursion into submodules (DND-1803, DND-1841) ---------------------
-# One copy, shared: this passthrough judges `push` and `subtree push` with it,
+# One copy, shared: this passthrough judges `push` with it (subtree push is
+# refused outright, DND-1867),
 # and ai/lib/agent-forge-push.sh (the agent PATH git wrapper's push check)
 # sources this file and calls it too.
 #
@@ -303,7 +320,7 @@ fg_takes_value() {
 # fg_push_recurses keeps its own conservative walk over FG_PUSH_VALUE_OPTS.
 # ai/agent-bin/git, a POSIX sh script, keeps its own copy of the global
 # tables (its step 2); the two are kept equal by hand.
-# Residual: the subtree push and fetch walks in fg_refuse_non_https match
+# Residual: the subtree pull/add and fetch walks in fg_refuse_non_https match
 # value options by exact name only.
 #
 # Global options (git.c handle_options). Value as the next word:
@@ -592,6 +609,95 @@ fg_exec_path_moved() {
   return 0
 }
 
+# ---- Remote-ref writers other than push (DND-1867) ---------------------------
+# Only `git push` is judged for its remote, its submodule recursion, a red main
+# and the gate (fg_refuse_red_main, fg_refuse_ungated_main). Every other
+# command that writes a remote ref under this route's bot header went
+# unjudged: `send-pack <origin> HEAD:refs/heads/main` landed an ungated commit
+# on a gated repo's main, measured on git 2.54 against a local bare origin. So
+# each is refused, with a Fix: that names the routed `git push`:
+#   * send-pack (push's own plumbing) and http-push (the WebDAV push);
+#   * a transport helper called directly, remote-<name> (remote-https,
+#     remote-http, remote-ftp, remote-ftps, remote-fd, any other): it pushes
+#     whatever its stdin asks. remote-ext is refused by "Commands git runs
+#     itself" first;
+#   * subtree push, in either word order (`subtree -P x push`): its inner
+#     `git push` of a split git-subtree computes runs from git's exec-path.
+# And a subcommand git does not know (fg_cmd_known): under help.autocorrect,
+# from -c or any config file, git runs the closest command instead
+# (`pusj` runs push), and nothing here judged that one.
+# Read on the alias-expanded argv; a command name git runs itself is never
+# alias-expanded, since git runs its own commands and any git-<name> on PATH
+# before an alias of that name (`alias.http-push=status` still runs
+# http-push). Measured, for both, on git 2.54.
+# Shown unable to write a remote ref, so not refused here: fetch-pack,
+# ls-remote, archive --remote, upload-pack and the other read-side commands;
+# receive-pack and update-ref, which write only a repository on this machine.
+# Residual: a third-party git-<name> on PATH (git-lfs among them), the
+# header's "third-party subcommands".
+FG_KNOWN_CMDS=""
+
+# fg_cmd_known <name> : 0 when git runs <name> as one of its own commands or
+# a git-<name> on PATH, before any alias. The list is read once, from the git
+# this route execs; a list that cannot be read refuses (COULD NOT LOOK),
+# never reads as "every command is unknown" or "every command is known".
+fg_cmd_known() {
+  if [ -z "$FG_KNOWN_CMDS" ]; then
+    FG_KNOWN_CMDS="$(git --list-cmds=main,others 2>/dev/null || true)"
+    case "$FG_KNOWN_CMDS" in
+      *push*) FG_KNOWN_CMDS=$'\n'"$FG_KNOWN_CMDS"$'\n' ;;
+      *) cat >&2 <<EOF
+$FG_TOOL: REFUSING \`git $1\`: COULD NOT LOOK which commands git has (\`git --list-cmds=main,others\` listed no push), so whether \`$1\` is a command or a typo git may autocorrect into one is unknown.
+  Fix: check that \`git --list-cmds=main,others\` lists git's commands in this shell, then retry. $FG_ESCALATE
+EOF
+         exit 3 ;;
+    esac
+  fi
+  [[ "$FG_KNOWN_CMDS" == *$'\n'"$1"$'\n'* ]]
+}
+
+# fg_refuse_unknown_cmd <name> : refuse a subcommand git does not know.
+fg_refuse_unknown_cmd() {
+  cat >&2 <<EOF
+$FG_TOOL: REFUSING \`git $1\`: '$1' is no command git knows and no alias. Under help.autocorrect git runs the closest command in its place (\`pusj\` runs push), and $FG_TOOL never judged that command: a push it makes is not checked for its remote, its submodules, a red main or the gate.
+  Fix: spell the subcommand as git names it (\`git help -a\` lists them). $FG_ESCALATE
+EOF
+  exit 3
+}
+
+# fg_writes_remote_ref <subcommand> <args...> : 0 when this argv writes a
+# remote ref other than through `git push`. Sets FG_RW_WHAT and FG_RW_FIX.
+fg_writes_remote_ref() {
+  local sub="$1" a
+  shift
+  FG_RW_WHAT=""
+  FG_RW_FIX="push with \`~/dev/custom/ai/bin/$FG_TOOL git push <repository> <src>:<dst>\` instead, which this route judges"
+  case "$sub" in
+    send-pack) FG_RW_WHAT="send-pack is push's plumbing" ;;
+    http-push) FG_RW_WHAT="http-push pushes over WebDAV" ;;
+    remote-*) FG_RW_WHAT="$sub is a transport helper, and it pushes whatever its stdin asks" ;;
+    subtree)
+      for a in "$@"; do
+        [ "$a" = push ] || continue
+        FG_RW_WHAT="subtree push runs its own git push of a split, from git's exec-path"
+        FG_RW_FIX="split with plain git, which reaches no forge (\`git subtree split -P <prefix> -b <branch>\`), then push that branch through the route: \`~/dev/custom/ai/bin/$FG_TOOL git push <repository> <branch>:<remote-branch>\`"
+        return 0
+      done
+      return 1 ;;
+    *) return 1 ;;
+  esac
+  return 0
+}
+
+# fg_refuse_remote_ref <what git was asked> : refuse FG_RW_WHAT with FG_RW_FIX.
+fg_refuse_remote_ref() {
+  cat >&2 <<EOF
+$FG_TOOL: REFUSING \`git $1\`: it writes a remote ref without \`git push\` ($FG_RW_WHAT). $FG_TOOL judges only \`git push\` for its remote, its submodules, a red main and the gate, so this would write a remote ref, main included, with none of those checks.
+  Fix: $FG_RW_FIX. $FG_ESCALATE
+EOF
+  exit 3
+}
+
 # fg_push_argv <push args...> : read the args after `push` as git does. Sets
 #   FG_PA_OPTS   every option, spelled in full: --<long> or --<long>=<value>
 #                (a short option becomes its long name; -h stays -h);
@@ -717,12 +823,15 @@ fg_refuse_non_https() {
     done
     [ $# -gt 0 ] || return 0
     sub="$1"; shift
-    [ "$depth" -lt 10 ] || break
-    case "$sub" in push|fetch|pull|ls-remote|clone|remote|submodule|subtree) break ;; esac
-    # git ignores an alias named for one of its own commands (DND-1844).
-    [[ " $FG_RUNS_COMMAND_SUBS " == *" $sub "* ]] && break
+    # git runs its own commands, and a git-<name> on PATH, before an alias of
+    # that name (DND-1844, DND-1867): `alias.http-push=status` runs http-push.
+    fg_cmd_known "$sub" && break
+    # An alias chain this deep is not read to its end, so the command it
+    # reaches is unknown (DND-1867: past the old cap, it ran unjudged).
+    [ "$depth" -lt 10 ] || fg_refuse_alias_depth "$sub"
     alias_val="$(G config --get "alias.$sub" 2>/dev/null || true)"
-    [ -n "$alias_val" ] || break
+    # No command and no alias: help.autocorrect may run another (DND-1867).
+    [ -n "$alias_val" ] || fg_refuse_unknown_cmd "$sub"
     case "$alias_val" in
       '!'*) fg_refuse_shell_alias "$sub" "$alias_val" ;;
       # git strips quotes and backslashes when it splits an alias; a plain
@@ -739,6 +848,8 @@ fg_refuse_non_https() {
   # below (DND-1844): refuse it, on the alias-expanded argv.
   fg_exec_path_moved "${glob[@]}" && fg_refuse_runs_command "${glob[*]:+${glob[*]} }$sub"
   fg_runs_command "$sub" "$@" && fg_refuse_runs_command "$sub $*"
+  # Only `push` is judged below: every other remote-ref writer is refused.
+  fg_writes_remote_ref "$sub" "$@" && fg_refuse_remote_ref "$sub $*"
 
   local recurse=0 a0
   for a0 in "$@"; do
@@ -761,14 +872,8 @@ fg_refuse_non_https() {
     remote) [ "${1:-}" = update ] || return 0; mode=fetch ;;
     submodule) mode=fetch; recurse=1 ;;
     subtree)
+      # subtree push was refused above (fg_writes_remote_ref, DND-1867).
       case "${1:-}" in
-        push)
-          mode=push
-          # git-subtree's own `git push` carries no recursion flag, but it
-          # reads the same config: judge that with no flags.
-          fg_push_recurses G \
-            && fg_refuse_unchecked "subtree push" "its inner git push pushes submodules too ($FG_RECURSE_SRC), and each submodule push goes through its own remote, which $FG_TOOL does not inspect" \
-                 "turn recursion off for this one command with \`~/dev/custom/ai/bin/$FG_TOOL git -c push.recurseSubmodules=no subtree push …\` (git subtree push has no --no-recurse-submodules)" ;;
         pull|add) mode=fetch ;;
         *) return 0 ;;
       esac
@@ -824,12 +929,9 @@ fg_refuse_non_https() {
     done
     set --
   fi
-  if [ "$mode" = push ]; then
-    # subtree push. A plain push was read by fg_push_argv above.
-    takes_value='^(-o|--push-option|--receive-pack|--exec|--repo|-P|--prefix|-m|--message)$'
-  else
-    takes_value='^(-P|--prefix|-m|--message|-o|--upload-pack|-j|--jobs|--depth|--deepen|--shallow-since|--shallow-exclude|--refmap|--server-option|--negotiation-tip|-s|--strategy|-X|--strategy-option|--origin|-b|--branch|-u|--reference|--reference-if-able|--separate-git-dir|-c|--config|--template|--filter|--bundle-uri|--ref-format)$'
-  fi
+  # The fetch-side walk. A push was read by fg_push_argv above, and its args
+  # cleared, so this loop sees none of them.
+  takes_value='^(-P|--prefix|-m|--message|-o|--upload-pack|-j|--jobs|--depth|--deepen|--shallow-since|--shallow-exclude|--refmap|--server-option|--negotiation-tip|-s|--strategy|-X|--strategy-option|--origin|-b|--branch|-u|--reference|--reference-if-able|--separate-git-dir|-c|--config|--template|--filter|--bundle-uri|--ref-format)$'
   local dd=0
   while [ $# -gt 0 ]; do
     a="$1"; shift
