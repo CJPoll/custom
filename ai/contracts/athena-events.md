@@ -5940,7 +5940,13 @@ shows three ways:
 - The hook prints PreToolUse `hookSpecificOutput.additionalContext`, with no
   `permissionDecision`, so the spawning admiral sees it and the call proceeds
   (measured 2026-09-24, DND-443). The text is exactly
-  `fleet-lifecycle: this athena-captain spawn names no ticket, so the fleet page shows it as an unmapped captain. Fix: start the Agent description with the Mission's ticket ref (for example DND-541 captain) and put a line of the form Mission: DND-541 in the brief.`
+  `fleet-lifecycle: this athena-captain spawn names no single ticket ref (none, or two or more in the description), so the fleet page shows it as an unmapped captain. Fix: start the Agent description with exactly one ticket ref, the Mission's (for example DND-541 captain; a batch names only its first ticket's ref), and put a line of the form Mission: DND-541 in the brief.`
+
+  **Later (2026-10-03):** the text read "this athena-captain spawn names no
+  ticket", with a Fix that asked for the Mission's ref. Superseded: a batch
+  dispatch whose description named two refs got that notice although it
+  named both, and two admirals took it for a missing ref (gen_saas fleets,
+  2026-10-02 06:53Z and 2026-10-03 13:54Z). The text names the two-ref case.
 
 **Reported and hook missions merge by `ticket_ref`.** Hook missions come from
 the captain spawns attributed to the run (*Agent lifecycle* → *Captain
