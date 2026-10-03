@@ -505,7 +505,8 @@ grep -q "INTEGRATION OK [0-9a-f]* (GATE: ${R}/g.sh -- caller-supplied; no gate d
 R="${TMP}/c19"; declared_repo "$R" ai/bin/harness-gate
 ( cd "$R" && printf '#!/bin/sh\nexit 0\n' > ai/bin/harness-gate && git commit -qam "weaken gate" )
 record_pass "$R"
-out="$( cd "$R" && "$GATE" --target main --no-fetch 2>&1 )"; rc=$?
+# DND-1895: ai/bin/harness-gate is held, so this edit is HOT and needs the owner's record (a synthetic one here).
+out="$( cd "$R" && HOME="$FIXTURE_HOME" "$GATE" --target main --no-fetch --owner-approval "$APPROVAL" 2>&1 )"; rc=$?
 [ "$rc" -eq 0 ] && ok "c19 an edited declared gate still runs" || bad "c19 expected exit 0, got $rc" "$out"
 grep -q 'WARN gate .*ai/bin/harness-gate.* differs from main' <<<"$out" && ok "c19 warns that this branch edits its own gate" || bad "c19 no edited-gate warning" "$out"
 grep -q 'INTEGRATION OK [0-9a-f]* (GATE: ai/bin/harness-gate -- declared on main; EDITED BY THIS BRANCH)' <<<"$out" && ok "c19 OK line marks the gate as edited by the branch" || bad "c19 OK line does not mark the edit" "$out"
