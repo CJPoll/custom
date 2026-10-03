@@ -18,6 +18,12 @@
       "commit": "412ea7352ab783253ada696bc0cc5c25362eee5d",
       "phases": ["verify", "implement"],
       "what": "a landing whose first gate run is inside its final integration run: verify reads a measured 0 (was invalid) and implement ends at the run's start"
+    },
+    {
+      "ticket": "DND-1838",
+      "commit": "e8e19fc7e498eed692a431d845e49c3bd793348b",
+      "phases": ["implement"],
+      "what": "a re-dispatch from Parked restarts the dispatch stamp, and after a recorded restart implement ends at the first gate run at or after it: implement reads measured (was invalid) and excludes the parked span"
     }
   ]
 }
