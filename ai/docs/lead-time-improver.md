@@ -350,31 +350,33 @@ Each `improve`-mode run does these steps in order:
    An experiment whose window straddles this landing is not comparable
    across it, and `experiment judge` does not detect that (the same gap as
    DND-1501's `phase_flow` break). Until the judge treats a series break
-   as confounding, judge such an experiment inconclusive by hand.
-
-   **Later (2026-10-02, DND-1810):** the judge treats a series break as
-   confounding, so no experiment is judged by hand. Every break is declared
-   in `ai/config/lead-time-series-breaks.json`, the one place to declare
-   one: a row of `ticket`, `commit` (as landed on custom's main), `phases`
-   and `what`. DND-1501 (verify, queue, merge), DND-1809 (integrate,
-   verify, queue, merge) and DND-1819 (verify, implement) are its first
-   rows. A break on an experiment's phase inside its window (the
-   before-set's first landing to the after-set's last) makes the verdict
-   `confounded`, for instrumentation too: the instrumentation exemption
-   says an instrumentation change moves no duration, but a break moves
-   what n/a means, which is what `na_share` compares. Judge re-checks a
-   settled keep and an owed revert, so a row declared after a verdict
-   still confounds it. A registry it cannot read or judge is exit 3,
-   never "no break". How to declare one: `athena:lead-time-improve` →
-   *Declaring a series break*.
-
-   A push
+   as confounding, judge such an experiment inconclusive by hand. A push
    row ingested from here on carries `gated_head_source` or
    `gated_head_miss`; a push row from before carries neither, which is how
    the two sides are told apart. Measured on a scratch
    re-ingest of custom since 2026-10-02T13:00Z (38 rows): integrate n/a
    6 → 1. All 10 push rows joined (5 by their own receipt, 5 by the
    clean-rebase cover), with no ambiguity and no miss.
+
+   **Later (2026-10-02, DND-1810):** the judge treats a DECLARED series
+   break as confounding, so a declared break needs no judging by hand.
+   Every break is declared in `ai/config/lead-time-series-breaks.json`,
+   the one place to declare one: a row of `ticket`, `commit` (as landed on
+   custom's main), `phases` and `what`, added after the landing by the
+   admiral that lands it (`athena:merge-boarding` → *The merge bar*).
+   DND-1501 (verify, queue, merge), DND-1809 (integrate, verify, queue,
+   merge) and DND-1819 (verify, implement) are its first rows. A break on
+   an experiment's phase inside its window (the before-set's first landing
+   to the after-set's last) makes the verdict `confounded`, for
+   instrumentation too: the instrumentation exemption says an
+   instrumentation change moves no duration, but a break moves what n/a
+   means, which is what `na_share` compares. A revert a worse guard drove
+   stands, since a guard is read from counters, not the phase. Judge
+   re-checks a settled keep and an owed revert, so a row declared after a
+   verdict still confounds it. A registry it cannot read or judge is exit
+   3, never "no break". An undeclared break stays invisible; that residual
+   and the others are in `athena:lead-time-improve` → *Declaring a series
+   break*.
 2. **Judge pending experiments first.** An experiment whose comparable
    after-set has reached K is judged before anything new starts.
 3. **Pick the biggest contributor** from the window summary. If that phase is
@@ -449,6 +451,13 @@ Each `improve`-mode run does these steps in order:
    --metric` records it, and `pr` refuses a lane with no commit carrying
    it), because locked-merge's squash keeps commit messages, not the PR
    body.
+
+   **Later (2026-10-02, DND-1810):** the instrumentation exemption covers
+   trailers only. A declared series break on the phase inside the window
+   confounds instrumentation too, and judge re-checks settled keeps and
+   owed reverts against breaks; a revert a worse guard drove stands. The
+   rule and its registry: the DND-1810 note under *Prune and ingest*, and
+   `athena:lead-time-improve` → *Declaring a series break*.
 
    **Later (2026-10-01, DND-1622):** the window above reaches back over the
    whole before-set, so a same-phase change or revert that settled inside it

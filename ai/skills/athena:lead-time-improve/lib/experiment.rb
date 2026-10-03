@@ -976,19 +976,41 @@ module LeadTimeExperiment
   # edges included, sorted by [at, commit]. The experiment's own commit is
   # not a break against itself. Every kind, instrumentation included.
   # breaks: series_breaks' output with "at" (RFC 3339) added.
+  # A break with no readable "at" is a caller's bug: it raises, never drops.
   def breaks_inside(exp, breaks, from:, to:)
     breaks.select { |b| b["phases"].include?(exp["phase"]) && b["commit"] != exp["commit"] }
-          .select { |b| (t = LeadTimePhases::Util.time(b["at"])) && t >= from && t <= to }
+          .select { |b| (t = break_time(b)) >= from && t <= to }
           .sort_by { |b| [b["at"], b["commit"]] }
   end
+
+  def break_time(b)
+    LeadTimePhases::Util.time(b["at"]) ||
+      raise(ArgumentError, "series break #{b['ticket']} has no RFC 3339 \"at\" (#{b['at'].inspect}); the manager dates each break")
+  end
+
+  # Whether a verdict is a revert a worse guard drove. A guard (critic
+  # BLOCK rate, gate red rate, reverts on main) is read from counters, not
+  # from a phase's duration, so a series break does not make it
+  # incomparable: such a revert stands (the hard constraint; a quality
+  # signal is never erased by a registry row).
+  def guard_revert?(v) = v["status"] == "revert" && v["guards"].is_a?(Hash) &&
+                         v["guards"].any? { |_, d| d.is_a?(Hash) && d["state"] == "worse" }
 
   def break_text(b) = "#{b['ticket']} #{b['commit'].to_s[0, 12]} (#{b['phases'].join('/')}, #{b['at']})"
 
   # The verdict once confounders and breaks are known: unchanged when there
   # are neither, else `confounded`, naming each other commit and each break
   # and what the verdict would have been. Never keep, never revert.
+  # A revert a worse guard drove is not confounded by a break alone
+  # (guard_revert?): it stays revert, and its reason names the break.
   def confound(v, confounders, phase:, breaks: [])
     return v if confounders.empty? && breaks.empty?
+
+    if confounders.empty? && guard_revert?(v)
+      return v.merge("reason" => "#{v['reason']}; a declared series break on #{phase} landed inside the window " \
+                                 "(#{breaks.map { |b| break_text(b) }.join(', ')}), but a worse guard is read from " \
+                                 "counters, not the phase, so the revert stands", "breaks" => breaks)
+    end
 
     parts = []
     unless confounders.empty?
@@ -1010,9 +1032,11 @@ module LeadTimeExperiment
   # taken). Either whose window straddles a break becomes confounded.
   RECHECKED = %w[keep revert].freeze
 
-  # The verdict an experiment's last status row carries, as judge wrote it.
+  # The verdict an experiment's last status row carries, as judge wrote it,
+  # without the row's own fields and without `held` (a confounded verdict
+  # is never held).
   def last_verdict(exp)
-    (exp["last"] || {}).reject { |k, _| %w[type schema id judged_at].include?(k) }
+    (exp["last"] || {}).reject { |k, _| %w[type schema id judged_at held].include?(k) }
   end
 
   # ── settling: a clean baseline before a change lands (DND-1622) ──────────
@@ -1025,7 +1049,7 @@ module LeadTimeExperiment
   #
   # commits: [[sha, committer Time, message]], as confounders takes them.
   # -> {"verdict" => CLEAN | SETTLING | SHORT, "confounded" => bool (what judge
-  #     would read), "confounders", "latest", "after_latest", "needed",
+  #     would read), "confounders", "breaks", "latest", "after_latest", "needed",
   #     "short_by", "before" => {n, from, to} | nil, "before_na", "window",
   #     "malformed" => [{commit, value, why}], ...}
   #   SHORT     fewer than K comparable landings before now (judge can never

@@ -880,7 +880,7 @@ end
 check("confounders: an instrumentation trailer (na_share) on the phase confounds no change, as it blocks none") do
   X.confounders(exp, [tc(OTHER_SHA, 2, "Lead-time-experiment: custom verify na_share\n")], from: FROM, to: TO)[:confounders].empty?
 end
-check("confounders: an instrumentation experiment is never confounded, as it is never blocked") do
+check("confounders: an instrumentation experiment is never confounded by a trailer, as it is never blocked") do
   X.confounders(exp(kind: "instrumentation", metric: "na_share"), [tc(OTHER_SHA, 2, "Lead-time-experiment: custom verify phase\n")],
                 from: FROM, to: TO)[:confounders].empty?
 end
@@ -1451,6 +1451,33 @@ check("confound: a trailer and a break are both named") do
     v["reason"].include?("a declared series break")
 end
 check("confound: neither leaves the verdict alone") { X.confound(KEEP_V, [], phase: "verify", breaks: []) == KEEP_V }
+
+GUARD_REVERT = KEEP_V.merge("status" => "revert", "reason" => "guard worsened: gate_red_rate 0.0 -> 0.2",
+                            "guards" => { "gate_red_rate" => { "before" => 0.0, "after" => 0.2, "state" => "worse" } }).freeze
+check("confound: a revert a worse guard drove stands against a break, and names it") do
+  v = X.confound(GUARD_REVERT, [], phase: "verify", breaks: [brk(2)])
+  v["status"] == "revert" && v["breaks"] == [brk(2)] && v["reason"].start_with?("guard worsened") &&
+    v["reason"].include?("the revert stands") && v["reason"].include?("DND-9001")
+end
+check("confound: a median-only revert is confounded by a break") do
+  median = KEEP_V.merge("status" => "revert", "reason" => "median rose 500s -> 600s",
+                        "guards" => { "gate_red_rate" => { "state" => "ok" } })
+  X.confound(median, [], phase: "verify", breaks: [brk(2)])["status"] == "confounded"
+end
+check("confound: a trailer confounder still confounds a guard revert (DND-1529, unchanged)") do
+  X.confound(GUARD_REVERT, CONF, phase: "verify", breaks: [brk(2)])["status"] == "confounded"
+end
+check("last_verdict: the row's own fields and held are dropped, the verdict kept") do
+  e = exp.merge("last" => { "type" => "status", "schema" => 1, "id" => "i", "judged_at" => "x", "status" => "revert",
+                            "reason" => "r", "held" => { "tests" => ["t/a_test.rb"] }, "guards" => {} })
+  X.last_verdict(e) == { "status" => "revert", "reason" => "r", "guards" => {} } && X.last_verdict(exp) == {}
+end
+check("breaks_inside: a break with no readable at raises, never reads as no break") do
+  X.breaks_inside(exp, [brk(2).merge("at" => nil)], from: FROM, to: TO)
+  false
+rescue ArgumentError => e
+  e.message.include?("DND-9001")
+end
 
 check("settling: a break inside the would-be before-set is SETTLING, named, needed = K - after it") do
   s = X.settling(ten600, [], phase: "verify", metric: "phase", now: SET_NOW, breaks: [brk(-5)])

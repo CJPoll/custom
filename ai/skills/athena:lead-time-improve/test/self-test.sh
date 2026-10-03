@@ -976,6 +976,22 @@ eq "the owed revert re-judged once the break is declared: exit 0" "$(sb "${STATE
 has "an owed revert whose window straddles the break becomes CONFOUNDED, never acted on" "$(out)" "${SBID} CONFOUNDED"
 has "... saying it read revert" "$(out)" "unconfounded it read revert"
 
+# A revert a worse guard drove stands: a guard is read from counters, not
+# from the phase a break re-measures. Faster verify, but every after gate red.
+STATESB5="${TMP}/statesb5"
+mkdir -p "${STATESB5}"
+/usr/bin/ruby "${HERE}/make_ledger.rb" "${STATESB5}/ledger.jsonl" "${SBX}" 500 2026-11-10T00:00:00Z
+/usr/bin/ruby "${HERE}/redden_ledger.rb" "${STATESB5}/ledger.jsonl" 2026-11-10T11:30:00Z
+sbrec "${STATESB5}" "${REGV}" verify phase change >/dev/null
+eq "a guard-driven revert with a break inside its window: exit 0" "$(sb "${STATESB5}" "${REGV}" run judge --repo custom)" "0"
+has "... stays REVERT, never confounded" "$(out)" "${SBID} REVERT"
+has "... its reason names the guard" "$(out)" "guard worsened: gate_red_rate"
+has "... and the break, saying the revert stands" "$(out)" "DND-9810 ${BRK:0:12}"
+has "... 0 confounded" "$(out)" "0 confounded"
+eq "re-judged as an owed revert: exit 0" "$(sb "${STATESB5}" "${REGV}" run judge --repo custom)" "0"
+has "... still owed, never confounded by the re-check" "$(out)" "${SBID} REVERT"
+has "... still 0 confounded" "$(out)" "0 confounded"
+
 STATESB4="${TMP}/statesb4"
 mkdir -p "${STATESB4}"
 /usr/bin/ruby "${HERE}/make_ledger.rb" "${STATESB4}/ledger.jsonl" "${SBX}" 500 2026-11-10T00:00:00Z

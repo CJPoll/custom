@@ -258,14 +258,16 @@ predecessor's change, or its revert) confounds the next change with
 certainty. A declared series break on the phase inside it does too
 (DND-1810), so settling names breaks as well. An instrumentation change
 checks `--metric na_share`, which reads breaks only: no trailer confounds
-instrumentation. Read SETTLING as a pending change on the phase:
+instrumentation. For instrumentation, SETTLING means it would read
+confounded if it landed now: not a target this run, though nothing blocks
+it. Read SETTLING as a pending change on the phase:
 
 - **CLEAN**: the phase is a change target.
 - **SETTLING**: not a target this run. The action is `no action` ("<phase>
   baseline settling after <sha>: N more landings", from its line), or
   instrumentation on another phase if one qualifies by the rule above.
 - **SHORT**: fewer than K=10 comparable landings. A SHORT that names a
-  confounder is read as SETTLING; its line gives "clean after N more". One
+  confounder or a series break is read as SETTLING; its line gives "clean after N more". One
   that names none is a target, and judge handles its short baseline as it
   does today: pending for 7 days, then inconclusive, never keep or revert.
 - **exit 3** (could not look): no change on that phase this run. Journal the
@@ -416,10 +418,24 @@ it. Its one home is `ai/config/lead-time-series-breaks.json` (DND-1810). Add
 one row: `ticket`, `commit` (the 40-hex SHA as it LANDED on custom's main),
 `phases` (every phase whose values change), and `what`. A landed SHA is known
 only after the landing, so the row lands in a follow-up commit: the change's
-report names the phases, and whoever lands the change adds the row. Judge
+report or PR body names the phases, and the admiral that lands it adds the
+row (`athena:merge-boarding` → *The merge bar*, the custom landing). Judge
 then confounds every experiment whose window holds the break, including one
-it already settled keep or owes a revert on. A row whose commit is not on
-main, or that names an unknown phase, makes judge exit 3 until it is fixed.
+it already settled keep or owes a revert on. A revert a worse guard drove
+still stands: a guard is read from counters, not the phase. A row whose
+commit is not on main, or that names an unknown phase, makes judge exit 3
+until it is fixed.
+
+Residuals, named rather than closed:
+
+- An undeclared break is invisible to judge. Nothing detects a measurement
+  change that nobody declared.
+- Between a break's landing and its row, a revert that lands or an
+  inconclusive recorded is not re-checked; only keep and an owed revert
+  are.
+- Rows are frozen at ingest, so the ledger's real cutover is the first
+  ingest that ran the new code, up to one hourly tick after the break's
+  landing time judge uses. Against windows of days that edge is small.
 
 A gate or the judge refusing the change (a RED, a BLOCK) is journaled, and
 the run's action ends there. Never retry around a gate. On the cron path,

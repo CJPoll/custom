@@ -125,6 +125,12 @@ The landing, as Cody confirmed it (2026-10-01):
      more to land; it is detection, not a merge gate, so it never holds the
      next push. The hourly shipwright cron runs the same check as the
      backstop for landings made by anyone else.
+   - If the landing changed how `ai/bin/lead-time-phases` measures a phase
+     (its report or PR body names a series break and its phases), declare
+     it: add one row naming the SHA step 3 pushed to
+     `ai/config/lead-time-series-breaks.json`, in a follow-up change that
+     lands the same way (`athena:lead-time-improve` → *Declaring a series
+     break*, DND-1810). The experiment judge sees only declared breaks.
 
    A cron lane (the shipwright and lead-time runs) stops after step 3: its
    runner fast-forwards the main checkout, and nothing on the cron path
