@@ -42,6 +42,14 @@ if ! . "${IR_LIB}" 2>/dev/null; then
   printf 'locked-merge: cannot load %s\nFix: run locked-merge from its committed path in a full ~/dev/custom checkout (ai/skills and ai/lib side by side).\n' "${IR_LIB}" >&2
   exit 2
 fi
+# The red-tip judge (DND-1902) is gh-athena's merge guard's, so the two read a
+# red base tip one way.
+GMG_LIB="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../../lib/gh-merge-guard.sh"
+# shellcheck source=../../../lib/gh-merge-guard.sh
+if ! . "${GMG_LIB}" 2>/dev/null; then
+  printf 'locked-merge: cannot load %s\nFix: run locked-merge from its committed path in a full ~/dev/custom checkout (ai/skills and ai/lib side by side).\n' "${GMG_LIB}" >&2
+  exit 2
+fi
 
 usage() {
   cat <<'EOF'
@@ -64,6 +72,13 @@ path fleets already share) it:
      prints BASE MOVED: the head merged with R..B was never gated;
   3. computes the expected squash tree, git merge-tree B --head (the head's
      own tree when R == B). A conflict is refused here (exit 3);
+  3b. stops the line (DND-1902): reads the runs on the base tip B itself,
+     and B's tree against ai/config/main-content-checks.json (a duplicated
+     migration version). A judged red run (CI or a post-merge deploy) or a
+     duplicate refuses (exit 11), naming each, unless --head contains B and
+     removes every duplicate (RED-MAIN FIX). What it cannot read is COULD NOT
+     LOOK (exit 2). A pending run is not red: it merges now and names the
+     run. No check on B and no declared content check merge as before;
   4. with --require-idle-workflow <workflow-file>, keyed on the base SHA B
      (DND-1378): the base commit's own push run, looked up by SHA and
      re-read by id, must be completed, and the <base> run list must show no
@@ -97,6 +112,9 @@ Exit (every non-zero prints a Fix: line):
     (recorded base not an ancestor of origin/<base>), or RECEIPT BASE
     UNKNOWN (COULD NOT LOOK) -- run integration-gate on this head (nothing landed)
   10 LANDED and confirmed, but the worktree stack teardown failed -- do not re-merge
+  11 MAIN RED: the base tip has a red run or a duplicated migration version,
+     and --head is not a fix (contains the tip, removes every duplicate) --
+     land only a red-main fix; others wait for a green base (nothing landed)
 EOF
 }
 
@@ -295,6 +313,24 @@ esac
        "check git >= 2.38 (merge-tree --write-tree); nothing was merged."
 echo "EXPECTED-TREE ${EXPECTED_TREE} (${HEAD_SHA} merged into ${B})"
 
+# ---- stop the line: a red base tip (DND-1902) ----
+# gen_saas 2026-10-03: main went red at 14:06Z and a merge landed onto it at
+# 14:23Z, because stop-the-line was a message that arrived a minute late. The
+# tip B's own runs and its content are read here, under the lock, with
+# gh-athena's judge (ai/lib/gh-merge-guard.sh -> gmg_line_check); the guard
+# reads them again.
+[[ "${ORIGIN_URL}" =~ github\.com[:/]+([^/]+)/([^/]+)$ ]] \
+  || die 2 "COULD NOT LOOK: origin '${ORIGIN_URL}' names no <owner>/<repo>, so the base tip's runs cannot be read" \
+       "set origin to the GitHub repo's URL (https://github.com/<owner>/<repo>.git); nothing was merged."
+GH_OWNER="${BASH_REMATCH[1]}"; GH_REPO="${BASH_REMATCH[2]%.git}"
+if gmg_line_check "${GH_OWNER}" "${GH_REPO}" "origin/${base}" "${B}" "${HEAD_SHA}" "${REPO}"; then tip_rc=0; else tip_rc=$?; fi
+case "${tip_rc}" in
+  0) echo "${GMG_LINE_NOTE}" ;;
+  1) die 11 "${GMG_LINE_WHY}" "$(gmg_line_fix "${GH_OWNER}" "${GH_REPO}" "${base}" "${B}"), then re-run locked-merge. Nothing was merged." ;;
+  *) die 2 "${GMG_LINE_WHY}" \
+       "make the tip readable (network up, gh auth, git fetch origin), then re-run locked-merge. Could-not-read is never green; nothing was merged." ;;
+esac
+
 # ---- required-idle workflow, keyed on the base SHA (DND-1378) ----
 # A single base-branch list read can miss the run for the commit that just
 # landed (not listed yet, or a stale list), and "no live run listed" then read
@@ -302,9 +338,10 @@ echo "EXPECTED-TREE ${EXPECTED_TREE} (${HEAD_SHA} merged into ${B})"
 # run is looked up by SHA and re-read by id; a run that cannot be found is
 # NOT SEEN YET / NO RUN FOR BASE, never idle (ai/CLAUDE.md -> "A failed lookup
 # must never look like an empty one"). The base-branch count stays on top, so a
-# re-run of an older run still holds. The base run's conclusion is printed; a
-# non-success is a WARN, not a refusal: no ratified rule holds a merge on a
-# failed deploy, and such a hold would also refuse the fix or revert merge.
+# re-run of an older run still holds. The base run's conclusion is printed. A
+# failed deploy that reports on B is refused earlier, by the red-tip check
+# (DND-1902), which lets a red-main fix through; a non-success that check did
+# not see is a WARN here.
 BASE_RUN_GRACE_S=600
 idle_check() {
   local wf="$1" commit_json ids id view st conc now ct age msg marker branch_json live
@@ -353,7 +390,7 @@ idle_check() {
     "wait for each run with ~/dev/custom/ai/bin/gh-ci-wait --repo <owner>/<repo> --run-id <id> (a 60 s poll on the App budget, DND-1706), then re-run; nothing was merged."
   if [ -n "${base_run}" ]; then
     echo "IDLE ${wf} base ${B}: BASE-RUN ${base_run} completed/${base_conc}; ${base} list counted $(jq length <<<"${branch_json}") runs, none live"
-    [ "${base_conc}" = success ] || echo "WARN base deploy ${base_run} for ${B} concluded ${base_conc:-unknown}; merging anyway: no ratified rule holds a merge on a failed deploy (DND-1378 escalation)"
+    [ "${base_conc}" = success ] || echo "WARN base deploy ${base_run} for ${B} concluded ${base_conc:-unknown}, but no red run on ${B}'s own checks stopped this merge (DND-1902); a failed deploy stops the line: merge nothing but the fix or the revert (athena:merge-boarding -> Stop the line)"
   fi
 }
 [ -z "${IDLE_WF}" ] || idle_check "${IDLE_WF}"

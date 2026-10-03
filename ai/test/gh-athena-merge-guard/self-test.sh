@@ -77,7 +77,18 @@ answer() {
 }
 case "$*" in
   "pr view"*"--json"*) answer prview ;;
-  "api graphql"*"statusCheckRollup"*) answer rollup ;;
+  "api graphql"*"statusCheckRollup"*)
+    # DND-1902: the rollup asked for the BASE TIP (the baseref fixture's sha)
+    # answers from tiprollup; with no tiprollup fixture the tip has reported
+    # no check (custom's shape: no CI). Every other oid is the PR head.
+    tip="$(jq -r '.object.sha // empty' "${STUB_FX}/baseref.out" 2>/dev/null)"
+    if [ -n "${tip}" ] && [[ "$*" == *"oid=${tip}"* ]]; then
+      [ -f "${STUB_FX}/tiprollup.out" ] || [ -f "${STUB_FX}/tiprollup.rc" ] || {
+        echo '{"data":{"repository":{"object":{"__typename":"Commit","statusCheckRollup":null}}}}'; exit 0; }
+      answer tiprollup
+    fi
+    answer rollup ;;
+  "api repos/"*"/compare/"*) answer compare ;;
   "api repos/"*"/protection/required_status_checks"*) answer protection ;;
   "api repos/"*"/rules/branches/"*) answer rules ;;
   "api repos/"*"/git/ref/heads/"*) answer baseref ;;
@@ -957,6 +968,153 @@ else bad "D14. linked worktree reads the common store" "$(detail)"; fi
 reset_fx; pr_view "${GREEN}"; base_is "${GATED_BASE}"
 OUT="$(GH_ATHENA_MERGE_DRY_RUN=1 "${WRAPPER}" pr merge 362 --squash --match-head-commit "${HEAD_SHA}" 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"
 receipt_refused "D15. the dry-run seam on a gated merge with no receipt -> the same refusal" "NO RECEIPT"
+
+echo
+echo "--- DND-1902: a merge onto a RED base tip is REFUSED (stop the line) ---"
+# The defect: on 2026-10-03 gen_saas main went red at 14:06Z (a duplicate
+# migration version), and a merge landed onto it at 14:23Z because the
+# stop-the-line message reached its admiral a minute late. Nothing in the merge
+# path read the base tip's own runs. The guard now reads the rollup of the
+# base tip and refuses while a judged run there is red, unless the pinned head
+# CONTAINS that tip (a red-main fix). Unreadable is COULD NOT LOOK; a pending
+# run is not red. NOGATE_BASE is the tip throughout, so no receipt is needed.
+TIP="${NOGATE_BASE}"
+TIP_RED='[{"__typename":"CheckRun","name":"Test","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-10-03T14:00:00Z","detailsUrl":"https://github.com/CJPoll/gen_saas/actions/runs/9001/job/1","checkSuite":{"databaseId":71,"app":{"databaseId":15368,"slug":"github-actions"},"workflowRun":{"event":"push","workflow":{"databaseId":5}}}},{"__typename":"CheckRun","name":"Build","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-10-03T14:00:00Z","checkSuite":{"databaseId":71,"app":{"databaseId":15368,"slug":"github-actions"},"workflowRun":{"event":"push","workflow":{"databaseId":5}}}}]'
+TIP_PENDING='[{"__typename":"CheckRun","name":"Deploy","status":"IN_PROGRESS","conclusion":null,"startedAt":"2026-10-03T14:00:00Z","checkSuite":{"databaseId":72,"app":{"databaseId":15368,"slug":"github-actions"},"workflowRun":{"event":"push","workflow":{"databaseId":6}}}},{"__typename":"CheckRun","name":"Build","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-10-03T14:00:00Z","checkSuite":{"databaseId":71,"app":{"databaseId":15368,"slug":"github-actions"},"workflowRun":{"event":"push","workflow":{"databaseId":5}}}}]'
+# The red Test run, then a newer suite's SUCCESS run of the same check.
+TIP_RERUN_GREEN='[{"__typename":"CheckRun","name":"Test","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-10-03T14:00:00Z","checkSuite":{"databaseId":71,"app":{"databaseId":15368,"slug":"github-actions"},"workflowRun":{"event":"push","workflow":{"databaseId":5}}}},{"__typename":"CheckRun","name":"Test","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-10-03T14:30:00Z","checkSuite":{"databaseId":73,"app":{"databaseId":15368,"slug":"github-actions"},"workflowRun":{"event":"push","workflow":{"databaseId":5}}}}]'
+TIP_STATUS_RED='[{"__typename":"StatusContext","context":"deploy/prod","state":"FAILURE","createdAt":"2026-10-03T14:00:00Z","targetUrl":"https://deploy.example/9"}]'
+tip_rollup() { rollup_fx "$1"; mv "${FX}/rollup.out" "${FX}/tiprollup.out"; rollup_fx "${GREEN}"; }
+compare_is() { printf '{"status":"%s","ahead_by":1,"behind_by":%s}\n' "$1" "$2" > "${FX}/compare.out"; }
+
+reset_fx; pr_view "${GREEN}"; base_is "${TIP}"; tip_rollup "${TIP_RED}"; compare_is diverged 3
+run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
+if refused && [[ "${ERR}" == *"RED"* ]] && [[ "${ERR}" == *"${TIP}"* ]] && [[ "${ERR}" == *"Test: COMPLETED/FAILURE"* ]] \
+   && [[ "${ERR}" == *"actions/runs/9001"* ]] && [[ "$(grep -m1 'Fix:' <<<"${ERR}")" == *"contains ${TIP}"* ]]; then
+  ok "T1. THE INCIDENT: green pinned head, base tip has a FAILED run -> refused before the merge call, names the tip SHA, the run and its URL"
+else bad "T1. merge onto a red tip refused" "$(detail)"; fi
+
+reset_fx; pr_view "${GREEN}"; base_is "${TIP}"; tip_rollup "${TIP_STATUS_RED}"; compare_is behind 1
+run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
+refused && [[ "${ERR}" == *"deploy/prod: FAILURE"* ]] \
+  && ok "T2. a red commit status (a deploy) on the tip -> refused" || bad "T2. red status refused" "$(detail)"
+
+reset_fx; pr_view "${GREEN}"; base_is "${TIP}"; tip_rollup "${TIP_RED}"; compare_is ahead 0
+run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
+if [ "${RC}" = 0 ] && merged && [[ "${ERR}" == *"RED-MAIN FIX"* ]]; then
+  ok "T3. red tip, but the pinned head CONTAINS the tip (a red-main fix) -> merges, and says so"
+else bad "T3. red-main fix merges" "$(detail)"; fi
+
+reset_fx; pr_view "${GREEN}"; base_is "${TIP}"; tip_rollup "${TIP_RED}"; compare_is identical 0
+run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
+[ "${RC}" = 0 ] && merged && ok "T3b. compare 'identical' (behind_by 0) is a head that contains the tip" || bad "T3b. identical" "$(detail)"
+
+reset_fx; pr_view "${GREEN}"; base_is "${TIP}"; tip_rollup "${TIP_RED}"; fx compare '' 1 'gh: Server Error (HTTP 502)'
+run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
+refused && [[ "${ERR}" == *"COULD NOT LOOK"* ]] && [[ "${ERR}" == *"HTTP 502"* ]] \
+  && ok "T4. red tip and the containment read fails -> COULD NOT LOOK, refused, never read as a fix" || bad "T4. compare failure refused" "$(detail)"
+
+reset_fx; pr_view "${GREEN}"; base_is "${TIP}"; tip_rollup "${TIP_RED}"; fx compare '{"status":"ahead"}'
+run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
+refused && [[ "${ERR}" == *"COULD NOT LOOK"* ]] \
+  && ok "T4b. a compare body with no behind_by -> COULD NOT LOOK" || bad "T4b. malformed compare refused" "$(detail)"
+
+reset_fx; pr_view "${GREEN}"; base_is "${TIP}"; fx tiprollup '' 1 'gh: Bad credentials (HTTP 401)'
+run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
+if refused && [[ "${ERR}" == *"COULD NOT LOOK"* ]] && [[ "${ERR}" == *"HTTP 401"* ]] && [[ "${ERR}" == *"${TIP}"* ]]; then
+  ok "T5. the base tip's runs cannot be read -> COULD NOT LOOK, refused, never green"
+else bad "T5. unreadable tip refused" "$(detail)"; fi
+[[ "${ERR}" != *"is RED"* ]] && ok "T5b. an unreadable tip is not reported as red" || bad "T5b. could-not-look vs red" "$(detail)"
+
+reset_fx; pr_view "${GREEN}"; base_is "${TIP}"; fx tiprollup '{"errors":[{"message":"Something went wrong"}]}'
+run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
+refused && [[ "${ERR}" == *"COULD NOT LOOK"* ]] \
+  && ok "T5c. a GraphQL answer carrying errors for the tip -> COULD NOT LOOK" || bad "T5c. GraphQL errors refused" "$(detail)"
+
+reset_fx; pr_view "${GREEN}"; base_is "${TIP}"; tip_rollup "${TIP_PENDING}"
+run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
+if [ "${RC}" = 0 ] && merged && [[ "${ERR}" == *"PENDING"* ]] && [[ "${ERR}" == *"Deploy"* ]]; then
+  ok "T6. a tip whose run is still in progress is not red -> merges at once (never waits), and names the pending run"
+else bad "T6. pending tip merges" "$(detail)"; fi
+
+reset_fx; pr_view "${GREEN}"; base_is "${TIP}"; tip_rollup "${TIP_RERUN_GREEN}"
+run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
+[ "${RC}" = 0 ] && merged && ok "T7. a red run superseded by a newer SUCCESS run of the same check on the tip -> not red, merges" \
+  || bad "T7. superseded red run" "$(detail)"
+
+reset_fx; pr_view "${GREEN}"; base_is "${TIP}"
+run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
+if [ "${RC}" = 0 ] && merged && [[ "${ERR}" == *"no check has reported"* ]]; then
+  ok "T8. a tip with no checks at all (no CI, custom's shape) -> merges as before, and says no check reported"
+else bad "T8. no-CI tip unchanged" "$(detail)"; fi
+
+reset_fx; pr_view "${QUEUED}"; base_is "${TIP}"; tip_rollup "${TIP_RED}"
+fx protection '{"strict":true,"contexts":["Test"],"checks":[{"context":"Test","app_id":1}]}'
+fx rules '[]'
+run pr merge 362 --squash --auto
+refused && [[ "${ERR}" == *"RED"* ]] && [[ "${ERR}" == *"${TIP}"* ]] \
+  && ok "T9. --auto with a readable required-checks gate, onto a red tip -> refused" || bad "T9. --auto onto red tip" "$(detail)"
+
+echo
+echo "--- DND-1902: a merge onto a tip whose CONTENT is red (a duplicated migration version) ---"
+# The incident's real shape: gen_saas main runs only its deploy, and the
+# deploy reported SUCCESS ("Migrations already up") while two athena
+# migrations shared version 20261003120000. Green runs, red content. The
+# fixture's origin is CJPoll/gen_saas, which ai/config/main-content-checks.json
+# declares; its tips declare no integration gate, so no receipt is needed.
+MIG=apps/athena/priv/repo/migrations
+gfx checkout -q -b dup "${NOGATE_BASE}"
+mkdir -p "${REPO_FX}/${MIG}" "${REPO_FX}/apps/dnd/priv/repo/migrations"
+: > "${REPO_FX}/${MIG}/20251219024753_y.exs"
+: > "${REPO_FX}/apps/dnd/priv/repo/migrations/20251219024753_x.exs"
+gfx add apps; gfx commit -q -m cross-app
+CROSS_BASE="$(gfx rev-parse HEAD)"
+: > "${REPO_FX}/${MIG}/20261003120000_cap.exs"; : > "${REPO_FX}/${MIG}/20261003120000_strip.exs"
+gfx add apps; gfx commit -q -m dup
+DUP_BASE="$(gfx rev-parse HEAD)"
+gfx mv "${MIG}/20261003120000_strip.exs" "${MIG}/20261003120001_strip.exs"; gfx commit -q -m fix
+FIX_HEAD="$(gfx rev-parse HEAD)"
+gfx checkout -q -b keep "${DUP_BASE}"; echo k > "${REPO_FX}/k.txt"; gfx add k.txt; gfx commit -q -m keep
+KEEP_HEAD="$(gfx rev-parse HEAD)"
+gfx checkout -q -b stray "${NOGATE_BASE}"; echo s > "${REPO_FX}/s.txt"; gfx add s.txt; gfx commit -q -m stray
+STRAY_HEAD="$(gfx rev-parse HEAD)"
+gfx checkout -q main
+
+reset_fx; pr_view "${GREEN}" "${STRAY_HEAD}"; base_is "${DUP_BASE}"
+run pr merge 362 --squash --match-head-commit "${STRAY_HEAD}"
+if refused && [[ "${ERR}" == *"MAIN RED"* ]] && [[ "${ERR}" == *"${MIG} version 20261003120000: 20261003120000_cap.exs, 20261003120000_strip.exs"* ]] \
+   && [[ "$(grep -m1 'Fix:' <<<"${ERR}")" == *"contains ${DUP_BASE}"*"removes every duplicate"* ]]; then
+  ok "C1. THE INCIDENT: every run green, but the tip holds a duplicated migration version -> refused, names the directory, version and both files"
+else bad "C1. duplicated migration version refused" "$(detail)"; fi
+
+reset_fx; pr_view "${GREEN}" "${FIX_HEAD}"; base_is "${DUP_BASE}"
+run pr merge 362 --squash --match-head-commit "${FIX_HEAD}"
+if [ "${RC}" = 0 ] && merged && [[ "${ERR}" == *"RED-MAIN FIX"* ]]; then
+  ok "C2. a head that contains the red tip and removes the duplicate -> merges, and says RED-MAIN FIX"
+else bad "C2. content fix merges" "$(detail)"; fi
+
+reset_fx; pr_view "${GREEN}" "${KEEP_HEAD}"; base_is "${DUP_BASE}"
+run pr merge 362 --squash --match-head-commit "${KEEP_HEAD}"
+refused && [[ "${ERR}" == *"still holds"* ]] \
+  && ok "C3. a head that contains the red tip but KEEPS the duplicate -> refused (containing the tip is not enough)" \
+  || bad "C3. contains-but-keeps refused" "$(detail)"
+
+reset_fx; pr_view "${GREEN}"; base_is "${DUP_BASE}"
+run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
+refused && [[ "${ERR}" == *"COULD NOT LOOK"* ]] && [[ "${ERR}" == *"not in the object store"* ]] \
+  && ok "C4. red content and a head that is not local -> COULD NOT LOOK, refused, never read as a fix" \
+  || bad "C4. non-local head refused" "$(detail)"
+
+reset_fx; pr_view "${GREEN}" "${STRAY_HEAD}"; base_is "${CROSS_BASE}"
+run pr merge 362 --squash --match-head-commit "${STRAY_HEAD}"
+[ "${RC}" = 0 ] && merged && [[ "${ERR}" == *"no duplicated migration version"* ]] \
+  && ok "C5. one version in two APPS (each its own database) is not a duplicate -> merges" \
+  || bad "C5. cross-app version allowed" "$(detail)"
+
+reset_fx; pr_view "${GREEN}" "${STRAY_HEAD}"; base_is "${DUP_BASE}"; tip_rollup "${TIP_RED}"; compare_is diverged 2
+run pr merge 362 --squash --match-head-commit "${STRAY_HEAD}"
+refused && [[ "${ERR}" == *"Red run(s)"* ]] && [[ "${ERR}" == *"Duplicated migration version"* ]] \
+  && ok "C6. a red run AND a duplicate -> refused, naming both" || bad "C6. both reds named" "$(detail)"
 
 # DND-1647: no gh/glab call may have fallen through past its stub.
 if fsg_verify; then ok "no gh/glab call fell through past its stub (DND-1647)"

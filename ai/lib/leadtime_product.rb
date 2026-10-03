@@ -320,7 +320,9 @@ module LeadTimeProduct
     case exit_code
     when 0 then Decision.new(:merged, "locked-merge landed it")
     when 10 then Decision.new(:merged, "locked-merge landed it (the worktree stack teardown failed)")
-    when 2, 3, 4, 5, 6, 9 then Decision.new(:retry, "locked-merge exit #{exit_code}: nothing landed")
+    # 11 is MAIN RED (DND-1902): the base's own line is stopped, not this
+    # PR's; nothing landed, and the PR lands once the base is green.
+    when 2, 3, 4, 5, 6, 9, 11 then Decision.new(:retry, "locked-merge exit #{exit_code}: nothing landed")
     when 7 then Decision.new(:stop_line, "locked-merge exit 7: LANDED UNGATED (parent or tree mismatch)")
     when 8 then Decision.new(:stop_line, "locked-merge exit 8: the merge ran but the landing is not confirmed")
     else Decision.new(:stop_line, "locked-merge exit #{exit_code}: unknown outcome, never retried blind")

@@ -67,6 +67,10 @@ case "$1 $2" in
   "run list") [ -e "${ST}/gh_fail" ] && exit 1
               if [ -n "${commit}" ]; then f="${ST}/runs_commit.json"; else f="${ST}/runs.json"; fi ;;
   "run view") [ -e "${ST}/gh_fail" ] && exit 1; f="${ST}/run_$3.json" ;;
+  # DND-1902: the base tip's rollup. No tip_rollup.json = no check reported.
+  "api graphql") [ -e "${ST}/tip_fail" ] && { echo "gh: Bad credentials (HTTP 401)" >&2; exit 1; }
+              f="${ST}/tip_rollup.json"
+              [ -e "${f}" ] || f="${ST}/../../no_checks.json" ;;
   *) echo "gh stub: unexpected $*" >&2; exit 99 ;;
 esac
 if [ -n "${q}" ]; then jq -r "${q}" "${f}"; else cat "${f}"; fi
@@ -115,6 +119,7 @@ rc="$(cat "${ST}/teardown_rc")"
 exit "${rc}"
 EOF
 chmod +x "${STUBS}"/*
+echo '{"data":{"repository":{"object":{"__typename":"Commit","statusCheckRollup":null}}}}' > "${TMP}/no_checks.json"
 fsg_require_stubs "${STUBS}" gh
 export PATH="${STUBS}:${PATH}" LOCKED_MERGE_AI_BIN="${STUBS}"
 
@@ -241,9 +246,10 @@ names i1 "gh-ci-wait"; unnamed i1 "gh run watch"
 idle_fixture i2; set_base_run completed "" in_progress
 idle_run i2; expect i2 5; no_merge i2; names i2 "BASE DEPLOY BUSY"
 # i3 the #595 case, made observable: completed/failure merges with a WARN.
-# Flip to a refusal only on an owner-ratified rule (DND-1378 escalation).
+# DND-1902: a deploy run that reports red on the tip's own checks is refused
+# by the red-tip check (b*); one the tip's rollup does not show stays a WARN.
 idle_fixture i3 completed failure
-idle_run i3; expect i3 0; names i3 "concluded failure"; names i3 "no ratified rule"
+idle_run i3; expect i3 0; names i3 "concluded failure"; names i3 "DND-1902"
 # i4 no run for a base committed moments ago: NOT SEEN YET, never idle.
 idle_fixture i4; advance_main; follow_main; echo '[]' > "${ST}/runs_commit.json"
 idle_run i4; expect i4 5; no_merge i4; names i4 "NOT SEEN YET"
@@ -440,11 +446,63 @@ printf '#!/bin/sh\nexit 0\n' > "${TMP}/r7/green.sh"; chmod +x "${TMP}/r7/green.s
 run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/r7.lock"; expect r7 0
 grep -q "^RECEIPT " <<<"${out}" && ok "r7 prints the RECEIPT it merged on" || bad "r7 no RECEIPT line" "${out}"
 
+# ---- DND-1902: a red base tip stops the line, under the lock ----
+# The defect: gen_saas main went red 2026-10-03 14:06Z and a merge landed onto
+# it at 14:23Z; nothing here read the tip's own runs. tip_rollup <status>
+# <conclusion-json> plants a rollup for the tip with one judged Deploy run.
+tip_rollup() { # <status> <conclusion|null>
+  jq -n --arg s "$1" --argjson c "$2" '{data:{repository:{object:{__typename:"Commit",statusCheckRollup:{contexts:{
+    totalCount:1, pageInfo:{hasNextPage:false}, nodes:[{__typename:"CheckRun", name:"Deploy", status:$s, conclusion:$c,
+    startedAt:"2026-10-03T14:00:00Z", detailsUrl:"https://github.com/t/t/actions/runs/9001/job/1",
+    checkSuite:{databaseId:71, app:{databaseId:15368, slug:"github-actions"}, workflowRun:{event:"push", workflow:{databaseId:6}}}}]}}}}}}' \
+    > "${ST}/tip_rollup.json"
+}
+# b1 THE MISS: main moved to a red tip the head does not contain -> exit 11.
+fixture b1; commit_on_main m.txt m; tip_rollup COMPLETED '"FAILURE"'; RED_TIP="$(git --git-dir="${BARE}" rev-parse main)"
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/b1.lock"; expect b1 11; no_merge b1
+names b1 "${RED_TIP}"; names b1 "Deploy: COMPLETED/FAILURE"; names b1 "actions/runs/9001"
+grep -q "^Fix: .*contains ${RED_TIP}" <<<"${out}" && ok "b1 Fix: names the red-main fix rule" || bad "b1 Fix: lacks the fix rule" "${out}"
+# b2 a red-main fix: the head CONTAINS the red tip (the fixture's head is cut
+# from main's tip) -> merges, and says so.
+fixture b2; tip_rollup COMPLETED '"FAILURE"'
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/b2.lock"; expect b2 0; names b2 "RED-MAIN FIX"
+# b3 the tip's runs cannot be read -> COULD NOT LOOK (exit 2), never green.
+fixture b3; : > "${ST}/tip_fail"
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/b3.lock"; expect b3 2; no_merge b3
+names b3 "COULD NOT LOOK"; names b3 "HTTP 401"
+# b4 a pending run on the tip is not red: merges now, naming it.
+fixture b4; commit_on_main m.txt m; tip_rollup IN_PROGRESS null
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/b4.lock"; expect b4 0; names b4 "PENDING"
+# b5 no check on the tip (custom: no CI) -> merges as before.
+fixture b5; commit_on_main m.txt m
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/b5.lock"; expect b5 0; names b5 "no check has reported"
+# b6/b7 the incident's real shape: every run green, but main holds two
+# migrations with one version. The origin is CJPoll/gen_saas, which
+# ai/config/main-content-checks.json declares.
+gs_dup_fixture() { # <name> -- main gains a duplicated athena migration version
+  fixture "$1"; local GS="https://github.com/CJPoll/gen_saas.git"
+  git -C "${WT}" config remote.origin.url "${GS}"; git -C "${WT}" config --unset-all "url.${BARE}.insteadOf"
+  git -C "${WT}" config "url.${BARE}.insteadOf" "${GS}"
+  ( cd "${WT}" && git checkout -q main && mkdir -p apps/athena/priv/repo/migrations \
+    && : > apps/athena/priv/repo/migrations/20261003120000_cap.exs && : > apps/athena/priv/repo/migrations/20261003120000_strip.exs \
+    && git add apps && git commit -qm dup && git push -q origin main && git checkout -q feature )
+}
+gs_dup_fixture b6
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/b6.lock"; expect b6 11; no_merge b6
+names b6 "apps/athena/priv/repo/migrations version 20261003120000: 20261003120000_cap.exs, 20261003120000_strip.exs"
+gs_dup_fixture b7; follow_main
+( cd "${WT}" && git mv apps/athena/priv/repo/migrations/20261003120000_strip.exs apps/athena/priv/repo/migrations/20261003120001_strip.exs \
+  && git commit -qm fix && git push -q origin feature )
+H="$(git -C "${WT}" rev-parse HEAD)"; jq --arg h "${H}" '.headRefOid=$h' "${ST}/pr.json" > "${ST}/x" && mv "${ST}/x" "${ST}/pr.json"
+plant_receipt "${H}" "$(git --git-dir="${BARE}" rev-parse main)"
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/b7.lock"; expect b7 0; names b7 "RED-MAIN FIX"
+
 # c14 --help: stdout, exit 0, no side effects.
 hout="$("${TOOL}" --help 2>/dev/null)"; rc=$?
 [ "${rc}" -eq 0 ] && grep -q '^Usage:' <<<"${hout}" && ok "c14 --help on stdout, exit 0" || bad "c14 --help" "${hout}"
 grep -q '^  9 ' <<<"${hout}" && ok "c14 --help documents exit 9" || bad "c14 --help lacks exit 9" "${hout}"
 grep -q '^  10 ' <<<"${hout}" && ok "c14 --help documents exit 10 (DND-864 teardown)" || bad "c14 --help lacks exit 10" "${hout}"
+grep -q '^  11 .*RED' <<<"${hout}" && ok "c14 --help documents exit 11 (DND-1902 red tip)" || bad "c14 --help lacks exit 11" "${hout}"
 for w in "NOT SEEN YET" "NO RUN FOR BASE" "COULD NOT LOOK" "base SHA"; do
   grep -qF "${w}" <<<"${hout}" && ok "c14 --help documents '${w}' (DND-1378)" || bad "c14 --help lacks '${w}'" "${hout}"
 done

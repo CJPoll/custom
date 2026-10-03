@@ -231,7 +231,7 @@ check("G9 an unknown exit retries, naming it") do
 end
 
 check("L1 locked-merge 0 and 10 merged") { P.merge_outcome(0).action == :merged && P.merge_outcome(10).action == :merged }
-check("L2 locked-merge 3, 5, 6, 9 retry later") { [3, 5, 6, 9, 2, 4].all? { |x| P.merge_outcome(x).action == :retry } }
+check("L2 locked-merge 3, 5, 6, 9, 11 retry later (11: main red, DND-1902)") { [3, 5, 6, 9, 2, 4, 11].all? { |x| P.merge_outcome(x).action == :retry } }
 check("L3 locked-merge 7 and 8 stop the line") { [7, 8].all? { |x| P.merge_outcome(x).action == :stop_line } }
 check("L4 an unknown locked-merge exit stops the line (never a blind retry)") { P.merge_outcome(99).action == :stop_line }
 check("K1 confirm-merged 0 confirms; anything else stops the line") do

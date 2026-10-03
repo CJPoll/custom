@@ -268,3 +268,30 @@ cannot run outside a full checkout. They are not signal for these rows.
 | M39 step 7's tree check removed | c9, m2 |
 | M40 the merge-tree conflict preflight never refuses | m3 (merge called, exit 8) |
 | M41 the head-contains-receipt-base check removed | m7 |
+
+## DND-1902: a merge onto a RED base tip (stop the line)
+
+- **Defect:** gen_saas main went red 2026-10-03 14:06Z (two athena
+  migrations with one version); a merge landed onto it at 14:23Z because the
+  stop-the-line message reached its admiral late. Its deploy had reported
+  SUCCESS. Nothing in the merge path read the base tip's runs or content.
+- **Fix:** `gmg_line_check` in `ai/lib/gh-merge-guard.sh` (the tip's runs,
+  `gmg_tip_health`; its tree against `ai/config/main-content-checks.json`,
+  `gmg_content_health`), called by the guard after the receipt gate and by
+  locked-merge under its lock (exit 11, MAIN RED).
+- **Suites:** this suite (T1-T9, C1-C6); the locked-merge suite (b1-b7, c14).
+
+### Fail-first: the new cases against the unfixed sources (5284994d)
+
+Guard, run with `GH_ATHENA_UNDER_TEST` on a `git archive 5284994d ai` copy:
+`RESULT: 193 passed, 16 failed` (T1-T6, T8, T9, C1-C6). T1: `rc=0 out=stub:
+MERGED`, the merge ran onto a tip with a FAILURE run. C1: `rc=0 out=stub:
+MERGED`, the merge ran onto a tip holding a duplicated migration version.
+
+locked-merge (runs-only cases, on the unfixed script): `248 passed, 17
+failed`. b1: `expected exit 11, got 0`, the merge was called; b3 (tip
+unreadable): `expected exit 2, got 0`, merged.
+
+### After the fix
+
+Guard: `RESULT: 209 passed, 0 failed`. locked-merge: `272 passed, 0 failed`.

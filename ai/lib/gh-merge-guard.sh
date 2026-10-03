@@ -36,6 +36,12 @@
 #     it (DND-1463), and `--auto` is refused outright (DND-969; see
 #     gmg_receipt_gate). The one recommended merge path
 #     is integration-gate, then locked-merge, which makes this call.
+#   * A merge onto a base tip whose own CI or deploy run is RED, or whose tree
+#     holds what ai/config/main-content-checks.json forbids (a duplicated
+#     migration version), is REFUSED (stop the line, DND-1902), unless the
+#     pinned head contains that tip and removes every duplicate (a red-main
+#     fix). What cannot be read is COULD NOT LOOK and refused; a pending run
+#     is not red. See gmg_line_check.
 #   * A gh ALIAS is expanded the way gh expands it (see gmg_expand_alias) and
 #     the EXPANDED argv is what the guard judges, so `gh alias set p pr` then
 #     `p merge 5 --auto` is refused like `pr merge 5 --auto`. A gh shell alias
@@ -153,6 +159,7 @@
 
 GMG_TOOL="${GMG_TOOL:-gh-athena}"
 GMG_IS_MERGE=0
+GMG_BASE_TIP=""
 GMG_ESCALATE='Never merge or move a branch around this (a bare `gh pr merge`, a `gh api` merge or ref write, or the owner'"'"'s token); if the checks cannot go green, escalate to your admiral with the PR number and this output.'
 # The one recommended merge path (DND-969): integration-gate, then locked-merge,
 # which makes the pinned `pr merge` call itself under the repo's merge lock.
@@ -528,6 +535,8 @@ gmg_receipt_gate() {
     gmg_refuse "$shown" "$look: the tip of its base branch '$base' could not be read (\`gh api repos/$owner/$repo/git/ref/heads/$base\` exit $rc: ${why:-body '$(head -c 200 <<<"$ref_json" | tr '\n' ' ')'})" \
       "make the base branch readable (right -R <owner>/<repo>, network up), then $GMG_LAND"
   fi
+  # The tip the red-tip check (gmg_tip_gate, DND-1902) judges: the same read.
+  GMG_BASE_TIP="$tip"
   if gate="$(ir_declared_gate_on "$GMG_TOP" "$tip")"; then rc=0; else rc=$?; fi
   case "$rc" in
     1) return 0 ;;   # the base tip declares no gate: merge as before
@@ -592,7 +601,7 @@ gmg_receipt_gate() {
 # workflow and event. One page of 100: a rollup with more (another page, or a
 # totalCount the page does not match) is refused, since unread runs are not
 # green. Zero contexts is refused, as before: no evidence is not green.
-GMG_ROLLUP_QUERY='query($owner: String!, $repo: String!, $oid: GitObjectID!) { repository(owner: $owner, name: $repo) { object(oid: $oid) { __typename ... on Commit { statusCheckRollup { contexts(first: 100) { totalCount pageInfo { hasNextPage } nodes { __typename ... on CheckRun { name status conclusion startedAt checkSuite { databaseId app { databaseId slug } workflowRun { event workflow { databaseId } } } } ... on StatusContext { context state createdAt } } } } } } } }'
+GMG_ROLLUP_QUERY='query($owner: String!, $repo: String!, $oid: GitObjectID!) { repository(owner: $owner, name: $repo) { object(oid: $oid) { __typename ... on Commit { statusCheckRollup { contexts(first: 100) { totalCount pageInfo { hasNextPage } nodes { __typename ... on CheckRun { name status conclusion startedAt detailsUrl checkSuite { databaseId app { databaseId slug } workflowRun { event workflow { databaseId } } } } ... on StatusContext { context state createdAt targetUrl } } } } } } } }'
 
 # The answer's shape: OK, EMPTY (no context), or ERR<TAB><why>.
 GMG_ROLLUP_SHAPE='
@@ -607,10 +616,11 @@ GMG_ROLLUP_SHAPE='
       else "OK" end
   end'
 
-# The judgment. One line per run or finding: BAD<TAB><text> for a run that is
-# judged and not green, or a check whose order cannot be read; OLD<TAB><text>
-# for a superseded run. The caller refuses on any other line.
-GMG_ROLLUP_JUDGE='
+# The definitions both judges share: the head's (GMG_ROLLUP_JUDGE) and the
+# base tip's (GMG_TIP_JUDGE, DND-1902), so a run's identity, order and colour
+# are read one way. by_identity turns the rollup into one array per check
+# identity, holding that identity's runs grouped by check suite.
+GMG_ROLLUP_DEFS='
   def ts: if .__typename == "StatusContext" then .createdAt else .startedAt end;
   def ts_ok: type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$");
   def nonempty: type == "string" and length > 0;
@@ -641,10 +651,18 @@ GMG_ROLLUP_JUDGE='
             (.checkSuite.workflowRun.event // null), .name]
     else ["alone", $i] end;
   def suite($i): if .__typename == "CheckRun" then .checkSuite.databaseId else $i end;
-  [.data.repository.object.statusCheckRollup.contexts.nodes | to_entries[] | .key as $i | .value
-    | {k: key($i), s: suite($i), v: .}]
-  | group_by(.k)[]
-  | [group_by(.s)[] | map(.v)] as $suites
+  def by_identity:
+    [.data.repository.object.statusCheckRollup.contexts.nodes | to_entries[] | .key as $i | .value
+      | {k: key($i), s: suite($i), v: .}]
+    | group_by(.k)[]
+    | [group_by(.s)[] | map(.v)];
+'
+
+# The judgment. One line per run or finding: BAD<TAB><text> for a run that is
+# judged and not green, or a check whose order cannot be read; OLD<TAB><text>
+# for a superseded run. The caller refuses on any other line.
+GMG_ROLLUP_JUDGE="$GMG_ROLLUP_DEFS"'
+  by_identity as $suites
   | if ($suites | length) == 1 then ($suites[0][] | if green then empty else "BAD\t\(lbl)" end)
     elif ([$suites[][] | ts | ts_ok] | all | not) then
       "BAD\t\($suites[0][0] | cname): runs from \($suites | length) check suites on the head, and their order cannot be read (start times: \([$suites[][] | ts | tostring] | join(", "))), so which run is current is unknown; a run with no start time has not started yet"
@@ -712,6 +730,299 @@ ${old%$'\n'}}" >&2
   return 0
 }
 
+# ---- stop the line: the base tip's own runs (DND-1902) ----------------------
+# The defect: on 2026-10-03 gen_saas main went red at 14:06Z (a duplicate
+# migration version), and an admiral landed another PR onto it at 14:23Z,
+# because the stop-the-line message reached it a minute late. Nothing in the
+# merge path read the base tip's own CI or deploy runs. custom has the
+# mechanical form (ai/bin/main-health's red marker, refused by `gh-athena git
+# push`); GitHub-repo merges had none.
+#
+# So every merge (this guard, and locked-merge, which calls gmg_tip_health
+# under its lock) reads the rollup of the base tip itself, the same GraphQL
+# read and the same run identity and superseding rules as the head's checks.
+# A push run (CI or a post-merge deploy) reports its checks on that commit.
+#   * RED: a judged run concluded red (a CheckRun COMPLETED and not
+#     SUCCESS/NEUTRAL/SKIPPED, a StatusContext FAILURE/ERROR), and it is not
+#     superseded by a newer suite whose runs of that check are all SUCCESS.
+#     Refused, naming every red run and its URL, unless the head CONTAINS the
+#     tip: a red-main fix, custom's rule. Containment is read from the local
+#     object store when both commits are there, else from the forge's compare.
+#   * PENDING: a run has not concluded. NOT red, so the merge proceeds at once
+#     and names the runs. Holding on pending would block every merge for the
+#     length of a deploy, and a pending run that turns red is caught by the
+#     next merge's read.
+#   * Unreadable (the rollup, its shape, the judge, or containment of a red
+#     tip): COULD NOT LOOK, refused, never green, and never reported as red.
+#   * No check reported on the tip (a repo with no CI, custom's shape): not
+#     red; the merge proceeds as before and says so.
+# No flag or env var skips it (~/dev/custom/CLAUDE.md -> "A check's own bar must
+# not live in the diff it is checking").
+#
+# Residuals (named, not closed): a merge onto a PENDING tip that then turns
+# red lands onto a red main, and its own merge commit is pending in turn; a
+# failed attempt re-run inside the SAME check suite still reads red (the
+# head judge's residual too), so the tip stays red until a new commit or a
+# fix; a red run beyond the rollup's first 100 contexts is COULD NOT LOOK.
+GMG_TIP_JUDGE="$GMG_ROLLUP_DEFS"'
+  def known: .__typename == "StatusContext" or .__typename == "CheckRun";
+  def red:
+    if .__typename == "StatusContext" then (.state // "") | IN("FAILURE", "ERROR")
+    elif .__typename == "CheckRun" then .status == "COMPLETED" and (green | not)
+    else false end;
+  def pending:
+    if .__typename == "StatusContext" then ((.state // "") | IN("SUCCESS", "FAILURE", "ERROR")) | not
+    elif .__typename == "CheckRun" then .status != "COMPLETED"
+    else false end;
+  def url: (if .__typename == "StatusContext" then .targetUrl else .detailsUrl end) // "" | tostring;
+  def tlbl: "\(lbl)\(when)\(if url == "" then "" else " \(url)" end)";
+  def judge($why):
+    if (known | not) then "ODD\t\(lbl)"
+    elif red then "RED\t\(tlbl)\($why)"
+    elif pending then "PEND\t\(tlbl)"
+    else empty end;
+  by_identity as $suites
+  | if ($suites | length) == 1 then ($suites[0][] | judge(""))
+    elif ([$suites[][] | ts | ts_ok] | all | not) then
+      ($suites[][] | judge(": runs from \($suites | length) check suites, and their order cannot be read, so this run is not shown superseded"))
+    else ($suites | map({t: (map(ts) | max), runs: .}) | sort_by(.t)) as $o
+      | ($o[-1].t) as $top | [$o[] | select(.t == $top)] as $tied
+      | if ($tied | length) > 1 then
+          ($o[].runs[] | judge(": runs from \($tied | length) check suites share the newest start time \($top), so this run is not shown superseded"))
+        else $o[-1].runs as $cur | [$o[:-1][].runs[]] as $old | ($cur | all(success)) as $supersedes
+          | ($cur[] | judge(", the current run")),
+            ($old[] | if (known | not) then "ODD\t\(lbl)"
+                      elif (red | not) then empty
+                      elif $supersedes then "OLD\t\(tlbl)"
+                      else "RED\t\(tlbl): the newer run is not SUCCESS (\([$cur[] | lbl] | join("; "))), so it does not supersede this one" end)
+        end
+    end'
+
+# gmg_tip_health <owner> <repo> <tip> <head|""> <gitdir> : judges the base
+# tip's own runs. Never exits. Sets GMG_TIP_STATE to NONE, CLEAN, PENDING or FIX
+# (return 0, the merge may proceed), RED (return 1) or LOOK (return 2), with
+# GMG_TIP_RUNS (the red runs, then the pending ones, one per line), GMG_TIP_OLD
+# (superseded red runs) and GMG_TIP_WHY (the reason, for LOOK). An empty head
+# (`--auto`) can never be a red-main fix. It reads with `gh`, so the caller
+# sets the identity, and containment from git in <gitdir> when it can.
+gmg_tip_health() {
+  local owner="$1" repo="$2" tip="$3" head="$4" gitdir="$5" rollup err rc why shape judged line red="" pend="" odd="" cmp behind
+  GMG_TIP_STATE="LOOK" GMG_TIP_RUNS="" GMG_TIP_OLD="" GMG_TIP_WHY=""
+  if ! [[ "$tip" =~ ^[0-9a-f]{40}$ ]]; then
+    GMG_TIP_WHY="the base tip '$tip' is not a full SHA"; return 2
+  fi
+  if ! err="$(mktemp)"; then GMG_TIP_WHY="mktemp failed, so the tip's runs could not be read"; return 2; fi
+  if rollup="$(gh api graphql -f query="$GMG_ROLLUP_QUERY" -f owner="$owner" -f repo="$repo" -f oid="$tip" 2>"$err")"; then rc=0; else rc=$?; fi
+  why="$(tr '\n' ' ' <"$err")"; rm -f "$err"
+  if [ "$rc" != 0 ]; then
+    GMG_TIP_WHY="the runs on $tip could not be read (\`gh api graphql\` statusCheckRollup exit $rc: ${why:-no stderr})"; return 2
+  fi
+  if ! shape="$(jq -r "$GMG_ROLLUP_SHAPE" <<<"$rollup" 2>/dev/null)"; then
+    shape="ERR"$'\t'"the answer is not the expected JSON: $(head -c 200 <<<"$rollup" | tr '\n' ' ')"
+  fi
+  case "$shape" in
+    OK) ;;
+    EMPTY) GMG_TIP_STATE="NONE"; return 0 ;;
+    *) GMG_TIP_WHY="the runs on $tip could not be read: ${shape#ERR$'\t'}"; return 2 ;;
+  esac
+  if ! judged="$(jq -r "$GMG_TIP_JUDGE" <<<"$rollup" 2>&1)"; then
+    GMG_TIP_WHY="the tip judge in ai/lib/gh-merge-guard.sh failed (jq: $(tr '\n' ' ' <<<"$judged")); a defect in the guard, not in the PR"; return 2
+  fi
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      RED$'\t'*) red+="    ${line#*$'\t'}"$'\n' ;;
+      PEND$'\t'*) pend+="    ${line#*$'\t'}"$'\n' ;;
+      OLD$'\t'*) GMG_TIP_OLD+="    ${line#*$'\t'}"$'\n' ;;
+      *) odd+="    $line"$'\n' ;;
+    esac
+  done <<<"$judged"
+  if [ -n "$odd" ]; then
+    GMG_TIP_WHY="the tip judge printed lines it has no meaning for (a context of a type it does not know, or a defect in ai/lib/gh-merge-guard.sh):
+${odd%$'\n'}"; return 2
+  fi
+  if [ -z "$red" ]; then
+    GMG_TIP_RUNS="${pend%$'\n'}"
+    if [ -n "$pend" ]; then GMG_TIP_STATE="PENDING"; else GMG_TIP_STATE="CLEAN"; fi
+    return 0
+  fi
+  GMG_TIP_RUNS="${red%$'\n'}"
+  GMG_TIP_STATE="RED"
+  [ -n "$head" ] || return 1
+  # Does the head contain the red tip? The commit graph answers when both
+  # commits are local (exit 0 yes, 1 no); anything else asks the forge.
+  if git -C "$gitdir" merge-base --is-ancestor "$tip" "$head" 2>/dev/null; then rc=0; else rc=$?; fi
+  case "$rc" in
+    0) GMG_TIP_STATE="FIX"; return 0 ;;
+    1) return 1 ;;
+  esac
+  if ! err="$(mktemp)"; then
+    GMG_TIP_STATE="LOOK"; GMG_TIP_WHY="$tip is red, and mktemp failed, so whether the head $head contains it could not be read"; return 2
+  fi
+  if cmp="$(gh api "repos/$owner/$repo/compare/$tip...$head" 2>"$err")"; then rc=0; else rc=$?; fi
+  why="$(tr '\n' ' ' <"$err")"; rm -f "$err"
+  behind="$(jq -r 'if (.behind_by | type) == "number" then .behind_by else empty end' <<<"$cmp" 2>/dev/null)" || behind=""
+  if [ "$rc" != 0 ] || ! [[ "$behind" =~ ^[0-9]+$ ]]; then
+    GMG_TIP_STATE="LOOK"
+    GMG_TIP_WHY="$tip is red (${GMG_TIP_RUNS#    }), and whether the head $head contains it could not be read (\`gh api repos/$owner/$repo/compare/$tip...$head\` exit $rc: ${why:-body '$(head -c 200 <<<"$cmp" | tr '\n' ' ')'})"
+    return 2
+  fi
+  if [ "$behind" = 0 ]; then GMG_TIP_STATE="FIX"; return 0; fi
+  return 1
+}
+
+# ---- stop the line: the base tip's CONTENT (DND-1902) -----------------------
+# A green run is not enough. gen_saas main runs only its post-merge deploy, not
+# the suite, and on 2026-10-03 9374d81c's deploy reported SUCCESS ("Migrations
+# already up") while main held two athena migrations with one version. So the
+# tip's TREE is read too, against what ai/config/main-content-checks.json
+# declares for the repo. The declaration lives in custom, never in the repo
+# whose merge it judges (~/dev/custom/CLAUDE.md -> "A check's own bar must not
+# live in the diff it is checking"). One check kind exists:
+#   unique_migration_dirs (ERE on a directory path): in every matching
+#   directory, two files <digits>_*.exs with the same digits are RED.
+# A red-main fix is a head that contains the tip AND whose own tree no longer
+# holds the duplicate (a merge of a head that contains the tip lands the
+# head's tree). In a repo that declares an integration gate, the receipt gate
+# has already required the head's own INTEGRATION OK receipt.
+GMG_CONTENT_CONFIG="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../config/main-content-checks.json"
+
+# gmg_mig_dups <gitdir> <rev> <dir-ere> : prints one line per duplicated
+# version ("<dir> version <v>: <file>, <file>"). Returns 2 when the tree
+# cannot be read.
+gmg_mig_dups() {
+  local gitdir="$1" rev="$2" re="$3" tree path dir base v key
+  local -A files=()
+  if ! tree="$(git -C "$gitdir" ls-tree -r --name-only "$rev" 2>/dev/null)"; then return 2; fi
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    base="${path##*/}"
+    [[ "$base" =~ ^([0-9]+)_.*\.exs$ ]] || continue
+    v="${BASH_REMATCH[1]}"
+    dir="${path%/*}"; [ "$dir" != "$path" ] || dir=""
+    [[ "$dir" =~ $re ]] || continue
+    key="$dir version $v"
+    files["$key"]+="${files[$key]:+, }$base"
+  done <<<"$tree"
+  for key in "${!files[@]}"; do
+    [[ "${files[$key]}" == *", "* ]] && printf '%s: %s\n' "$key" "${files[$key]}"
+  done | sort
+  return 0
+}
+
+# gmg_content_health <owner> <repo> <tip> <head|""> <gitdir> : judges the base
+# tip's content. Never exits. Sets GMG_CONTENT_STATE to NONE (no check
+# declared), CLEAN or FIX (return 0), RED (return 1) or LOOK (return 2), with
+# GMG_CONTENT_DUPS and GMG_CONTENT_WHY.
+gmg_content_health() {
+  local owner="$1" repo="$2" tip="$3" head="$4" gitdir="$5" key re rc dups
+  GMG_CONTENT_STATE="LOOK" GMG_CONTENT_DUPS="" GMG_CONTENT_WHY=""
+  key="${owner,,}/${repo,,}"
+  if ! re="$(jq -er --arg k "$key" 'if .schema != "main-content-checks/1" then error("schema is not main-content-checks/1")
+             elif (.repos | type) != "object" then error("repos is not an object")
+             elif .repos[$k] == null then ""
+             elif (.repos[$k] | type) != "object" or (.repos[$k] | keys) != ["unique_migration_dirs"]
+                  or (.repos[$k].unique_migration_dirs | type) != "string" or .repos[$k].unique_migration_dirs == ""
+               then error("the entry for \($k) is not {\"unique_migration_dirs\": \"<ERE>\"}")
+             else .repos[$k].unique_migration_dirs end' "$GMG_CONTENT_CONFIG" 2>&1)"; then
+    GMG_CONTENT_WHY="the content declaration $GMG_CONTENT_CONFIG cannot be read: $(tr '\n' ' ' <<<"$re")"; return 2
+  fi
+  if [ -z "$re" ]; then GMG_CONTENT_STATE="NONE"; return 0; fi
+  if [[ "" =~ $re ]]; [ $? = 2 ]; then
+    GMG_CONTENT_WHY="the unique_migration_dirs pattern for $key in $GMG_CONTENT_CONFIG is not a valid ERE ('$re')"; return 2
+  fi
+  if dups="$(gmg_mig_dups "$gitdir" "$tip" "$re")"; then rc=0; else rc=$?; fi
+  if [ "$rc" != 0 ]; then
+    GMG_CONTENT_WHY="the tree of the tip $tip cannot be read in $gitdir (\`git ls-tree -r $tip\` failed; fetch origin so it is local)"; return 2
+  fi
+  if [ -z "$dups" ]; then GMG_CONTENT_STATE="CLEAN"; return 0; fi
+  GMG_CONTENT_DUPS="$(sed 's/^/    /' <<<"$dups")"
+  GMG_CONTENT_STATE="RED"
+  [ -n "$head" ] || return 1
+  if git -C "$gitdir" merge-base --is-ancestor "$tip" "$head" 2>/dev/null; then rc=0; else rc=$?; fi
+  case "$rc" in
+    0) ;;
+    1) return 1 ;;
+    *) GMG_CONTENT_STATE="LOOK"
+       GMG_CONTENT_WHY="the tip $tip holds a duplicated migration version, and the head $head is not in the object store of $gitdir, so whether it is a fix cannot be read (fetch the PR branch)"
+       return 2 ;;
+  esac
+  if dups="$(gmg_mig_dups "$gitdir" "$head" "$re")"; then rc=0; else rc=$?; fi
+  if [ "$rc" != 0 ]; then
+    GMG_CONTENT_STATE="LOOK"; GMG_CONTENT_WHY="the tree of the head $head cannot be read in $gitdir"; return 2
+  fi
+  if [ -n "$dups" ]; then
+    GMG_CONTENT_DUPS+=$'\n'"  the head $head contains the tip but still holds:"$'\n'"$(sed 's/^/    /' <<<"$dups")"
+    return 1
+  fi
+  GMG_CONTENT_STATE="FIX"; return 0
+}
+
+# gmg_line_check <owner> <repo> <base> <tip> <head|""> <gitdir> : the whole
+# stop-the-line judgment, the runs (gmg_tip_health) and the content
+# (gmg_content_health). Never exits. Returns 0 (GMG_LINE_NOTE says why the
+# merge may proceed), 1 RED or 2 COULD NOT LOOK (GMG_LINE_WHY says why). A red
+# finding outranks a COULD NOT LOOK in the other half: either refuses.
+gmg_line_check() {
+  local owner="$1" repo="$2" base="$3" tip="$4" head="$5" gitdir="$6" rr cr
+  GMG_LINE_NOTE="" GMG_LINE_WHY=""
+  if gmg_tip_health "$owner" "$repo" "$tip" "$head" "$gitdir"; then rr=0; else rr=$?; fi
+  if gmg_content_health "$owner" "$repo" "$tip" "$head" "$gitdir"; then cr=0; else cr=$?; fi
+  if [ "$rr" = 1 ] || [ "$cr" = 1 ]; then
+    GMG_LINE_WHY="MAIN RED: $base tip $tip is RED, so the line is stopped (DND-1902)."
+    [ "$rr" = 1 ] && GMG_LINE_WHY+=" Red run(s):
+$GMG_TIP_RUNS${GMG_TIP_OLD:+
+  superseded red runs, not judged:
+${GMG_TIP_OLD%$'\n'}}"
+    [ "$cr" = 1 ] && GMG_LINE_WHY+="
+  Duplicated migration version(s) (ai/config/main-content-checks.json):
+$GMG_CONTENT_DUPS"
+    GMG_LINE_WHY+="
+  The head ${head:-(none: --auto)} is not a red-main fix: it must contain $tip and remove every duplicate."
+    return 1
+  fi
+  if [ "$rr" = 2 ] || [ "$cr" = 2 ]; then
+    GMG_LINE_WHY="COULD NOT LOOK: whether the $base tip $tip is red cannot be told:"
+    [ "$rr" = 2 ] && GMG_LINE_WHY+=" $GMG_TIP_WHY."
+    [ "$cr" = 2 ] && GMG_LINE_WHY+=" $GMG_CONTENT_WHY."
+    return 2
+  fi
+  case "$GMG_TIP_STATE" in
+    NONE) GMG_LINE_NOTE="BASE-TIP $base $tip: no check has reported on it, so no run is red" ;;
+    CLEAN) GMG_LINE_NOTE="BASE-TIP $base $tip: no judged run is red" ;;
+    PENDING) GMG_LINE_NOTE="BASE-TIP $base $tip PENDING: no judged run is red, and these have not concluded; a pending run is not red, so this merge is not held:
+$GMG_TIP_RUNS" ;;
+    FIX) GMG_LINE_NOTE="BASE-TIP $base $tip is RED, and the head contains it: RED-MAIN FIX, merging onto the red tip. Red run(s):
+$GMG_TIP_RUNS" ;;
+  esac
+  case "$GMG_CONTENT_STATE" in
+    NONE) GMG_LINE_NOTE+=$'\n'"  content: no check declared for $owner/$repo" ;;
+    CLEAN) GMG_LINE_NOTE+=$'\n'"  content: no duplicated migration version" ;;
+    FIX) GMG_LINE_NOTE+=$'\n'"  content: RED-MAIN FIX: the tip holds a duplicated migration version and the head removes it:"$'\n'"$GMG_CONTENT_DUPS" ;;
+  esac
+  GMG_LINE_NOTE+=" (DND-1902)"
+  return 0
+}
+
+# gmg_line_fix <owner> <repo> <base> <tip> : the Fix: text for a RED tip.
+gmg_line_fix() {
+  printf 'land only a red-main fix: a head that contains %s, removes every duplicate named above, and carries its own INTEGRATION OK receipt (merge origin/%s into it, fix it, push as Athena, re-gate). Every other PR waits until %s is green again (`~/dev/custom/ai/bin/gh-ci-wait --repo %s/%s --sha <the new %s tip>`)' \
+    "$4" "$3" "$3" "$1" "$2" "$3"
+}
+
+# gmg_tip_gate <shown> <owner> <repo> <base> <tip> <head|""> : returns 0 when
+# the base tip does not stop the merge; exits 3 otherwise.
+gmg_tip_gate() {
+  local shown="$1" owner="$2" repo="$3" base="$4" tip="$5" head="$6" rc
+  if gmg_line_check "$owner" "$repo" "$base" "$tip" "$head" .; then rc=0; else rc=$?; fi
+  case "$rc" in
+    0) printf '%s: %s\n' "$GMG_TOOL" "$GMG_LINE_NOTE" >&2; return 0 ;;
+    1) gmg_refuse "$shown" "$GMG_LINE_WHY" "$(gmg_line_fix "$owner" "$repo" "$base" "$tip"). Then $GMG_LAND" ;;
+    *) gmg_refuse "$shown" "$GMG_LINE_WHY" \
+         "make the tip readable (network up, the right -R <owner>/<repo>, gh auth, \`git fetch origin\` in this checkout), then $GMG_LAND" ;;
+  esac
+}
+
 # gmg_guard <gh args...> : the entry point. Returns 0 or exits 3.
 gmg_guard() {
   local shown="gh $*" pr_json err rc url owner repo base head n_prot n_rules w
@@ -758,6 +1069,7 @@ gmg_guard() {
     local probes; probes="$(cat "$GMG_PROBE_FILE")"; rm -f "$GMG_PROBE_FILE"
     if [ "$(( n_prot + n_rules ))" -gt 0 ]; then
       gmg_receipt_gate "$shown" "$owner" "$repo" "$base" ""
+      gmg_tip_gate "$shown" "$owner" "$repo" "$base" "$GMG_BASE_TIP" ""
       return 0
     fi
     gmg_refuse "$shown" "\`--auto\` waits only on the base branch's REQUIRED checks, and $GMG_TOOL could not establish a gate for $owner/$repo:$base: 0 required checks readable. Probes:
@@ -776,5 +1088,6 @@ $probes
   fi
   gmg_checks_green "$shown" "$owner" "$repo" "$head"
   gmg_receipt_gate "$shown" "$owner" "$repo" "$base" "$head"
+  gmg_tip_gate "$shown" "$owner" "$repo" "$base" "$GMG_BASE_TIP" "$head"
   return 0
 }

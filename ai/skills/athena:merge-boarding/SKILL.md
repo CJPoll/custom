@@ -156,7 +156,16 @@ The landing, as Cody confirmed it (2026-10-01):
    only failure is `check-hooks-registered` or `check-inbox-registry` drift on
    a row the landing added is a skipped install, not a bad landing: run step
    5's `landing-installers` for that landing, then `main-health check
-   --recheck`.
+   --recheck`. In a GitHub repo, `locked-merge` (exit 11, `MAIN RED`) and
+   the `gh-athena pr merge` guard refuse a merge while a judged run on the
+   base tip itself (CI or a post-merge deploy) is red, or while the tip's
+   tree breaks what `ai/config/main-content-checks.json` declares for the
+   repo (gen_saas: a duplicated migration version in one app). The one
+   exception is a red-main fix: a head that contains the red tip, removes
+   every duplicate, and carries its own `INTEGRATION OK` receipt. What cannot
+   be read is COULD NOT LOOK and refused; a pending run is not red and does
+   not hold the merge (DND-1902; `ai/lib/gh-merge-guard.sh` →
+   `gmg_line_check`). No flag or env var skips it.
 
 **Later (2026-10-02, DND-1664):** step 5 was "Check `main` after the push"
 and ran `main-health check` first, with no fast-forward or installer before
@@ -940,11 +949,20 @@ So the merge step is a critical section on every GitHub-merged repo:
     idle, unless the commit carries a skip marker;
   - the base-branch run list must show nothing live.
 
-  The base run's conclusion is printed. A non-success is a `WARN`, not a
-  refusal, so the fix or revert can still merge. But a failed deploy stops the
-  line (owner, 2026-10-01): on that `WARN`, merge nothing but the fix or the
-  revert until a deploy succeeds. Do not hand-roll a deploy waiter around it;
-  retry on exit 5.
+  The base run's conclusion is printed. A failed deploy stops the line
+  (owner, 2026-10-01), and `locked-merge` enforces it: a deploy run that
+  reports red on the base tip is refused by the red-tip check (exit 11,
+  DND-1902) unless the head contains the tip, so the fix still merges. A
+  non-success this check prints that the tip's rollup does not show stays a
+  `WARN`: merge nothing but the fix or the revert until a deploy succeeds. Do
+  not hand-roll a deploy waiter around it; retry on exit 5.
+
+  **Later (2026-10-03, DND-1902):** this said "A non-success is a `WARN`, not
+  a refusal", and `locked-merge` only warned on a failed deploy, so holding
+  the line rested on a message reaching each admiral in time. Superseded by
+  the red-tip check: gen_saas main went red 2026-10-03 14:06Z, and a merge
+  landed onto it at 14:23Z because the stop-the-line message arrived a minute
+  late.
 
   **Later (2026-10-01, DND-1463):** this said "no ratified rule holds merges
   on a failed deploy". Superseded: Cody's landing doctrine stops the line on a

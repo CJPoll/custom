@@ -1,0 +1,9 @@
+{
+  "schema": "main-content-checks/1",
+  "about": "DND-1902: what a GitHub repo's base tip must not CONTAIN for a merge onto it (ai/lib/gh-merge-guard.sh -> gmg_content_health). Keyed by lower-case <owner>/<repo>. unique_migration_dirs is an ERE matched against each directory path in the tip's tree; in every matching directory, no two files named <digits>_*.exs may share the digits (an Ecto migration version). A repo not listed declares no content check. The bar lives here, in custom, never in the repo whose merge it judges.",
+  "repos": {
+    "cjpoll/gen_saas": {
+      "unique_migration_dirs": "^apps/[^/]+/priv/repo/migrations$"
+    }
+  }
+}
