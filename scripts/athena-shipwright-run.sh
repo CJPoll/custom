@@ -1225,14 +1225,14 @@ fi
 # --- 7. teardown: publish on success, then always remove the lane ------------
 #
 # On a successful session, publish: refresh origin/main and fast-forward the
-# main checkout to the run's own newest landed commit (DND-1541) so the machine's live harness advances. --ff-only
-# is the whole safety story — it can only move the pointer forward to a commit
+# main checkout to the run's own newest landed commit (DND-1541) so the
+# machine's live harness advances. --ff-only is the whole safety story — it can only move the pointer forward to a commit
 # that already contains main's history, it never creates or rewrites a commit,
 # and git refuses it outright rather than overwrite a locally-modified file. A
 # failure here is reported and NOT retried or forced.
 #
-# With an origin, only LANDED work is published this way (DND-1008): the tip
-# must already be on origin/main. A run that put its work up for review (a PR
+# With an origin, only LANDED work is published this way (DND-1008): the run's
+# own commit must already be on origin/main. A run that put its work up for review (a PR
 # branch) leaves the main checkout alone, so the live harness never runs
 # unreviewed code and local main never diverges from origin/main.
 tip="$(git -C "${WORKTREE}" rev-parse HEAD 2>/dev/null || true)"
@@ -1269,13 +1269,18 @@ own_any=0; [ -z "${own}" ] || own_any=1
 OWN_LANDED="0"
 own_tip=""
 own_newest=""
+# One fetch, before the landing checks and the run record read origin/main. A
+# failed fetch leaves it stale, and the record says so.
+main_note=""
+if has_origin; then
+  git -C "${MAIN_CHECKOUT}" fetch --quiet origin main >>"${log}" 2>&1 || main_note=" (the teardown fetch failed; origin/main may be stale)"
+fi
 if [ "${own_known}" -eq 0 ]; then
   OWN_LANDED="UNKNOWN (${own_why})"
-  echo "athena-shipwright: run ${ts}: ${own_why}, so the run's own commits cannot be told from a sync; nothing past BASE was credited." >&2
-  echo "  Fix: ${own_fix} Any work the run landed is on origin/main: 'git -C ${MAIN_CHECKOUT} merge --ff-only origin/main' picks it up." >&2
-fi
-if [ "${status}" -eq 0 ] && [ "${own_any}" -eq 1 ] && has_origin; then
-  git -C "${MAIN_CHECKOUT}" fetch --quiet origin main >>"${log}" 2>&1 || true
+  catch_up=""
+  has_origin && catch_up=" Any work the run landed is on origin/main: 'git -C ${MAIN_CHECKOUT} merge --ff-only origin/main' picks it up."
+  echo "athena-shipwright: run ${ts}: ${own_why}, so the run's own commits cannot be told from a sync; nothing past BASE was credited, and only BASE is published." >&2
+  echo "  Fix: ${own_fix}${catch_up}" >&2
 fi
 publish_to=""
 if [ "${own_any}" -eq 1 ]; then
@@ -1323,10 +1328,6 @@ fi
 # The run record (DND-1541): what the run itself landed, and how far origin/main
 # moved during it, whoever moved it. The second is never the first. A fetch that
 # failed leaves origin/main stale, and the record says so.
-main_note=""
-if has_origin; then
-  git -C "${MAIN_CHECKOUT}" fetch --quiet origin main >>"${log}" 2>&1 || main_note=" (the teardown fetch failed; origin/main may be stale)"
-fi
 main_after="$(git -C "${MAIN_CHECKOUT}" rev-parse --verify --quiet refs/remotes/origin/main 2>/dev/null || true)"
 if has_origin && [ "${base_desc}" = "origin/main" ] && [ -n "${main_after}" ]; then
   main_moved="origin/main ${BASE_COMMIT}..${main_after} commits=$(git -C "${MAIN_CHECKOUT}" rev-list --count "${BASE_COMMIT}..${main_after}" 2>/dev/null || echo '?')${main_note}"
