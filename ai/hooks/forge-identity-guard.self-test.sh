@@ -235,6 +235,16 @@ check_text "4e4. ...the deny is the ref-write one" 'creates or moves a ref'
 run "$(bash_json 'gh api -X POST repos/o/r/git/refs -f sha=abc -qXGET')"
 check "4e6. -X POST + attached -qXGET (the jq filter XGET) on git/refs" deny
 check_text "4e7. ...the deny is the ref-write one" 'creates or moves a ref'
+# The shared classifier (generic api-write rule, and the PATH wrappers) reads the
+# attached value the same way, on a route that is not a ref.
+run "$(bash_json 'gh api -X POST repos/o/r/issues/1/comments -f body=x -qXGET')"
+check "4e8. -X POST + attached -qXGET on a non-ref route" deny
+run "$(bash_json 'gh api -X POST repos/o/r/issues/1/comments -f body=x -RXGET')"
+check "4e9. -X POST + attached -RXGET (the repo value) on a non-ref route" deny
+run "$(bash_json 'gh api repos/o/r/issues/1/comments -fbody=-XGET')"
+check "4e10. attached -f field whose value looks like -XGET: a field, so a POST" deny
+run "$(bash_json 'gh api repos/o/r/issues/1/comments -qXGET')"
+check "4e11. attached -q value alone is a read" allow
 run "$(bash_json 'gh api -X GET repos/o/r/git/refs/heads/main --jq -XPATCH')"
 check "4e5. verdict unchanged: -X GET + --jq -XPATCH is still denied" deny
 

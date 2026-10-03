@@ -118,6 +118,11 @@ function api_write(s,    k, x, m, method, field, ovr, ep, fromfile) {
     x = t[k]
     if (x == "-X" || x == "--method") { method = t[k + 1]; k++; continue }
     if (x ~ /^--method=/) { method = substr(x, 10); continue }
+    # An attached value (`-qXGET`: the jq filter XGET) is that option's value,
+    # never the -X cluster. -H and -f/-F attached are judged on their own below.
+    if (x ~ /^-[qtpR]./ && x !~ /^--/) continue
+    if (x ~ /^-H./ && x !~ /^--/) { if (tolower(x) ~ /x-(http-)?method/) ovr = 1; continue }
+    if (x ~ /^-[fF]./ && x !~ /^--/) { field = 1; if (unread(x)) fromfile = 1; continue }
     if (x ~ /^-[A-Za-z]*X/ && x !~ /^--/) {
       m = x; sub(/^-[A-Za-z]*X=?/, "", m)
       if (m == "") { method = t[k + 1]; k++ } else method = m
