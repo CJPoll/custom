@@ -18,7 +18,7 @@
 #     and without its trailing slash (the most specific key a caller can
 #     write), and remote.<remote-name>.proxy= (which overrides http.proxy).
 #     Unsets every proxy, TLS-override and curl-trace variable in
-#     FG_HTTP_UNSET_ENV.
+#     FG_HTTP_UNSET_ENV, and turns every trace2 target off.
 #   fg_http_pin_args <remote-name> <url>
 #     the same pin as `-c` options (FG_HTTP_ARGS), for a git whose own argv
 #     carries the caller's -c.
@@ -29,13 +29,26 @@
 #     or a CA or TLS backend setting is present. A CA setting is refused, not
 #     reset: git has no value that restores curl's default CA store.
 #     A read that fails is a refusal, never a pass.
+#
+# Out of scope: http.sslVersion and http.sslCipherList (a weaker TLS version
+# or cipher reveals nothing while verification is on), and variables that
+# load code into the process (LD_PRELOAD, OPENSSL_CONF, OPENSSL_MODULES):
+# same uid is not a boundary, the transport's stated residual.
 
 FG_HTTP_UNSET_ENV=(
   HTTPS_PROXY https_proxy HTTP_PROXY http_proxy ALL_PROXY all_proxy
   GIT_SSL_NO_VERIFY GIT_SSL_CAINFO GIT_SSL_CAPATH GIT_SSL_BACKEND
   CURL_CA_BUNDLE SSL_CERT_FILE SSL_CERT_DIR SSLKEYLOGFILE
   GIT_TRACE_CURL GIT_TRACE_CURL_NO_DATA GIT_CURL_VERBOSE GIT_TRACE_REDACT
+  CURL_SSL_BACKEND GIT_TRACE2_CONFIG_PARAMS GIT_TRACE2_ENV_VARS
 )
+# trace2 logs config values (trace2.configParams) and environment variables
+# (trace2.envVars), and the header travels in GIT_CONFIG_VALUE_<n>. A target
+# set to 0 in the environment beats any trace2.* config, global included.
+fg_http_trace_off() {
+  unset "${FG_HTTP_UNSET_ENV[@]}"
+  export GIT_TRACE2=0 GIT_TRACE2_EVENT=0 GIT_TRACE2_PERF=0
+}
 FG_HTTP_WHY=""
 
 fg_http_sq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
@@ -63,7 +76,7 @@ fg_http_pin() {
     GIT_CONFIG_PARAMETERS="${GIT_CONFIG_PARAMETERS:+${GIT_CONFIG_PARAMETERS} }$(fg_http_sq "${kv%%=*}")=$(fg_http_sq "${kv#*=}")"
   done
   export GIT_CONFIG_PARAMETERS
-  unset "${FG_HTTP_UNSET_ENV[@]}"
+  fg_http_trace_off
 }
 
 # fg_http_pin_args <remote-name> <url> : the same pin for a git whose OWN argv
@@ -76,11 +89,11 @@ fg_http_pin_args() {
   fg_http_kvs "$1" "$2"
   FG_HTTP_ARGS=()
   for kv in "${FG_HTTP_KVS[@]}"; do FG_HTTP_ARGS+=( -c "$kv" ); done
-  unset "${FG_HTTP_UNSET_ENV[@]}"
+  fg_http_trace_off
 }
 
 fg_http_check() {
-  local remote="$1" url="$2" u out line key val rp rc
+  local remote="$1" url="$2" u out line key val rp rc verify
   shift 2
   FG_HTTP_WHY=""
   while IFS= read -r u; do
@@ -89,7 +102,7 @@ fg_http_check() {
       FG_HTTP_WHY="git config --get-urlmatch http $u failed (exit $rc), so the TLS and proxy settings for it could not be read"
       return 1
     fi
-    local verify=""
+    verify=""
     while IFS= read -r line; do
       key="${line%% *}"; val=""; [ "$key" != "$line" ] && val="${line#* }"
       case "$key" in

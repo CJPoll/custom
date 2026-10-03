@@ -126,11 +126,10 @@ unset header
 # GIT_CONFIG_PARAMETERS, so these go LAST in GIT_CONFIG_PARAMETERS, where
 # they win: every signing program is refuse-signing, the credential helper
 # list is reset to empty, and there is no askpass.
-sq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 for kv in "gpg.program=${HERE}/refuse-signing" "gpg.openpgp.program=${HERE}/refuse-signing" \
           "gpg.x509.program=${HERE}/refuse-signing" "gpg.ssh.program=${HERE}/refuse-signing" \
           "credential.helper=" "core.askPass="; do
-  GIT_CONFIG_PARAMETERS="${GIT_CONFIG_PARAMETERS:+${GIT_CONFIG_PARAMETERS} }$(sq "${kv%%=*}")=$(sq "${kv#*=}")"
+  GIT_CONFIG_PARAMETERS="${GIT_CONFIG_PARAMETERS:+${GIT_CONFIG_PARAMETERS} }$(fg_http_sq "${kv%%=*}")=$(fg_http_sq "${kv#*=}")"
 done
 export GIT_CONFIG_PARAMETERS
 unset GIT_ASKPASS SSH_ASKPASS

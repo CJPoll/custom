@@ -1221,9 +1221,10 @@ for k in gpg.program gpg.openpgp.program gpg.x509.program gpg.ssh.program; do gp
 eff="gpg:$(git config --get gpg.program | sed 's|.*/||'),helper:$(git config --get-all credential.helper | tail -n 1 | sed 's|.*/||'),askpass:$(git config --get core.askPass | sed 's|.*/||')"
 printf 'start via=%s url=%s hdr=%s gpg=%s eff=%s argv=%s\n' "${via}" "${url}" "${hdr}" "${gpg}" "${eff}" "$*" >> "${X_STUB_LOG}"
 # DND-1899: what git's http layer resolves for this URL in this process.
-envs=""; for e in HTTPS_PROXY https_proxy ALL_PROXY GIT_SSL_NO_VERIFY GIT_SSL_CAINFO GIT_TRACE_CURL GIT_CURL_VERBOSE GIT_TRACE_REDACT SSLKEYLOGFILE; do [ -n "${!e+x}" ] && envs="${envs}${e},"; done
-printf 'net via=%s verify=%s proxy=[%s] rproxy=[%s] env=[%s]\n' "${via}" "$(git config --get-urlmatch http.sslverify "${url%/}/")" \
-  "$(git config --get-urlmatch http.proxy "${url%/}/")" "$(git config --get "remote.$1.proxy")" "${envs}" >> "${X_NET_LOG:-/dev/null}"
+envs=""; for e in HTTPS_PROXY https_proxy ALL_PROXY GIT_SSL_NO_VERIFY GIT_SSL_CAINFO GIT_TRACE_CURL GIT_CURL_VERBOSE GIT_TRACE_REDACT SSLKEYLOGFILE GIT_TRACE2_CONFIG_PARAMS GIT_TRACE2_ENV_VARS; do [ -n "${!e+x}" ] && envs="${envs}${e},"; done
+printf 'net via=%s verify=%s proxy=[%s] rproxy=[%s] env=[%s] t2=[%s,%s,%s]\n' "${via}" "$(git config --get-urlmatch http.sslverify "${url%/}/")" \
+  "$(git config --get-urlmatch http.proxy "${url%/}/")" "$(git config --get "remote.$1.proxy")" "${envs}" \
+  "${GIT_TRACE2:-}" "${GIT_TRACE2_EVENT:-}" "${GIT_TRACE2_PERF:-}" >> "${X_NET_LOG:-/dev/null}"
 repo="${X_FORGE}/${url#https://*/}"
 while IFS= read -r line; do
   case "${line}" in
@@ -1365,7 +1366,8 @@ lsn() {
   OUT="$(cd "${X}/src" && env "${envp[@]}" X_EXEC="${X}/exec-real" PATH="${XPATH}" timeout 30 "${WRAPPER}" git "${pre[@]}" ls-remote origin 2>"${TMP}/err")"; RC=$?
   ERR="$(cat "${TMP}/err")"
   kill "${lp}" 2>/dev/null; wait "${lp}" 2>/dev/null
-  if [ "${RC}" != 0 ] && [ ! -s "${X}/lsn.cap" ]; then ok "${l}"
+  # The direct connection was tried and failed (not a refusal before it).
+  if [ "${RC}" != 0 ] && [ ! -s "${X}/lsn.cap" ] && [[ "${ERR}" != *REFUSING* ]] && [[ "${ERR}" == *"unable to access"* ]]; then ok "${l}"
   else bad "${l}" "rc=${RC} listener=[$(head -c 120 "${X}/lsn.cap" 2>/dev/null)] err=$(printf '%s' "${ERR}" | tail -n 2)"; fi
 }
 lsn "N1. a caller's -c http.proxy: the transport's connection never reaches that proxy" arg
@@ -1376,11 +1378,13 @@ lsn "N2. a caller's HTTPS_PROXY: the transport's connection never reaches that p
 NX="http://127.0.0.1:9"
 : > "${X_STUB_LOG}"; : > "${X_NET_LOG}"
 OUT="$(cd "${X}/src" && HTTPS_PROXY="${NX}" ALL_PROXY="${NX}" GIT_SSL_NO_VERIFY=1 GIT_TRACE_CURL="${X}/curl.trace" \
-  GIT_TRACE_REDACT=0 GIT_CURL_VERBOSE=1 SSLKEYLOGFILE="${X}/keys.log" PATH="${XPATH}" "${WRAPPER}" git \
+  GIT_TRACE_REDACT=0 GIT_CURL_VERBOSE=1 SSLKEYLOGFILE="${X}/keys.log" GIT_TRACE2_EVENT="${X}/t2-n3.json" GIT_TRACE2_CONFIG_PARAMS='http.*' \
+  GIT_TRACE2_ENV_VARS=GIT_CONFIG_VALUE_0,GIT_CONFIG_VALUE_1,GIT_CONFIG_VALUE_2 PATH="${XPATH}" "${WRAPPER}" git \
   -c http.sslVerify=false -c 'http.https://github.com/o/r.git/.sslVerify=false' -c 'http.https://github.com/o/r.git.sslVerify=false' \
   -c "http.proxy=${NX}" -c "http.https://github.com/o/r.git/.proxy=${NX}" -c "remote.origin.proxy=${NX}" fetch -q origin 2>"${TMP}/err")"; RC=$?
 ERR="$(cat "${TMP}/err")"
-if [ "${RC}" = 0 ] && [ "$(x_starts)" = 1 ] && grep -qx 'net via=transport verify=true proxy=\[\] rproxy=\[\] env=\[\]' "${X_NET_LOG}"; then
+if [ "${RC}" = 0 ] && [ "$(x_starts)" = 1 ] && grep -qx 'net via=transport verify=true proxy=\[\] rproxy=\[\] env=\[\] t2=\[0,0,0\]' "${X_NET_LOG}" \
+  && ! grep -qF "${B64}" "${X}/t2-n3.json" 2>/dev/null; then
   ok "N3. a caller's sslVerify=false, proxy (http., http.<url>., remote.<name>.) and TLS/trace environment: the transport resolves verify on, no proxy, no trace; the fetch succeeds"
 else bad "N3. the transport's TLS, proxy and trace settings" "$(xdiag) net=[$(cat "${X_NET_LOG}")]"; fi
 
@@ -1399,15 +1403,35 @@ done
 x_reset; x_sync; git -C "${X}/src" commit -q --allow-empty -m n5
 : > "${X_NET_LOG}"
 S="${X}/n5-store"
-OUT="$(cd "${X}/src" && HTTPS_PROXY="${NX}" GIT_SSL_NO_VERIFY=1 GIT_TRACE_CURL="${X}/curl.trace" PATH="${XPATH}" ATHENA_TELEMETRY_DIR="${S}" \
+OUT="$(cd "${X}/src" && HTTPS_PROXY="${NX}" GIT_SSL_NO_VERIFY=1 GIT_TRACE_CURL="${X}/curl.trace" GIT_TRACE2_EVENT="${X}/t2-n5.json" GIT_TRACE2_CONFIG_PARAMS='http.*' \
+  GIT_TRACE2_ENV_VARS=GIT_CONFIG_VALUE_0,GIT_CONFIG_VALUE_1,GIT_CONFIG_VALUE_2 PATH="${XPATH}" ATHENA_TELEMETRY_DIR="${S}" \
   "${WRAPPER}" git -c http.sslVerify=false -c "http.proxy=${NX}" -c 'http.https://github.com/o/r.git/.sslVerify=false' push -q origin HEAD:main 2>"${TMP}/err")"; RC=$?
 ERR="$(cat "${TMP}/err")"
 n5_direct="$(grep -c '^net via=direct ' "${X_NET_LOG}")"
 if [ "${RC}" = 0 ] && [ "$(git --git-dir="${X_FORGE}/o/r.git" rev-parse main)" = "$(git -C "${X}/src" rev-parse HEAD)" ] \
   && [ "${n5_direct:-0}" -ge 2 ] && [ "$(landed_n "${S}")" = 1 ] \
-  && [ -z "$(grep -v -x 'net via=[a-z]* verify=true proxy=\[\] rproxy=\[\] env=\[\]' "${X_NET_LOG}")" ]; then
-  ok "N5. a push's own ls-remote probes and its transport resolve verify on, no proxy, no trace; the push lands, merge.landed emitted"
+  && [ -z "$(grep -v -x 'net via=[a-z]* verify=true proxy=\[\] rproxy=\[\] env=\[\] t2=\[0,0,0\]' "${X_NET_LOG}")" ] \
+  && ! grep -qF "${B64}" "${X}/t2-n5.json" 2>/dev/null; then
+  ok "N5. a push's own ls-remote probes and its transport resolve verify on, no proxy, no curl or trace2 trace; the push lands, merge.landed emitted"
 else bad "N5. probes' TLS, proxy and trace settings" "$(xdiag) net=[$(cat "${X_NET_LOG}")] landed=$(landed_n "${S}")"; fi
+
+# N6. An insteadOf rule that moves the probe to another URL on the same host,
+# where the caller's http.<url>.* keys are longer than the pinned ones: the
+# probe does not run (and says why); the push still lands through the
+# transport.
+x_reset; x_sync; git -C "${X}/src" commit -q --allow-empty -m n6
+git -C "${X}/src" remote set-url origin 'git@github.com:o/r.git'
+: > "${X_STUB_LOG}"
+S="${X}/n6-store"
+OUT="$(cd "${X}/src" && PATH="${XPATH}" ATHENA_TELEMETRY_DIR="${S}" "${WRAPPER}" git -c 'url.https://github.com/evil/.insteadOf=https://github.com/o/' \
+  -c "http.https://github.com/evil/.proxy=${NX}" -c 'http.https://github.com/evil/.sslVerify=false' push -q origin HEAD:main 2>"${TMP}/err")"; RC=$?
+ERR="$(cat "${TMP}/err")"
+git -C "${X}/src" remote set-url origin 'https://github.com/o/r.git'
+if [ "${RC}" = 0 ] && [ "$(git --git-dir="${X_FORGE}/o/r.git" rev-parse main)" = "$(git -C "${X}/src" rev-parse HEAD)" ] \
+  && ! grep -q 'url=https://github.com/evil' "${X_STUB_LOG}" && [ "$(x_starts)" = 1 ] \
+  && [[ "${ERR}" == *"probe of https://github.com/o/r.git did not run"* ]] && [[ "${ERR}" == *"Fix:"* ]]; then
+  ok "N6. an insteadOf rule that moves the header-carrying probe to another URL: the probe does not run and says why; the push lands"
+else bad "N6. probe rewritten by insteadOf" "$(xdiag)"; fi
 
 # H1. A pre-push hook in the repository.
 x_reset; x_sync; git -C "${X}/src" commit -q --allow-empty -m h1

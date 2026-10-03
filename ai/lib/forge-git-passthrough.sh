@@ -1184,14 +1184,30 @@ fg_push_and_record() {
   # ext::, ssh's command or a local path. A local push URL needs no header
   # and gets none. It runs with the transport's network settings (DND-1899,
   # ai/lib/forge-http-pin.sh): TLS verification on, no proxy, no curl trace;
-  # where the caller's config would weaken TLS anyway, the probe does not run
-  # (the push's transport then refuses with a Fix:).
+  # where the caller's config would weaken TLS anyway, or an insteadOf rule
+  # would send the probe to another URL than the one pinned, the probe does
+  # not run and says why; the push still runs, with no landing record.
+  # The remote name pinned is the URL itself: `ls-remote <url>` makes an
+  # anonymous remote named after it, so remote.<url>.proxy is what git reads.
   hprobe() (
     case "$purl" in "https://$FG_HOST/"*)
-      . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/forge-http-pin.sh" 2>/dev/null || exit 1
+      local pin_lib gu
+      pin_lib="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/forge-http-pin.sh"
+      skip() {
+        printf '%s: the push'"'"'s ls-remote probe of %s did not run, so this push records no landing: %s\n  Fix: %s\n' \
+          "$FG_TOOL" "$purl" "$1" "$2" >&2
+        exit 1
+      }
+      # shellcheck source=forge-http-pin.sh
+      . "$pin_lib" 2>/dev/null || skip "its network-settings library ($pin_lib) did not load." \
+        "check that ai/lib/forge-http-pin.sh exists in this checkout."
       fg_http_pin_args "$purl" "$purl"
       probe+=( "${FG_HTTP_ARGS[@]}" )
-      fg_http_check "$purl" "$purl" "${probe[@]}" || exit 1
+      gu="$(fg_probe "${probe[@]}" ls-remote --get-url "$purl")"
+      [ "$gu" = "$purl" ] || skip "git config rewrites it to '${gu}' (a url.<base>.insteadOf rule), which the pinned TLS and proxy settings do not cover." \
+        "drop the url.<base>.insteadOf rule that matches $purl from the command's -c options and from git config."
+      fg_http_check "$purl" "$purl" "${probe[@]}" || skip "$FG_HTTP_WHY." \
+        "drop that setting (http.sslVerify, http.proxy, http.<url>.*, remote.<name>.proxy, http.sslCAInfo, http.sslCAPath, http.sslBackend) from the command's -c options and from git config."
       export "GIT_CONFIG_KEY_$n=$hk" "GIT_CONFIG_VALUE_$n=$FG_HEADER" GIT_CONFIG_COUNT="$((n + 1))" \
         GIT_ALLOW_PROTOCOL=https ;;
     esac

@@ -198,3 +198,16 @@ GIT_TRACE_CURL,GIT_CURL_VERBOSE,GIT_TRACE_REDACT,SSLKEYLOGFILE,]`; three
 After (ai/lib/forge-http-pin.sh: TLS verification on and no proxy appended
 last, the environment unset, a CA or backend setting refused):
 `RESULT: 239 passed, 0 failed`.
+
+The review round found two more paths. trace2 logs config values and
+environment variables (`GIT_TRACE2_CONFIG_PARAMS`, `GIT_TRACE2_ENV_VARS`),
+and the header travels in `GIT_CONFIG_VALUE_<n>`; and a caller's
+`url.<base>.insteadOf` moved the header-carrying probe to another URL on the
+same host, where the caller's longer `http.<url>.*` keys beat the pin. N3/N5
+gained the trace2 environment and N6 was added. On d1de1f11: `RESULT: 237
+passed, 3 failed`: `FAIL N3` with `env=[GIT_TRACE2_CONFIG_PARAMS,
+GIT_TRACE2_ENV_VARS,] t2=[/dev/null,<tmp>/t2-n3.json,]`; `FAIL N5`;
+`FAIL N6` with `start via=direct url=https://github.com/evil/r.git
+hdr=ok:x-access-token`. After (trace2 targets set to 0 and its parameter
+variables unset; the probe refuses a URL git rewrites, naming why):
+`RESULT: 240 passed, 0 failed`.
