@@ -194,17 +194,30 @@ REF_DENY='forge-identity: this is a bare `gh api` call that creates or moves a r
 # api_method <segment> : the HTTP method one `gh … api` segment names (upper
 # case, the last one wins), or "" when it names none. Options that take a value
 # are read WITH that value, so `--jq -XGET` is a jq filter and never a method
-# (DND-1886). The value options are the shared classifier's -R/--repo and
+# (DND-1886), and a quoted value is one word however many spaces it holds
+# (DND-1911). The value options are the shared classifier's -R/--repo and
 # --hostname (ai/lib/forge-write-class.awk, valued) plus gh api's own: -q/--jq,
 # -t/--template, -p/--preview, --cache, --output, -H/--header, -f/-F/--field/
 # --raw-field/--form and --input.
 api_method() {
   printf '%s' "$1" | awk '{
-    m = ""; seen = 0
-    for (i = 1; i <= NF; i++) {
-      x = $i; gsub(/["'"'"']/, "", x)
+    # DND-1911: the words are read the way the shell does. A quoted value that
+    # holds a space (--jq ".a -XGET") is ONE word, so its tail is never read
+    # as an option. Quotes group and are dropped, a backslash escapes the next
+    # character, and an unterminated quote runs to the end of the segment.
+    m = ""; seen = 0; nw = 0; cur = ""; has = 0; q = ""
+    for (p = 1; p <= length($0) + 1; p++) {
+      tc = (p <= length($0)) ? substr($0, p, 1) : " "
+      if (q != "") { if (tc == q) q = ""; else cur = cur tc; continue }
+      if (tc == "\"" || tc == "'"'"'") { q = tc; has = 1; continue }
+      if (tc == "\\" && p < length($0)) { cur = cur substr($0, p + 1, 1); has = 1; p++; continue }
+      if (tc == " ") { if (has) W[++nw] = cur; cur = ""; has = 0; continue }
+      cur = cur tc; has = 1
+    }
+    for (i = 1; i <= nw; i++) {
+      x = W[i]
       if (!seen) { if (x == "api") seen = 1; continue }
-      if (x == "-X" || x == "--method") { v = $(i + 1); gsub(/["'"'"']/, "", v); m = v; i++; continue }
+      if (x == "-X" || x == "--method") { m = W[i + 1]; i++; continue }
       if (x ~ /^--method=/) { m = substr(x, 10); continue }
       if (x ~ /^--(jq|template|preview|cache|output|header|field|raw-field|form|input|repo|hostname)=/) continue
       if (x ~ /^-[^-]/) {
@@ -214,7 +227,7 @@ api_method() {
         cl = substr(x, 2); done = 0
         for (c = 1; c <= length(cl); c++) {
           ch = substr(cl, c, 1); rest = substr(cl, c + 1)
-          if (ch == "X") { sub(/^=/, "", rest); if (rest == "") { rest = $(i + 1); gsub(/["'"'"']/, "", rest); i++ } m = rest; done = 1; break }
+          if (ch == "X") { sub(/^=/, "", rest); if (rest == "") { rest = W[i + 1]; i++ } m = rest; done = 1; break }
           if (ch ~ /[qtpRHfF]/) { if (rest == "") i++; done = 1; break }
         }
         if (done) continue

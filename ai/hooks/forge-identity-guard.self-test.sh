@@ -255,6 +255,26 @@ check "4e11. attached -q value alone is a read" allow
 run "$(bash_json 'gh api -X GET repos/o/r/git/refs/heads/main --jq -XPATCH')"
 check "4e5. verdict unchanged: -X GET + --jq -XPATCH is still denied" deny
 
+# DND-1911: a QUOTED option value that holds -XGET is one word, not two. The
+# split reading took its tail (-XGET') for the method and gave the call the
+# generic api-write Fix instead of the ref-write one.
+run "$(bash_json "gh api -X PATCH repos/o/r/git/refs/heads/x --jq '.a -XGET'")"
+check "4e12. -X PATCH + --jq '.a -XGET' (quoted, one word) on git/refs" deny
+check_text "4e13. ...the deny is the ref-write one" 'creates or moves a ref'
+run "$(bash_json 'gh api -X PATCH repos/o/r/git/refs/heads/x -q ".a -XGET"')"
+check "4e14. the same, double-quoted -q" deny
+check_text "4e15. ...the deny is the ref-write one" 'creates or moves a ref'
+run "$(bash_json "gh api -X PATCH repos/o/r/git/refs/heads/x -H 'Accept: a -XGET'")"
+check_text "4e16. a quoted -H value holding -XGET: the ref-write deny" 'creates or moves a ref'
+run "$(bash_json "gh api -X PATCH repos/o/r/git/refs/heads/x -f 'body=a -XGET'")"
+check_text "4e17. a quoted -f value holding -XGET: the ref-write deny" 'creates or moves a ref'
+run "$(bash_json "gh api repos/o/r/git/refs/heads/x --jq '.a -XGET'")"
+check "4e18. a quoted --jq -XGET alone on a ref route is a read" allow
+run "$(bash_json "gh api -X GET repos/o/r/git/refs/heads/x --jq '.a -XPATCH'")"
+check "4e19. -X GET + quoted --jq '.a -XPATCH' stays denied (lexical reading)" deny
+run "$(bash_json "gh api repos/o/r/git/refs/heads/x -X 'PATCH' --jq 'a'")"
+check_text "4e20. a quoted method word is still the method" 'creates or moves a ref'
+
 run "$(bash_json 'gh api -X DELETE repos/o/r/contents/lib/a.ex -f message=x -f sha=abc')"
 check "4f. bare gh api DELETE contents/<path>" deny
 
