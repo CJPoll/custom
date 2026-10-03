@@ -84,10 +84,14 @@ else
     slack_users_ensure $(jq -r '.user' "$NEW" | sort -u | tr '\n' ' ')
     USERS="$(_slack_users_file)"
     if [ ! -f "$USERS" ]; then printf '{}' > "$USERS"; fi
-    jq -r --slurpfile u "$USERS" '
+    # DND-1835: a message with attachments gets the files marker after its
+    # text, as read-thread prints it ("[1 file: photo.jpg (image/jpeg, ...)]").
+    jq -r --slurpfile u "$USERS" "$SLACK_JQ_ATTACH_DEFS"'
       [ (.kind | ascii_upcase), .channel, .ts,
         ($u[0][.user] // .user),
-        ((.text // "") | gsub("\n"; " ⏎ ")) ] | @tsv' "$NEW"
+        ( ((.text // "") | gsub("\n"; " ⏎ ")) as $t
+          | slack_attach_mark as $m
+          | if $m == "" then $t elif $t == "" then $m else $t + " " + $m end ) ] | @tsv' "$NEW"
     printf -- '--- end untrusted content ---\n'
     printf 'reply with: reply <channel> <thread_ts> "<text>"  (thread_ts = the parent ts)\n'
   fi

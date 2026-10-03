@@ -2699,6 +2699,40 @@ assert_eq "DND-491 r1-r3 every line counted, none unreadable" "3 0" \
 assert_eq "DND-491 r3 the hostile route line stays inside the fence" "1" \
   "$(printf '%s\n' "${OUT}" | awk '/untrusted content [0-9a-f]+:/{f=1} /--- end untrusted content/{f=0} f && /route=\{"evil"/{n++} END{print n+0}')"
 
+# DND-1835: a Slack line's `files` (athena-inbox.md -> Line format) reaches
+# the reader as the contract's allowlist: id, name, title, filetype, mimetype,
+# size, mode, and never a URL. The text form marks it inside the fence. A line
+# with no files renders as before; a malformed `files` is no files, never an
+# unreadable line.
+setup_log_case
+printf '%s\n' \
+  '{"v":1,"ts":"1791.1","channel":"D1","user":"UFAKE00001","kind":"im","event_id":"EvF1","route":"channel_route","text":"","files":[{"id":"F0FAKE0001","name":"console.jpg","title":"console","filetype":"jpg","mimetype":"image/jpeg","size":2048,"mode":"hosted","url_private":"https://files.example.test/F0FAKE0001?t=xoxe-secret-1","thumb_64":"https://files.example.test/thumb"}]}' \
+  '{"v":1,"ts":"1791.2","channel":"D1","user":"UFAKE00001","kind":"im","event_id":"EvF2","route":"channel_route","text":"plain"}' \
+  '{"v":1,"ts":"1791.3","channel":"D1","user":"UFAKE00001","kind":"im","event_id":"EvF3","route":"channel_route","text":"odd","files":"not-a-list"}' \
+  '{"v":1,"ts":"1791.4","channel":"D1","user":"UFAKE00001","kind":"im","event_id":"EvF4","route":"channel_route","text":"stub","files":[7,{"id":"F0FAKE0002","size":"big"}]}' \
+  > "${LINBOX}"
+JOUT="$(cd "${LPROJ}" && "${BIN}/read-inbox" slack --json --peek 2>/dev/null)"
+assert_eq "DND-1835 f1 --json: a photo DM's files keep id, name, title, filetype, mimetype, size, mode" \
+  '[{"id":"F0FAKE0001","name":"console.jpg","title":"console","filetype":"jpg","mimetype":"image/jpeg","size":2048,"mode":"hosted"}]' \
+  "$(printf '%s' "${JOUT}" | jq -c '.messages[] | select(.ts == "1791.1") | .files' 2>/dev/null)"
+assert_eq "DND-1835 f2 --json: a line with no files, or a non-list files, has no files key" "false false" \
+  "$(printf '%s' "${JOUT}" | jq -r '[.messages[] | select(.ts == "1791.2" or .ts == "1791.3") | has("files")] | map(tostring) | join(" ")' 2>/dev/null)"
+assert_eq "DND-1835 f3 --json: non-object entries drop; a non-number size is null" \
+  '[{"id":"F0FAKE0002","name":null,"title":null,"filetype":null,"mimetype":null,"size":null,"mode":null}]' \
+  "$(printf '%s' "${JOUT}" | jq -c '.messages[] | select(.ts == "1791.4") | .files' 2>/dev/null)"
+assert_eq "DND-1835 f4 every line counted, none unreadable" "4 0" \
+  "$(printf '%s' "${JOUT}" | jq -r '"\(.messages | length) \(.unreadable // 0)"' 2>/dev/null)"
+assert_not_contains "DND-1835 f5 --json carries no file URL" "files.example.test" "${JOUT}"
+OUT="$(cd "${LPROJ}" && "${BIN}/read-inbox" slack --peek 2>/dev/null)"; RC=$?
+assert_eq "DND-1835 f6 read-inbox renders lines with files, exit 0" "0" "${RC}"
+assert_eq "DND-1835 f7 the photo DM's marker lists name, mimetype, size and id, inside the fence" "1" \
+  "$(printf '%s\n' "${OUT}" | awk '/untrusted content [0-9a-f]+:/{f=1} /--- end untrusted content/{f=0} f && index($0, "[1 file: console.jpg (image/jpeg, 2048 bytes, F0FAKE0001)]"){n++} END{print n+0}')"
+assert_contains "DND-1835 f8 an id-only stub is marked with its id and no size" \
+  "[1 file: F0FAKE0002 (file, F0FAKE0002)]" "${OUT}"
+assert_not_contains "DND-1835 f9 the text form carries no file URL" "files.example.test" "${OUT}"
+assert_eq "DND-1835 f10 a plain line renders exactly as before" "1" \
+  "$(printf '%s\n' "${OUT}" | grep -A2 -F '[im] D1 1791.2 UFAKE00001 thread_ts=(none) route=channel_route' | sed -n 2,3p | tr '\n' '|' | grep -c -x -F 'plain||')"
+
 # A re-appended duplicate event_id is reported ONCE. At-least-once delivery
 # makes a re-append normal, not an anomaly.
 setup_log_case

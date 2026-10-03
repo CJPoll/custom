@@ -1677,3 +1677,23 @@ A bug fix, so the evidence is the unfixed code going red, plus one mutation.
   which never says to resolve the tool's error`.
 - **After:** `VERDICT: PASS (1060 cases)`; `VERDICT: PASS (1061 cases)` after
   the review round added the ledger-line case.
+
+## DND-1835 (2026-10-03): a Slack line keeps its files
+
+- **Feature:** a Slack line's `files` (`ai/contracts/athena-inbox.md` → *Line
+  format*) reaches `read-inbox` as the allowlist (id, name, title, filetype,
+  mimetype, size, mode), and the text form marks it inside the fence.
+- **Code:** `lib/logchan.sh` (`logchan_scan`'s `files` projection,
+  `LOGCHAN_JQ_FILES_MARK`), `bin/read-inbox` (the Slack render).
+- **Suite run:** `bash test/self-test.sh` (the `DND-1835 f1`-`f10` cases).
+- **Before** (the readers as of `dbbf7ca2`, the new tests): `VERDICT: FAIL (4
+  of 1071 cases)`: `FAIL DND-1835 f1 --json: a photo DM's files keep id,
+  name, title, filetype, mimetype, size, mode`, `f3`, `f7`, `f8`. `f5` (no URL)
+  passes trivially there: nothing of the file reaches the reader.
+- **After:** `VERDICT: PASS (1071 cases)`. Each mutation applied alone (exact
+  anchor, asserted once), restored with `cp`, verified by `cmp`.
+
+| # | Mutation | Cases reddened | Failure string(s) |
+|---|---|---|---|
+| S-1835a | the scan merges the allowlist onto the whole file object (`. + {id: ...}`) | 3 | `FAIL DND-1835 f1 ...` / `FAIL DND-1835 f3 --json: non-object entries drop; a non-number size is null` / `FAIL DND-1835 f5 --json carries no file URL` |
+| S-1835b | the Slack render drops the marker line | 2 | `FAIL DND-1835 f7 the photo DM's marker lists name, mimetype, size and id, inside the fence` / `FAIL DND-1835 f8 an id-only stub is marked with its id and no size` |

@@ -351,9 +351,13 @@ else
       FENCED="$(printf '%s' "${READ}" | routed_render_platform "${NAMES}")" || RENDER_RC=1
       BODY="${FENCED}"
     elif [ "${KIND}" = "log" ]; then
-      BODY="$(printf '%s' "${READ}" | jq -r '
+      # DND-1835: a message with attachments gets the contract's files
+      # marker on its own line after the text, inside the fence (file names
+      # are the sender's words). A message with none renders as before.
+      BODY="$(printf '%s' "${READ}" | jq -r "${LOGCHAN_JQ_FILES_MARK}"'
         .messages[]
-        | "[\(if (.kind // "") == "" then "message" else .kind end)] \(.channel) \(.ts) \(.user) thread_ts=\(if (.thread_ts // "") == "" then "(none)" else .thread_ts end) route=\(.route // "(none, pre-DND-450)")\n\(.text)\n"')" || RENDER_RC=1
+        | logchan_files_mark as $fm
+        | "[\(if (.kind // "") == "" then "message" else .kind end)] \(.channel) \(.ts) \(.user) thread_ts=\(if (.thread_ts // "") == "" then "(none)" else .thread_ts end) route=\(.route // "(none, pre-DND-450)")\n\(.text)\n\(if $fm == "" then "" else $fm + "\n" end)"')" || RENDER_RC=1
     else
       BODY="$(printf '%s' "${READ}" | jq -r '
         .messages[]

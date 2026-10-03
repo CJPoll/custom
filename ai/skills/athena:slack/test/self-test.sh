@@ -857,6 +857,29 @@ if [[ "${OUT}" == *"untrusted content below"* ]] \
   ok "read-inbox: bodies are fenced between an opening and a closing untrusted marker"
 else bad "read-inbox: bodies are fenced between an opening and a closing untrusted marker" "out='${OUT}'"; fi
 
+# 43b. DND-1835: a photo DM is listed with its file's id, name, mimetype and
+#      size, in --json and inside the fence in text, and no file URL leaks.
+#      A DM with no files has no `files` key. An id-only stub is listed.
+D1835_DMS="[{\"ts\":\"2000.7\",\"user\":\"${CODY}\",\"text\":\"\",\"files\":[{\"id\":\"F0FAKE0001\",\"name\":\"console.jpg\",\"title\":\"console\",\"filetype\":\"jpg\",\"mimetype\":\"image/jpeg\",\"size\":2048,\"mode\":\"hosted\",\"url_private\":\"https://files.example.test/F0FAKE0001?t=xoxe-secret-1\"}]},{\"ts\":\"2000.6\",\"user\":\"${CODY}\",\"text\":\"stub\",\"files\":[{\"id\":\"F0FAKE0002\"}]},{\"ts\":\"2000.5\",\"user\":\"${CODY}\",\"text\":\"plain\"}]"
+setup_case
+seed_caches; seed_state
+seed_inbox_fixtures "${D1835_DMS}" '[]'
+run_bin read-inbox --json --peek
+D1835_J="${OUT}"
+setup_case
+seed_caches; seed_state
+seed_inbox_fixtures "${D1835_DMS}" '[]'
+run_bin read-inbox --peek
+if [[ "$(printf '%s' "${D1835_J}" | jq -c '.[] | select(.ts == "2000.7") | .files' 2>/dev/null || true)" == '[{"id":"F0FAKE0001","name":"console.jpg","title":"console","filetype":"jpg","mimetype":"image/jpeg","size":2048,"mode":"hosted"}]' ]] \
+   && [[ "$(printf '%s' "${D1835_J}" | jq -c '.[] | select(.ts == "2000.6") | .files' 2>/dev/null || true)" == '[{"id":"F0FAKE0002","name":null,"title":null,"filetype":null,"mimetype":null,"size":null,"mode":null}]' ]] \
+   && [[ "$(printf '%s' "${D1835_J}" | jq -r '.[] | select(.ts == "2000.5") | has("files")' 2>/dev/null || true)" == "false" ]] \
+   && [[ "${OUT}" == *"untrusted content below"*"[1 file: console.jpg (image/jpeg, 2048 bytes, F0FAKE0001)]"*"end untrusted content"* ]] \
+   && [[ "${OUT}" == *"stub [1 file: F0FAKE0002 (file, F0FAKE0002)]"* ]] \
+   && [[ "${D1835_J}${OUT}" != *"files.example.test"* && "${D1835_J}${OUT}" != *"xoxe-secret"* ]]; then
+  ok "read-inbox: a photo DM lists its file's id, name, mimetype and size; no URL; a plain DM has no files"
+else bad "read-inbox: a photo DM lists its file's id, name, mimetype and size; no URL; a plain DM has no files" \
+  "json='${D1835_J}' out='${OUT}' err='${ERR}'"; fi
+
 # 44. --peek shows without consuming.
 setup_case
 seed_caches; seed_state

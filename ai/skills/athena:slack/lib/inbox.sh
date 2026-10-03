@@ -261,8 +261,11 @@ _inbox_scan_list() {
     # First sight: record where we are, report nothing.
     if [ -z "$_sl_last" ]; then continue; fi
 
+    # DND-1835: a message with attachments carries `files`, the contract's
+    # allowlist (athena-inbox.md -> Line format; slack_files_meta in
+    # lib/slack.sh). A message with none has no `files` key.
     jq -c --arg kind "$_sl_kind" --arg class "$_sl_class" \
-       --arg ch "$_sl_ch" --arg me "$SLACK_BOT_USER_ID" '
+       --arg ch "$_sl_ch" --arg me "$SLACK_BOT_USER_ID" "$SLACK_JQ_ATTACH_DEFS"'
       .messages[]?
       | select((.user // "") != $me)
       | select((.subtype // "") != "message_changed")
@@ -270,6 +273,7 @@ _inbox_scan_list() {
       | select(($class == "dm") or ((.text // "") | contains("<@" + $me + ">")))
       | {kind: $kind, channel: $ch, ts: .ts, user: (.user // .bot_id // "unknown"),
          thread_ts: (.thread_ts // .ts), text: (.text // "")}
+        + (slack_files_meta as $f | if $f == null then {} else {files: $f} end)
     ' "$SLACK_TMPDIR/hist.json" >> "$_sl_out"
   done < "$_sl_ids"
   if [ "$_sl_attempted" -gt 0 ] &&

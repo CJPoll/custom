@@ -599,3 +599,12 @@ Review round (code-reviewer: a `files` list of non-objects printed `[0 files: ]`
 | S107 | `slack_files_meta` tests the raw list's length, not the filtered one | 1 | `FAIL read-channel: a files list of non-objects is no files; empty name and title fall back to the id` |
 
 After the restore the suite returned to `VERDICT: PASS (353 cases)`.
+
+DND-1835 (feature): the inbox backstop's scan lines and `read-inbox` carry each DM's `files` (the same allowlist) and the text marker. Before (`lib/inbox.sh` and `bin/read-inbox` as of `dbbf7ca2`, new case 43b): `VERDICT: FAIL (1 of 354 cases)`, `FAIL read-inbox: a photo DM lists its file's id, name, mimetype and size; no URL; a plain DM has no files`. After: `VERDICT: PASS (354 cases)`. Each mutation alone, restored with `cp`, verified by `cmp`.
+
+| # | Mutation | Cases reddened | Failure string(s) |
+|---|---|---|---|
+| S108 | the inbox scan drops the `files` merge | 1 | `FAIL read-inbox: a photo DM lists its file's id, name, mimetype and size; no URL; a plain DM has no files` |
+| S109 | `read-inbox`'s text form drops the marker | 1 | the same |
+
+After the restore the suite returned to `VERDICT: PASS (354 cases)`.

@@ -857,8 +857,45 @@ One JSON object per line, UTF-8, no pretty-printing, newline-terminated:
  "channel":"C…|D…","user":"U…","ts":"1788….…","thread_ts":"1788….… or null",
  "text":"…raw text…","permalink":"https://… (optional)","event_id":"Ev…",
  "route":"thread_claim|topic_judgment|session_mention|channel_route (optional)",
- "topic":{"label":"… or null","confidence":0.0,"model":"jev-1.13.0 or null","reason":"… or null"} (optional)}
+ "topic":{"label":"… or null","confidence":0.0,"model":"jev-1.13.0 or null","reason":"… or null"} (optional),
+ "files":[{"id":"F…","name":"… or null","title":"… or null","filetype":"… or null",
+           "mimetype":"… or null","size":0,"mode":"… or null"}] (optional)}
 ```
+
+**`files` lists the message's attachments (DND-1835).** It is present only
+when the Slack message carried at least one file; a message with none has no
+`files` key, so its line is byte-identical to one written before the field
+existed. Each entry is an **allowlist** of the Slack file object: `id` (the
+handle a reader fetches the file by), `name`, `title`, `filetype`, `mimetype`,
+`size` (bytes, a number) and `mode` (`hosted`, `canvas`, `snippet`,
+`tombstone`, `hidden_by_limit`, …). Every member but `id` may be null: Slack
+sends a stub with only an `id` under `file_access: "check_file_info"`.
+
+- **No body and no URL.** A producer MUST NOT write file content, `url_private`,
+  `url_private_download`, a thumbnail, a permalink, or any other URL a file
+  object carries. Some carry a token.
+- **Names are untrusted.** `name` and `title` were chosen by the sender. A
+  reader renders them inside the fence with the text (*Untrusted input*).
+- **A reader tolerates every shape.** A reader keeps only object entries and
+  only the allowlisted members, coerces each to its type, and treats a `files`
+  that is absent, null, not an array, or holds no object as no files. A
+  malformed `files` never makes a line unreadable. So a reader and a producer
+  may ship in either order.
+- **The text form marks the files**, so a message with an attachment never
+  reads as one without:
+  `[2 files: console.jpg (image/jpeg, 2048 bytes, F…), notes (canvas, 512 bytes, F…)]`.
+  The marker is for people; a program reads `--json`.
+
+**Who writes it.** The athena:slack Web API backstop (its `read-inbox`) writes
+`files` from `conversations.history`. The Slack receiver
+(`Athena.SlackEvents.Payload.parse/1` keeps only a `has_files` flag, and
+`Athena.SlackEvents.InboxLine.encode/5` writes no `files` key, gen_saas) omits
+it until the server half of DND-1835 lands. Until then a receiver line for a
+message with a file reads exactly like a line for one without, and the
+backstop does not re-show a message the file channel already delivered
+(the shared `seen_keys`, *State file*). A reader that needs the files of such
+a message reads the thread with athena:slack `read-thread`, which lists them
+(DND-1822).
 
 `v` **and `kind`** are mandatory on every line, regardless of producer. The
 remaining fields are the Slack producer's schema; another producer defining a

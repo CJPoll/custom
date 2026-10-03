@@ -19,6 +19,35 @@
 
 LOGCHAN_RING_CAP=500
 
+# LOGCHAN_JQ_FILES_MARK -- a jq definition, `logchan_files_mark`, that turns a
+# scanned Slack message's `files` (already the contract's allowlist, see
+# logchan_scan) into the text form's marker, or "" when it has none. The
+# format is the contract's (athena-inbox.md -> Line format, `files`), the same
+# one athena:slack's read-thread prints (its SLACK_JQ_ATTACH_DEFS):
+#   [2 files: console.jpg (image/jpeg, 2048 bytes, F..), notes (canvas, 512 bytes, F..)]
+# Label: name, else title, else id. Kind: mode when not "hosted", else
+# mimetype, else filetype. A size Slack did not send is left out.
+LOGCHAN_JQ_FILES_MARK='
+def logchan_first_set(f): [f | select(type == "string" and . != "")] | first;
+def logchan_files_mark:
+  (.files // []) as $f
+  | if ($f | length) == 0 then ""
+    else "[" + ($f | length | tostring)
+         + (if ($f | length) == 1 then " file: " else " files: " end)
+         + ( $f | map(
+               (logchan_first_set(.name, .title, .id) // "unnamed") + " ("
+               + ( [ (logchan_first_set(
+                        (if (.mode // "hosted") != "hosted" then .mode else empty end),
+                        .mimetype, .filetype) // "file"),
+                     (if .size == null then empty else (.size | tostring) + " bytes" end),
+                     (logchan_first_set(.id) // "no id") ]
+                   | join(", ") )
+               + ")")
+             | join(", ") )
+         + "]"
+    end;
+'
+
 # logchan_dedupe_key <channel> <ts>
 #
 # `channel + ":" + ts` is the CROSS-SOURCE key, and it has to be: the Slack Web
@@ -345,6 +374,26 @@ logchan_scan() {
                                  thread_ts: (($o.thread_ts // "") | tostring),
                                  route: (if $o.route == null then null
                                          else ($o.route | tostring) end)}
+                                # DND-1835: the message attachments, as the
+                                # contract allowlist (Line format, `files`).
+                                # (No apostrophe in this comment: the jq
+                                # program is a single-quoted shell string.)
+                                # Only object entries, only the named members,
+                                # each coerced; a URL the line carries is
+                                # dropped here. Absent, null, not an array, or
+                                # no object entry: no `files` key, so a plain
+                                # line renders exactly as before. Never
+                                # unreadable.
+                                + ([ ($o.files | if type == "array" then .[] else empty end)
+                                     | select(type == "object")
+                                     | {id: (if .id == null then null else (.id | tostring) end),
+                                        name: (if .name == null then null else (.name | tostring) end),
+                                        title: (if .title == null then null else (.title | tostring) end),
+                                        filetype: (if .filetype == null then null else (.filetype | tostring) end),
+                                        mimetype: (if .mimetype == null then null else (.mimetype | tostring) end),
+                                        size: (if (.size | type) == "number" then .size else null end),
+                                        mode: (if .mode == null then null else (.mode | tostring) end)} ]
+                                   | if length > 0 then {files: .} else {} end)
                               else {} end)) ]
                 | (if $eid != null then .ev[$eid] = true else . end)
                 | (if $key != null then .ky[$key] = true else . end)
