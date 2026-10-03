@@ -977,3 +977,33 @@ The canary reads usage under LC_ALL=C. After: `RESULT: 429 passed, 0 failed`.
 | S-1858-14 | a mid-word `=` before `(` still read as an array | ZG36 |
 | S-1858-15 | unreadable arguments (ZA -1) leave a wrapper verdict | ZG33, ZG33a |
 | S-1858-16 | no group reading of a trailing paren (NO_BARE_GLOB_QUAL) | ZG38, ZG39 |
+
+## 2026-10-03 — DND-1859, git-stash-guard: here-string text fed to a program that runs it
+
+- **Domain:** the PreToolUse git-stash text guard (`ai/hooks/git-stash-guard.sh`):
+  a here-string (`<<<word`) whose text reaches a shell, eval, make, xargs
+  or parallel (the tokenizer's HT/HI/HA/PB capture, `hsfeed`, `ansic`, and
+  the here-string loop in `analyze`).
+- **Suite run:** `sh ai/hooks/git-stash-guard.self-test.sh`, section HS.
+  Mutations ran on a `mktemp -d` copy of the hook with the committed suite;
+  the committed files were never edited.
+- **Fail-first:** section HS written first. Against the unfixed hook
+  (`94d2082f`), the first cases gave `RESULT: 577 passed, 17 failed`; the
+  final suite gives `RESULT: 578 passed, 26 failed`: every deny case in
+  section HS, and no other case. After: `RESULT: 604 passed, 0 failed`.
+- **Review round (first cut `c5941b32`):** HS30-HS39 added first. Against
+  `c5941b32`: `RESULT: 596 passed, 8 failed` (HS31-HS38).
+
+| id | Mutation | Observed failure |
+|---|---|---|
+| S-1859-1 | `hsfeed` always returns "" (no consumer runs the text) | 26 cases: every deny case in section HS |
+| S-1859-2 | `ansic` returns its input | HS9 |
+| S-1859-3 | no xargs-argument reading (text not appended) | HS14, HS30, HS32 |
+| S-1859-4 | no closing-keyword rule (`}`, done, fi, esac) | HS13 |
+| S-1859-5 | a here-string after a `)` attributed to the next word | HS12 |
+| S-1859-6 | no wrapper value, count or mask skip | HS11, HS37, HS38 |
+| S-1859-7 | the brace-group `{` not skipped | HS27 |
+| S-1859-8 | the tokenizer never keeps the here-string word | 26 cases: every deny case in section HS |
+| S-1859-9 | a reader piping on never passes the text to the next stage | HS33, HS34 |
+| S-1859-10 | a here-string on fd 3 attributed to its own command | HS35 |
+| S-1859-11 | the operator loop eats a leading `-` of the word | HS32 |
