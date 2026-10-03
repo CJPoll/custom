@@ -451,6 +451,60 @@ slack_read_text() {
 
 # --------------------------------------------------------------- rendering
 
+# SLACK_JQ_ATTACH_DEFS -- jq definitions every message reader prefixes to its
+# filter, so a message with an attachment never reads as one without
+# (DND-1822). Each is an allowlist, never a pass-through: a Slack file object
+# also carries `url_private`, `url_private_download`, thumbnails and permalinks,
+# and some of those embed a token. Only the named metadata leaves this skill.
+#
+#   slack_files_meta  -- the message's files[] as [{id, name, title, filetype,
+#                        mimetype, size, mode}], or null when it has none.
+#   slack_room_meta   -- a huddle message's room as {id, name, date_start,
+#                        date_end, has_ended, participants}, or null.
+#   slack_attach_mark -- the text form's marker, "" for a plain message:
+#                        "[2 files: notes (canvas, F..), ...]" and
+#                        "[huddle R..: <name>, ended]".
+#
+# A file's kind in the marker is its `mode` when that is not the ordinary
+# "hosted" (canvas, snippet, tombstone, hidden_by_limit, external all change
+# how it can be read), else its filetype, else its mimetype.
+SLACK_JQ_ATTACH_DEFS='
+def slack_files_meta:
+  if ((.files // []) | type) == "array" and ((.files // []) | length) > 0
+  then [ .files[] | select(type == "object")
+         | {id: (.id // null), name: (.name // null), title: (.title // null),
+            filetype: (.filetype // null), mimetype: (.mimetype // null),
+            size: (.size // null), mode: (.mode // null)} ]
+  else null end;
+def slack_room_meta:
+  if (.room | type) == "object"
+  then .room | {id: (.id // null), name: (.name // null),
+                date_start: (.date_start // null), date_end: (.date_end // null),
+                has_ended: (.has_ended // null), participants: (.participants // null)}
+  else null end;
+def slack_attach_mark:
+  (slack_files_meta) as $f
+  | (slack_room_meta) as $r
+  | ( if $f == null then ""
+      else "[" + ($f | length | tostring)
+           + (if ($f | length) == 1 then " file: " else " files: " end)
+           + ( $f | map(
+                 ((.title // .name // .id // "unnamed") | tostring) + " ("
+                 + ((if (.mode // "hosted") != "hosted" then .mode
+                     else (.filetype // .mimetype // "file") end) | tostring)
+                 + ", " + ((.id // "no id") | tostring) + ")")
+               | join(", ") )
+           + "]"
+      end ) as $fm
+  | ( if $r == null then ""
+      else "[huddle " + (($r.id // "no id") | tostring)
+           + (if $r.name != null then ": " + ($r.name | tostring) else "" end)
+           + (if $r.has_ended == true then ", ended" else "" end)
+           + "]"
+      end ) as $rm
+  | [$rm, $fm] | map(select(. != "")) | join(" ");
+'
+
 # slack_render_messages <jsonl-file> <true|false as-json>
 #
 # Reads Slack message objects (one per line, newest-first as the API returns
@@ -474,19 +528,26 @@ slack_render_messages() {
 
   # sed '1!G;h;$!d' is the portable line reverse -- `tac` is GNU-only and
   # absent on macOS, where these scripts also have to run.
+  # A message with files or a huddle room gains `files` / `room` keys (see
+  # SLACK_JQ_ATTACH_DEFS); a plain message keeps exactly its six.
   if [ "$_rm_json" = "true" ]; then
-    jq -c --slurpfile u "$_rm_users" '
+    jq -c --slurpfile u "$_rm_users" "$SLACK_JQ_ATTACH_DEFS"'
       {ts, user: (.user // .bot_id // "unknown"),
        name: ($u[0][(.user // "")] // .username // .user // "unknown"),
        thread_ts: (.thread_ts // .ts), text: (.text // ""),
-       subtype: (.subtype // null)}' "$_rm_file" | sed '1!G;h;$!d'
+       subtype: (.subtype // null)}
+      + (slack_files_meta as $f | if $f == null then {} else {files: $f} end)
+      + (slack_room_meta as $r | if $r == null then {} else {room: $r} end)' \
+      "$_rm_file" | sed '1!G;h;$!d'
     return 0
   fi
 
-  jq -r --slurpfile u "$_rm_users" '
+  jq -r --slurpfile u "$_rm_users" "$SLACK_JQ_ATTACH_DEFS"'
     [ .ts,
       ($u[0][(.user // "")] // .username // .user // "unknown"),
-      ((.text // "") | gsub("\n"; " ⏎ ")),
+      ( ((.text // "") | gsub("\n"; " ⏎ ")) as $t
+        | slack_attach_mark as $m
+        | if $m == "" then $t elif $t == "" then $m else $t + " " + $m end ),
       (if (.thread_ts // .ts) != .ts then "(in thread " + .thread_ts + ")" else "" end)
     ] | @tsv' "$_rm_file" | sed '1!G;h;$!d'
 }

@@ -565,6 +565,69 @@ if [[ "${RC}" == 2 ]] && ! any_curl; then
 else bad "read-channel: --before with no value is a usage error, no request" "rc=${RC}"; fi
 
 echo
+echo "-- read-thread / read-channel: files[] and huddle metadata (DND-1822) ------"
+
+# DND-1822. A message with an attachment read as one without: the renderers
+# kept six keys and dropped `files[]` and `room`, so a huddle-notes canvas's
+# file id never reached the reader. Each file's id, name, title, filetype,
+# mimetype, size and mode pass through; a tokened URL never does. A message
+# with no files keeps exactly its six keys.
+DND1822_FILES_MSG="{\"ts\":\"1.0\",\"user\":\"${CODY}\",\"text\":\"photos\",\"files\":[{\"id\":\"F0FAKE0001\",\"name\":\"console.jpg\",\"title\":\"console\",\"filetype\":\"jpg\",\"mimetype\":\"image/jpeg\",\"size\":2048,\"mode\":\"hosted\",\"url_private\":\"https://files.example.test/F0FAKE0001?t=xoxe-secret-1\",\"url_private_download\":\"https://files.example.test/dl/F0FAKE0001?t=xoxe-secret-2\",\"thumb_64\":\"https://files.example.test/thumb\"},{\"id\":\"F0FAKE0002\",\"name\":\"notes\",\"title\":\"notes\",\"filetype\":\"quip\",\"mimetype\":\"application/vnd.slack-docs\",\"size\":512,\"mode\":\"canvas\",\"permalink\":\"https://example.test/canvas\"}]}"
+DND1822_HUDDLE_MSG="{\"ts\":\"2.0\",\"user\":\"${CODY}\",\"text\":\"\",\"subtype\":\"huddle_thread\",\"room\":{\"id\":\"R0FAKE0001\",\"name\":\"standup huddle\",\"date_start\":1700000000,\"date_end\":1700000600,\"has_ended\":true,\"participants\":[\"${CODY}\"],\"media_server\":\"wss://media.example.test/?token=xoxe-secret-3\"}}"
+DND1822_PLAIN_MSG="{\"ts\":\"3.0\",\"user\":\"${CODY}\",\"text\":\"plain\"}"
+
+setup_case
+seed_caches
+fixture conversations.replies "{\"ok\":true,\"messages\":[${DND1822_FILES_MSG},${DND1822_HUDDLE_MSG},${DND1822_PLAIN_MSG}],\"response_metadata\":{\"next_cursor\":\"\"}}"
+run_bin read-thread "${ENG_CHANNEL}" 1.0 --json
+D1822_F="$(printf '%s\n' "${OUT}" | jq -c 'select(.ts == "1.0") | .files' 2>/dev/null || true)"
+if [[ "${RC}" == 0 ]] \
+   && [[ "$(printf '%s' "${D1822_F}" | jq -r 'length' 2>/dev/null)" == "2" ]] \
+   && [[ "$(printf '%s' "${D1822_F}" | jq -c '.[0]' 2>/dev/null)" == '{"id":"F0FAKE0001","name":"console.jpg","title":"console","filetype":"jpg","mimetype":"image/jpeg","size":2048,"mode":"hosted"}' ]] \
+   && [[ "$(printf '%s' "${D1822_F}" | jq -r '.[1].mode' 2>/dev/null)" == "canvas" ]]; then
+  ok "read-thread --json: a message's files[] keep id, name, title, filetype, mimetype, size, mode"
+else bad "read-thread --json: a message's files[] keep id, name, title, filetype, mimetype, size, mode" \
+  "rc=${RC} files='${D1822_F}' out='${OUT}' err='${ERR}'"; fi
+
+if [[ "${OUT}" != *"xoxe-secret"* && "${OUT}" != *"url_private"* && "${OUT}" != *"files.example.test"* \
+      && "${OUT}" != *"example.test/canvas"* ]]; then
+  ok "read-thread --json: no tokened or private file URL is printed"
+else bad "read-thread --json: no tokened or private file URL is printed" "out='${OUT}'"; fi
+
+D1822_R="$(printf '%s\n' "${OUT}" | jq -c 'select(.ts == "2.0") | .room' 2>/dev/null || true)"
+if [[ "${D1822_R}" == "{\"id\":\"R0FAKE0001\",\"name\":\"standup huddle\",\"date_start\":1700000000,\"date_end\":1700000600,\"has_ended\":true,\"participants\":[\"${CODY}\"]}" ]] \
+   && [[ "$(printf '%s\n' "${OUT}" | jq -r 'select(.ts == "2.0") | .subtype' 2>/dev/null)" == "huddle_thread" ]]; then
+  ok "read-thread --json: a huddle message keeps its room metadata"
+else bad "read-thread --json: a huddle message keeps its room metadata" "room='${D1822_R}' out='${OUT}'"; fi
+
+if [[ "$(printf '%s\n' "${OUT}" | jq -c 'select(.ts == "3.0") | keys' 2>/dev/null)" == '["name","subtype","text","thread_ts","ts","user"]' ]]; then
+  ok "read-thread --json: a message with no files keeps exactly its six keys"
+else bad "read-thread --json: a message with no files keeps exactly its six keys" "out='${OUT}'"; fi
+
+run_bin read-thread "${ENG_CHANNEL}" 1.0
+D1822_L1="$(printf '%s\n' "${OUT}" | grep '^1\.0' || true)"
+D1822_L3="$(printf '%s\n' "${OUT}" | grep '^3\.0' || true)"
+if [[ "${RC}" == 0 ]] \
+   && [[ "${D1822_L1}" == *"[2 files: console (jpg, F0FAKE0001), notes (canvas, F0FAKE0002)]"* ]] \
+   && [[ "${OUT}" != *"xoxe-secret"* ]] \
+   && [[ "$(printf '%s\n' "${OUT}" | grep '^2\.0' || true)" == *"[huddle R0FAKE0001: standup huddle, ended]"* ]] \
+   && [[ "${D1822_L3}" == "$(printf '3.0\tcody\tplain\t')" ]]; then
+  ok "read-thread text: marks files and a huddle; a plain message is unchanged"
+else bad "read-thread text: marks files and a huddle; a plain message is unchanged" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+
+setup_case
+seed_caches
+fixture conversations.history "{\"ok\":true,\"messages\":[${DND1822_FILES_MSG}],\"response_metadata\":{\"next_cursor\":\"\"}}"
+run_bin read-channel "${ENG_CHANNEL}" --limit 5 --json
+D1822_CF="$(printf '%s\n' "${OUT}" | jq -c '.files | map(.id)' 2>/dev/null || true)"
+run_bin read-channel "${ENG_CHANNEL}" --limit 5
+if [[ "${D1822_CF}" == '["F0FAKE0001","F0FAKE0002"]' ]] \
+   && [[ "${OUT}" == *"[2 files: console (jpg, F0FAKE0001), notes (canvas, F0FAKE0002)]"* ]] \
+   && [[ "${OUT}" != *"xoxe-secret"* ]]; then
+  ok "read-channel: files[] pass through in --json and are marked in text"
+else bad "read-channel: files[] pass through in --json and are marked in text" "json-ids='${D1822_CF}' out='${OUT}'"; fi
+
+echo
 echo "-- the hook: when it runs --------------------------------------------------"
 
 # 27. Unconfigured is silent AND unlogged. Every machine without a bot token

@@ -580,3 +580,13 @@ DND-1661: `topic_route.sh` kept its own copy of the refusal reader and read a JS
 After the restore the suite returned to `VERDICT: PASS (307 cases)`.
 
 DND-1804: `status` told every `invalid_thread_ts` caller to "pass the thread PARENT ts", though Slack answers that error for a deleted message too, and the walt_ui failures were top-level owner DMs that no longer existed. Live probe in the owner DM, 2026-10-02: a top-level message with no replies, by its own ts, answered `{"ok":true}`; the same ts after a delete answered `{"ok":false,"error":"invalid_thread_ts"}`. `status` now asks `conversations.replies` and exits 4 for a deleted message. Red before the fix (unfixed `a2d79e44`, new cases 84b-84f): `VERDICT: FAIL (6 of 340 cases)`, e.g. `FAIL status: a deleted message exits 4, names the key, and is not told to pass a parent ts` with `rc=1 err='athena-slack: status failed: assistant.threads.setStatus failed: invalid_thread_ts ... Fix: pass the thread PARENT ts ...'`. After: `VERDICT: PASS (340 cases)`; `VERDICT: PASS (345 cases)` after the review round added 84g-84j (a thread parent with replies, a parent-led answer, a tombstone, an answer about another message, an unparseable answer).
+
+DND-1822: `read-thread` and `read-channel` rendered six keys per message and dropped `files[]` and a huddle's `room`, so a message with an attachment read as one without. Red before the fix (unfixed `30c1d5d2`, new cases in *files[] and huddle metadata*): `VERDICT: FAIL (4 of 351 cases)`, e.g. `FAIL read-thread --json: a message's files[] keep id, name, title, filetype, mimetype, size, mode` with `files='null'`, and `FAIL read-thread text: marks files and a huddle; a plain message is unchanged` with the line `1.0 cody photos`. After: `VERDICT: PASS (351 cases)`. Each mutation applied alone (exact anchors, each asserted once), restored with `cp` (verified by `cmp`).
+
+| # | Mutation | Cases reddened | Failure string(s) |
+|---|---|---|---|
+| S103 | `slack_files_meta` merges onto the whole file object (`. + {id: ...}`), so the allowlist passes everything through | 2 | `FAIL read-thread --json: a message's files[] keep id, name, title, filetype, mimetype, size, mode` / `FAIL read-thread --json: no tokened or private file URL is printed` |
+| S104 | the JSON form drops the `files` merge | 2 | `FAIL read-thread --json: a message's files[] keep ...` / `FAIL read-channel: files[] pass through in --json and are marked in text` |
+| S105 | the text form drops the attachment marker | 2 | `FAIL read-thread text: marks files and a huddle; a plain message is unchanged` / `FAIL read-channel: files[] pass through in --json and are marked in text` |
+
+After the restore the suite returned to `VERDICT: PASS (351 cases)`.
