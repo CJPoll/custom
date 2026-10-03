@@ -224,10 +224,10 @@ module AgentStashEnv
     text.lines.map(&:strip).reject { |l| l.empty? || l.start_with?("#") }
   end
 
-  # Does a script running `live` run exactly the landed `lines`: every one of
-  # them, and nothing else?
+  # Does a script running `live` run exactly the landed `lines`: the same
+  # lines in the same order, and nothing else?
   def same_code?(live, lines)
-    (lines - live).empty? && (live - lines).empty?
+    live == lines
   end
 
   # Runtime problems of an ACTIVE install: [] when all hold. bin_files is the
@@ -277,12 +277,13 @@ module AgentStashEnv
               "#{ENV_FILE} var in ai/hooks/registry.json's env, then the owner runs " \
               "`#{File.join(main, 'scripts/setup-hooks')} --install-env` and restarts sessions."]
     end
-    restore = "Fix: restore ai/agent-env/session-env.sh in #{main} (git -C #{main} checkout -- " \
-              "ai/agent-env/session-env.sh), then restart sessions."
+    restore = "Fix: fast-forward #{main} to origin/main (git -C #{main} merge --ff-only origin/main) and " \
+              "restore ai/agent-env/session-env.sh there (git -C #{main} checkout -- ai/agent-env/session-env.sh), " \
+              "then restart sessions."
     begin
       code = code_lines(File.read(file))
       unless (env_lines - code).empty?
-        return ["#{ENV_FILE} #{file} does not carry the agent PATH line #{env_bar} runs, so the wrapper never " \
+        return ["#{ENV_FILE} #{file} does not carry the agent PATH line(s) #{env_bar} runs, so the wrapper never " \
                 "reaches the Bash tool's PATH. #{restore}"]
       end
       # The text runs before every Bash command in every session, and every
@@ -293,7 +294,7 @@ module AgentStashEnv
       extra = code - env_lines
       return [] if extra.empty?
 
-      ["#{ENV_FILE} #{file} runs #{extra.size} line(s) besides the agent PATH line #{env_bar} runs (first: " \
+      ["#{ENV_FILE} #{file} runs #{extra.size} line(s) besides the agent PATH line(s) #{env_bar} runs (first: " \
        "#{extra.first[0, 80].inspect}); they run before every Bash command in every session. #{restore}"]
     rescue SystemCallError => e
       ["#{ENV_FILE} #{file} cannot be read (#{e.class}), so the wrapper never reaches the Bash tool's PATH. " \

@@ -707,6 +707,10 @@ session_check "${D}" "${SNAP_OLD}" wrapper
 expect "live session-env.sh runs the checker's old line, main landed another -> FAIL (the checker's own copy is not the bar)" 1 \
   "does not carry the agent PATH line" "agent-stash env: ACTIVE"
 
+# The branch rewrites its session-env.sh, and rewrites the line wherever its
+# own agent_stash_env.rb spells it. On the pre-fix checker that rewrote
+# ENV_LINE, the bar itself; on the fixed one there is nothing to rewrite, so
+# the step changes nothing, which is the point: no branch file is the bar.
 D="$(env_fixture envline-branch-loosens)"
 printf '# branch session-env.sh\n%s\n' "${ENVLINE_V2}" > "${D}/wt/ai/agent-env/session-env.sh"
 OLD_LINE="${ENVLINE_V1}" NEW_LINE="${ENVLINE_V2}" LIBF="${D}/wt/ai/lib/agent_stash_env.rb" /usr/bin/ruby -e '

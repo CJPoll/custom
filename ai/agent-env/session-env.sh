@@ -16,7 +16,7 @@
 # so a change to the line takes effect for the check when it lands.
 #
 # Nothing writes here, and check-hooks-registered FAILs an ACTIVE install when
-# this file runs any line but the one below (comments and blanks aside). Claude Code hands SessionStart, CwdChanged and
+# this file runs any line its landed copy does not (comments and blanks aside). Claude Code hands SessionStart, CwdChanged and
 # FileChanged hooks their OWN CLAUDE_ENV_FILE to append exports to; every
 # other process in the session (the Bash tool, other hooks) sees this path, so
 # a script that appends to "$CLAUDE_ENV_FILE" outside those three hooks would

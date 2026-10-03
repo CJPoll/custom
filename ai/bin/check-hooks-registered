@@ -995,6 +995,11 @@ end
 # one should run: Landed::Unreadable, so COULD NOT MEASURE, never a pass. The
 # branch's own copy of the script is never read.
 #
+# The landed script is absent at that commit: a measurement (it had not
+# landed there), distinct from a read that failed. Only this one lets a pinned
+# tip that predates the script fall back to the newer origin/main.
+class EnvScriptAbsent < Landed::Unreadable; end
+
 # The lines ai/agent-env/session-env.sh runs at commit sha.
 def env_lines_at(root, sha, label)
   rel = AgentStashEnv::ENV_SCRIPT_REL
@@ -1002,7 +1007,7 @@ def env_lines_at(root, sha, label)
 
   text = Landed.file_at(root, sha, rel, label)
   if text.nil?
-    raise Landed::Unreadable.new([[label, "#{sha[0, 12]}: #{rel} does not exist, so it cannot say what line the " \
+    raise EnvScriptAbsent.new([[label, "#{sha[0, 12]}: #{rel} does not exist, so it cannot say what line the " \
                                           "live script must run"]])
   end
   lines = AgentStashEnv.code_lines(text)
@@ -1042,8 +1047,8 @@ def env_line_bar(file, root, tip_sha, landed_lines:, newer_lines:)
   live = live_env_lines(file)
   begin
     bar, lines = landed_lines.call(root, tip_sha)
-  rescue Landed::Unreadable => e
-    return env_line_newer_only(file, live, root, newer_lines) || raise(e)
+  rescue EnvScriptAbsent => e
+    return env_line_newer_only(file, live, root, newer_lines, e)
   end
   return [lines, bar, nil, []] if live.nil? || AgentStashEnv.same_code?(live, lines)
 
@@ -1075,23 +1080,29 @@ def env_line_ahead(file, ndesc)
     "harness-gate pinned origin/main (not drift)."
 end
 
-# The pinned tip's script could not be read: the newer origin/main's bar as
-# [lines, bar, ahead, notes], or nil when there is no newer main or it cannot
-# be read either (the caller then re-raises the pinned failure).
-def env_line_newer_only(file, live, root, newer_lines)
+# The pinned tip has no script (the env landed after the pin, so the script
+# did too): the newer origin/main's bar as [lines, bar, ahead, notes]. With no
+# newer main, or one that cannot be read either, it raises Landed::Unreadable
+# carrying every probe: COULD NOT MEASURE.
+def env_line_newer_only(file, live, root, newer_lines, absent)
+  rel = AgentStashEnv::ENV_SCRIPT_REL
   got = begin
     newer_lines.call(root)
-  rescue Landed::Unreadable, Landed::Mismatch
-    nil
+  rescue Landed::Unreadable => e
+    raise Landed::Unreadable.new(absent.probes + e.probes)
+  rescue Landed::Mismatch => e
+    raise Landed::Unreadable.new(absent.probes + [["newer origin/main", e.message]])
   end
-  return nil unless got
+  raise absent unless got
 
   ndesc, nlines = got
-  bar = "#{ndesc} (the pinned tip's #{AgentStashEnv::ENV_SCRIPT_REL} could not be read)"
-  return [nlines, bar, env_line_ahead(file, ndesc), []] if live && AgentStashEnv.same_code?(live, nlines)
+  bar = "#{ndesc} (the pinned tip has no #{rel})"
+  if live && AgentStashEnv.same_code?(live, nlines)
+    return [nlines, bar, "#{env_line_ahead(file, ndesc)} The pinned tip has no #{rel}.", []]
+  end
 
-  [nlines, bar, nil, ["the pinned tip's #{AgentStashEnv::ENV_SCRIPT_REL} could not be read, so the live " \
-                      "#{AgentStashEnv::ENV_FILE} script is measured against #{ndesc} alone"]]
+  [nlines, bar, nil, ["the pinned tip has no #{rel}, so the live #{AgentStashEnv::ENV_FILE} script is measured " \
+                      "against #{ndesc} alone"]]
 end
 
 # AHEAD OF THE PINNED BAR (DND-1570), the agent-stash env's counterpart of the
@@ -1278,7 +1289,8 @@ def run_agent_stash_env(path: settings_path, main: nil, root: REPO_DIR,
       Landed.unreadable_lines("agent PATH line (#{AgentStashEnv::ENV_SCRIPT_REL})", e.probes).each { |l| err.puts l }
       err.puts "  Fix: if a probe says #{AgentStashEnv::ENV_SCRIPT_REL} does not exist or runs no line, origin/main " \
                "lost the script that delivers the wrapper: restore it on main. Until it lands, the owner runs " \
-               "`#{File.join(main, 'scripts/setup-hooks')} --remove-env` and restarts sessions."
+               "`#{File.join(main, 'scripts/setup-hooks')} --remove-env` and restarts sessions. If a probe names " \
+               "a failed git read (ls-tree, cat-file, ls-remote, fetch), fetch origin main and re-run."
       return EXIT_UNMEASURED
     end
   end
@@ -1537,7 +1549,7 @@ def agent_stash_env_self_test(check)
     File.write(env_file, "# fixture\n#{v2}\n")
     code, text = run.call(full)
     check.call("line: live script runs a line the landed tip lacks, no newer main -> FAIL naming the landed bar",
-               code == EXIT_FAIL && text.include?("does not carry the agent PATH line fixture landed") &&
+               code == EXIT_FAIL && text.include?("does not carry the agent PATH line(s) fixture landed") &&
                text.include?("Fix:"))
     code, text = run.call(full, newer_lines: newer_v2)
     check.call("line: older pinned tip, live script runs the line a newer main landed -> ACTIVE, named ahead, exit 0",
@@ -1562,20 +1574,41 @@ def agent_stash_env_self_test(check)
                code == EXIT_UNMEASURED && text.include?("agent PATH line") && text.include?("Fix:") &&
                !text.include?("ACTIVE —"))
     # The env (and so its script) landed after the pin: the newer main alone.
-    pinned_gone = ->(_r, _s) { raise Landed::Unreadable.new([["fixture probe", "no such path at the pin"]]) }
+    # Only an ABSENT script falls back; a failed read at the pin stays exit 3.
+    pinned_gone = ->(_r, _s) { raise EnvScriptAbsent.new([["fixture pin probe", "no such path at the pin"]]) }
     code, text = run.call(full, landed_lines: pinned_gone,
-                                newer_lines: ->(_root) { raise Landed::Unreadable.new([["fixture probe", "unreachable"]]) })
-    check.call("line: pinned and newer line both unreadable -> COULD NOT MEASURE, exit 3, never ACTIVE",
+                                newer_lines: ->(_root) { raise Landed::Unreadable.new([["fixture newer probe", "unreachable"]]) })
+    check.call("line: pin lacks the script and the newer line is unreadable -> COULD NOT MEASURE naming both probes",
+               code == EXIT_UNMEASURED && !text.include?("ACTIVE —") && text.include?("fixture pin probe") &&
+               text.include?("fixture newer probe"))
+    code, text = run.call(full, landed_lines: pinned_gone,
+                                newer_lines: ->(_root) { raise Landed::Mismatch.new("a" * 40, "b" * 40) })
+    check.call("line: pin lacks the script and origin's main does not descend from the pin -> COULD NOT MEASURE",
+               code == EXIT_UNMEASURED && !text.include?("ACTIVE —") && text.include?("fixture pin probe"))
+    code, text = run.call(full, landed_lines: pinned_gone)
+    check.call("line: pin lacks the script, no newer main -> COULD NOT MEASURE, exit 3",
                code == EXIT_UNMEASURED && !text.include?("ACTIVE —"))
     File.write(env_file, "# fixture\n#{v2}\n")
     code, text = run.call(full, landed_lines: pinned_gone, newer_lines: newer_v2)
-    check.call("line: pin lacks the script, live runs the newer main's line -> ACTIVE, named ahead, exit 0",
-               code.zero? && text.include?("agent PATH line ahead of the pinned bar"))
+    check.call("line: pin lacks the script, live runs the newer main's line -> ACTIVE, named ahead, says the pin lacks it",
+               code.zero? && text.include?("agent PATH line ahead of the pinned bar") &&
+               text.include?("The pinned tip has no #{env_rel}"))
+    pinned_broken = ->(_r, _s) { raise Landed::Unreadable.new([["fixture pin probe", "git cat-file failed"]]) }
+    code, text = run.call(full, landed_lines: pinned_broken, newer_lines: newer_v2)
+    check.call("line: a failed read at the pin never falls back, even when the newer line matches -> COULD NOT MEASURE",
+               code == EXIT_UNMEASURED && !text.include?("ACTIVE —") && text.include?("git cat-file failed"))
+    code, text = run.call(full, newer_lines: ->(_root) { raise Landed::Mismatch.new("a" * 40, "b" * 40) })
+    check.call("line: newer main mismatched -> the pinned FAIL stands, says it could not judge",
+               code == EXIT_FAIL && text.include?("could not read a newer origin/main to tell whether the live CLAUDE_ENV_FILE"))
     File.write(env_file, "# fixture\n#{v3}\n")
     code, text = run.call(full, landed_lines: pinned_gone, newer_lines: newer_v2)
     check.call("line: pin lacks the script, live runs a line the newer main lacks -> FAIL, never ahead",
-               code == EXIT_FAIL && text.include?("does not carry the agent PATH line fixture newer") &&
+               code == EXIT_FAIL && text.include?("does not carry the agent PATH line(s) fixture newer") &&
                !text.include?("line ahead of the pinned bar"))
+    File.write(env_file, "# fixture\n#{v2}\n#{v2}\n")
+    code, text = run.call(full, newer_lines: newer_v2)
+    check.call("line: the newer line twice is not exactly the landed lines -> never ahead",
+               !code.zero? && !text.include?("line ahead of the pinned bar"))
     File.write(env_file, "# fixture\n#{fx_line}\n")
     line_sha = nil
     run.call(full, landed_env: ->(_root) { ["fixture landed", registry["env"], "e" * 40] },
