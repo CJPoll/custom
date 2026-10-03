@@ -14,6 +14,11 @@
 #     and if so reads the receipt with ir_read_receipt before any merge call.
 #     Both readers accept a recorded base that is the tip or an ancestor of it
 #     (DND-1463).
+#   * glab-merge-guard.sh (ai/lib/, behind every GitLab merge or train board
+#     through glab-athena, DND-1845) reads the receipt with ir_read_receipt
+#     before any merge call. It is NOT declaration-keyed: it never asks
+#     ir_declared_gate_on, so every project merged through glab-athena needs a
+#     receipt, declared gate or not. Held with the rest of the chain (DND-1873).
 #   * main-health.sh (ai/lib/) reads a landed tip's receipt with
 #     ir_read_receipt.
 #   * forge-git-passthrough.sh (ai/lib/, behind every `gh-athena git push`

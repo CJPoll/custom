@@ -3901,6 +3901,9 @@ def self_test
      ["the merge guard", "ai/lib/gh-merge-guard.sh", "[owner-approval-policy]"],
      ["the push guard", "ai/lib/forge-git-passthrough.sh", "[owner-approval-policy]"],
      ["the gh-athena entry point", "ai/bin/gh-athena", "[owner-approval-policy]"],
+     # DND-1873: the GitLab merge guard decides a merge on the receipt since DND-1845
+     ["the GitLab merge guard", "ai/lib/glab-merge-guard.sh", "[owner-approval-policy]"],
+     ["the glab-athena entry point", "ai/bin/glab-athena", "[owner-approval-policy]"],
      ["locked-merge", "ai/skills/athena:merge-boarding/scripts/locked-merge", "[owner-approval-policy]"],
      ["the push-guard fix-push exception", "ai/lib/main-health.sh", "[owner-approval-policy]"],
      ["the main-health CLI", "ai/bin/main-health", "[owner-approval-policy]"],
@@ -3917,12 +3920,37 @@ def self_test
                  "exit=#{code} out=#{out}")
     end
     # DND-1807: the receipt chain's non-trust neighbours stay COLD
-    %w[ai/bin/confirm-merged ai/bin/test-slot ai/lib/critic_prompt.rb ai/bin/ready-and-idle ai/lib/glab-merge-guard.sh ai/lib/proc-stat.sh].each do |path|
+    %w[ai/bin/confirm-merged ai/bin/test-slot ai/lib/critic_prompt.rb ai/bin/ready-and-idle ai/lib/proc-stat.sh].each do |path|
       dd = File.join(tmp, "policy-cold-#{path.tr('/.', '__')}")
       bb, hh = mkrepo.call(dd) { |r| FileUtils.mkdir_p(File.dirname(File.join(r, path))); File.write(File.join(r, path), "x\n") }
       out, _, code = run_br.call(["--base", bb, "--head", hh, "--repo", dd] + real)
       check.call("policy: #{path} is not a receipt-trust surface and stays COLD",
                  code.zero? && out.include?("BLAST-RADIUS COLD"), "exit=#{code} out=#{out}")
+    end
+    # DND-1873: every tracked file that sources the receipt reader to ENFORCE a merge or push is
+    # held. A new sourcer (the GitLab guard, DND-1845, was one) reads COLD until the manifest
+    # names it; this walks the tree so the next one fails here instead of landing unheld.
+    # The readers below only REPORT or time a receipt and decide nothing (merge-boarding names
+    # each); a new entry here is a decision about what the file does, made in a held file.
+    non_enforcing = %w[ai/bin/ready-and-idle ai/bin/test-slot ai/lib/lead_time_phases_io.rb]
+    repo_root = File.expand_path("../..", __dir__)
+    tracked = IO.popen(["git", "-C", repo_root, "ls-files", "ai/bin", "ai/lib", "ai/hooks", "ai/skills", "scripts"], &:read).split("\n")
+    sourcers = tracked.select do |f|
+      next false if f.include?("/test/") || f.end_with?(".md")
+      full = File.join(repo_root, f)
+      body = File.file?(full) ? File.binread(full) : ""
+      body.include?("integration-receipt.sh") && body.match?(/^\s*(\.|source)\s/)
+    end
+    check.call("policy: the receipt-sourcer walk finds the merge guards (an empty walk would pass for nothing)",
+               sourcers.include?("ai/lib/gh-merge-guard.sh") && sourcers.include?("ai/lib/glab-merge-guard.sh"),
+               "sourcers=#{sourcers.inspect}. Fix: the walk in ai/bin/blast-radius --self-test no longer sees a known sourcer; repair the walk, never shrink it.")
+    (sourcers - non_enforcing).each do |path|
+      dd = File.join(tmp, "policy-sourcer-#{path.tr('/.:', '___')}")
+      bb, hh = mkrepo.call(dd) { |r| FileUtils.mkdir_p(File.dirname(File.join(r, path))); File.write(File.join(r, path), "x\n") }
+      out, _, code = run_br.call(["--base", bb, "--head", hh, "--repo", dd] + real)
+      check.call("policy: #{path} sources integration-receipt.sh and is held (exit 4)",
+                 code == 4 && out.include?("BLAST-RADIUS HOT") && out.include?("hold: yes, always"),
+                 "exit=#{code} out=#{out}. Fix: add #{path} to the receipt-chain patterns in ai/blast-radius/surfaces.json, or, if it only reports or times a receipt, add it to non_enforcing in this self-test.")
     end
     # the approval table: only its SECTION holds
     claude = lambda do |extra_policy, extra_other, dup: false|

@@ -567,9 +567,11 @@ one.
 **The receipt chain is a held surface (DND-1807).** A diff that touches
 `integration-gate` (the script and its `ai/bin` shim), `ai/lib/integration-receipt.sh`,
 `ai/lib/receipt_seal.rb`, `ai/bin/receipt-seal`, the merge and push guards
-(`ai/lib/gh-merge-guard.sh`, `ai/lib/forge-git-passthrough.sh`) and what they
+(`ai/lib/gh-merge-guard.sh`, `ai/lib/glab-merge-guard.sh`,
+`ai/lib/forge-git-passthrough.sh`) and what they
 load to decide a call is a merge or a push (`ai/lib/forge-api-scan.sh`,
-`ai/lib/forge-cli-isolation.sh`), `ai/bin/gh-athena`, `locked-merge`,
+`ai/lib/forge-cli-isolation.sh`), `ai/bin/gh-athena`, `ai/bin/glab-athena`,
+`locked-merge`,
 `ai/bin/main-health` and `ai/lib/main-health.sh` (the push guard's fix-push
 exception reads a receipt), or the critic verdict producer
 (`ai/bin/critic-review`, `ai/lib/critic_carry.rb`,
@@ -578,11 +580,18 @@ exit 4, cleared by the owner's verified decision (*Owner approval policy* ->
 *Asking, and what counts as approval*). The gate judges with the manifest as
 landed on the target, so a new hold binds after it lands, never in the PR that
 adds it. Not held: `confirm-merged`, `ai/bin/test-slot`,
-`ai/lib/glab-merge-guard.sh` (it decides GitLab merges on the receipt since
-DND-1845, but the manifest does not name it), `ai/bin/ready-and-idle` (it reads a receipt to
+`ai/bin/ready-and-idle` (it reads a receipt to
 report, and decides nothing), `ai/lib/critic_prompt.rb` (the rubric text, not a
 trust decision) and the judge-set utilities `proc-stat.sh` and
 `telemetry-emit.sh`, which write no verdict.
+
+**Later (2026-10-03, DND-1873):** this paragraph listed `ai/lib/glab-merge-guard.sh`
+as not held, "though it decides GitLab merges on the receipt since DND-1845".
+Superseded: the guard and `ai/bin/glab-athena` are in the same class as the
+GitHub pair, so a diff that weakened `glmg_receipt_gate` no longer reads COLD.
+`blast-radius --self-test` walks every tracked file that sources
+`integration-receipt.sh` and fails, with a `Fix:`, on one that decides a merge
+or push and is not held.
 
 **The gate comes from the landed target, not from you.** The first of
 `bin/prep-commit.sh` (gen_saas) and `ai/bin/harness-gate` (`~/dev/custom`) that
