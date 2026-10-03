@@ -16,9 +16,12 @@ ai/skills/synced/
 # `.skills` keys of ~/.agents/.skill-lock.json. One line per skill, never a
 # pattern: `ai/skills/*` or `ai/skills/hyperframes*` would also hide a new
 # first-party skill, and `git add -A` would skip it with no error. A name the
-# installer adds later dirties the main checkout until its line lands here;
-# the shipwright's stale-dirt alert (DND-692) names the path.
-# ai/test/vendored-skills-ignore/self-test.sh pins this block.
+# installer adds later dirties the main checkout until its line lands here:
+# every shipwright tick yields, and check-guard-messages, check-bin-help and
+# check-tool-risk fail when run there. After 3 hourly STALE skips (dirt
+# unchanged 6h) the shipwright's stale-dirt alert (DND-692) names the path.
+# ai/test/vendored-skills-ignore/self-test.sh checks each name below is
+# ignored and that a broad pattern does not hide a new first-party skill.
 /ai/skills/faceless-explainer/
 /ai/skills/hyperframes/
 /ai/skills/hyperframes-animation/
