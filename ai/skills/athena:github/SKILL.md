@@ -121,7 +121,12 @@ escalate it.
 
 The `forge-identity-guard.sh` hook denies a plain `git push` to a github.com or
 gitlab.com remote (or one it cannot resolve) before it runs, with a `Fix:`
-naming this form (DND-577).
+naming this form (DND-577). It reads only the command text, so the agent PATH
+`git` wrapper refuses the push again in the process, a script included
+(DND-1803; `ai/lib/agent-forge-push.sh`): a push to github.com or gitlab.com
+runs only with this route's credential isolation. The agent PATH `gh` and
+`glab` wrappers refuse a plain forge write the same way
+(`ai/lib/agent-forge-cli.sh`); reads pass.
 
 Afterwards, check who the push was attributed to:
 
@@ -188,8 +193,9 @@ fleet goes on attributing work to the owner.
 
 This is the one home of the rule. Other skills, briefs, and agent blocks cite
 this section by name and do not restate it. The `Fix:` text in
-`forge-auth-guard.sh`, `forge-identity-guard.sh`, and the `gh-athena git` /
-`glab-athena git` refusals point here.
+`forge-auth-guard.sh`, `forge-identity-guard.sh`, the `gh-athena git` /
+`glab-athena git` refusals, and the agent PATH `git` / `gh` / `glab` wrappers'
+forge refusals (DND-1803) point here.
 
 ## Vocabulary map (GitLab → GitHub)
 

@@ -546,8 +546,11 @@ check "Q5. a quoted separator in a non-push git command still passes" allow
 echo "--- DND-1179: every installed gh/glab command group is classified ---"
 # A group the hook does not know is ALLOWED (it reads as prose), so a CLI
 # upgrade that adds a group with a write verb would fail open. This turns it red.
-KNOWN=$( { grep -oE 'RD\["(gh|glab) [a-z0-9-]+"\]' "$HOOK" | sed -E 's/^RD\["//; s/"\]$//'
-  sed -nE 's/^[[:space:]]*AGS\["(gh|glab)"\] = "([^"]*)".*/\1 \2/p' "$HOOK" |
+# The tables live in the classifier the hook shares with the agent PATH
+# wrappers (DND-1803).
+FWC_LIB="$(dirname "$HOOK")/../lib/forge-write-class.awk"
+KNOWN=$( { grep -oE 'RD\["(gh|glab) [a-z0-9-]+"\]' "$FWC_LIB" | sed -E 's/^RD\["//; s/"\]$//'
+  sed -nE 's/^[[:space:]]*AGS\["(gh|glab)"\] = "([^"]*)".*/\1 \2/p' "$FWC_LIB" |
     while read -r _c _rest; do for _w in $_rest; do echo "$_c $_w"; done; done
   echo 'gh api'; echo 'glab api'; } | sort -u)
 unclassified() {
@@ -568,7 +571,7 @@ if command -v gh >/dev/null 2>&1; then
   if [ -n "$GH_GROUPS" ] && [ -z "$_miss" ]; then
     PASS=$((PASS + 1)); printf '  PASS  K1. every gh %s group and group alias is classified (%s names)\n' "$(gh --version | awk 'NR==1{print $3}')" "$(printf '%s\n' "$GH_ALL" | grep -c .)"
   else
-    FAIL=$((FAIL + 1)); printf '  FAIL  K1. gh groups not classified in the hook: [%s] (parsed %s names from gh --help). Fix: in forge-identity-guard.sh add RD["gh <group>"] with its read verbs (every other verb is denied), or add it to AGS["gh"] if it has no forge write.\n' "$_miss" "$(printf '%s\n' "$GH_ALL" | grep -c .)"
+    FAIL=$((FAIL + 1)); printf '  FAIL  K1. gh groups not classified in the hook: [%s] (parsed %s names from gh --help). Fix: in ai/lib/forge-write-class.awk add RD["gh <group>"] with its read verbs (every other verb is denied), or add it to AGS["gh"] there if it has no forge write.\n' "$_miss" "$(printf '%s\n' "$GH_ALL" | grep -c .)"
   fi
 else
   echo "  NOTE  K1. gh is not on PATH: gh group coverage NOT measured here"
@@ -579,7 +582,7 @@ if command -v glab >/dev/null 2>&1; then
   if [ -n "$GL_ALL" ] && [ -z "$_miss" ]; then
     PASS=$((PASS + 1)); printf '  PASS  K2. every glab %s group is classified (%s names; group aliases are not listed by glab and are kept by hand)\n' "$(glab --version | awk 'NR==1{print $2}')" "$(printf '%s\n' "$GL_ALL" | grep -c .)"
   else
-    FAIL=$((FAIL + 1)); printf '  FAIL  K2. glab groups not classified in the hook: [%s] (parsed %s names from glab __complete). Fix: in forge-identity-guard.sh add RD["glab <group>"] with its read verbs, or add it to AGS["glab"] if it has no forge write.\n' "$_miss" "$(printf '%s\n' "$GL_ALL" | grep -c .)"
+    FAIL=$((FAIL + 1)); printf '  FAIL  K2. glab groups not classified in the hook: [%s] (parsed %s names from glab __complete). Fix: in ai/lib/forge-write-class.awk add RD["glab <group>"] with its read verbs, or add it to AGS["glab"] there if it has no forge write.\n' "$_miss" "$(printf '%s\n' "$GL_ALL" | grep -c .)"
   fi
 else
   echo "  NOTE  K2. glab is not on PATH: glab group coverage NOT measured here"

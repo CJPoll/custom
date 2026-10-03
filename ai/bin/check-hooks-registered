@@ -1204,7 +1204,12 @@ def agent_stash_env_self_test(check)
     File.write(File.join(main, "ai", "agent-bin", "ls"), "#!/bin/sh\n")
     code, text = run.call(full)
     File.delete(File.join(main, "ai", "agent-bin", "ls"))
-    check.call("env: a second file in the wrapper dir -> FAIL", code == 1 && text.include?("besides git"))
+    check.call("env: a second file in the wrapper dir -> FAIL", code == 1 && text.include?("besides git, gh, glab"))
+    %w[gh glab].each { |t| File.write(File.join(main, "ai", "agent-bin", t), "#!/bin/sh\n") }
+    code, text = run.call(full)
+    %w[gh glab].each { |t| File.delete(File.join(main, "ai", "agent-bin", t)) }
+    check.call("env: the gh and glab forge-identity wrappers beside git (DND-1803) are not a stray file",
+               !text.include?("besides git"))
     File.write(env_file, "# fixture\n")
     code, text = run.call(full)
     File.write(env_file, "# fixture\n#{AgentStashEnv::ENV_LINE}\n")

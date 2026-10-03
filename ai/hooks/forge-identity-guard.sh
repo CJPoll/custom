@@ -403,7 +403,8 @@ done
 # the api merge/ref routes and plain push, so it ran, and GitHub recorded the
 # close as CJPoll. This rule closes the class with a POSITIVE model, chosen
 # over a longer deny-list because a deny-list misses the next verb the CLI
-# ships: for each known command group, a READ allowlist (RD below); any other
+# ships: for each known command group, a READ allowlist (RD, in the shared
+# classifier named below); any other
 # verb of that group is a write and is denied. `api` is judged by its method (below). The specific rules above run
 # first, so a create, a merge or a ref write keeps its own Fix.
 #   * Known groups: every group and group alias of gh 2.96 / glab 1.112. A group
@@ -440,136 +441,16 @@ done
 # Lexical, like every rule here: a command that only MENTIONS a write is denied
 # (the accepted false positive above), and a command word built by expansion
 # (`$G pr close`) is not seen.
-FORGE_WRITE=$(printf '%s\n' "$CMD" | awk '
-  BEGIN {
-    # Groups (and group aliases) with no forge write: allowed whole.
-    AGS["gh"] = "auth config completion help version extension extensions ext search status browse attestation at ruleset rs preview org accessibility a11y licenses"
-    AGS["glab"] = "auth config completion help version check-update changelog user iteration work-items attestation whatsnew"
-    for (c in AGS) { na = split(AGS[c], a, " "); for (x = 1; x <= na; x++) AG[c " " a[x]] = 1 }
-    # READ allowlists: "|verb|" or "|verb subverb|", verb aliases included.
-    # Every other verb of the group writes.
-    RD["gh pr"] = "|list|ls|view|status|checks|diff|checkout|co|"
-    RD["gh issue"] = "|list|ls|view|status|"
-    RD["gh repo"] = "|list|ls|view|clone|set-default|read-dir|read-file|deploy-key list|deploy-key ls|autolink list|autolink ls|autolink view|gitignore list|gitignore view|license list|license view|"
-    RD["gh release"] = "|list|ls|view|download|verify|verify-asset|"
-    RD["gh run"] = "|list|ls|view|watch|download|"
-    RD["gh workflow"] = "|list|ls|view|"
-    RD["gh label"] = "|list|ls|"
-    RD["gh secret"] = "|list|ls|"
-    RD["gh variable"] = "|list|ls|get|"
-    RD["gh gist"] = "|list|ls|view|clone|"
-    RD["gh cache"] = "|list|ls|"
-    RD["gh project"] = "|list|ls|view|field-list|item-list|"
-    RD["gh codespace"] = "|list|ls|view|logs|ports|"
-    RD["gh cs"] = RD["gh codespace"]
-    RD["gh ssh-key"] = "|list|ls|"
-    RD["gh gpg-key"] = "|list|ls|"
-    RD["gh agent-task"] = "|list|ls|view|"
-    RD["gh agent-tasks"] = RD["gh agent-task"]; RD["gh agent"] = RD["gh agent-task"]; RD["gh agents"] = RD["gh agent-task"]
-    RD["gh discussion"] = "|list|ls|view|"
-    RD["gh skill"] = "|list|ls|preview|search|install|update|"
-    RD["gh skills"] = RD["gh skill"]
-    RD["gh alias"] = "|list|ls|delete|"
-    # Runs an agent that can write as the owner: no verb is a read.
-    RD["gh copilot"] = "|"
-    RD["glab mr"] = "|list|ls|view|show|diff|checkout|issues|approvers|note list|"
-    RD["glab issue"] = "|list|ls|view|show|board view|"
-    RD["glab ci"] = "|list|ls|view|status|trace|get|lint|config|artifact|"
-    RD["glab pipeline"] = RD["glab ci"]; RD["glab pipe"] = RD["glab ci"]
-    RD["glab job"] = "|artifact|"
-    RD["glab release"] = "|list|ls|view|download|"
-    RD["glab repo"] = "|list|ls|view|clone|search|contributors|archive|"
-    RD["glab project"] = RD["glab repo"]
-    RD["glab label"] = "|list|ls|get|"
-    RD["glab variable"] = "|list|ls|get|export|"
-    RD["glab var"] = RD["glab variable"]
-    RD["glab snippet"] = "|list|ls|view|"
-    RD["glab schedule"] = "|list|ls|"
-    RD["glab sched"] = RD["glab schedule"]; RD["glab skd"] = RD["glab schedule"]
-    RD["glab milestone"] = "|list|ls|get|"
-    RD["glab incident"] = "|list|ls|view|show|"
-    RD["glab token"] = "|list|ls|"
-    RD["glab deploy-key"] = "|list|ls|get|"
-    RD["glab ssh-key"] = "|list|ls|get|"
-    RD["glab gpg-key"] = "|list|ls|get|"
-    RD["glab cluster"] = "|agent list|graph|"
-    RD["glab stack"] = "|list|ls|prev|next|first|last|move|create|save|amend|switch|"
-    RD["glab stacks"] = RD["glab stack"]
-    RD["glab securefile"] = "|list|ls|show|get|download|"
-    RD["glab runner"] = "|list|ls|jobs|managers|"
-    RD["glab runner-controller"] = "|list|ls|get|scope list|token list|"
-    RD["glab opentofu"] = "|init|state list|state download|"
-    RD["glab todo"] = "|list|ls|"
-    RD["glab alias"] = "|list|ls|delete|"
-    # duo cli and mcp serve run an agent or a server that can write as the owner.
-    RD["glab duo"] = "|ask|"
-    RD["glab mcp"] = "|"
-    # glab 1.112 groups. dependency-firewall configure writes a local package
-    # manager config, not the forge. orbit setup/local and skills install/update
-    # install a binary or agent skills on this machine: denied, like duo cli.
-    RD["glab container-registry"] = "|repository list|repository ls|repository view|tag list|tag ls|tag view|"
-    RD["glab dependency-firewall"] = "|ci-summary|configure|"
-    RD["glab orbit"] = "|remote dsl|remote graph-status|remote query|remote schema|remote status|remote tools|"
-    RD["glab packages"] = "|list|ls|download|"
-    RD["glab search"] = "|semantic|"
-    RD["glab security"] = "|config status|"
-    RD["glab skills"] = "|list|"
-  }
-  function valued(x) { return x == "-R" || x == "--repo" || x == "--hostname" }
-  # unread(v): a field value this guard cannot read: from a file (=@f), or a
-  # GraphQL query built by expansion (`query=$Q`, `query=$(cat f)`, backticks).
-  function unread(v) { return v ~ /=@/ || v ~ /(^|[^A-Za-z0-9_])query=.*[$]/ }
-  function api_write(s,    k, x, m, method, field, ovr, ep, fromfile) {
-    method = ""; field = 0; ovr = 0; ep = ""; fromfile = 0
-    for (k = s; k <= n; k++) {
-      x = t[k]
-      if (x == "-X" || x == "--method") { method = t[k + 1]; k++; continue }
-      if (x ~ /^--method=/) { method = substr(x, 10); continue }
-      if (x ~ /^-[A-Za-z]*X/ && x !~ /^--/) {
-        m = x; sub(/^-[A-Za-z]*X=?/, "", m)
-        if (m == "") { method = t[k + 1]; k++ } else method = m
-        continue
-      }
-      if (x == "-H" || x == "--header") { if (tolower(t[k + 1]) ~ /x-(http-)?method/) ovr = 1; k++; continue }
-      if ((x ~ /^--header=/ || x ~ /^-H/) && tolower(x) ~ /x-(http-)?method/) { ovr = 1; continue }
-      if (x == "-q" || x == "--jq" || x == "-t" || x == "--template" || x == "-p" || x == "--preview" || x == "--cache" || x == "--output" || valued(x)) { k++; continue }
-      if (x == "--input") { field = 1; fromfile = 1; k++; continue }
-      if (x ~ /^--input=/) { field = 1; fromfile = 1; continue }
-      if (x == "-f" || x == "-F" || x == "--field" || x == "--raw-field" || x == "--form") { field = 1; if (unread(t[k + 1])) fromfile = 1; k++; continue }
-      if (x ~ /^--(raw-field|field|form)=/ || (x ~ /^-[A-Za-z]*[fF]/ && x !~ /^--/)) { field = 1; if (unread(x)) fromfile = 1; continue }
-      if (x ~ /^-/) continue
-      if (ep == "") ep = x
-    }
-    sub(/^\//, "", ep)
-    if (tolower(ep) == "graphql") return MUT || fromfile
-    if (ovr) return 1
-    method = toupper(method)
-    if (method != "") return !(method == "GET" || method == "HEAD")
-    return field
-  }
-  # judge(i): t[i] is the command word gh/glab; prints the verdict and exits on a write.
-  function judge(i,    cli, j, g, key, k, v1, v2) {
-    cli = t[i]; sub(/.*\//, "", cli)
-    j = i + 1
-    while (j <= n && t[j] ~ /^-/) { if (valued(t[j])) j++; j++ }
-    g = t[j]
-    if (g == "") return
-    key = cli " " g
-    if (key in AG) return
-    if (g == "api") { if (api_write(j + 1)) { printf "%s\tapi\t\t\n", cli; exit } ; return }
-    if (!(key in RD)) return
-    v1 = ""; v2 = ""
-    for (k = j + 1; k <= n; k++) {
-      if (t[k] == "--help" || t[k] == "-h") { if (v2 == "") return; break }
-      if (t[k] ~ /^-/) { if (valued(t[k])) k++; continue }
-      if (v1 == "") v1 = t[k]; else if (v2 == "") v2 = t[k]; else break
-      if (v2 != "") break
-    }
-    if (v1 == "") return
-    if (index(RD[key], "|" v1 "|") || index(RD[key], "|" v1 " " v2 "|")) return
-    printf "%s\t%s\t%s\t%s\n", cli, g, v1, RD[key]
-    exit
-  }
+# The classifier (the AG/RD tables, api_write, judge) is shared with the agent
+# PATH wrappers ai/agent-bin/gh and ai/agent-bin/glab (DND-1803), which judge
+# the real argv: ai/lib/forge-write-class.awk. Its text goes in front of this
+# hook's own lexical driver. If it cannot be read, awk fails on the call to
+# fwc_init, FORGE_WRITE is empty and this rule allows, per FAIL-OPEN above;
+# the PATH wrappers still refuse the write when it runs.
+FWC_LIB="$(dirname "$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")")/../lib/forge-write-class.awk"
+FWC_TEXT=$(cat "$FWC_LIB" 2>/dev/null) || FWC_TEXT=""
+FORGE_WRITE=$(printf '%s\n' "$CMD" | awk "$FWC_TEXT"'
+  BEGIN { fwc_init() }
   # judge_words(w, nw): judge every gh/glab word of one command segment.
   function judge_words(w, nw,    i, b) {
     n = nw

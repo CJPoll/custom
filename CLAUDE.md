@@ -905,8 +905,8 @@ and pronoun-guard; nothing detected it. The durable fix:
 - **The agent-stash env (DND-775):** `registry.json` also has an `env` section:
   the GIT_CONFIG_* pairs that register the git reference-transaction hook
   `ai/git-hooks/agent-stash-guard.sh`, `GIT_TRACE2=/dev/null`,
-  `ATHENA_AGENT_BIN` (the directory of the agent PATH git wrapper
-  `ai/agent-bin/git`), and `CLAUDE_ENV_FILE`, which names
+  `ATHENA_AGENT_BIN` (the directory of the agent PATH wrappers: `git`, and
+  the forge-identity `gh` and `glab` of DND-1803), and `CLAUDE_ENV_FILE`, which names
   `ai/agent-env/session-env.sh`. Claude Code runs that script in the Bash
   tool's shell after the shell snapshot and before each command; it prepends
   `ATHENA_AGENT_BIN` to PATH. Plain `--install` never touches it:
@@ -915,6 +915,15 @@ and pronoun-guard; nothing detected it. The durable fix:
   it (the one-command disable). Restart sessions after either. Like a hook,
   it is installed only after it lands. The expected values are read from the
   registry AS LANDED, like the hooks' bar.
+  The same PATH carries forge identity (DND-1803): the git wrapper refuses a
+  push to github.com or gitlab.com not made through `gh-athena git` /
+  `glab-athena git` (`ai/lib/agent-forge-push.sh`), and the `gh` / `glab`
+  wrappers refuse a forge write not made through `gh-athena` / `glab-athena`
+  (`ai/lib/agent-forge-cli.sh`), wherever the command came from, a script
+  included. `forge-identity-guard.sh` stays the earlier, lexical layer. A new
+  file in `ai/agent-bin/` needs no env change: it is on PATH once it lands in
+  the main checkout, and `check-hooks-registered` fails on any file there but
+  `git`, `gh` and `glab`.
   `check-hooks-registered` prints its own agent-stash line: INACTIVE (exit 0),
   ACTIVE (exit 0, runtime asserted), PENDING RESTART (exit 0), DRIFT/FAIL
   (exit 1), or COULD NOT MEASURE (exit 3: guard keys present but the landed

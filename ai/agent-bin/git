@@ -8,7 +8,9 @@
 # Claude Code runs after the Bash tool's shell snapshot and which prepends it
 # when the wrapper is executable (DND-1080: a ~/.zshrc PATH change never reaches
 # the tool shell). The owner's terminal never sets ATHENA_AGENT_BIN. This directory
-# holds ONLY this file: anything else here would shadow a real command.
+# holds this file and the forge-identity gh and glab wrappers (DND-1803), each
+# meant to shadow its real command; anything else here would shadow one by
+# accident. Pushes are judged for forge identity too: see "forge identity" below.
 #
 # WHY A WRAPPER, AND WHY THIS IS NOT THE ENFORCEMENT. The enforcement is the
 # reference-transaction hook ai/git-hooks/agent-stash-guard.sh, which runs
@@ -317,6 +319,20 @@ while :; do
   IFS=$old_ifs
   words="$expanded$rest"
 done
+
+# ---- forge identity (DND-1803) ----------------------------------------------
+# A push is judged by ai/lib/agent-forge-push.sh, beside this wrapper's own
+# directory: a push to github.com or gitlab.com is refused unless it carries the
+# credential isolation of the Athena route (`gh-athena git` / `glab-athena git`),
+# so a push in a script cannot go out as the machine owner. The rule, its
+# marker and its residuals are that file's header. Only a push pays for it.
+if [ "$sub" = push ]; then
+  _afp=$(readlink -f "$self" 2>/dev/null) || _afp=$self
+  _afp="${_afp%/*}/../lib/agent-forge-push.sh"
+  [ -r "$_afp" ] || refuse "git push: the forge-identity check $_afp cannot be read, so whether this push goes out as the machine owner is unknown" \
+    "Fix: restore ai/lib/agent-forge-push.sh in the checkout that holds this wrapper; to push to a forge meanwhile, use ~/dev/custom/ai/bin/gh-athena git push ... or ~/dev/custom/ai/bin/glab-athena git push ...."
+  eval "ATHENA_REAL_GIT=\"\$real\" bash \"\$_afp\" $globals push \"\$@\"" || exit $?
+fi
 
 # $sub is the resolved subcommand; "$@" holds its arguments.
 case "$sub" in

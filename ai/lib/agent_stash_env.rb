@@ -20,8 +20,8 @@
 #   ACTIVE    every key is present with its exact value, the GIT_CONFIG pairs
 #             inside GIT_CONFIG_COUNT. Then the runtime is asserted too (the
 #             hook script exists and is executable in the main checkout; git
-#             lists the hook; the wrapper is executable and alone in its
-#             directory; the CLAUDE_ENV_FILE script carries the PATH line)
+#             lists the hook; the wrapper is executable and its directory
+#             holds nothing but BIN_FILES; the CLAUDE_ENV_FILE script carries the PATH line)
 #             and each failure is exit 1 with a Fix:.
 #   DRIFT     some keys present, or a value that differs (a hook path in a
 #             worktree, say). Exit 1, each difference named.
@@ -83,6 +83,10 @@ module AgentStashEnv
   # PATH change reaches the Bash tool's shell.
   ENV_LINE    = 'if [ -n "${ATHENA_AGENT_BIN:-}" ] && [ -x "$ATHENA_AGENT_BIN/git" ]; then PATH="$ATHENA_AGENT_BIN:$PATH"; export PATH; fi'
   ENV_FILE    = "CLAUDE_ENV_FILE"
+  # The files ATHENA_AGENT_BIN may hold: the git wrapper (DND-775) and the
+  # gh/glab forge-identity wrappers (DND-1803). Each shadows the real command on
+  # agent PATH on purpose; anything else there would shadow one by accident.
+  BIN_FILES   = %w[git gh glab].freeze
   # Vars other tools set too. Their presence alone is no trace of the guard.
   SHARED_VARS = ["GIT_TRACE2", ENV_FILE].freeze
   DISABLE     = "scripts/setup-hooks --remove-env"
@@ -215,8 +219,8 @@ module AgentStashEnv
     if !(File.file?(wrapper) && File.executable?(wrapper))
       out << "the PATH git wrapper #{wrapper} is missing or not executable; the CLAUDE_ENV_FILE line then leaves PATH " \
              "alone and drop/reflog go unguarded. Fix: restore ai/agent-bin/git in #{main}."
-    elsif (extra = Dir.children(bin) - ["git"]).any?
-      out << "#{bin} holds #{extra.sort.join(', ')} besides git; anything there shadows a real command on " \
+    elsif (extra = Dir.children(bin) - BIN_FILES).any?
+      out << "#{bin} holds #{extra.sort.join(', ')} besides #{BIN_FILES.join(', ')}; anything there shadows a real command on " \
              "agent PATH. Fix: move it out of #{bin}."
     end
     out.concat(env_file_problems(exp, main))

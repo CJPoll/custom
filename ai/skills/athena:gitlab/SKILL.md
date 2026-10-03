@@ -123,7 +123,9 @@ too; `glab-athena refresh` is owner-gated, so do not run it. The mechanism and
 its named residuals (an `~/.ssh/config` Host alias, `ext::`, git-lfs, …) are
 shared with `gh-athena git` and listed in `ai/lib/forge-git-passthrough.sh`.
 The `forge-identity-guard.sh` hook denies a plain `git push` to a gitlab.com
-remote before it runs, with a `Fix:` naming this form (DND-577).
+remote before it runs, with a `Fix:` naming this form (DND-577). The agent PATH
+`git` and `glab` wrappers refuse a plain push or forge write again in the
+process, a script included (DND-1803; **athena:github** → *Pushing as Athena*).
 
 A push to `main` is also judged for its gate, as on GitHub: in a repo that
 declares one, it is refused (`NO RECEIPT`, exit 3) unless `integration-gate`
@@ -207,7 +209,8 @@ What the wrapper refuses, exit 3 with a `Fix:`:
   after it.
 
 A refusal is expected, not an auth error: follow its `Fix:`. Never merge around
-it with plain `glab`, which the `forge-identity-guard` hook denies too. On
+it with plain `glab`, which the `forge-identity-guard` hook and the agent PATH
+`glab` wrapper deny too. On
 walt_ui GitLab also enforces "pipelines must succeed" server-side (measured
 2026-09-26); the wrapper is the floor that fires on every project, and the
 only thing that pins the reviewed head. Its named residuals (ref-moving API

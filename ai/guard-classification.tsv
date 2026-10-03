@@ -31,6 +31,11 @@ ai/bin/contention-census	tool	reads and prints host load/contention numbers for 
 # --- DND-775 agent-stash guard: a git reference-transaction hook and the agent PATH git wrapper. Both refuse with a Fix:.
 ai/git-hooks/agent-stash-guard.sh	guard
 ai/agent-bin/git	guard
+ai/agent-bin/gh	guard
+ai/agent-bin/glab	guard
+ai/lib/agent-forge-cli.sh	guard
+ai/lib/agent-forge-push.sh	guard
+ai/lib/forge-write-class.awk	library	the forge-write classifier (DND-1179, shared since DND-1803), awk functions loaded by ai/hooks/forge-identity-guard.sh and ai/lib/agent-forge-cli.sh; it prints a verdict line and each caller composes the deny or refusal that carries Fix:
 
 # --- Sourced libraries. guard = the library holds refusal text that must keep its Fix:.
 ai/lib/agent-free-git.sh	guard	
