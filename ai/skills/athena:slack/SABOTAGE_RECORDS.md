@@ -616,3 +616,11 @@ Review round (code-reviewer: `slack_files_meta` copied an object-valued member a
 | S110 | `slack_scalar_str` passes any value through (`def slack_scalar_str: .;`) | 1 | `FAIL read-inbox: malformed files members are null, no nested URL passes, a non-list files is none` |
 
 After the restore the suite returned to `VERDICT: PASS (355 cases)`.
+
+Critic round (correctness: `slack_room_meta` passed its members' values through, so an object-valued room `id` carrying a URL reached `--json` and the marker). Each room member now keeps only its own type; an empty file id reads `no id`, as athena:inbox prints it. Case added; baseline `VERDICT: PASS (356 cases)`.
+
+| # | Mutation | Cases reddened | Failure string(s) |
+|---|---|---|---|
+| S111 | `slack_room_meta`'s `id` back to `(.id // null)` | 1 | `FAIL read-channel: room members keep only their own type; an empty file id reads no id` |
+
+After the restore the suite returned to `VERDICT: PASS (356 cases)`.

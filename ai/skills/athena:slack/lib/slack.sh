@@ -464,7 +464,9 @@ slack_read_text() {
 #                        in an object-valued member never passes (DND-1835;
 #                        athena-inbox.md -> Line format, `files`).
 #   slack_room_meta   -- a huddle message's room as {id, name, date_start,
-#                        date_end, has_ended, participants}, or null.
+#                        date_end, has_ended, participants}, or null. Each
+#                        member keeps only its own type (a string, a number,
+#                        a boolean, a list of user-id strings), else null.
 #   slack_attach_mark -- the text form's marker, "" for a plain message:
 #                        "[2 files: notes (canvas, 512 bytes, F..), ...]" and
 #                        "[huddle R..: <name>, ended]".
@@ -487,9 +489,13 @@ def slack_files_meta:
 def slack_first_set(f): [f | select(type == "string" and . != "")] | first;
 def slack_room_meta:
   if (.room | type) == "object"
-  then .room | {id: (.id // null), name: (.name // null),
-                date_start: (.date_start // null), date_end: (.date_end // null),
-                has_ended: (.has_ended // null), participants: (.participants // null)}
+  then .room
+       | {id: (.id | slack_scalar_str), name: (.name | slack_scalar_str),
+          date_start: (if (.date_start | type) == "number" then .date_start else null end),
+          date_end: (if (.date_end | type) == "number" then .date_end else null end),
+          has_ended: (if (.has_ended | type) == "boolean" then .has_ended else null end),
+          participants: (if (.participants | type) == "array"
+                         then [.participants[] | select(type == "string")] else null end)}
   else null end;
 def slack_attach_mark:
   (slack_files_meta) as $f
@@ -504,14 +510,14 @@ def slack_attach_mark:
                           .mimetype, .filetype) // "file"),
                        (if .size == null then empty
                         else (.size | tostring) + " bytes" end),
-                       ((.id // "no id") | tostring) ]
+                       (slack_first_set(.id) // "no id") ]
                      | join(", ") )
                  + ")")
                | join(", ") )
            + "]"
       end ) as $fm
   | ( if $r == null then ""
-      else "[huddle " + (($r.id // "no id") | tostring)
+      else "[huddle " + (slack_first_set($r.id) // "no id")
            + ((slack_first_set($r.name) | if . == null then "" else ": " + . end))
            + (if $r.has_ended == true then ", ended" else "" end)
            + "]"

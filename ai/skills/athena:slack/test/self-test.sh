@@ -655,6 +655,24 @@ if [[ "${D1822_K7}" == '["name","subtype","text","thread_ts","ts","user"]' ]] \
   ok "read-channel: a files list of non-objects is no files; empty name and title fall back to the id"
 else bad "read-channel: a files list of non-objects is no files; empty name and title fall back to the id" "keys7='${D1822_K7}' out='${OUT}'"; fi
 
+# DND-1835 critic round: a room member keeps only its own type, so a URL
+# nested in an object-valued room id never passes. An empty file id reads
+# "no id", as athena:inbox prints it.
+setup_case
+seed_caches
+D1835_HOSTILE="{\"ok\":true,\"messages\":[{\"ts\":\"9.0\",\"user\":\"${CODY}\",\"text\":\"\",\"subtype\":\"huddle_thread\",\"room\":{\"id\":{\"u\":\"wss://media.example.test/?token=xoxe-secret-7\"},\"name\":\"ok\",\"date_start\":\"soon\",\"has_ended\":\"yes\",\"participants\":[{\"u\":\"https://media.example.test/p\"},\"${CODY}\"]}},{\"ts\":\"10.0\",\"user\":\"${CODY}\",\"text\":\"\",\"files\":[{\"id\":\"\",\"name\":\"a.txt\",\"mimetype\":\"text/plain\"}]}],\"response_metadata\":{\"next_cursor\":\"\"}}"
+fixture conversations.history "${D1835_HOSTILE}"
+run_bin read-channel "${ENG_CHANNEL}" --limit 5 --json
+D1835_R="$(printf '%s\n' "${OUT}" | jq -c 'select(.ts == "9.0") | .room' 2>/dev/null || true)"
+D1835_RJ="${OUT}"
+run_bin read-channel "${ENG_CHANNEL}" --limit 5
+if [[ "${D1835_R}" == "{\"id\":null,\"name\":\"ok\",\"date_start\":null,\"date_end\":null,\"has_ended\":null,\"participants\":[\"${CODY}\"]}" ]] \
+   && [[ "$(printf '%s\n' "${OUT}" | grep '^9\.0' || true)" == "$(printf '9.0\tcody\t[huddle no id: ok]\t')" ]] \
+   && [[ "$(printf '%s\n' "${OUT}" | grep '^10\.0' || true)" == "$(printf '10.0\tcody\t[1 file: a.txt (text/plain, no id)]\t')" ]] \
+   && [[ "${D1835_RJ}${OUT}" != *"example.test"* ]]; then
+  ok "read-channel: room members keep only their own type; an empty file id reads no id"
+else bad "read-channel: room members keep only their own type; an empty file id reads no id" "room='${D1835_R}' out='${OUT}'"; fi
+
 echo
 echo "-- the hook: when it runs --------------------------------------------------"
 
