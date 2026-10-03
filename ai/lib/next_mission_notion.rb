@@ -278,6 +278,8 @@ class NextMissionNotion
       # Control (DND-1747): a page without the property is a ReadError, so a
       # schema that lost it never reads as "no control misreports".
       control: select(page, "Control"),
+      # Security (DND-1789): tier 1(a) needs pre-existing; same ReadError rule.
+      security: select(page, "Security"),
       depends_on: [], created: page["created_time"]
     )
   rescue KeyError, NoMethodError, TypeError => e

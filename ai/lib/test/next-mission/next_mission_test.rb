@@ -33,14 +33,18 @@ NM = NextMission
 
 # t("DND-5", kind: "Bug", ...) -> a Ticket with sensible defaults.
 # control: the Control select (DND-1747); set only when given, so a ticket
-# built without it reads as unset.
+# built without it reads as unset. security: (DND-1789) defaults to
+# pre-existing for a Vulnerability, so the tier-1 cases keep their meaning;
+# pass security: nil (unset), "none" or "introduced" to test the other values.
 def t(id, status: "Todo", kind: nil, severity: nil, path: "Off", area: "Product",
-      deps: [], created: nil, control: nil)
+      deps: [], created: nil, control: nil, security: :auto)
   n = id.split("-").last.to_i
   x = NM::Ticket.new(id: id, page_id: "page-#{id}", title: "title #{id}", status: status,
                      kind: kind, severity: severity, path: path, area: area,
                      depends_on: deps, created: created || format("2026-09-%02dT00:00:00Z", (n % 28) + 1))
   x[:control] = control if control
+  security = "pre-existing" if security == :auto && kind == "Vulnerability"
+  x[:security] = security unless security == :auto
   x
 end
 
@@ -515,10 +519,67 @@ check("result: to_h carries pick, tier, rule, funnel, held_back") do
   h[:ticket] == "DND-3" && h[:tier] == 1 && h[:funnel].is_a?(Array) && h.key?(:held_back)
 end
 
+# ------------------------------------------- domain: Security gates tier 1(a) (DND-1789)
+# The tier table: tier 1(a) is Kind=Vulnerability with Security=pre-existing.
+
+%w[none introduced].each do |value|
+  check("DND-1789: a HIGH Vulnerability with Security=#{value} is not tier 1; a blocking bug wins") do
+    r = pick([t("DND-2", kind: "Bug", severity: "LOW", path: "Blocking"),
+              t("DND-5", kind: "Vulnerability", severity: "HIGH", security: value)])
+    r.pick.id == "DND-2" && r.tier == 2 && r.security_unset == []
+  end
+end
+
+check("DND-1789: a CRITICAL Vulnerability with Security unset is not tier 1 and is reported") do
+  r = pick([t("DND-2", kind: "Bug", severity: "LOW", path: "Blocking"),
+            t("DND-5", kind: "Vulnerability", severity: "CRITICAL", security: nil)])
+  r.pick.id == "DND-2" && r.tier == 2 && r.security_unset == ["DND-5"] && r.to_h[:security_unset] == ["DND-5"]
+end
+
+check("DND-1789: Security=pre-existing at HIGH and CRITICAL is tier 1") do
+  r = pick([t("DND-2", kind: "Bug", severity: "LOW", path: "Blocking"),
+            t("DND-5", kind: "Vulnerability", severity: "HIGH", security: "pre-existing")])
+  r.pick.id == "DND-5" && r.tier == 1 && r.rule == "tier 1: exploitable vulnerability (HIGH)"
+end
+
+check("DND-1789: Security=pre-existing below HIGH stays tier 4") do
+  pick([t("DND-5", kind: "Vulnerability", severity: "MEDIUM", security: "pre-existing")]).tier == 4
+end
+
+check("DND-1789: a fail-open Vulnerability is tier 1 through Control whatever its Security") do
+  r = pick([t("DND-2", kind: "Bug", severity: "LOW", path: "Blocking"),
+            t("DND-5", kind: "Vulnerability", severity: "HIGH", security: "none", control: "fails-open")])
+  r.pick.id == "DND-5" && r.tier == 1 && r.rule == "tier 1: security control fails open (Vulnerability, HIGH)" &&
+    r.security_unset == []
+end
+
+check("DND-1789: a non-Vulnerability with Security=pre-existing gains no tier 1") do
+  pick([t("DND-5", kind: "Bug", severity: "HIGH", security: "pre-existing", control: "none")]).tier == 4
+end
+
+check("DND-1789: a Vulnerability off tier 1 keeps its tier-4 Kind rank") do
+  order = NM.tier4_order([t("DND-40", kind: "Bug", severity: "LOW", created: "2026-09-01T00:00:00Z"),
+                          t("DND-41", kind: "Vulnerability", severity: "LOW", security: "none",
+                                      created: "2026-09-02T00:00:00Z")])
+  order.map(&:id) == %w[DND-41 DND-40]
+end
+
+check("DND-1789: a terminal or MEDIUM Vulnerability with Security unset is not reported") do
+  r = pick([t("DND-5", kind: "Vulnerability", severity: "HIGH", security: nil, status: "Done"),
+            t("DND-6", kind: "Vulnerability", severity: "MEDIUM", security: nil)])
+  r.security_unset == []
+end
+
+check("DND-1789: an unknown Security value is a DataError naming it") do
+  raises?(NM::DataError, /Security="maybe"/) do
+    pick([t("DND-5", kind: "Vulnerability", severity: "HIGH", security: "maybe")])
+  end
+end
+
 # ------------------------------------------------- adapter: Notion (fake HTTP)
 
 def page(id_num, status: "Todo", kind: nil, severity: nil, path: "Off", area: "Harness",
-         deps: [], deps_more: false, created: "2026-09-27T21:15:00.000Z", control: nil)
+         deps: [], deps_more: false, created: "2026-09-27T21:15:00.000Z", control: nil, security: nil)
   sel = ->(v) { { "type" => "select", "select" => v && { "name" => v } } }
   { "object" => "page", "id" => "p#{id_num}", "created_time" => created,
     "properties" => {
@@ -526,7 +587,7 @@ def page(id_num, status: "Todo", kind: nil, severity: nil, path: "Off", area: "H
       "Name" => { "id" => "title", "type" => "title", "title" => [{ "plain_text" => "T#{id_num}" }] },
       "Status" => { "id" => "st", "type" => "status", "status" => { "name" => status } },
       "Kind" => sel.call(kind), "Severity" => sel.call(severity), "Path" => sel.call(path),
-      "Area" => sel.call(area), "Control" => sel.call(control),
+      "Area" => sel.call(area), "Control" => sel.call(control), "Security" => sel.call(security),
       "Depends On" => { "id" => "dep", "type" => "relation", "relation" => deps.map { |d| { "id" => d } },
                         "has_more" => deps_more }
     } }
@@ -684,6 +745,23 @@ check("adapter: DND-1747 a page with no Control property is a ReadError naming i
   bad["properties"].delete("Control")
   tr = FakeTransport.new([:post, "/v1/data_sources/#{TDS}/query"] => { "results" => [bad], "has_more" => false })
   raises?(NextMissionNotion::ReadError, /"Control"/) { NextMissionNotion.new(tr).load(epic: EPIC) }
+end
+
+check("adapter: DND-1789 the Security select is read into the ticket") do
+  tr = FakeTransport.new([:post, "/v1/data_sources/#{TDS}/query"] => {
+                           "results" => [page(1, kind: "Vulnerability", severity: "HIGH", security: "pre-existing"),
+                                         page(2)],
+                           "has_more" => false
+                         })
+  s = NextMissionNotion.new(tr).load(epic: EPIC)
+  s.scope.map(&:security) == ["pre-existing", nil]
+end
+
+check("adapter: DND-1789 a page with no Security property is a ReadError naming it, never an unset Security") do
+  bad = page(1, kind: "Vulnerability", severity: "HIGH")
+  bad["properties"].delete("Security")
+  tr = FakeTransport.new([:post, "/v1/data_sources/#{TDS}/query"] => { "results" => [bad], "has_more" => false })
+  raises?(NextMissionNotion::ReadError, /"Security"/) { NextMissionNotion.new(tr).load(epic: EPIC) }
 end
 
 def epic_row(id, title)
@@ -1016,6 +1094,48 @@ check("cli: DND-1747 an unknown Control value in a fixture is exit 3 naming it")
                ]) do |f|
     _out, err, code = cli("--from-json", f)
     code == 3 && err.include?("Control") && err.include?("Fix:")
+  end
+end
+
+# DND-1789: tier 1(a) needs Security=pre-existing, as the tier table states
+# (athena:ticket-management -> Priority: critical path first). A blocking Bug
+# is the foil: tier 2 wins whenever the Vulnerability is not tier 1.
+def security_fixture(security)
+  vuln = { "id" => "DND-5", "status" => "Todo", "kind" => "Vulnerability", "severity" => "HIGH", "path" => "Off",
+           "area" => "Product", "created" => "2026-09-02T00:00:00Z" }
+  vuln["security"] = security unless security.nil?
+  { "tickets" => [{ "id" => "DND-2", "status" => "Todo", "kind" => "Bug", "severity" => "LOW", "path" => "Blocking",
+                    "area" => "Product", "created" => "2026-09-01T00:00:00Z" }, vuln] }
+end
+
+%w[none introduced].each do |value|
+  check("cli: DND-1789 regression: a HIGH Vulnerability with Security=#{value} is not tier 1") do
+    with_fixture(security_fixture(value)) do |f|
+      out, _err, code = cli("--from-json", f)
+      code.zero? && out.start_with?("DND-2\ttier 2")
+    end
+  end
+end
+
+check("cli: DND-1789 regression: a HIGH Vulnerability with Security unset is not tier 1, and is named on stderr") do
+  with_fixture(security_fixture(nil)) do |f|
+    out, err, code = cli("--from-json", f)
+    code.zero? && out.start_with?("DND-2\ttier 2") && err.include?("Security unset") && err.include?("DND-5") &&
+      err.include?("Fix:")
+  end
+end
+
+check("cli: DND-1789 a HIGH Vulnerability with Security=pre-existing is tier 1") do
+  with_fixture(security_fixture("pre-existing")) do |f|
+    out, err, code = cli("--from-json", f)
+    code.zero? && out == "DND-5\ttier 1: exploitable vulnerability (HIGH)\n" && !err.include?("Security unset")
+  end
+end
+
+check("cli: DND-1789 an unknown Security value in a fixture is exit 3 naming it") do
+  with_fixture(security_fixture("maybe")) do |f|
+    _out, err, code = cli("--from-json", f)
+    code == 3 && err.include?("Security") && err.include?("Fix:")
   end
 end
 

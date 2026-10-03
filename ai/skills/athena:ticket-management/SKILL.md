@@ -411,6 +411,9 @@ The DND Tickets data source carries these. The values are stated here once.
   MEDIUM.
 - **`Security`:** `introduced` means this ticket's own change creates it
   (it blocks that ticket); `pre-existing` means found along the way.
+  `ai/bin/next-mission` ranks a `Vulnerability` tier 1 only at
+  `Security` = `pre-existing`, and names each open `CRITICAL`/`HIGH`
+  `Vulnerability` with `Security` unset (it is not tier 1 until set).
 - **`Path`:** `Critical` is on the epic's critical path. `Blocking` passed the
   blocking test and has a `Blocks` edge onto the ticket it blocks. `Promoted`
   is the owner's order (their quote in the body), an admiral's promotion (its
