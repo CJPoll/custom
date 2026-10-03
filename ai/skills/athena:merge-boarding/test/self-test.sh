@@ -1893,7 +1893,7 @@ landed_layout() {
 landed_branch() { ( cd "$1" && git worktree add -q -b "$(basename "$2")" "$2" ); stub_gate_green "$2/GATE_RAN" "$2/g.sh"; }
 LBG=ai/skills/athena:merge-boarding/scripts/integration-gate
 printf '.surfaces |= map(select(.class != "owner-approval-policy"))\n' > "${TMP}/lb-narrow.jq"
-printf '.surfaces |= map(.patterns |= (if . == null then . else map(select((test("integration-gate|integration-receipt|receipt_seal|receipt-seal|merge-guard|forge-git-passthrough|gh-athena|locked-merge|main-health|critic-review|critic_carry|critic_verdict_stores")) | not)) end))\n' > "${TMP}/lb-unhold-chain.jq"
+printf '.surfaces |= map(.patterns |= (if . == null then . else map(select((test("integration-gate|integration-receipt|receipt_seal|receipt-seal|merge-guard|forge-git-passthrough|gh-athena|locked-merge|main-health|forge-api-scan|forge-cli-isolation|critic-review|critic_carry|critic_verdict_stores")) | not)) end))\n' > "${TMP}/lb-unhold-chain.jq"
 
 # lb1: a branch that narrows the manifest (drops the held owner-approval-policy
 # surface) and so touches a file that surface holds. The landed manifest holds

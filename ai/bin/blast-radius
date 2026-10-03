@@ -3903,6 +3903,9 @@ def self_test
      ["the gh-athena entry point", "ai/bin/gh-athena", "[owner-approval-policy]"],
      ["locked-merge", "ai/skills/athena:merge-boarding/scripts/locked-merge", "[owner-approval-policy]"],
      ["the push-guard fix-push exception", "ai/lib/main-health.sh", "[owner-approval-policy]"],
+     ["the main-health CLI", "ai/bin/main-health", "[owner-approval-policy]"],
+     ["the forge api scan the merge guard loads", "ai/lib/forge-api-scan.sh", "[owner-approval-policy]"],
+     ["the forge cli isolation the entry point loads", "ai/lib/forge-cli-isolation.sh", "[owner-approval-policy]"],
      ["the critic-review producer", "ai/bin/critic-review", "[owner-approval-policy]"],
      ["the critic carry library", "ai/lib/critic_carry.rb", "[owner-approval-policy]"],
      ["the critic verdict stores", "ai/lib/critic_verdict_stores.rb", "[owner-approval-policy]"]].each do |label, path, cls|

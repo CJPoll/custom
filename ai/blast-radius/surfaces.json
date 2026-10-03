@@ -37,7 +37,7 @@
   "surfaces": [
     {
       "class": "owner-approval-policy",
-      "why": "merging changes WHAT NEEDS THE OWNER'S APPROVAL (KEEP 6): the owner approval grant allowlist, the approval table, or the classifier and verifiers that enforce them, and the receipt chain a merge or push to main is accepted on (integration-gate and its shim, the receipt reader and seal, the merge and push guards, locked-merge, gh-athena, main-health and the critic verdict producer). No owner approval grant class covers this surface. The owner's verified click (--owner-approval click:<delivery_id>, ai/lib/owner_click.rb) clears it like any other hold: owner decision, Cody, 2026-10-02 (DND-1784), \"Gate accepts a verified owner click, without hesitation.\"",
+      "why": "merging changes WHAT NEEDS THE OWNER'S APPROVAL (KEEP 6): the owner approval grant allowlist, the approval table, or the classifier and verifiers that enforce them, and the receipt chain a merge or push to main is accepted on (integration-gate and its shim, the receipt reader and seal, the merge and push guards and what they load, locked-merge, gh-athena, main-health and the critic verdict producer; athena:merge-boarding names each). No owner approval grant class covers this surface. The owner's verified click (--owner-approval click:<delivery_id>, ai/lib/owner_click.rb) clears it like any other hold: owner decision, Cody, 2026-10-02 (DND-1784), \"Gate accepts a verified owner click, without hesitation.\"",
       "patterns": [
         "**/athena/owner_approvals/action_class.ex",
         "**/athena/owner_approvals/action_class_test.exs",
@@ -55,6 +55,9 @@
         "ai/lib/forge-git-passthrough.sh",
         "ai/bin/gh-athena",
         "ai/lib/main-health.sh",
+        "ai/bin/main-health",
+        "ai/lib/forge-api-scan.sh",
+        "ai/lib/forge-cli-isolation.sh",
         "ai/bin/critic-review",
         "ai/lib/critic_carry.rb",
         "ai/lib/critic_verdict_stores.rb"
