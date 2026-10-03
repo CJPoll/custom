@@ -691,6 +691,50 @@ check("LC6 code stays measured for the no-run landing (it ends at the landing by
   totals_of(no_deploy).fetch("code").values_at("n", "n_na") == [5, 0]
 end
 
+# ── the ledger carries the same lead rule (DND-1924) ───────────────────────
+# The experiment judge reads lead_s from the ledger row, not from Stats, so a
+# no-run landing in a CI repo must be written n/a at ingest. A repo with no CI
+# keeps the landing-ended lead.
+def ingest_land(i, tail_s, tail_end)
+  l = landing(ticket: "DND-#{9100 + i}", commit: format("%040x", i))
+  l.merge("lead_s" => 1000 * i, "code_s" => 900 * i, "tail_s" => tail_s, "tail_end" => tail_end)
+end
+mix_in = [ingest_land(1, 3600, "deploy"), ingest_land(2, 7200, "deploy"), ingest_land(3, 0, "merge")]
+no_runs = [ingest_land(1, 0, "merge"), ingest_land(2, 0, "merge")]
+decl_ci = L::TailCI.declare("post-merge.yml", "prod")
+decl_none = L::TailCI.declare("none", "prod")
+lead_s_of = ->(ls) { ls.map { |l| l["lead_s"] } }
+check("LI1 declared CI: the no-run landing's lead_s is null, the deploy-ended ones keep theirs") do
+  lead_s_of.call(L::Ledger.lead_in_ci(mix_in, decl_ci)) == [1000, 2000, nil]
+end
+check("LI1 its lead_na_reason is tail's: no post-merge run, naming the declaration") do
+  r = L::Ledger.lead_in_ci(mix_in, decl_ci).last["lead_na_reason"]
+  r.include?("declares post-merge CI") && r.include?("no successful post-merge run")
+end
+check("LI1 code_s and tail_s of that landing are untouched") do
+  last = L::Ledger.lead_in_ci(mix_in, decl_ci).last
+  last["code_s"] == 2700 && last["tail_s"] == 0
+end
+check("LI2 undeclared, CI inferred from the batch: the same null with the inferred reason") do
+  out = L::Ledger.lead_in_ci(mix_in, nil)
+  lead_s_of.call(out) == [1000, 2000, nil] && out.last["lead_na_reason"].include?("inferred from the window")
+end
+check("LI3 declared no CI: every landing-ended lead stays measured") do
+  lead_s_of.call(L::Ledger.lead_in_ci(no_runs, decl_none)) == [1000, 2000]
+end
+check("LI3 undeclared and no run anywhere in the batch (custom-shaped): leads stay measured") do
+  lead_s_of.call(L::Ledger.lead_in_ci(no_runs, nil)) == [1000, 2000]
+end
+check("LI4 a lead already n/a keeps its own reason") do
+  na = ingest_land(3, 0, "merge").merge("lead_s" => nil, "lead_na_reason" => "start: no stamp")
+  L::Ledger.lead_in_ci([ingest_land(1, 3600, "deploy"), na], decl_ci).last["lead_na_reason"] == "start: no stamp"
+end
+check("LI5 the ledger row the judge reads: lead_s null, reason kept, n/a never 0") do
+  last = L::Ledger.lead_in_ci(mix_in, decl_ci).last
+  b = L::Ledger.base(repo: "prod", mode: "improve", landing: last, ingested_at: t("2026-10-02T00:00:00Z"))
+  b["lead_s"].nil? && b["lead_na_reason"].include?("no successful post-merge run")
+end
+
 # The tail numbers and candidacy before DND-1614, pinned: [n, n_na, sum_s, candidate].
 { "custom-shaped" => [custom_rows, [5, 0, 0, false]], "gen_saas-shaped" => [gs_rows, [5, 0, 18_000, true]],
   "one no-run landing" => [no_deploy, [4, 1, 14_400, true]], "one pre-DND-1532 row" => [pre, [4, 1, 14_400, true]],

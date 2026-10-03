@@ -986,6 +986,21 @@ module LeadTimePhases
         .merge(landing.slice(*PUSH_JOIN_FIELDS).compact)
     end
 
+    # The ingest batch with each no-run landing's lead written n/a (DND-1924).
+    # The experiment judge reads lead_s from the ledger row, so DND-1615's rule
+    # (Stats.no_run_reason: in a CI window a landing with no post-merge run has
+    # an n/a lead, tail's reason) is applied here once, at the one place a
+    # row's lead is written. CI is the repo's declaration, else the batch's own
+    # inference (TailCI.ci?). A lead already n/a keeps its own reason. Rows
+    # already in the ledger are never rewritten.
+    def lead_in_ci(landings, decl)
+      ci = TailCI.ci?(decl, landings)
+      landings.map do |l|
+        why = l["lead_s"].nil? ? nil : Stats.no_run_reason(l, ci, decl)
+        why ? l.merge("lead_s" => nil, "lead_na_reason" => why) : l
+      end
+    end
+
     # How PushJoin joined a push landing, or what it searched (DND-1809).
     PUSH_JOIN_FIELDS = %w[gated_head_source gated_head_miss gated_head_search].freeze
 

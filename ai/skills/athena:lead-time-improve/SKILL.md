@@ -209,6 +209,12 @@ window (`tail_ci`, DND-1614; `ai/bin/lead-time-phases --help`). A
 post-merge run: its tails stay measured, and the run files a ticket to fix
 that repo's lead-time config entry.
 
+`--metric lead` reads the ledger's `lead_s`. Ingest writes it null for a
+landing with no post-merge run in a CI repo (DND-1924), so a before/after on
+`lead` never mixes landing-ended and deploy-ended leads in one set. Rows
+ingested before DND-1924 keep their old `lead_s`: a before-set that reaches
+back to them mixes the two definitions until they age out of the window.
+
 **Later (2026-10-01, DND-1533):** this read "The product-side action for a
 `product` lever is not set by this step (DND-1533, DND-1542). Until it is,
 the harness work goes on", for every repo. Superseded for an improve repo

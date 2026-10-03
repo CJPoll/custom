@@ -246,6 +246,23 @@ check("Metric: counter and total values read from their ledger fields") do
     X::Metric.parse("counter:slot_wait_s", phase: "verify").value(r) == 12
 end
 
+# DND-1924: a before-set in a CI repo, one deploy-ended row and one no-run
+# row, written the way ingest writes them. The no-run landing is not a
+# measured lead on the judge's side, and says why.
+check("lead before-set in a CI repo: the no-run landing is n/a with tail's reason, never 0") do
+  land = lambda do |hours, tail_s, tail_end|
+    { "ticket" => "DND-9300", "landed_commit" => format("%040x", hours.abs), "tail_s" => tail_s,
+      "tail_end" => tail_end, "lead_s" => 1000 * hours.abs, "lead_na_reason" => nil }
+  end
+  decl = LeadTimePhases::TailCI.declare("post-merge.yml", "custom")
+  ing = LeadTimePhases::Ledger.lead_in_ci([land.call(-2, 3600, "deploy"), land.call(-1, 0, "merge")], decl)
+  rows = ing.each_with_index.map { |l, i| row(-2 + i).merge(l) }
+  m = X::Metric.parse("lead", phase: "verify")
+  s = X.sides(rows, metric: m, exclude: [], boundary: t(RECORDED))
+  s[:before].size == 1 && m.value(rows[0]) == 2000 && m.value(rows[1]).nil? &&
+    m.na_reason(rows[1]).include?("no successful post-merge run")
+end
+
 check("Metric.check_kind: instrumentation must measure na_share, a change must not") do
   X.kind_error("instrumentation", "phase").include?("na_share") &&
     X.kind_error("change", "na_share").include?("instrumentation") &&

@@ -213,7 +213,13 @@ HELP = <<~TXT
                    lead with the tail's reason, never a shorter lead. With
                    no CI a lead ends at the landing and stays measured.
                    `code` ends at the landing by definition and is
-                   unchanged. --json carries tail_ci: {"source":
+                   unchanged. The ledger row carries the same rule
+                   (DND-1924): --ingest writes lead_s null with the
+                   tail's reason for such a landing (CI declared, else
+                   inferred from the ingested batch), so the experiment
+                   judge's --metric lead reads it as n/a too. Rows
+                   already ingested keep the lead_s they were written
+                   with. --json carries tail_ci: {"source":
                    "declared"|"inferred", "value": true|false, and
                    "mismatch": N for a "none" repo with runs}.
     --self-test    run the domain and IO suites.
@@ -411,6 +417,8 @@ module Ingest
     events = LeadTimePhases.scope_events(LeadTimePhases.only_events(all_events, LeadTimePhases::EVENTS),
                                          common ? io::Git.repo_label(common) : repo.name)
     landings = landings.map { |l| join_push(l, events, common) }
+    decl = LeadTimePhases::TailCI.declare(repo.idle_workflow, repo.name)
+    landings = LeadTimePhases::Ledger.lead_in_ci(landings, decl)
     heads = landings.filter_map { |l| l["gated_head"] }.uniq
     timings, bad = io::TimingsReader.read(io::TimingsReader.path(env), heads)
     warn "lead-time-phases: #{bad} malformed harness-gate timings line(s) skipped" if bad.positive?
