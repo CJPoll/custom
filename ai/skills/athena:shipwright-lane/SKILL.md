@@ -43,7 +43,8 @@ Two consequences to carry:
 - **Your memory does not move with your tree.** `$SHIPWRIGHT_STATE_DIR`
   (`cursor.txt`, `journal.md`) is always the **main
   checkout's** state, resolved via `dirname "$(git rev-parse
-  --git-common-dir)"` if the env var is unset — never derived from your cwd.
+  --path-format=absolute --git-common-dir)"` if the env var is unset — never
+  derived from your cwd.
   In `MODE: lead-time` your state dir is the one your brief names
   (`LEAD_TIME_STATE_DIR`, the main checkout's `ai-artifacts/lead-time`).
   Everything else — the code you edit, the commits you make — is your
@@ -52,6 +53,13 @@ Two consequences to carry:
   **Later (2026-10-01, DND-1480):** this skill named only the shipwright
   cron's lane, and `$SHIPWRIGHT_STATE_DIR` held the lead-time cursors.
   Superseded: lead time moved to its own cron runner and state dir.
+
+  **Later (2026-10-03):** the resolver had no `--path-format=absolute`.
+  Superseded: without it, git prints the common dir relative to the cwd in a
+  main checkout (`.git` at its root, `../.git` one level down), so `dirname`
+  gives `.` or `..`, a path that names the state dir only from that cwd
+  (DND-1722 report, finding 3; `~/.claude/CLAUDE.md` → *A failed lookup must
+  never look like an empty one*).
 - **On the cron path, you land on main by refspec, not by branch name.** Your
   HEAD is a per-invocation `shipwright/run-*` or `leadtime/run-*` branch, so a bare
   `git pull`/`git push` does the wrong thing — spell both ends out (below). A
