@@ -913,7 +913,7 @@ def bin_files_at(root, sha, label)
   rel = AgentStashEnv::BIN_REL
   raise Landed::Unreadable.new([[label, "no landed commit to read #{rel}/ at"]]) if sha.to_s.empty?
 
-  out, ok = Landed.git_read(root, "ls-tree", "-z", "--name-only", sha, "--", "#{rel}/")
+  out, ok = Landed.git_read(root, "ls-tree", "-z", "--name-only", "--full-tree", sha, "--", "#{rel}/")
   raise Landed::Unreadable.new([[label, "#{sha[0, 12]}: git ls-tree failed for #{rel}/"]]) unless ok
 
   out.split("\0").reject(&:empty?).map { |p| p.delete_prefix("#{rel}/") }
@@ -936,19 +936,24 @@ def newer_bin_files(root)
 end
 
 # The entries of the checkout's own ai/agent-bin/ (the branch under check).
+# They only feed the pending note, so an absent directory is []; any other
+# read failure raises SystemCallError, which the caller reports as COULD NOT
+# MEASURE rather than as "the branch adds nothing".
 def branch_bin_files(root)
   Dir.children(File.join(root, AgentStashEnv::BIN_REL))
-rescue SystemCallError
+rescue Errno::ENOENT
   []
 end
 
 # The allowlist the live wrapper directory is judged against, as
-# [files, bar, notes]. notes holds the ahead-of-the-pinned-bar line (only
-# when the live directory passes the newer bar in full), the reason it is not
-# ahead, and the pending line for wrappers the branch adds.
+# [files, bar, ahead, notes]. ahead is the ahead-of-the-pinned-bar line, set
+# only when the live directory passes the newer bar in full; the caller prints
+# it only after a passing verdict (DND-1599). notes holds the reason it is not
+# ahead and the pending line for wrappers the branch adds.
 def bin_bar(bin, root, tip_sha, landed_bin:, newer_bin:, branch_bin:)
   bar, files = landed_bin.call(root, tip_sha)
   notes = []
+  ahead = nil
   extras = AgentStashEnv.bin_extras(bin, files)
   unless extras.empty?
     begin
@@ -957,8 +962,8 @@ def bin_bar(bin, root, tip_sha, landed_bin:, newer_bin:, branch_bin:)
         ndesc, nfiles = got
         still = AgentStashEnv.bin_extras(bin, nfiles)
         if still.empty?
-          notes << "agent-bin ahead of the pinned bar — #{bin} holds #{extras.join(', ')}, which #{ndesc} lands, a " \
-                   "commit that landed after harness-gate pinned origin/main (not drift)."
+          ahead = "agent-bin ahead of the pinned bar — #{bin} holds #{extras.join(', ')}, which #{ndesc} lands, a " \
+                  "commit that landed after harness-gate pinned origin/main (not drift)."
           bar = "#{ndesc}, ahead of the pinned bar (#{bar})"
           files = nfiles
         else
@@ -975,7 +980,7 @@ def bin_bar(bin, root, tip_sha, landed_bin:, newer_bin:, branch_bin:)
     notes << "#{AgentStashEnv::BIN_REL}/ on this branch adds #{pending.join(', ')}: pending (not judged until it " \
              "lands on main and the main checkout fast-forwards)."
   end
-  [files, bar, notes]
+  [files, bar, ahead, notes]
 end
 
 # AHEAD OF THE PINNED BAR (DND-1570), the agent-stash env's counterpart of the
@@ -1128,15 +1133,22 @@ def run_agent_stash_env(path: settings_path, main: nil, root: REPO_DIR,
   end
 
   begin
-    bin_files, bin_desc, bin_notes = bin_bar(exp[:vars]["ATHENA_AGENT_BIN"].to_s, root, tip_sha,
-                                             landed_bin: landed_bin, newer_bin: newer_bin, branch_bin: branch_bin)
+    bin_files, bin_desc, ahead_bin, bin_other = bin_bar(exp[:vars]["ATHENA_AGENT_BIN"].to_s, root, tip_sha,
+                                                        landed_bin: landed_bin, newer_bin: newer_bin,
+                                                        branch_bin: branch_bin)
   rescue Landed::Unreadable => e
     err.puts "#{tag}: COULD NOT MEASURE — this is not a pass."
     Landed.unreadable_lines("agent-bin allowlist", e.probes).each { |l| err.puts l }
     return EXIT_UNMEASURED
+  rescue SystemCallError => e
+    err.puts "#{tag}: COULD NOT MEASURE — this is not a pass. A wrapper directory could not be listed " \
+             "(#{e.message.lines.first.to_s.strip}), so whether it holds a file that shadows a real command is unknown."
+    err.puts "  Fix: make #{exp[:vars]['ATHENA_AGENT_BIN']} and this checkout's #{AgentStashEnv::BIN_REL}/ " \
+             "readable (`chmod u+r`), then re-run."
+    return EXIT_UNMEASURED
   end
   # DND-1599: an ahead line is printed only after a passing verdict.
-  bin_ahead, bin_other = bin_notes.partition { |n| n.start_with?("agent-bin ahead") }
+  bin_ahead = [ahead_bin].compact
   problems = AgentStashEnv.runtime_problems(env, exp, main: main, bin_files: bin_files, bin_bar: bin_desc)
   notes, session, path_problem = AgentStashEnv.session_state(exp, proc_env: proc_env)
   problems += session
@@ -1156,7 +1168,11 @@ def run_agent_stash_env(path: settings_path, main: nil, root: REPO_DIR,
   code = report_session_path(path_problem, env, tag: tag, main: main, snapshot: session_snapshot, now: now.call,
                                                 out: out, err: err)
   out.puts "  note: #{ahead_line}" if ahead_line && code == EXIT_OK
-  (code == EXIT_OK ? bin_ahead + bin_other : bin_other).each { |n| out.puts "  note: #{n}" }
+  if code == EXIT_OK
+    (bin_ahead + bin_other).each { |n| out.puts "  note: #{n}" }
+  else
+    bin_other.each { |n| err.puts "  note: #{n}" }
+  end
   code
 rescue JSON::ParserError, SystemCallError => e
   err.puts "#{tag}: COULD NOT MEASURE — #{e.message.lines.first.to_s.strip}. " \
@@ -1344,6 +1360,22 @@ def agent_stash_env_self_test(check)
     %w[gh glab tea].each { |t| File.delete(File.join(main, "ai", "agent-bin", t)) }
     check.call("bin: a branch that adds tea cannot excuse a live unlanded tea -> FAIL, not pending",
                code == EXIT_FAIL && text.include?("holds tea besides") && !text.include?("pending"))
+    # Review round (DND-1842): an unlistable wrapper directory read as "no
+    # extras" and passed. Mode 0111 still lets the wrapper's own checks pass.
+    File.write(File.join(main, "ai", "agent-bin", "ls"), "#!/bin/sh\n")
+    File.chmod(0o111, File.join(main, "ai", "agent-bin"))
+    begin
+      code, text = run.call(full)
+    ensure
+      File.chmod(0o755, File.join(main, "ai", "agent-bin"))
+      File.delete(File.join(main, "ai", "agent-bin", "ls"))
+    end
+    check.call("bin: a wrapper dir that cannot be listed -> COULD NOT MEASURE, exit 3, never ACTIVE",
+               code == EXIT_UNMEASURED && text.include?("could not be listed") && text.include?("Fix:") &&
+               !text.include?("ACTIVE —"))
+    code, text = run.call(full, branch_bin: ->(_root) { raise Errno::EACCES, "fixture branch dir" })
+    check.call("bin: the branch's agent-bin cannot be listed -> COULD NOT MEASURE, never a quiet pass",
+               code == EXIT_UNMEASURED && !text.include?("ACTIVE —"))
     sha_seen = nil
     run.call(full, landed_env: ->(_root) { ["fixture landed", registry["env"], "f" * 40] },
                    landed_bin_bar: ->(_root, sha) { sha_seen = sha; ["fixture", %w[git]] })

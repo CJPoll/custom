@@ -204,11 +204,13 @@ module AgentStashEnv
   end
 
   # The entries of the live wrapper directory `bin` that `allowed` does not
-  # name, sorted. Empty when the directory cannot be listed: the missing-wrapper
-  # problem in runtime_problems reports that case.
+  # name, sorted. Empty only when the directory does not exist: the
+  # missing-wrapper problem in runtime_problems reports that case. Any other
+  # read failure raises, so the caller reports COULD NOT MEASURE: a directory
+  # that cannot be listed must not read as one holding nothing extra.
   def bin_extras(bin, allowed)
     (Dir.children(bin) - allowed).sort
-  rescue SystemCallError
+  rescue Errno::ENOENT
     []
   end
 
@@ -236,7 +238,8 @@ module AgentStashEnv
       out << "the PATH git wrapper #{wrapper} is missing or not executable; the CLAUDE_ENV_FILE line then leaves PATH " \
              "alone and drop/reflog go unguarded. Fix: restore ai/agent-bin/git in #{main}."
     elsif (extra = bin_extras(bin, bin_files)).any?
-      out << "#{bin} holds #{extra.join(', ')} besides #{bin_files.sort.join(', ')} (#{bin_bar}); anything there " \
+      allowed = bin_files.empty? ? "nothing (it lands no file there)" : bin_files.sort.join(", ")
+      out << "#{bin} holds #{extra.join(', ')} besides #{allowed} (#{bin_bar}); anything there " \
              "shadows a real command on agent PATH. Fix: move it out of #{bin}, or land it in #{BIN_REL}/ on " \
              "main first."
     end

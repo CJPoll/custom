@@ -916,8 +916,17 @@ and pronoun-guard; nothing detected it. The durable fix:
   it is installed only after it lands. The expected values are read from the
   registry AS LANDED, like the hooks' bar. So is what `ATHENA_AGENT_BIN` may
   hold: the entries of `ai/agent-bin/` at the landed tip, never a list in the
-  checker (DND-1842). A live file only a newer origin/main lands is *ahead of
-  the pinned bar*; one a branch adds is *pending*.
+  checker. A live file only a newer origin/main lands is *ahead of the pinned
+  bar*; one a branch adds is *pending*.
+
+  **Later (2026-10-03, DND-1842):** the files `ATHENA_AGENT_BIN` may hold were
+  a constant in `ai/lib/agent_stash_env.rb` (`BIN_FILES`: git, gh, glab).
+  Superseded by the landed `ai/agent-bin/`. The constant was in the diff it
+  judged, so a branch could widen it. And an older pinned tree judged a main
+  checkout a newer landing had filled: main-health gated 5414505c falsely RED
+  on 2026-10-03, because the main checkout already held DND-1803's `gh` and
+  `glab`.
+
   The same PATH carries forge identity (DND-1803): the git wrapper refuses a
   push to github.com or gitlab.com not made through `gh-athena git` /
   `glab-athena git` (`ai/lib/agent-forge-push.sh`), and the `gh` / `glab`
@@ -925,8 +934,9 @@ and pronoun-guard; nothing detected it. The durable fix:
   (`ai/lib/agent-forge-cli.sh`), wherever the command came from, a script
   included. `forge-identity-guard.sh` stays the earlier, lexical layer. The
   `gh` and `glab` wrappers need no env change: they are on PATH once they land
-  in the main checkout. `check-hooks-registered` fails on any other file in
-  `ai/agent-bin/`, because it would shadow a real command.
+  in the main checkout. `check-hooks-registered` fails on any file in the main
+  checkout's `ai/agent-bin/` that has not landed there, because it would
+  shadow a real command.
   `check-hooks-registered` prints its own agent-stash line: INACTIVE (exit 0),
   ACTIVE (exit 0, runtime asserted), PENDING RESTART (exit 0), DRIFT/FAIL
   (exit 1), or COULD NOT MEASURE (exit 3: guard keys present but the landed
