@@ -364,6 +364,30 @@ run "$(bash_json_cwd "$TMP/gh_scp" "git push $TMP/bare.git HEAD 2>/dev/null")"
 check "A19. git push <local path> HEAD 2>/dev/null -> allow" allow
 run "$(bash_json_cwd "$TMP/local" 'git push --repo=git@github.com:o/r.git')"
 check_text "A20. git push --repo=<github url>: the --repo value is the repository" 'to a github.com remote'
+# DND-1887: help as the FIRST push argument prints usage and exits before git
+# reads a remote, so it is allowed (the same rule merge-role-guard has, DND-1865).
+# Help anywhere else is judged as before: git accepts abbreviated long options,
+# so `--push-op -h` makes -h an option value.
+run "$(bash_json_cwd "$TMP/gh_scp" 'git push -h')"
+check "B1. git push -h (help first, origin=github) -> allow" allow
+run "$(bash_json_cwd "$TMP/gh_scp" 'git push --help')"
+check "B2. git push --help -> allow" allow
+run "$(bash_json_cwd "$TMP/norepo" "git -C $TMP/gh_scp push -h")"
+check "B3. git -C <github repo> push -h -> allow" allow
+run "$(bash_json_cwd "$TMP/gh_scp" 'git push -h 2>&1')"
+check "B4. git push -h 2>&1 -> allow" allow
+run "$(bash_json_cwd "$TMP/gh_scp" 'git push origin -h')"
+check_text "B5. git push origin -h (help after the repository) is judged: denies" 'to a github.com remote'
+run "$(bash_json_cwd "$TMP/gh_scp" 'git push -- -h')"
+check_text "B6. git push -- -h (after --, -h is a repository word) is judged: denies" 'could not resolve its remote'
+run "$(bash_json_cwd "$TMP/gh_scp" 'git push --push-op -h')"
+check_text "B7. git push --push-op -h (-h is the option's value) denies" 'to a github.com remote'
+run "$(bash_json_cwd "$TMP/gh_scp" 'git push -f -h origin main')"
+check_text "B8. git push -f -h origin main (help behind another option) denies" 'to a github.com remote'
+run "$(bash_json_cwd "$TMP/gh_scp" 'git push -o -h')"
+check_text "B9. git push -o -h (-o takes -h as its value) denies" 'to a github.com remote'
+run "$(bash_json_cwd "$TMP/gh_scp" 'git push -h; git push origin HEAD')"
+check_text "B10. help, then a real push: the second push is still examined" 'to a github.com remote'
 # The grammar cannot be read (a hook copy with no ../lib beside it): a push
 # is denied as unresolved, naming the file, never allowed as "not a forge".
 mkdir -p "$TMP/nolib/hooks"

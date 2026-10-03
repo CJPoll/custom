@@ -45,6 +45,10 @@
 # --no-repo` read the path as the repository and were allowed, while git
 # pushes to the default remote; `git --namespace ns push` was never seen.
 #
+# Later (2026-10-03, DND-1887): the push rule denied `git push -h` and
+# `--help`, which print usage and send nothing. Superseded: help as the FIRST
+# push argument is allowed; help anywhere else is judged as before.
+#
 # SCOPE: EVERY forge write run on plain `gh` / `glab` (DND-1179). Create and
 # merge, and the `gh api` / `glab api` merge and ref-write shapes (DND-728,
 # DND-741, DND-742), keep their own blocks and Fix text, because a merge or a
@@ -436,6 +440,11 @@ while [ $# -gt 0 ]; do
   esac
 done
 if [ "$found" = 0 ]; then echo NOTPUSH; echo OK; exit 0; fi
+# DND-1887: help as the FIRST push argument prints usage and exits before git
+# reads a remote. Stricter than git on purpose (as merge-role-guard, DND-1865):
+# git accepts abbreviated long options, so `--push-op -h` makes -h a value, and
+# help in any other position is judged like any push.
+case "${1-}" in -h|--help) echo NOTPUSH; echo OK; exit 0 ;; esac
 fg_push_argv "$@"
 if [ -n "$FG_PA_BAD" ]; then printf "BAD %s\n" "$FG_PA_BAD"; echo OK; exit 0; fi
 has_repo=0
