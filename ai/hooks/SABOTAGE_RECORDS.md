@@ -943,34 +943,37 @@ The canary reads usage under LC_ALL=C. After: `RESULT: 429 passed, 0 failed`.
 
 - **Domain:** the PreToolUse git-stash text guard (`ai/hooks/git-stash-guard.sh`):
   a command word that zsh rewrites through a glob group or a glob qualifier
-  with no other glob character (`zseg`/`zscan`, `zwcat`, `zqual`, `zgexp`,
-  `asgpre`, the `ZGRP_RE` prefilter, and the ZV override in `analyze`).
+  with no other glob character (`zseg`/`zscan`, `zwcat`, `zqual`, `zgroups`,
+  `zgexp`, `asgpre`, the `ZGRP_RE` prefilter, and the ZV override in
+  `analyze`).
 - **Suite run:** `sh ai/hooks/git-stash-guard.self-test.sh`, section ZG.
   Mutations ran on a `mktemp -d` copy of the hook with the committed suite;
   the committed files were never edited.
 - **Fail-first:** section ZG written first. Against the unfixed hook
   (`a5cc8936`), the first cases gave `RESULT: 531 passed, 19 failed`; the
-  final suite gives `RESULT: 537 passed, 26 failed`: every deny case (ZG1-ZG19,
-  ZG33, ZG33a, ZG34-ZG37), and no other case. After: `RESULT: 563 passed, 0
-  failed`.
+  final suite gives `RESULT: 537 passed, 28 failed`: every deny case in
+  section ZG, and no other case. After: `RESULT: 565 passed, 0 failed`.
 - **Review round (code-reviewer on `97f18731`):** ZG33-ZG37 added first.
   Against `97f18731`: `RESULT: 557 passed, 6 failed` (ZG19, ZG33, ZG33a,
   ZG34, ZG35, ZG36).
+- **NO_BARE_GLOB_QUAL (the Bash tool shell's setting):** ZG38 and ZG39 added
+  first. Against `d0d20905`: `RESULT: 563 passed, 2 failed` (ZG38, ZG39).
 
 | id | Mutation | Observed failure |
 |---|---|---|
-| S-1858-1 | `zseg` never called (no ZV verdict) | 26 cases: every deny case ZG1-ZG19, ZG33-ZG37 |
+| S-1858-1 | `zseg` never called (no ZV verdict) | 28 cases: every deny case in section ZG |
 | S-1858-2 | a `:` modifier read as a filter | ZG2, ZG2a, ZG11, ZG14, ZG17, ZG36 |
 | S-1858-3 | `e`, `P`, `+` never mark a rename | ZG4, ZG6, ZG12 |
 | S-1858-4 | a blank or newline inside a paren ends the zsh word | ZG8, ZG13, ZG17, ZG18 |
-| S-1858-5 | the prefilter ignores a joined paren (`ZGRP_RE`) | ZG3, ZG5, ZG19 |
+| S-1858-5 | the prefilter ignores a joined paren (`ZGRP_RE`) | ZG3, ZG5, ZG19, ZG38 |
 | S-1858-6 | a paren-start zsh word takes command position from its own paren | ZG27 |
 | S-1858-7 | a list zsh refuses (unknown character) read as may be git | ZG30 |
 | S-1858-8 | the empty-pattern qualifier rule removed | ZG28 |
 | S-1858-9 | a `;` inside a paren not read as a parse error | ZG29 |
 | S-1858-10 | the redirection-target skip removed | ZG31 |
 | S-1858-11 | arguments read from the first word's own simple command | ZG32 |
-| S-1858-12 | groups never expanded (`zgexp` keeps the word) | ZG1, ZG7, ZG8, ZG9, ZG10, ZG13, ZG16, ZG18, ZG37 |
+| S-1858-12 | groups never expanded (`zgexp` keeps the word) | 11 cases: ZG1, ZG7, ZG8, ZG9, ZG10, ZG13, ZG16, ZG18, ZG37, ZG38, ZG39 |
 | S-1858-13 | no joining scan (a substitution splits the word) | ZG34, ZG35 |
 | S-1858-14 | a mid-word `=` before `(` still read as an array | ZG36 |
 | S-1858-15 | unreadable arguments (ZA -1) leave a wrapper verdict | ZG33, ZG33a |
+| S-1858-16 | no group reading of a trailing paren (NO_BARE_GLOB_QUAL) | ZG38, ZG39 |
