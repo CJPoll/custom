@@ -533,6 +533,7 @@ EOF2
 : > "${ST}/confirm.log"
 run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/b10.lock"; expect b10 11; no_teardown b10
 names b10 "MAIN RED: main tip abc is RED"
+grep -q "^Fix: land only a red-main fix: .*the red tip the guard names above" <<<"${out}" && ok "b10 Fix: points at the guard's tip, not the stale one" || bad "b10 Fix: wrong" "${out}"
 [ -s "${ST}/confirm.log" ] && bad "b10 confirm-merged was retried" "$(cat "${ST}/confirm.log")" || ok "b10 no confirm retries"
 # b11 another guard refusal (exit 3, not red) keeps exit 4: no other code moves.
 fixture b11; echo guardother > "${ST}/merge_mode"; echo 1 > "${ST}/confirm_rc"

@@ -443,7 +443,7 @@ rm -f "${merge_err}"
 # re-check. The guard refused before any call to the forge, so nothing landed:
 # exit 11 at once, with no confirm retries (they read as exit 4).
 [ -z "${merge_red}" ] || die 11 "${GMG_RED_MARK} the merge guard refused PR ${PR}: ${base} went red after the check above; its message is above" \
-  "$(gmg_line_fix "${GH_OWNER}" "${GH_REPO}" "${base}" "${B}"), then re-run locked-merge. Nothing was merged."
+  "land only a red-main fix: a head that contains the red tip the guard names above (not ${B}, which this tool read before the tip moved), removes every duplicate it names, and carries its own INTEGRATION OK receipt; re-run integration-gate on it, then re-run locked-merge. Every other PR waits until ${base} is green again. Nothing was merged."
 if [ "${merge_rc}" -ne 0 ]; then
   confirm_landed 3 \
     || die 4 "gh-athena pr merge ${PR} refused or failed, and confirm-merged does not show it landed" \
