@@ -1217,7 +1217,8 @@ module LeadTimePhases
           next tail_cell(r, ci, decl) if name == "tail"
 
           # DND-1615: a lead with no post-merge run, in a CI window, is n/a.
-          if name == "lead" && (why = no_run_reason(r, ci, decl))
+          # A lead already n/a keeps its own reason (a missing start says so).
+          if name == "lead" && !r[key].nil? && (why = no_run_reason(r, ci, decl))
             next [nil, why]
           end
 

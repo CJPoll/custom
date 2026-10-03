@@ -682,6 +682,11 @@ check("LC5 a lead already n/a keeps its own reason, not the tail's") do
   rs = no_deploy.first(4) + [row(5).merge("lead_s" => nil, "tail_s" => nil, "lead_na_reason" => "start: no stamp")]
   totals_of(rs).fetch("lead")["na_reasons"] == [{ "reason" => "start: no stamp", "count" => 1 }]
 end
+check("LC5 a lead n/a for its start keeps that reason even when the landing also has no run") do
+  rs = no_deploy.first(4) + [row(5).merge("lead_s" => nil, "tail_s" => 0, "tail_end" => "merge",
+                                           "lead_na_reason" => "start: no stamp")]
+  totals_of(rs).fetch("lead")["na_reasons"] == [{ "reason" => "start: no stamp", "count" => 1 }]
+end
 check("LC6 code stays measured for the no-run landing (it ends at the landing by definition)") do
   totals_of(no_deploy).fetch("code").values_at("n", "n_na") == [5, 0]
 end
