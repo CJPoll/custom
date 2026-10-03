@@ -76,6 +76,13 @@ trap cleanup EXIT INT TERM
 
 me="$(id -un)"
 
+# DND-1439: the initds' log dir and per-user runtime dir are test-owned. Without
+# them start_pre wrote /var/log/<name>.log (and failed for a normal user) and
+# needed a real /run/user/<uid>, which a sandbox does not have.
+export ATHENA_INITD_LOG_DIR="${tmp}/var-log"
+export ATHENA_INITD_RUN_USER_DIR="${tmp}/run-user"
+mkdir -p "${ATHENA_INITD_LOG_DIR}" "${ATHENA_INITD_RUN_USER_DIR}/$(id -u)"
+
 # A real binary copied under a runner dir, so /proc/<pid>/exe lies inside it
 # (the live Runner.Listener is RUNNER_DIR/bin/Runner.Listener).
 mk_sleeper() { # dest
@@ -275,7 +282,6 @@ mk_sleeper "${r2}/bin/Runner.Listener"
 mk_stub "${r1}/run.sh" gh1 "${r1}/bin/Runner.Listener 300"
 mk_stub "${r2}/run.sh" gh2 "${r2}/bin/Runner.Listener 300"
 : > "${r1}/.runner"; : > "${r2}/.runner"
-[ -d "/run/user/$(id -u)" ] || fail "start_pre needs /run/user/$(id -u) (the initd's XDG_RUNTIME_DIR check); run this as a logged-in user"
 
 gh_env1=(RUNNER_USER="${me}" RUNNER_DIR="${r1}")
 gh_env2=(RUNNER_USER="${me}" RUNNER_DIR="${r2}")
@@ -624,6 +630,29 @@ if [ -r "${lib}" ]; then
 else
   fail "lib: ${lib} does not exist"
 fi
+
+# ---------------------------------------------------------------------------
+# DND-1439: the log/runtime-dir seams. The suite writes only to its own dirs;
+# with the seams unset every initd still points at the real paths.
+if [ -e "${ATHENA_INITD_LOG_DIR}/selftest-${run_id}-gh1.log" ]; then
+  pass "seam: start_pre created the service log under the test-owned log dir"
+else
+  fail "seam: no selftest-${run_id}-gh1.log under ${ATHENA_INITD_LOG_DIR}"
+fi
+real_logs="$(find /var/log -maxdepth 1 -name "selftest-${run_id}-*" 2>/dev/null)"
+if [ -z "${real_logs}" ]; then pass "seam: nothing of this run exists under the real /var/log"
+else fail "seam: this run wrote under the real /var/log: ${real_logs}"; fi
+for initd in github-runner gitlab-runner docker-rootless-github-runner docker-rootless-gitlab-runner docker-rootless-athena; do
+  want_uid="$(id -u)"
+  got="$(env -u ATHENA_INITD_LOG_DIR -u ATHENA_INITD_RUN_USER_DIR RC_SVCNAME=seam-default \
+    RUNNER_USER="${me}" DOCKER_ROOTLESS_USER="${me}" \
+    sh -c '. "$1" >/dev/null 2>&1; echo "$output_log|$error_log|$XDG_RUNTIME_DIR"' sh "${sysfiles}/${initd}.initd" 2>&1)"
+  if [ "${got}" = "/var/log/seam-default.log|/var/log/seam-default.log|/run/user/${want_uid}" ]; then
+    pass "seam: ${initd}.initd defaults to the real /var/log and /run/user/<uid>"
+  else
+    fail "seam: ${initd}.initd defaults changed: ${got}"
+  fi
+done
 
 if [ "${fails}" -eq 0 ]; then
   echo "initd-proc-tree/self-test.sh: OK"

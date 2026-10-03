@@ -17,6 +17,13 @@ command="/usr/bin/dockerd-rootless.sh"
 command_args="${DOCKERD_ROOTLESS_OPTS}"
 command_user="${DOCKER_ROOTLESS_USER}:${DOCKER_ROOTLESS_USER}"
 command_background=1
+# DND-1439: test seams for the self-test (system-files/test/initd-proc-tree),
+# which points these at its own temp dirs so it writes nothing under the real
+# /var/log and needs no /run/user. Unset in production: the defaults below are
+# the real paths. Namespaced ATHENA_INITD_*, and set only by a root-owned
+# /etc/conf.d file, so nothing a runner job exports reaches an initd.
+: "${ATHENA_INITD_LOG_DIR:=/var/log}"
+: "${ATHENA_INITD_RUN_USER_DIR:=/run/user}"
 pidfile="/run/${RC_SVCNAME}.pid"
 # DND-812: the supervisor signals ONLY the command's pid on stop. Anything the
 # command forked would re-parent to PID 1 and keep running (a "stopped" GitHub
@@ -25,12 +32,12 @@ pidfile="/run/${RC_SVCNAME}.pid"
 # is a root-owned copy of system-files/lib/initd-proc-tree.sh.
 : "${ATHENA_PROC_TREE_LIB:=/usr/local/lib/athena/initd-proc-tree.sh}"
 start_stop_daemon_args="${start_stop_daemon_args:+${start_stop_daemon_args} }--env ATHENA_SVC_TREE=${RC_SVCNAME}"
-output_log="/var/log/${RC_SVCNAME}.log"
-error_log="/var/log/${RC_SVCNAME}.log"
+output_log="${ATHENA_INITD_LOG_DIR}/${RC_SVCNAME}.log"
+error_log="${ATHENA_INITD_LOG_DIR}/${RC_SVCNAME}.log"
 
 # dockerd-rootless.sh needs a real runtime dir and HOME for the target user.
 export HOME="/home/${DOCKER_ROOTLESS_USER}"
-export XDG_RUNTIME_DIR="/run/user/${_uid}"
+export XDG_RUNTIME_DIR="${ATHENA_INITD_RUN_USER_DIR}/${_uid}"
 export PATH="/usr/sbin:/usr/bin:/sbin:/bin"
 
 depend() {

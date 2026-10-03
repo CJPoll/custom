@@ -23,6 +23,13 @@ supervisor="supervise-daemon"
 respawn_delay=5
 respawn_max=0
 directory="${RUNNER_DIR}"
+# DND-1439: test seams for the self-test (system-files/test/initd-proc-tree),
+# which points these at its own temp dirs so it writes nothing under the real
+# /var/log and needs no /run/user. Unset in production: the defaults below are
+# the real paths. Namespaced ATHENA_INITD_*, and set only by a root-owned
+# /etc/conf.d file, so nothing a runner job exports reaches an initd.
+: "${ATHENA_INITD_LOG_DIR:=/var/log}"
+: "${ATHENA_INITD_RUN_USER_DIR:=/run/user}"
 pidfile="/run/${RC_SVCNAME}.pid"
 # DND-812: the supervisor signals ONLY the command's pid on stop. Anything the
 # command forked would re-parent to PID 1 and keep running (a "stopped" GitHub
@@ -40,15 +47,15 @@ supervise_daemon_args="${supervise_daemon_args:+${supervise_daemon_args} }--env 
 _svc_program="${command}"
 command_args="--lib ${ATHENA_PROC_TREE_LIB} --timeout ${ATHENA_PROC_TREE_TIMEOUT:-10} --anchor ${RUNNER_DIR} -- ${_svc_program}${command_args:+ ${command_args}}"
 command="${ATHENA_REAP_EXEC}"
-output_log="/var/log/${RC_SVCNAME}.log"
-error_log="/var/log/${RC_SVCNAME}.log"
+output_log="${ATHENA_INITD_LOG_DIR}/${RC_SVCNAME}.log"
+error_log="${ATHENA_INITD_LOG_DIR}/${RC_SVCNAME}.log"
 
 # The runner and its jobs need the user's HOME, rootless Docker socket, and a
 # sane PATH. The bundled .NET uses invariant globalization to avoid an ICU
 # dependency on Gentoo.
 export HOME="/home/${RUNNER_USER}"
-export XDG_RUNTIME_DIR="/run/user/${_uid}"
-export DOCKER_HOST="unix:///run/user/${_uid}/docker.sock"
+export XDG_RUNTIME_DIR="${ATHENA_INITD_RUN_USER_DIR}/${_uid}"
+export DOCKER_HOST="unix://${ATHENA_INITD_RUN_USER_DIR}/${_uid}/docker.sock"
 # Prepend standard dirs but KEEP OpenRC's PATH (it holds the rc helper bin dir,
 # e.g. /usr/libexec/rc/bin, where start-stop-daemon/mountinfo/shell_var live).
 # Replacing it made those "command not found" and broke the start wrapper.
@@ -65,7 +72,7 @@ start_pre() {
 	# because start-stop-daemon opens stdout/stderr AFTER dropping to that user
 	# and /var/log is not user-writable. Uses coreutils only (not checkpath),
 	# since this box's OpenRC helper env is unreliable.
-	_log="/var/log/${RC_SVCNAME}.log"
+	_log="${ATHENA_INITD_LOG_DIR}/${RC_SVCNAME}.log"
 	[ -e "${_log}" ] || : > "${_log}"
 	chown "${RUNNER_USER}:${RUNNER_USER}" "${_log}" 2>/dev/null || true
 	chmod 0644 "${_log}" 2>/dev/null || true
