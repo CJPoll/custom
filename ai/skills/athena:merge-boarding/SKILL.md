@@ -546,13 +546,17 @@ gate uses the copies beside the script, and its gate cannot be sandboxed
 **The receipt chain is a held surface (DND-1807).** A diff that touches
 `integration-gate` (the script and its `ai/bin` shim), `ai/lib/integration-receipt.sh`,
 `ai/lib/receipt_seal.rb`, `ai/bin/receipt-seal`, `ai/lib/gh-merge-guard.sh`,
-`ai/lib/forge-git-passthrough.sh`, `ai/bin/gh-athena` or `locked-merge` is
-`owner-approval-policy`, hold `always`: exit 4, cleared by the owner's click
-only. The gate judges with the manifest as landed on the target, so a new
-hold binds after it lands, never in the PR that adds it. Not held: `confirm-merged`,
-`ai/lib/main-health.sh`, `ai/bin/test-slot`, `ai/lib/glab-merge-guard.sh` and
-the judge-set utilities `proc-stat.sh` and `telemetry-emit.sh` read no receipt
-as a trust decision.
+`ai/lib/forge-git-passthrough.sh`, `ai/lib/main-health.sh` (its fix-push
+exception reads a receipt), `ai/bin/gh-athena`, `locked-merge`, or the critic
+verdict producer (`ai/bin/critic-review`, `ai/lib/critic_carry.rb`,
+`ai/lib/critic_verdict_stores.rb`) is `owner-approval-policy`, hold `always`:
+exit 4, cleared by the owner's click only. The gate judges with the manifest as
+landed on the target, so a new hold binds after it lands, never in the PR that
+adds it. Not held: `confirm-merged`, `ai/bin/test-slot`,
+`ai/lib/glab-merge-guard.sh`, `ai/bin/ready-and-idle` (it reads a receipt to
+report, and decides nothing), `ai/lib/critic_prompt.rb` (the rubric text, not a
+trust decision) and the judge-set utilities `proc-stat.sh` and
+`telemetry-emit.sh`, which write no verdict.
 
 **Later (2026-10-02, DND-1814):** the residual above also said "a critic
 receipt is a file any process can write". Narrowed, not closed: a merely

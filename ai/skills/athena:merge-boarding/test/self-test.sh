@@ -1881,7 +1881,10 @@ landed_layout() {
   mkdir -p "$1/ai/skills/athena:merge-boarding/scripts" "$1/ai/bin" "$1/ai/blast-radius"
   cp "$GATE" "$1/ai/skills/athena:merge-boarding/scripts/integration-gate"
   cp -R "${DND1796_REPO}/ai/lib" "$1/ai/lib"
-  cp "${DND1796_REPO}/ai/blast-radius/surfaces.json" "$1/ai/blast-radius/surfaces.json"
+  # The mechanics cases below edit the gate and its libs and expect a LANDING, so
+  # their manifest leaves the receipt chain unheld (DND-1807 holds it for real;
+  # lb10 runs the real manifest). The owner verifiers and the rest stay held.
+  jq -f "${TMP}/lb-unhold-chain.jq" "${DND1796_REPO}/ai/blast-radius/surfaces.json" > "$1/ai/blast-radius/surfaces.json"
   for b in integration-gate blast-radius test-slot critic-review receipt-seal; do cp "${DND1796_REPO}/ai/bin/${b}" "$1/ai/bin/${b}"; done
   ( cd "$1" && git init -q -b main . && git add -A && git commit -qm layout \
     && printf '/g.sh\n/GATE_RAN\n' >> .git/info/exclude )
@@ -1890,6 +1893,7 @@ landed_layout() {
 landed_branch() { ( cd "$1" && git worktree add -q -b "$(basename "$2")" "$2" ); stub_gate_green "$2/GATE_RAN" "$2/g.sh"; }
 LBG=ai/skills/athena:merge-boarding/scripts/integration-gate
 printf '.surfaces |= map(select(.class != "owner-approval-policy"))\n' > "${TMP}/lb-narrow.jq"
+printf '.surfaces |= map(.patterns |= (if . == null then . else map(select((test("integration-gate|integration-receipt|receipt_seal|receipt-seal|merge-guard|forge-git-passthrough|gh-athena|locked-merge|main-health|critic-review|critic_carry|critic_verdict_stores")) | not)) end))\n' > "${TMP}/lb-unhold-chain.jq"
 
 # lb1: a branch that narrows the manifest (drops the held owner-approval-policy
 # surface) and so touches a file that surface holds. The landed manifest holds
@@ -2022,6 +2026,22 @@ out="$( cd "$W" && "${W}/${LBG}" --target main --no-fetch --gate "${W}/g.sh" 2>&
   || bad "lb4 expected exit 2 naming the missing classifier, got $rc" "$out"
 grep -q 'INTEGRATION OK' <<<"$out" && bad "lb4 fell back to the branch's classifier" "$out" || ok "lb4 no INTEGRATION OK"
 [ ! -f "${W}/GATE_RAN" ] && ok "lb4 the gate did not run on an unjudgeable head" || bad "lb4 ran the gate before finding no classifier"
+
+# lb10 (DND-1807): with the REAL manifest as the landed one, a branch that edits
+# the gate script is HOT: exit 4, no OK line, no receipt. The mechanics cases
+# above run with the receipt chain unheld (landed_layout) so they can land.
+L="${TMP}/lb10-layout"; landed_layout "$L"
+cp "${DND1796_REPO}/ai/blast-radius/surfaces.json" "${L}/ai/blast-radius/surfaces.json"
+( cd "$L" && git commit -qam 'land the real manifest' )
+W="${TMP}/lb10-wt"; landed_branch "$L" "$W"
+( cd "$W" && sed -i 's/^OK_LINE="INTEGRATION OK /OK_LINE="BRANCH-COPY INTEGRATION OK /' "$LBG" && git commit -qam 'edit the gate' ) || bad "lb10 fixture: could not edit the gate"
+record_pass "$W"
+out="$( cd "$W" && "${W}/${LBG}" --target main --no-fetch --gate "${W}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 4 ] && grep -q 'BLAST-RADIUS HOT' <<<"$out" && grep -q 'owner-approval-policy' <<<"$out" && ok "lb10 a gate-editing branch is HOT under the landed manifest, exit 4" \
+  || bad "lb10 expected exit 4 HOT [owner-approval-policy], got $rc" "$out"
+grep -q 'INTEGRATION OK' <<<"$out" && bad "lb10 printed INTEGRATION OK" "$out" || ok "lb10 no INTEGRATION OK"
+[ ! -e "$(git -C "$W" rev-parse --path-format=absolute --git-common-dir)/integration-receipts/$(git -C "$W" rev-parse HEAD).json" ] \
+  && ok "lb10 no receipt for the HOT head" || bad "lb10 a receipt was written for a HOT head"
 
 # ---------------------------------------------------------------- summary
 printf '\nintegration-gate self-test: %d passed, %d failed\n' "$PASS" "$FAIL"

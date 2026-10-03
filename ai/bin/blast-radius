@@ -3901,7 +3901,11 @@ def self_test
      ["the merge guard", "ai/lib/gh-merge-guard.sh", "[owner-approval-policy]"],
      ["the push guard", "ai/lib/forge-git-passthrough.sh", "[owner-approval-policy]"],
      ["the gh-athena entry point", "ai/bin/gh-athena", "[owner-approval-policy]"],
-     ["locked-merge", "ai/skills/athena:merge-boarding/scripts/locked-merge", "[owner-approval-policy]"]].each do |label, path, cls|
+     ["locked-merge", "ai/skills/athena:merge-boarding/scripts/locked-merge", "[owner-approval-policy]"],
+     ["the push-guard fix-push exception", "ai/lib/main-health.sh", "[owner-approval-policy]"],
+     ["the critic-review producer", "ai/bin/critic-review", "[owner-approval-policy]"],
+     ["the critic carry library", "ai/lib/critic_carry.rb", "[owner-approval-policy]"],
+     ["the critic verdict stores", "ai/lib/critic_verdict_stores.rb", "[owner-approval-policy]"]].each do |label, path, cls|
       dd = File.join(tmp, "policy-#{path.tr('/.', '__')}")
       bb, hh = mkrepo.call(dd) { |r| FileUtils.mkdir_p(File.dirname(File.join(r, path))); File.write(File.join(r, path), "x\n") }
       out, _, code = run_br.call(["--base", bb, "--head", hh, "--repo", dd] + real)
@@ -3910,7 +3914,7 @@ def self_test
                  "exit=#{code} out=#{out}")
     end
     # DND-1807: the receipt chain's non-trust neighbours stay COLD
-    %w[ai/bin/confirm-merged ai/lib/main-health.sh ai/bin/test-slot ai/lib/glab-merge-guard.sh ai/lib/proc-stat.sh].each do |path|
+    %w[ai/bin/confirm-merged ai/bin/test-slot ai/lib/critic_prompt.rb ai/bin/ready-and-idle ai/lib/glab-merge-guard.sh ai/lib/proc-stat.sh].each do |path|
       dd = File.join(tmp, "policy-cold-#{path.tr('/.', '__')}")
       bb, hh = mkrepo.call(dd) { |r| FileUtils.mkdir_p(File.dirname(File.join(r, path))); File.write(File.join(r, path), "x\n") }
       out, _, code = run_br.call(["--base", bb, "--head", hh, "--repo", dd] + real)
