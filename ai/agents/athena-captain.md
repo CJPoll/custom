@@ -354,7 +354,7 @@ bare role name reaches you specifically.
      it to. Resolve it with your best judgment per the top of this file, or
      if it's a hard blocker (e.g. auth failure), report `STUCK`.
    Do not merge to main at any point — merging is the athena-admiral's job,
-   made by a human, never by you.
+   never yours; `ai/hooks/merge-role-guard.sh` denies it (DND-726).
 
 ### Repos with no MR/CI system
 

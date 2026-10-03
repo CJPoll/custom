@@ -781,3 +781,33 @@ external`: `expected [external .../settings.json.bak-20261001-142204], got [suit
 |---|---|---|
 | S-DND1552-1 | every new backup classed external | `F-11b a backup made inside a suite setup-hooks call is the suite's` |
 | S-DND1552-2 | old rule: every new backup classed the suite's | `F-11b a backup made outside every suite setup-hooks call is external` |
+
+## 2026-10-03 — DND-726, merge-role-guard: only athena-admiral merges or lands
+
+- **Domain:** the PreToolUse merge-role guard (`ai/hooks/merge-role-guard.sh`,
+  rules in `ai/lib/merge_role.rb`, git facts in `ai/lib/merge_role_io.rb`).
+- **Suite run:** `sh ai/hooks/merge-role-guard.self-test.sh` (fixture repos
+  with local bare remotes under a `mktemp -d` HOME; nothing is merged or
+  pushed). Each mutation was applied to a COPY of the hook files and run with
+  `MRG_SRC=<copy>`; the committed files were never edited.
+- **Baseline:** `merge-role-guard self-test: 385 passed, 0 failed`.
+- **Fail-first (the DND-321 regression):** with `MRG_HOOK` set to a hook that
+  answers nothing (the tree before the guard), `FAIL  DND-321: gh-athena pr
+  merge 275 --squash --auto [captain] -- expected deny, got allow:` and
+  `186 passed, 197 failed`. Fed to every PreToolUse(Bash) hook in the registry
+  on origin/main 780d81d3, the same payload was allowed by all eight.
+- **Fail-first (the review round):** the 82 cases the review round added, run
+  against the hook as it stood before that round, gave `320 passed, 57 failed`
+  (quoting and escapes, `heads/main`, config-set destinations, send-pack,
+  subshell and `||` cds, update-ref/fetch, ref-write APIs, the admiral spawn,
+  the top-level cwd, the token in the deny log).
+- **Fail-first (the critic round):** a named destination that may be a
+  non-main default (`trunk`) when the repo is unresolved or has no
+  `origin/HEAD` gave `379 passed, 6 failed` before the fix.
+
+| id | Mutation | Observed failure |
+|---|---|---|
+| S-DND726-1 | the `type == ADMIRAL` line deleted from `decide` | 67 FAILs: every `[admiral]` merge-class case and `top-level --agent athena-admiral [agent-admiral]`: `expected allow, got deny` |
+| S-DND726-2 | `decide` returns nil where it returns the deny | 198 FAILs, from `DND-321: gh-athena pr merge 275 --squash --auto [captain] -- expected deny, got allow` on |
+| S-DND726-3 | the shipwright carve-out's `lane_of.call(f[:dir])` dropped | `hand-spawned worktree push HEAD:main [shipwright]` and `product repo's lead-time lane push HEAD:main [shipwright]`: `expected deny, got allow` |
+| S-DND726-4 | an unresolved current branch read as "not main" (`return nil unless facts.resolved`, both sites) | 14 FAILs, among them `no refspec, unresolvable branch, names it [captain]`, `GIT_DIR= prefix [captain]`, `cd after \|\| [captain]`, `top-level --agent captain, bare push: cwd is not trusted [agent-captain]`: `expected deny, got allow` |

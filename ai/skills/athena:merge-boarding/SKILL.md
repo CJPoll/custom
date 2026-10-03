@@ -17,6 +17,13 @@ criteria hold: **local gate green, full pipeline green on the current head, and
 the captain has addressed the FIRST round of review-bot findings** (must-fix
 items fixed, nits replied/resolved) with threads replied.
 
+- **Merging is the admiral's alone, and a hook enforces it.**
+  `ai/hooks/merge-role-guard.sh` (DND-726) denies a merge, a landing onto a
+  protected branch, or a spawn of an admiral to every subagent but
+  athena-admiral; the one carve-out is the cron shipwright's push from its own
+  lane. Its header lists what it matches. If it denies you as the admiral,
+  escalate; do not work around it.
+
 - **One review round, no more (owner policy, 2026-09-09): there is NO
   expectation of multiple review-bot rounds.** Do NOT play the `*:request` jobs
   to force another review, and do NOT require a clean re-review round before

@@ -182,6 +182,10 @@ STATIC_CHECKS = [
   # scratch-rm-guard (DND-1653): the PreToolUse guard against a delete by
   # pattern in a shared session scratchpad. Command text only; deletes nothing.
   ["scratch-rm-guard self-test", %w[ai/hooks/scratch-rm-guard.self-test.sh]],
+  # merge-role-guard (DND-726): the PreToolUse guard that only athena-admiral
+  # merges or lands. Fixture repos under a fake HOME; reads command text and
+  # git state only, merges and pushes nothing.
+  ["merge-role-guard self-test", %w[ai/hooks/merge-role-guard.self-test.sh]],
   # secret-env-warn (DND-845): the SessionStart per-machine-secrets warning. Only
   # its SELF-TEST is gated here; the check it runs (check-machine-secrets) and
   # its registry row join at the migration's final step (contract -> Rollout).
@@ -365,6 +369,7 @@ INLINE_SELF_TEST_COVERED_BY = {
   "ai/hooks/workflow-phase-guard.sh"  => "ai/hooks/workflow-phase-guard.self-test.sh",
   "ai/hooks/worktree-escape-guard.sh" => "ai/hooks/worktree-escape-guard.self-test.sh",
   "ai/hooks/scratch-rm-guard.sh" => "ai/hooks/scratch-rm-guard.self-test.sh",
+  "ai/hooks/merge-role-guard.sh" => "ai/hooks/merge-role-guard.self-test.sh",
   "ai/skills/athena:epic-clustering/scripts/epic-clustering" =>
     "ai/skills/athena:epic-clustering/test/self-test.sh",
   "ai/skills/athena:inbox-attend/bin/wedge-ticket-decide" =>
