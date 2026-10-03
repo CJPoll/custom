@@ -1,119 +1,259 @@
 #!/usr/bin/env bash
 #
-# setup-gitlab-runner — install the self-hosted GitLab Runner binary for the
-# `gitlab-runner` user and its OpenRC service. Does NOT register (that needs a
-# `glrt-` authentication token you create in GitLab) and does NOT start (the
-# service refuses to start until a runner is registered).
+# setup-gitlab-runner — install the self-hosted GitLab Runner for one runner
+# user: the shared gitlab-runner binary, the user's own OpenRC service, and
+# (with --runner) its config.toml holding one [[runners]] entry per runner.
+# Never starts the service.
 #
-# Run as root:  sudo scripts/setup-gitlab-runner  [--dry-run]
-# Idempotent. Prerequisites: setup-gitlab-runner-user, setup-gitlab-runner-docker.
+# Usage (as root):
+#   sudo scripts/setup-gitlab-runner [--user <name>] [--runner NAME:TAG[:LIMIT]]...
+#                                    [--concurrent <N>] [--url <https-url>] [--dry-run]
 #
-# Steps: download the gitlab-runner linux-amd64 binary to /usr/local/bin; install
-# the gitlab-runner OpenRC service; rc-update add (NOT start). Then print the exact
-# create-runner + register + concurrency + start sequence, including the walt_ui
-# buildctl-MR ordering caveat (see system-files/gitlab-runner-runbook.md).
+#   --user <name>       gitlab-runner (default) or gitlab-runner-<suffix>. Its
+#                       service is gitlab-runner (default user) or the OpenRC
+#                       instance gitlab-runner.<suffix>.
+#   --runner SPEC       NAME:TAG[:LIMIT], repeatable. One [[runners]] entry: its
+#                       name, its one tag, and its own job limit (default 1).
+#                       Tags and run_untagged=false are set on the runner in
+#                       GitLab when it is created; the entry records them.
+#   --concurrent <N>    the config's global job cap for a NEW config.toml.
+#                       Default: the sum of the runners' limits, so one runner
+#                       never queues behind another's jobs.
+#   --url <https-url>   the GitLab instance (default https://gitlab.com)
+#   --dry-run           print what would change; change nothing, read no token
+#   -h, --help          this text (stdout, exit 0, does nothing else)
 #
-# Unlike the GitHub runner there is NO host toolchain (node/jq) and NO .NET/ICU
-# workaround: GitLab's docker executor runs each job inside its own container, so
-# the runner host needs only the gitlab-runner binary + rootless docker.
+# Tokens. For each --runner entry not already in the config, one glrt- runner
+# authentication token is read from STDIN, one per line, in --runner order
+# (a hidden prompt when stdin is a terminal). A token is never an argument, never
+# printed and never logged. The config is written 0600, owned by the user, in
+# its 0700 ~/.gitlab-runner. An entry already in the config is kept and its
+# token is not read. Without --runner the script installs and prints the steps.
+#
+# Example (two runners, tokens from the two `POST user/runners` responses):
+#   sudo scripts/setup-gitlab-runner --user gitlab-runner-personal \
+#     --runner personal-ci:ci --runner personal-deploy:deploy
+#
+# Idempotent. Prerequisites: setup-gitlab-runner-user, setup-gitlab-runner-docker
+# (same --user). Flags may come in any order.
 
 set -euo pipefail
 
 USER_NAME="gitlab-runner"
-CONFIG="/home/gitlab-runner/.gitlab-runner/config.toml"
-SERVICE_NAME="gitlab-runner"
-BIN="/usr/local/bin/gitlab-runner"
+SERVICE_BASE="gitlab-runner"
+BIN_PATH="/usr/local/bin/gitlab-runner"
 DL_URL="https://gitlab-runner-downloads.s3.amazonaws.com/latest/binaries/gitlab-runner-linux-amd64"
+GITLAB_URL="https://gitlab.com"
+CONCURRENT=""
+RUNNER_SPECS=()
 DRY_RUN=false
 
 usage() { awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"; }
+SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+KIT_LIB="${SCRIPTS_DIR}/lib/gitlab-runner-kit.sh"
+if [ ! -r "${KIT_LIB}" ]; then
+  printf 'missing %s\nFix: run this script from the custom repo checkout (scripts/setup-gitlab-runner)\n' "${KIT_LIB}" >&2; exit 1
+fi
+# shellcheck source=lib/gitlab-runner-kit.sh
+. "${KIT_LIB}"
+# A refusal never echoes a glrt- token, whichever flag one was pasted into.
+die()  { printf '\033[1;31m[x]\033[0m %s\n' "$(grk_redact "$1")" >&2; printf 'Fix: %s\n' "$(grk_redact "$2")" >&2; exit 1; }
+need_value() { [ "$1" -ge 2 ] || die "$2 needs a value" "pass $2 <value> (see --help)"; }
 while [ $# -gt 0 ]; do case "$1" in
   --dry-run) DRY_RUN=true ;;
   -h|--help) usage; exit 0 ;;
-  *) echo "unknown argument: $1" >&2; usage >&2; exit 1 ;;
+  --user=*) USER_NAME="${1#--user=}" ;;
+  --user) need_value $# --user; USER_NAME="$2"; shift ;;
+  --runner=*) RUNNER_SPECS+=("${1#--runner=}") ;;
+  --runner) need_value $# --runner; RUNNER_SPECS+=("$2"); shift ;;
+  --concurrent=*) CONCURRENT="${1#--concurrent=}" ;;
+  --concurrent) need_value $# --concurrent; CONCURRENT="$2"; shift ;;
+  --url=*) GITLAB_URL="${1#--url=}" ;;
+  --url) need_value $# --url; GITLAB_URL="$2"; shift ;;
+  *) usage >&2; die "unknown argument: $1" "run with --help and pass only the flags it lists (a token goes on stdin, never as an argument)" ;;
 esac; shift; done
 
 log()  { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
-die()  { printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
 run()  { if $DRY_RUN; then printf '    + %s\n' "$*"; else "$@"; fi; }
 
-SYSTEM_FILES="$(cd "$(dirname "${BASH_SOURCE[0]}")/../system-files" && pwd)" \
-  || die "cannot locate system-files/ — run from the custom repo checkout"
-[ -f "$SYSTEM_FILES/$SERVICE_NAME.initd" ] \
-  || die "missing $SYSTEM_FILES/$SERVICE_NAME.initd — run from the custom repo checkout"
-[ -f "$SYSTEM_FILES/lib/initd-proc-tree.sh" ] \
-  || die "missing $SYSTEM_FILES/lib/initd-proc-tree.sh — run from the custom repo checkout"
-[ -f "$SYSTEM_FILES/lib/initd-reap-exec" ] \
-  || die "missing $SYSTEM_FILES/lib/initd-reap-exec — run from the custom repo checkout"
 
-[ "$(id -u)" -eq 0 ] || die "must run as root (use sudo)"
-getent passwd "$USER_NAME" >/dev/null \
-  || die "user $USER_NAME does not exist — run setup-gitlab-runner-user first"
-command -v curl >/dev/null || die "curl not found"
-
-# --- 1. download the gitlab-runner binary ------------------------------------
-if [ -x "$BIN" ]; then
-  log "gitlab-runner already installed at $BIN ($("$BIN" --version 2>/dev/null | head -1))"
-else
-  tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
-  log "downloading gitlab-runner-linux-amd64 -> $BIN"
-  run curl -fsSL -o "$tmp/gitlab-runner" "$DL_URL"
-  if ! $DRY_RUN; then
-    log "sha256: $(sha256sum "$tmp/gitlab-runner" | cut -d' ' -f1)  (compare with $DL_URL.sha256 if you want)"
-  fi
-  run install -m 755 -o root -g root "$tmp/gitlab-runner" "$BIN"
+# --- validate every input before any change ----------------------------------
+grk_validate_user "${USER_NAME}" || exit 1
+grk_valid_url "${GITLAB_URL}" || die "--url '${GITLAB_URL}' is not an https origin" "pass --url https://<host> (no path, no credentials), or omit it for https://gitlab.com"
+R_NAMES=(); R_TAGS=(); R_LIMITS=(); LIMIT_SUM=0
+for spec in "${RUNNER_SPECS[@]+"${RUNNER_SPECS[@]}"}"; do
+  parsed="$(grk_parse_runner "${spec}")" || exit 1
+  read -r n t l <<<"${parsed}"
+  for seen in "${R_NAMES[@]+"${R_NAMES[@]}"}"; do
+    [ "${seen}" != "${n}" ] || die "--runner ${n} is given twice" "pass each runner name once"
+  done
+  R_NAMES+=("${n}"); R_TAGS+=("${t}"); R_LIMITS+=("${l}"); LIMIT_SUM=$((LIMIT_SUM + l))
+done
+if [ -n "${CONCURRENT}" ]; then
+  [[ "${CONCURRENT}" =~ ^[1-9][0-9]{0,2}$ ]] || die "--concurrent '${CONCURRENT}' is not a whole number from 1 to 999" "pass --concurrent <N> with N >= 1, or omit it"
+  [ "${#R_NAMES[@]}" -gt 0 ] || die "--concurrent without --runner has nothing to write" "add the --runner entries, or drop --concurrent and edit config.toml"
+elif [ "${#R_NAMES[@]}" -gt 0 ]; then
+  CONCURRENT="${LIMIT_SUM}"
+fi
+if [ "${#R_NAMES[@]}" -gt 0 ] && [ "${CONCURRENT}" -lt "${LIMIT_SUM}" ]; then
+  warn "concurrent ${CONCURRENT} is below the runners' summed limit ${LIMIT_SUM}: one runner's job can queue behind another's"
 fi
 
-# --- 2. install the OpenRC service (do NOT start until registered) -----------
-log "installing /etc/init.d/$SERVICE_NAME"
+SERVICE_NAME="$(grk_runner_service "${USER_NAME}")"
+CI_DIR="$(grk_ci_dir "${USER_NAME}")"
+
+# ATHENA_RUNNER_KIT_ROOT: the test seam (scripts/test/gitlab-runner-kit). Every
+# file path is under it; unset in production, so paths are the real ones.
+R="${ATHENA_RUNNER_KIT_ROOT:-}"
+if [ -n "${R}" ] && { [[ "${R}" != /* ]] || [ ! -d "${R}" ]; }; then
+  die "ATHENA_RUNNER_KIT_ROOT='${R}' is not an absolute existing directory" "unset ATHENA_RUNNER_KIT_ROOT (it is a test seam), or point it at a test root"
+fi
+BIN="${R}${BIN_PATH}"
+
+SYSTEM_FILES="$(cd "${SCRIPTS_DIR}/../system-files" && pwd)" \
+  || die "cannot locate system-files/" "run from the custom repo checkout"
+for f in "${SERVICE_BASE}.initd" lib/initd-proc-tree.sh lib/initd-reap-exec; do
+  [ -f "${SYSTEM_FILES}/${f}" ] || die "missing ${SYSTEM_FILES}/${f}" "run from a complete custom repo checkout (git status should show it)"
+done
+
+[ "$(id -u)" -eq 0 ] || die "must run as root" "re-run with sudo: sudo $0 --user ${USER_NAME} (tokens on stdin)"
+getent passwd "${USER_NAME}" >/dev/null \
+  || die "user ${USER_NAME} does not exist" "run: sudo scripts/setup-gitlab-runner-user --user ${USER_NAME}"
+USER_HOME="$(getent passwd "${USER_NAME}" | cut -d: -f6)"
+[[ "${USER_HOME}" == /* ]] || die "${USER_NAME}'s home '${USER_HOME}' is not an absolute path" \
+  "set it with: usermod -d /home/${USER_NAME} ${USER_NAME}, then re-run"
+CONFIG_DIR="${USER_HOME}/.gitlab-runner"
+CONFIG="${CONFIG_DIR}/config.toml"
+
+# --- 1. read the tokens (before any change, so a bad one changes nothing) ----
+# A token lives only in shell variables and reaches the config through the
+# printf builtin: no process ever has it in argv, and nothing prints it.
+NEW_IDX=()
+for i in "${!R_NAMES[@]}"; do
+  if grk_config_has_runner "${R}${CONFIG}" "${R_NAMES[$i]}"; then
+    log "config already has runner ${R_NAMES[$i]} — keeping it (its token is not read)"
+  else
+    NEW_IDX+=("${i}")
+  fi
+done
+TOKENS=()
+if [ "${#NEW_IDX[@]}" -gt 0 ] && ! $DRY_RUN; then
+  for i in "${NEW_IDX[@]}"; do
+    tok=""
+    if [ -t 0 ]; then
+      IFS= read -r -s -p "glrt- token for runner ${R_NAMES[$i]} (input hidden): " tok || true
+      printf '\n' >&2
+    else
+      IFS= read -r tok || true
+    fi
+    tok="${tok%$'\r'}"
+    if ! grk_valid_token "${tok}"; then
+      unset tok
+      die "stdin line for runner ${R_NAMES[$i]} is not a glrt- runner authentication token (it is not shown)" \
+          "give one glrt- token per line on stdin, in --runner order (${R_NAMES[*]}); create each with POST user/runners, never pass one as an argument"
+    fi
+    TOKENS[$i]="${tok}"
+    unset tok
+  done
+fi
+
+# --- 2. download the gitlab-runner binary (shared by every runner user) -------
+if [ -x "${BIN}" ]; then
+  log "gitlab-runner already installed at ${BIN_PATH} ($("${BIN}" --version 2>/dev/null | head -1))"
+else
+  tmp="$(mktemp -d)"; trap 'rm -rf "${tmp}"' EXIT
+  log "downloading gitlab-runner-linux-amd64 -> ${BIN_PATH}"
+  run curl -fsSL -o "${tmp}/gitlab-runner" "${DL_URL}"
+  if ! $DRY_RUN; then
+    log "sha256: $(sha256sum "${tmp}/gitlab-runner" | cut -d' ' -f1)  (compare with ${DL_URL}.sha256 if you want)"
+  fi
+  run install -D -m 755 -o root -g root "${tmp}/gitlab-runner" "${BIN}"
+fi
+
+# --- 3. install the OpenRC service (do NOT start) ----------------------------
+log "installing /etc/init.d/${SERVICE_NAME}"
 # The initd sources this to end its whole process tree on stop (DND-812).
-run install -D -m 644 "$SYSTEM_FILES/lib/initd-proc-tree.sh" "/usr/local/lib/athena/initd-proc-tree.sh"
+run install -D -m 644 "${SYSTEM_FILES}/lib/initd-proc-tree.sh" "${R}/usr/local/lib/athena/initd-proc-tree.sh"
 # supervise-daemon runs the real command through this, so a respawn after a
 # crash ends the dead command's leftover tree first (DND-838).
-run install -D -m 755 "$SYSTEM_FILES/lib/initd-reap-exec" "/usr/local/lib/athena/initd-reap-exec"
-run install -m 755 "$SYSTEM_FILES/$SERVICE_NAME.initd" "/etc/init.d/$SERVICE_NAME"
-if [ -e "/etc/conf.d/$SERVICE_NAME" ]; then
-  log "keeping existing /etc/conf.d/$SERVICE_NAME"
-else
-  run install -m 644 "$SYSTEM_FILES/$SERVICE_NAME.confd" "/etc/conf.d/$SERVICE_NAME"
+run install -D -m 755 "${SYSTEM_FILES}/lib/initd-reap-exec" "${R}/usr/local/lib/athena/initd-reap-exec"
+run install -m 755 "${SYSTEM_FILES}/${SERVICE_BASE}.initd" "${R}/etc/init.d/${SERVICE_BASE}"
+if [ "${SERVICE_NAME}" != "${SERVICE_BASE}" ]; then
+  # An OpenRC multiplexed instance: the initd derives its user from RC_SVCNAME.
+  run ln -sfn "${SERVICE_BASE}" "${R}/etc/init.d/${SERVICE_NAME}"
 fi
-run rc-update add "$SERVICE_NAME" default
+CONFD="${R}/etc/conf.d/${SERVICE_NAME}"
+if [ -e "${CONFD}" ]; then
+  log "keeping existing /etc/conf.d/${SERVICE_NAME}"
+else
+  log "writing /etc/conf.d/${SERVICE_NAME}"
+  if $DRY_RUN; then printf '    + write %s\n' "${CONFD}"
+  else
+    mkdir -p "$(dirname "${CONFD}")"
+    grk_render_runner_confd "${USER_NAME}" "${USER_HOME}" > "${CONFD}"
+    chmod 0644 "${CONFD}"
+  fi
+fi
+run rc-update add "${SERVICE_NAME}" default
+
+# --- 4. the config.toml ([[runners]] entries) ---------------------------------
+if [ "${#R_NAMES[@]}" -gt 0 ]; then
+  run install -d -m 0700 -o "${USER_NAME}" -g "${USER_NAME}" "${R}${CONFIG_DIR}"
+  if [ -e "${R}${CONFIG}" ]; then
+    content="$(cat "${R}${CONFIG}")"$'\n'
+    [ -z "${CONCURRENT}" ] || log "${CONFIG} exists: its concurrent setting is kept as is"
+  else
+    content="$(grk_render_header "${CONCURRENT}")"$'\n'
+  fi
+  for i in "${NEW_IDX[@]+"${NEW_IDX[@]}"}"; do
+    log "adding runner ${R_NAMES[$i]} (tag ${R_TAGS[$i]}, limit ${R_LIMITS[$i]}) to ${CONFIG}"
+    $DRY_RUN && continue
+    content+="$(grk_render_runner "${R_NAMES[$i]}" "${R_TAGS[$i]}" "${R_LIMITS[$i]}" "${GITLAB_URL}" "${CI_DIR}" "${TOKENS[$i]}")"$'\n'
+  done
+  if $DRY_RUN; then
+    printf '    + write %s (mode 0600, owner %s; %s new entr(ies); would read %s token(s) on stdin)\n' \
+      "${R}${CONFIG}" "${USER_NAME}" "${#NEW_IDX[@]}" "${#NEW_IDX[@]}"
+  else
+    # mktemp creates 0600; the rename makes the write atomic.
+    tmpcfg="$(mktemp "${R}${CONFIG_DIR}/.config.toml.XXXXXX")"
+    printf '%s' "${content}" > "${tmpcfg}"
+    unset content TOKENS
+    chmod 0600 "${tmpcfg}"
+    chown "${USER_NAME}:${USER_NAME}" "${tmpcfg}"
+    mv -f "${tmpcfg}" "${R}${CONFIG}"
+    log "wrote ${CONFIG} (mode 0600, owner ${USER_NAME})"
+  fi
+fi
 
 log "done."
-cat <<EOF
+if [ "${#R_NAMES[@]}" -gt 0 ]; then
+  cat <<EOF
 
-GitLab Runner binary at $BIN (not yet registered). To finish:
-
-  1. Create the runner in GitLab: walt_ui -> Settings -> CI/CD -> Runners ->
-     New project runner.
-       * Turn ON "Run untagged jobs"  (so it grabs the untagged pipeline; that
-         is what gives self-hosted-when-up / SaaS-when-down fallback).
-       * Leave Tags EMPTY  (image-build jobs stay UNTAGGED so SaaS can also run
-         them — the non-negotiable build fallback; see the runbook).
-       * Copy the 'glrt-...' authentication token.
-
-  2. Register AS the runner user (the --docker-security-opt flags set the
-     rootless-BuildKit block inline; privileged stays false):
-       sudo -u $USER_NAME $BIN register --non-interactive \\
-         --url https://gitlab.com --token glrt-... \\
-         --executor docker --docker-image alpine:3.20 \\
-         --docker-security-opt seccomp:unconfined \\
-         --docker-security-opt apparmor:unconfined \\
-         --docker-volumes /cache \\
-         --config $CONFIG
-
-  3. Set global concurrency: edit $CONFIG, set the top-level  concurrent = 3
-     (compare the whole file against system-files/gitlab-runner-config.toml.example).
-
-  4. DO NOT START YET. Image-build jobs are untagged, so the runner would grab
-     them the instant it starts — but until walt_ui's buildctl-rewrite MR is
-     merged those jobs still use privileged dind and would FAIL RED here. Land
-     that MR first (full spec in system-files/gitlab-runner-runbook.md), THEN:
-       sudo rc-service $SERVICE_NAME start
-       sudo rc-service $SERVICE_NAME status
-
-  The runner then shows online under walt_ui -> Settings -> CI/CD -> Runners; it
-  grabs untagged jobs while up, and gitlab.com shared runners handle them when it
-  is stopped (the fallback). Force SaaS at any time: sudo rc-service $SERVICE_NAME stop.
+${SERVICE_NAME} is installed and ${CONFIG} holds ${#R_NAMES[@]} runner entr(ies).
+Check them against GitLab, then start (only once every job tagged for these
+runners can run rootless):
+  sudo -u ${USER_NAME} ${BIN_PATH} verify --config ${CONFIG}
+  sudo rc-service ${SERVICE_NAME} start
+  sudo rc-service ${SERVICE_NAME} status
+Stop at any time: sudo rc-service ${SERVICE_NAME} stop
 EOF
+else
+  cat <<EOF
+
+GitLab Runner binary at ${BIN_PATH}; ${SERVICE_NAME} installed, not registered. To finish:
+
+  1. Create each runner in GitLab with its tag and "Run untagged jobs" OFF,
+     e.g. glab api -X POST user/runners -f runner_type=project_type \\
+       -F project_id=<id> -f description=<name> -f tag_list=<tag> -F run_untagged=false
+     Keep the 'glrt-...' token from the response. Never paste it into a chat.
+
+  2. Write the config, tokens on stdin in --runner order (never as arguments):
+       sudo scripts/setup-gitlab-runner --user ${USER_NAME} --runner <name>:<tag>[:<limit>] ...
+
+  3. Start: sudo rc-service ${SERVICE_NAME} start
+
+  The walt_ui runner (user gitlab-runner, untagged by design) keeps its own
+  ordering caveat: system-files/gitlab-runner-runbook.md.
+EOF
+fi

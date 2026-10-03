@@ -1,15 +1,25 @@
 #!/sbin/openrc-run
 # Self-hosted GitLab Runner for a non-root user (default: gitlab-runner).
 # Source: ~/dev/custom/system-files/ — installed to /etc/init.d/ by
-# scripts/setup-gitlab-runner. Runs `gitlab-runner run` AS the user (a deliberate
+# scripts/setup-gitlab-runner. One runner user per trust domain (DND-1937):
+# /etc/init.d/gitlab-runner serves user gitlab-runner, and each OpenRC instance
+# /etc/init.d/gitlab-runner.<suffix> (a symlink to this file) serves user
+# gitlab-runner-<suffix>, after its own docker-rootless-gitlab-runner.<suffix>. Runs `gitlab-runner run` AS the user (a deliberate
 # divergence from GitLab's default root-service packaging), after that user's
 # rootless Docker is up, so the docker executor's jobs use the rootless daemon
 # on the user's own socket.
 
-# Overridable in /etc/conf.d/gitlab-runner
-: "${RUNNER_USER:=gitlab-runner}"
-: "${RUNNER_HOME:=/home/gitlab-runner}"
-: "${RUNNER_CONFIG:=/home/gitlab-runner/.gitlab-runner/config.toml}"
+# The default user follows the service name: gitlab-runner.<suffix> runs as
+# gitlab-runner-<suffix>; anything else as gitlab-runner.
+case "${RC_SVCNAME}" in
+	gitlab-runner.?*) _default_user="gitlab-runner-${RC_SVCNAME#gitlab-runner.}" ;;
+	*) _default_user="gitlab-runner" ;;
+esac
+
+# Overridable in /etc/conf.d/${RC_SVCNAME}
+: "${RUNNER_USER:=${_default_user}}"
+: "${RUNNER_HOME:=/home/${RUNNER_USER}}"
+: "${RUNNER_CONFIG:=${RUNNER_HOME}/.gitlab-runner/config.toml}"
 : "${RUNNER_BIN:=/usr/local/bin/gitlab-runner}"
 : "${RUNNER_OPTS:=}"
 
@@ -67,7 +77,7 @@ export PATH="/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:${PATH}}"
 
 depend() {
 	need net
-	after elogind firewall docker-rootless-gitlab-runner
+	after elogind firewall docker-rootless-${RC_SVCNAME}
 }
 
 start_pre() {
@@ -88,11 +98,9 @@ start_pre() {
 		return 1
 	fi
 	if [ ! -f "${RUNNER_CONFIG}" ] || ! grep -q '\[\[runners\]\]' "${RUNNER_CONFIG}" 2>/dev/null; then
-		eerror "runner not registered (${RUNNER_CONFIG} has no [[runners]]). As ${RUNNER_USER}, run:"
-		eerror "  ${_svc_program} register --non-interactive --url https://gitlab.com \\"
-		eerror "    --token glrt-<TOKEN> --executor docker --docker-image alpine:3.20 \\"
-		eerror "    --docker-security-opt seccomp:unconfined --docker-security-opt apparmor:unconfined \\"
-		eerror "    --docker-volumes /cache --config ${RUNNER_CONFIG}"
+		eerror "runner not registered (${RUNNER_CONFIG} has no [[runners]])."
+		eerror "Fix: sudo <custom checkout>/scripts/setup-gitlab-runner --user ${RUNNER_USER} --runner <name>:<tag>"
+		eerror "     (one glrt- token per --runner on stdin, never as an argument)"
 		return 1
 	fi
 	if [ ! -d "${XDG_RUNTIME_DIR}" ]; then

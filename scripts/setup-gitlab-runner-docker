@@ -1,71 +1,128 @@
 #!/usr/bin/env bash
 #
-# setup-gitlab-runner-docker — give the `gitlab-runner` user ROOTLESS Docker.
+# setup-gitlab-runner-docker — give one GitLab runner user its own ROOTLESS Docker.
 #
 # The self-hosted GitLab Runner uses the DOCKER executor: each CI job runs in a
 # container spun by this user's OWN dockerd under its UID — NOT the
-# root-equivalent `docker` group. Mirrors setup-github-runner-docker.
+# root-equivalent `docker` group. Each runner user gets its own daemon, its own
+# subordinate id block and its own OpenRC service (DND-1937).
 #
-# Run as root:  sudo scripts/setup-gitlab-runner-docker  [--dry-run]
-# Idempotent; safe to re-run. Prerequisite: run setup-gitlab-runner-user first.
+# Usage (as root):
+#   sudo scripts/setup-gitlab-runner-docker [--user <name>] [--subid-start <N>] [--dry-run]
 #
-# Steps: accept ~amd64 for rootlesskit; emerge rootlesskit + slirp4netns +
-# fuse-overlayfs (skipped if already present from another rootless user);
-# ensure /etc/subuid + /etc/subgid ranges; loginctl enable-linger; install the
-# docker-rootless-gitlab-runner OpenRC service; add DOCKER_HOST to the user's
-# ~/.bashrc.
+#   --user <name>        gitlab-runner (default) or gitlab-runner-<suffix>
+#   --subid-start <N>    first id of the user's 65536-id /etc/subuid + /etc/subgid
+#                        block. Default: gitlab-runner keeps 296608; any other
+#                        user gets 1000000000 + (CRC32(name) mod 4096) * 65536.
+#                        Needed only when that block overlaps an existing line.
+#   --dry-run            print what would change; change nothing
+#   -h, --help           this text (stdout, exit 0, does nothing else)
+#
+# Idempotent; safe to re-run. Prerequisite: setup-gitlab-runner-user --user <name>.
+#
+# Steps: refuse a subid block that overlaps any other /etc/subuid or /etc/subgid
+# line; accept ~amd64 for rootlesskit; emerge rootlesskit + slirp4netns +
+# fuse-overlayfs (skipped if present); add the subuid/subgid block; loginctl
+# enable-linger; install the docker-rootless-gitlab-runner OpenRC service (user
+# gitlab-runner) or its instance docker-rootless-gitlab-runner.<suffix>, with
+# its data root at /srv/ci/<name>/docker; add DOCKER_HOST to the user's ~/.bashrc.
 
 set -euo pipefail
 
 USER_NAME="gitlab-runner"
-SERVICE_NAME="docker-rootless-gitlab-runner"
+SERVICE_BASE="docker-rootless-gitlab-runner"
 KEYWORD_ATOM="sys-apps/rootlesskit"
-SUBID_RANGE="296608:65536"   # next 64K block after github-runner's 231072:65536 (no overlap)
+SUBID_START=""
 DRY_RUN=false
 
 usage() { awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"; }
-for a in "$@"; do case "$a" in
+SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+KIT_LIB="${SCRIPTS_DIR}/lib/gitlab-runner-kit.sh"
+if [ ! -r "${KIT_LIB}" ]; then
+  printf 'missing %s\nFix: run this script from the custom repo checkout (scripts/setup-gitlab-runner-docker)\n' "${KIT_LIB}" >&2; exit 1
+fi
+# shellcheck source=lib/gitlab-runner-kit.sh
+. "${KIT_LIB}"
+# A refusal never echoes a glrt- token, whichever flag one was pasted into.
+die()  { printf '\033[1;31m[x]\033[0m %s\n' "$(grk_redact "$1")" >&2; printf 'Fix: %s\n' "$(grk_redact "$2")" >&2; exit 1; }
+while [ $# -gt 0 ]; do case "$1" in
   --dry-run) DRY_RUN=true ;;
   -h|--help) usage; exit 0 ;;
-  *) echo "unknown argument: $a" >&2; usage >&2; exit 1 ;;
-esac; done
+  --user=*) USER_NAME="${1#--user=}" ;;
+  --user) [ $# -ge 2 ] || die "--user needs a value" "pass --user gitlab-runner-<suffix>, or omit --user for gitlab-runner"
+          USER_NAME="$2"; shift ;;
+  --subid-start=*) SUBID_START="${1#--subid-start=}" ;;
+  --subid-start) [ $# -ge 2 ] || die "--subid-start needs a value" "pass --subid-start <N>, or omit it for the deterministic block"
+          SUBID_START="$2"; shift ;;
+  *) usage >&2; die "unknown argument: $1" "run with --help and pass only the flags it lists" ;;
+esac; shift; done
 
 log()  { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
-die()  { printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
 run()  { if $DRY_RUN; then printf '    + %s\n' "$*"; else "$@"; fi; }
 
-SYSTEM_FILES="$(cd "$(dirname "${BASH_SOURCE[0]}")/../system-files" && pwd)" \
-  || die "cannot locate system-files/ — run from the custom repo checkout"
-[ -f "$SYSTEM_FILES/$SERVICE_NAME.initd" ] \
-  || die "missing $SYSTEM_FILES/$SERVICE_NAME.initd — run from the custom repo checkout"
-[ -f "$SYSTEM_FILES/lib/initd-proc-tree.sh" ] \
-  || die "missing $SYSTEM_FILES/lib/initd-proc-tree.sh — run from the custom repo checkout"
-[ -f "$SYSTEM_FILES/lib/initd-reap-exec" ] \
-  || die "missing $SYSTEM_FILES/lib/initd-reap-exec — run from the custom repo checkout"
+grk_validate_user "${USER_NAME}" || exit 1
+if [ -n "${SUBID_START}" ]; then grk_validate_subid_start "${SUBID_START}" || exit 1
+else SUBID_START="$(grk_subid_start "${USER_NAME}")"; fi
+SUBID_COUNT="${GRK_SUBID_COUNT}"
+SERVICE_NAME="$(grk_docker_service "${USER_NAME}")"
+CI_DIR="$(grk_ci_dir "${USER_NAME}")"
 
-[ "$(id -u)" -eq 0 ] || die "must run as root (use sudo)"
-getent passwd "$USER_NAME" >/dev/null \
-  || die "user $USER_NAME does not exist — run setup-gitlab-runner-user first"
-command -v loginctl >/dev/null || die "loginctl (elogind) not found — needed for linger"
-
-if grep -qx docker <<<"$(id -nG "$USER_NAME" | tr ' ' '\n')"; then
-  die "$USER_NAME is in the 'docker' group — root-equivalent, defeats rootless.
-      Remove it:  gpasswd -d $USER_NAME docker"
+# ATHENA_RUNNER_KIT_ROOT: the test seam (scripts/test/gitlab-runner-kit). Every
+# file path is under it; unset in production, so paths are the real ones.
+R="${ATHENA_RUNNER_KIT_ROOT:-}"
+if [ -n "${R}" ] && { [[ "${R}" != /* ]] || [ ! -d "${R}" ]; }; then
+  die "ATHENA_RUNNER_KIT_ROOT='${R}' is not an absolute existing directory" "unset ATHENA_RUNNER_KIT_ROOT (it is a test seam), or point it at a test root"
 fi
 
-# --- 1. accept ~amd64 keyword for rootlesskit --------------------------------
-KW_DIR="/etc/portage/package.accept_keywords"
-if [ -d "$KW_DIR" ]; then KW_FILE="$KW_DIR/gitlab-runner-docker"; else KW_FILE="$KW_DIR"; fi
-if [ -e "$KW_FILE" ] && grep -qE "^\s*${KEYWORD_ATOM//\//\\/}\s+~amd64" "$KW_FILE" 2>/dev/null; then
-  log "keyword for $KEYWORD_ATOM already accepted"
+SYSTEM_FILES="$(cd "${SCRIPTS_DIR}/../system-files" && pwd)" \
+  || die "cannot locate system-files/" "run from the custom repo checkout"
+for f in "${SERVICE_BASE}.initd" lib/initd-proc-tree.sh lib/initd-reap-exec; do
+  [ -f "${SYSTEM_FILES}/${f}" ] || die "missing ${SYSTEM_FILES}/${f}" "run from a complete custom repo checkout (git status should show it)"
+done
+
+[ "$(id -u)" -eq 0 ] || die "must run as root" "re-run with sudo: sudo $0 --user ${USER_NAME}"
+getent passwd "${USER_NAME}" >/dev/null \
+  || die "user ${USER_NAME} does not exist" "run: sudo scripts/setup-gitlab-runner-user --user ${USER_NAME}"
+command -v loginctl >/dev/null || die "loginctl (elogind) not found — needed for linger" "emerge sys-auth/elogind, then re-run"
+USER_HOME="$(getent passwd "${USER_NAME}" | cut -d: -f6)"
+[[ "${USER_HOME}" == /* ]] || die "${USER_NAME}'s home '${USER_HOME}' is not an absolute path" \
+  "set it with: usermod -d /home/${USER_NAME} ${USER_NAME}, then re-run"
+
+if grep -qx docker <<<"$(id -nG "${USER_NAME}" | tr ' ' '\n')"; then
+  die "${USER_NAME} is in the 'docker' group — root-equivalent, defeats rootless" "remove it: gpasswd -d ${USER_NAME} docker, then re-run"
+fi
+
+# --- 1. subuid / subgid block: judged for BOTH files before either is written -
+declare -A SUBID_ADD=()
+for f in subuid subgid; do
+  file="${R}/etc/${f}"
+  existing="$(grk_subid_entry "${file}" "${USER_NAME}")"
+  if [ -n "${existing}" ]; then
+    log "/etc/${f} already has ${USER_NAME}:${existing} — keeping it"
+    continue
+  fi
+  rc=0; conflicts="$(grk_subid_conflicts "${file}" "${USER_NAME}" "${SUBID_START}" "${SUBID_COUNT}")" || rc=$?
+  case "${rc}" in
+    0) SUBID_ADD[${f}]=1 ;;
+    1) die "${USER_NAME}'s block ${SUBID_START}:${SUBID_COUNT} overlaps /etc/${f}: $(tr '\n' ' ' <<<"${conflicts}")" \
+           "pass --subid-start <N> with a 65536-id block no /etc/subuid or /etc/subgid line covers (e.g. a multiple of 65536 above 1000000000), or remove the line above if its user is gone" ;;
+    *) exit 1 ;; # grk_subid_conflicts printed the problem and its Fix:
+  esac
+done
+
+# --- 2. accept ~amd64 keyword for rootlesskit --------------------------------
+KW_DIR="${R}/etc/portage/package.accept_keywords"
+if [ -d "${KW_DIR}" ]; then KW_FILE="${KW_DIR}/gitlab-runner-docker"; else KW_FILE="${KW_DIR}"; fi
+if [ -e "${KW_FILE}" ] && grep -qE "^\s*${KEYWORD_ATOM//\//\\/}\s+~amd64" "${KW_FILE}" 2>/dev/null; then
+  log "keyword for ${KEYWORD_ATOM} already accepted"
 else
-  log "accepting ~amd64 keyword for $KEYWORD_ATOM in $KW_FILE"
-  if $DRY_RUN; then printf '    + echo "%s ~amd64" >> %s\n' "$KEYWORD_ATOM" "$KW_FILE"
-  else printf '%s ~amd64\n' "$KEYWORD_ATOM" >> "$KW_FILE"; fi
+  log "accepting ~amd64 keyword for ${KEYWORD_ATOM} in ${KW_FILE}"
+  if $DRY_RUN; then printf '    + echo "%s ~amd64" >> %s\n' "${KEYWORD_ATOM}" "${KW_FILE}"
+  else printf '%s ~amd64\n' "${KEYWORD_ATOM}" >> "${KW_FILE}"; fi
 fi
 
-# --- 2. emerge rootless deps (skipped if already present) --------------------
+# --- 3. emerge rootless deps (skipped if already present) --------------------
 missing=()
 command -v rootlesskit    >/dev/null || missing+=("sys-apps/rootlesskit")
 command -v slirp4netns    >/dev/null || missing+=("app-containers/slirp4netns")
@@ -77,52 +134,61 @@ else
   run emerge --verbose --noreplace "${missing[@]}"
 fi
 
-# --- 3. subuid / subgid ranges (non-overlapping) -----------------------------
-for f in /etc/subuid /etc/subgid; do
-  if grep -q "^${USER_NAME}:" "$f" 2>/dev/null; then
-    log "$(basename "$f") already has a range for $USER_NAME"
-  else
-    log "adding $USER_NAME range ($SUBID_RANGE) to $f"
-    run sh -c "printf '%s:%s\n' '$USER_NAME' '$SUBID_RANGE' >> '$f'"
-  fi
+# --- 4. write the subuid / subgid block ---------------------------------------
+for f in subuid subgid; do
+  [ -n "${SUBID_ADD[${f}]:-}" ] || continue
+  log "adding ${USER_NAME}:${SUBID_START}:${SUBID_COUNT} to /etc/${f}"
+  if $DRY_RUN; then printf '    + append %s:%s:%s to %s\n' "${USER_NAME}" "${SUBID_START}" "${SUBID_COUNT}" "${R}/etc/${f}"
+  else printf '%s:%s:%s\n' "${USER_NAME}" "${SUBID_START}" "${SUBID_COUNT}" >> "${R}/etc/${f}"; fi
 done
 
-# --- 4. persistent runtime dir via linger ------------------------------------
-if grep -q 'Linger=yes' <<<"$(loginctl show-user "$USER_NAME" -p Linger 2>/dev/null)"; then
-  log "lingering already enabled for $USER_NAME"
+# --- 5. persistent runtime dir via linger ------------------------------------
+if grep -q 'Linger=yes' <<<"$(loginctl show-user "${USER_NAME}" -p Linger 2>/dev/null)"; then
+  log "lingering already enabled for ${USER_NAME}"
 else
-  log "enabling linger for $USER_NAME (creates /run/user/<uid> at boot)"
-  run loginctl enable-linger "$USER_NAME"
+  log "enabling linger for ${USER_NAME} (creates /run/user/<uid> at boot)"
+  run loginctl enable-linger "${USER_NAME}"
 fi
 
-# --- 5. install the OpenRC service -------------------------------------------
-log "installing /etc/init.d/$SERVICE_NAME"
+# --- 6. install the OpenRC service -------------------------------------------
+log "installing /etc/init.d/${SERVICE_NAME}"
 # The initd sources this to end its whole process tree on stop (DND-812).
-run install -D -m 644 "$SYSTEM_FILES/lib/initd-proc-tree.sh" "/usr/local/lib/athena/initd-proc-tree.sh"
+run install -D -m 644 "${SYSTEM_FILES}/lib/initd-proc-tree.sh" "${R}/usr/local/lib/athena/initd-proc-tree.sh"
 # supervise-daemon runs the real command through this, so a respawn after a
 # crash ends the dead command's leftover tree first (DND-838).
-run install -D -m 755 "$SYSTEM_FILES/lib/initd-reap-exec" "/usr/local/lib/athena/initd-reap-exec"
-run install -m 755 "$SYSTEM_FILES/$SERVICE_NAME.initd" "/etc/init.d/$SERVICE_NAME"
-if [ -e "/etc/conf.d/$SERVICE_NAME" ]; then
-  log "keeping existing /etc/conf.d/$SERVICE_NAME"
-else
-  run install -m 644 "$SYSTEM_FILES/$SERVICE_NAME.confd" "/etc/conf.d/$SERVICE_NAME"
+run install -D -m 755 "${SYSTEM_FILES}/lib/initd-reap-exec" "${R}/usr/local/lib/athena/initd-reap-exec"
+run install -m 755 "${SYSTEM_FILES}/${SERVICE_BASE}.initd" "${R}/etc/init.d/${SERVICE_BASE}"
+if [ "${SERVICE_NAME}" != "${SERVICE_BASE}" ]; then
+  # An OpenRC multiplexed instance: the initd derives its user from RC_SVCNAME.
+  run ln -sfn "${SERVICE_BASE}" "${R}/etc/init.d/${SERVICE_NAME}"
 fi
-run rc-update add "$SERVICE_NAME" default
-if $DRY_RUN; then printf '    + rc-service %s restart\n' "$SERVICE_NAME"
-elif rc-service "$SERVICE_NAME" status >/dev/null 2>&1; then rc-service "$SERVICE_NAME" restart
-else rc-service "$SERVICE_NAME" start || warn "not started yet — check: rc-service $SERVICE_NAME status"; fi
-
-# --- 6. user's shell env (so its `docker` CLI targets its rootless socket) ----
-BASHRC="/home/$USER_NAME/.bashrc"
-MARKER="# >>> rootless docker (setup-gitlab-runner-docker) >>>"
-if [ -e "$BASHRC" ] && grep -qF "$MARKER" "$BASHRC"; then
-  log "rootless docker env already present in $BASHRC"
+CONFD="${R}/etc/conf.d/${SERVICE_NAME}"
+if [ -e "${CONFD}" ]; then
+  log "keeping existing /etc/conf.d/${SERVICE_NAME}"
 else
-  log "adding rootless docker env to $BASHRC"
-  if $DRY_RUN; then printf '    + append DOCKER_HOST/PATH block to %s\n' "$BASHRC"
+  log "writing /etc/conf.d/${SERVICE_NAME} (data root ${CI_DIR}/docker)"
+  if $DRY_RUN; then printf '    + write %s\n' "${CONFD}"
   else
-    cat >> "$BASHRC" <<'EOF'
+    mkdir -p "$(dirname "${CONFD}")"
+    grk_render_docker_confd "${USER_NAME}" > "${CONFD}"
+    chmod 0644 "${CONFD}"
+  fi
+fi
+run rc-update add "${SERVICE_NAME}" default
+if $DRY_RUN; then printf '    + rc-service %s restart\n' "${SERVICE_NAME}"
+elif rc-service "${SERVICE_NAME}" status >/dev/null 2>&1; then rc-service "${SERVICE_NAME}" restart
+else rc-service "${SERVICE_NAME}" start || warn "not started yet — check: rc-service ${SERVICE_NAME} status"; fi
+
+# --- 7. user's shell env (so its `docker` CLI targets its rootless socket) ----
+BASHRC="${R}${USER_HOME}/.bashrc"
+MARKER="# >>> rootless docker (setup-gitlab-runner-docker) >>>"
+if [ -e "${BASHRC}" ] && grep -qF "${MARKER}" "${BASHRC}"; then
+  log "rootless docker env already present in ${USER_HOME}/.bashrc"
+else
+  log "adding rootless docker env to ${USER_HOME}/.bashrc"
+  if $DRY_RUN; then printf '    + append DOCKER_HOST/PATH block to %s\n' "${BASHRC}"
+  else
+    cat >> "${BASHRC}" <<'EOF'
 
 # >>> rootless docker (setup-gitlab-runner-docker) >>>
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
@@ -130,14 +196,14 @@ export DOCKER_HOST="unix://${XDG_RUNTIME_DIR}/docker.sock"
 export PATH="/usr/sbin:/usr/bin:$PATH"
 # <<< rootless docker (setup-gitlab-runner-docker) <<<
 EOF
-    chown "$USER_NAME":"$USER_NAME" "$BASHRC"
+    chown "${USER_NAME}:${USER_NAME}" "${BASHRC}"
   fi
 fi
 
-log "done. Next: sudo scripts/setup-gitlab-runner"
+log "done. Next: sudo scripts/setup-gitlab-runner --user ${USER_NAME}"
 cat <<EOF
 
 Verify (once the service is up):
-  rc-service $SERVICE_NAME status
-  ls -l /run/user/$(id -u "$USER_NAME" 2>/dev/null)/docker.sock   # owned by $USER_NAME
+  rc-service ${SERVICE_NAME} status
+  ls -l /run/user/$(id -u "${USER_NAME}" 2>/dev/null)/docker.sock   # owned by ${USER_NAME}
 EOF
