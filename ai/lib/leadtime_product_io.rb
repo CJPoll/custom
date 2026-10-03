@@ -28,11 +28,13 @@ require "open3"
 require "time"
 require_relative "leadtime_product"
 require_relative "lead_time_trailer"
+require_relative "lead_time_config_io"
 
 module LeadTimeProductIO
   P = LeadTimeProduct
   HARNESS = File.expand_path("../..", __dir__)
-  GIT_ENV_UNSET = %w[GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_PREFIX].to_h { |k| [k, nil] }.freeze
+  # One definition of the hermetic-git hash: LeadTimeConfigIO's (DND-1923).
+  GIT_ENV_UNSET = LeadTimeConfigIO::GIT_ENV_UNSET
 
   # A read that could not be made: exit 3, never an empty result.
   class CouldNotLook < P::Error; end

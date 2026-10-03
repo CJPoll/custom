@@ -71,6 +71,7 @@ require_relative "../lib/next_mission_notion"
 require_relative "../lib/dispatch_trackers"
 require_relative "../lib/dispatch_trackers_overlay"
 require_relative "../lib/ticket_ref"
+require_relative "../lib/lead_time_config_io"
 
 # Which workflow/stage counts as "the deploy" (overridable, not hardcoded to a
 # repo). GitHub: workflow name matches this regex. GitLab: job stage equals the
@@ -595,7 +596,7 @@ end
 
 def run_json(cmd, dir)
   printable = "#{cmd.first} #{cmd[1..].join(' ')}"
-  out, err, st = Open3.capture3(*cmd, chdir: dir)
+  out, err, st = Open3.capture3(LeadTimeConfigIO::GIT_ENV_UNSET, *cmd, chdir: dir)
   unless st.success?
     # No Fix: here. Every recorded failure ends in a path that classifies it
     # and prints the Fix: (SCAN INCOMPLETE, or report_lookup_miss); a generic
@@ -624,7 +625,7 @@ def note_saturated(printable, count, cap = MERGED_PAGE_CAP)
 end
 
 def origin_url(dir)
-  out, _err, st = Open3.capture3("git", "-C", dir, "remote", "get-url", "origin")
+  out, _err, st = Open3.capture3(LeadTimeConfigIO::GIT_ENV_UNSET, "git", "-C", dir, "remote", "get-url", "origin")
   st.success? ? out.strip : ""
 end
 
@@ -895,7 +896,7 @@ class GitHubForge
   # checks few without skipping the push that landed it. An unreadable date
   # only widens the search to every push, so it is not a failed probe.
   def pushes_since(pushes, sha)
-    out, _e, st = Open3.capture3("git", "-C", @dir, "show", "-s", "--format=%cI", sha)
+    out, _e, st = Open3.capture3(LeadTimeConfigIO::GIT_ENV_UNSET, "git", "-C", @dir, "show", "-s", "--format=%cI", sha)
     return pushes unless st.success?
 
     floor = Time.iso8601(out.strip) - 3600
@@ -915,12 +916,12 @@ class GitHubForge
   end
 
   def git_status(*args)
-    _o, _e, st = Open3.capture3("git", "-C", @dir, *args)
+    _o, _e, st = Open3.capture3(LeadTimeConfigIO::GIT_ENV_UNSET, "git", "-C", @dir, *args)
     st.exitstatus
   end
 
   def git_ok(*args, stdin: nil)
-    out, err, st = Open3.capture3("git", "-C", @dir, *args, stdin_data: stdin.to_s)
+    out, err, st = Open3.capture3(LeadTimeConfigIO::GIT_ENV_UNSET, "git", "-C", @dir, *args, stdin_data: stdin.to_s)
     return out if st.success?
 
     ProbeFailures.record("git #{args.first(3).join(' ')}", err)

@@ -51,6 +51,13 @@ else
   bad "lead_time_test.rb: landing rules" "$(cat "${TMP}/lt")"
 fi
 
+# 1b2. A leaked GIT_DIR must not redirect any git spawn (DND-1923).
+if /usr/bin/ruby "$here/git_env_leak_test.rb" >"${TMP}/ge" 2>&1; then
+  ok "git_env_leak_test.rb: leaked GIT_DIR ($(tail -1 "${TMP}/ge"))"
+else
+  bad "git_env_leak_test.rb: leaked GIT_DIR" "$(cat "${TMP}/ge")"
+fi
+
 # 1c. The Notion start lookup's retry policy (DND-1519) over a fake Notion on
 #     loopback. LC_ALL=C pins the read of a raw UTF-8 body (DND-1054).
 if LC_ALL=C /usr/bin/ruby "$here/notion_retry_test.rb" >"${TMP}/nr" 2>&1; then
