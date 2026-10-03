@@ -210,11 +210,11 @@ fleet_agent_end_problem() {
 }
 
 # fleet_unmapped_notice -- the exact PreToolUse additionalContext for a captain
-# spawn that names no ticket. Pinned in
+# spawn that names no single ticket ref (none, or two or more). Pinned in
 # ai/contracts/fixtures/athena-events-quoted-fix.txt (*Mission pointers are
 # metadata only*); the domain self-test asserts equality.
 fleet_unmapped_notice() {
-  printf '%s\n' "fleet-lifecycle: this athena-captain spawn names no ticket, so the fleet page shows it as an unmapped captain. Fix: start the Agent description with the Mission's ticket ref (for example DND-541 captain) and put a line of the form Mission: DND-541 in the brief."
+  printf '%s\n' "fleet-lifecycle: this athena-captain spawn names no single ticket ref (none, or two or more in the description), so the fleet page shows it as an unmapped captain. Fix: start the Agent description with exactly one ticket ref, the Mission's (for example DND-541 captain; a batch names only its first ticket's ref), and put a line of the form Mission: DND-541 in the brief."
 }
 
 # fleet_reports_url <mcp-url>

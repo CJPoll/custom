@@ -368,7 +368,9 @@ how such tier-4 tickets get that captain cheaply. Do not batch any other tier.
 The batch brief carries everything above for one Mission, plus:
 
 - **The tickets, in stack order**, each with its own Notion page and design
-  sub-docs.
+  sub-docs. The Agent `description` and the `Mission:` line name the first
+  ticket only (`DND-1349 batch captain`); a second ref there unmaps the
+  spawn (step 2). Measured twice: 2026-10-02 06:53Z, 2026-10-03 13:54Z.
 - **The branches.** One worktree, one branch per ticket, each cut from the
   branch of the ticket below it. The worktree's own branch is the first
   ticket's. In a forge repo, each PR targets the branch of the ticket below it;
