@@ -377,6 +377,19 @@ CONFIG="${GS_CONFIG}"; STATE="${TMP}/state-gs"
 ROWS="${TMP}/rows-gs.json" run "${TEL_EMPTY}" --ingest --repo gen_saas
 eq "a gen_saas-shaped improve ingest exits 0" "${CODE}" "0"
 eq "the ledger keeps lead-time's end kind" "$(row_field "${HEAD_PUSH}" tail_end)" "deploy"
+eq "DND-1924 ingest: the deploy-ended landing keeps its lead_s" "$(row_field "${HEAD_PUSH}" lead_s)" "10800"
+eq "DND-1924 ingest: the no-run landing's lead_s is null (CI inferred from the batch), never 0" "$(row_field "${HEAD_BARE}" lead_s)" "null"
+has "DND-1924 ingest: its lead_na_reason is tail's" "$(row_field "${HEAD_BARE}" lead_na_reason)" "no successful post-merge CI run"
+STATE="${TMP}/state-gs-decl"; CONFIG="${TMP}/repos-gs-ci-ingest.json"
+printf '{"repos":[{"name":"gen_saas","path":"%s","mode":"improve","idle_workflow":"post-merge.yml"}],"window":20,"improvement_epic":"e"}\n' "${WATCH}" >"${CONFIG}"
+ROWS="${TMP}/rows-gs.json" run "${TEL_EMPTY}" --ingest --repo gen_saas
+eq "DND-1924 ingest, declared CI: the no-run landing's lead_s is null" "$(row_field "${HEAD_BARE}" lead_s)" "null"
+has "DND-1924 ingest, declared CI: the reason names the declaration" "$(row_field "${HEAD_BARE}" lead_na_reason)" "declares post-merge CI"
+STATE="${TMP}/state-gs-none"; CONFIG="${TMP}/repos-gs-none-ingest.json"
+printf '{"repos":[{"name":"gen_saas","path":"%s","mode":"improve","idle_workflow":"none"}],"window":20,"improvement_epic":"e"}\n' "${WATCH}" >"${CONFIG}"
+ROWS="${TMP}/rows-gs.json" run "${TEL_EMPTY}" --ingest --repo gen_saas
+eq "DND-1924 ingest, declared none: the landing-ended lead stays measured" "$(row_field "${HEAD_BARE}" lead_s)" "1800"
+STATE="${TMP}/state-gs"; CONFIG="${GS_CONFIG}"
 run "${TEL_EMPTY}" --summary --repo gen_saas
 eq "its summary exits 0" "${CODE}" "0"
 has "the biggest contributor is tail, lever product" "${OUT}" "biggest contributor: tail (sum 4h; lever product)"

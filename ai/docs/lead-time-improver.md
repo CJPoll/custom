@@ -155,6 +155,13 @@ Lead time is the owner's definition: captain dispatch (the ticket's
    an n/a lead carrying the tail's reason. No-CI repos and `code` are
    unchanged.
 
+   **Later (2026-10-03, DND-1924):** the experiment judge reads `lead_s` from
+   the ledger row, not from the summary, so ingest now applies the same rule:
+   a no-run landing in a CI repo is written with `lead_s` null and the
+   tail's reason. A repo that declares no `idle_workflow` infers CI from the
+   ingested batch, not the full window. Rows already ingested keep their old
+   `lead_s`, and watch-mode rows are not adjusted.
+
    **Later (2026-10-02, DND-1501):** the table above is the standalone-PASS
    flow. In custom the captain's verify step is `integration-gate
    --with-critic`, so the PASS is judged inside the run, none stands before

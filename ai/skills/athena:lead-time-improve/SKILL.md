@@ -213,7 +213,8 @@ that repo's lead-time config entry.
 landing with no post-merge run in a CI repo (DND-1924), so a before/after on
 `lead` never mixes landing-ended and deploy-ended leads in one set. Rows
 ingested before DND-1924 keep their old `lead_s`: a before-set that reaches
-back to them mixes the two definitions until they age out of the window.
+back to them mixes the two definitions until they age out of the window. A repo with no `idle_workflow` infers CI
+per ingested batch, so declare it; watch-mode rows are not adjusted.
 
 **Later (2026-10-01, DND-1533):** this read "The product-side action for a
 `product` lever is not set by this step (DND-1533, DND-1542). Until it is,
