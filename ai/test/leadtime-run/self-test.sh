@@ -184,6 +184,13 @@ case "$(cat "$d/mode" 2>/dev/null || echo ok)" in
   limit)     echo "You've hit your weekly limit"; exit 1 ;;
   crash)     echo "segmentation fault"; exit 3 ;;
   limit-receipt) : >"$LEADTIME_RECEIPT"; echo "You've hit your weekly limit"; exit 1 ;;
+  limit-receipt-land) : >"$LEADTIME_RECEIPT"; echo change >landed.txt; g add landed.txt >/dev/null; g commit -q -m "landed change"
+             g push -q origin HEAD:main 2>/dev/null || exit 9; echo "You've hit your weekly limit"; exit 1 ;;
+  product-limit)
+    # A product lane was cut (work begun), no summary, then the provider stopped the run.
+    : >"$LEADTIME_RECEIPT"
+    "$d/repo/ai/bin/leadtime-product" cut --repo gen_saas --phase verify >"$d/cut.out" 2>&1 || echo "cut-rc=$?" >>"$d/cut.out"
+    echo "You've hit your weekly limit"; exit 1 ;;
   limit-receipt-midlog) : >"$LEADTIME_RECEIPT"; echo "the authentication step passed"; head -c 4000 /dev/zero | tr '\0' 'x'; echo; echo "the run fell over"; exit 1 ;;
   limit-receipt-summary) : >"$LEADTIME_RECEIPT"; summary; echo "You've hit your weekly limit"; exit 1 ;;
   limit-receipt-strand) : >"$LEADTIME_RECEIPT"; echo change >strand.txt; g add strand.txt >/dev/null; g commit -q -m "unlanded change"
@@ -932,6 +939,15 @@ if [ "$r1$r2$r3" = 696969 ] && [ "$(fails "$c")" = 0 ] && [ "$(sends "$c" leadti
 else
   bad "limit after receipt x3" "rcs=$r1$r2$r3 fails=$(fails "$c") sends=$(cat "$c/send.log")"
 fi
+# Evidence of work keeps the failure: an own commit that landed on origin/main
+# (not stranded), and a product lane that was cut.
+c="$(new_case)"; echo limit-receipt-land >"$c/mode"
+rc="$(run_runner "$c")"
+if [ "$rc" = 1 ] && [ "$(fails "$c")" = 1 ] && [ -z "$(newest "$c" blocked)" ] && grep -q 'outcome=failed exit=1' "$(newest "$c" run)"; then
+  ok "a limit line after the run landed a commit of its own stays a counted failure (the commit is evidence of work)"
+else
+  bad "limit after a landed commit" "rc=$rc fails=$(fails "$c") run=$(cat "$(newest "$c" run)" 2>/dev/null) err=$(cat "$c/runner.err")"
+fi
 c="$(new_case)"; echo limit-receipt-midlog >"$c/mode"
 rc="$(run_runner "$c")"
 if [ "$rc" = 1 ] && [ "$(fails "$c")" = 1 ] && [ -z "$(newest "$c" blocked)" ]; then
@@ -1452,6 +1468,18 @@ if [ "$rc" = 72 ] && grep -q 'outcome=stranded exit=72' "$run" && grep -q '^prod
   ok "an unpushed commit in a product lane: STRANDED, exit 72, branch kept, counted"
 else
   bad "product strand" "rc=$rc run=$(cat "$run" 2>/dev/null) err=$(cat "$c/runner.err")"
+fi
+
+# DND-1560: a limit line after a product lane was cut is not BLOCKED, whether or
+# not the lane holds a commit: the lane is evidence of work.
+c="$(new_case)"; product_case "$c"; echo product-limit >"$c/mode"
+rc="$(prun "$c")"
+run="$(newest "$c" run)"
+if [ "$rc" = 1 ] && [ "$(fails "$c")" = 1 ] && [ -z "$(newest "$c" blocked)" ] && grep -q 'outcome=failed exit=1' "$run" \
+   && grep -q '^product_lane: repo=gen_saas' "$run"; then
+  ok "a limit line after a product lane was cut stays a counted failure (the lane is evidence of work)"
+else
+  bad "limit after a product lane" "rc=$rc run=$(cat "$run" 2>/dev/null) cut=$(cat "$c/cut.out" 2>/dev/null) err=$(cat "$c/runner.err")"
 fi
 
 # The sweep runs before the session and its result reaches the brief and .run.
