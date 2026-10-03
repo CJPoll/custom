@@ -1389,6 +1389,83 @@ check("settling: text for CLEAN, SHORT and a malformed trailer") do
     bad.include?("malformed") && bad.include?("not counted as a confounder")
 end
 
+# ── target: only a CLEAN baseline is a change target (DND-1674) ─────────────
+# The pick step reads `target` and nothing else: CLEAN or no change on the
+# phase. SHORT reads as SETTLING (a before-set is frozen at landing, so no
+# later landing can fill it). `target` is true exactly when the verdict is CLEAN.
+
+def impl_rows(values) = values.each_with_index.map { |v, i| row(-(i + 1), verify: 600, implement: v) }
+
+check("target 1: a SHORT unconfounded verify (6 landings) is not a target, and a clean implement (12) is") do
+  v = settle(before_rows([600] * 6), [])
+  i = settle(impl_rows([500] * 12), [], phase: "implement")
+  v["verdict"] == "SHORT" && v["confounded"] == false && v["short_by"] == 4 && v["target"] == false &&
+    i["verdict"] == "CLEAN" && i["target"] == true
+end
+
+check("target 2: a SHORT verify stays not-a-target when another phase is mostly n/a") do
+  rows = (1..12).map { |i| row(-i, verify: i <= 6 ? 600 : nil, implement: nil) }
+  settle(rows, [])["target"] == false
+end
+
+check("target 3: K-1 = 9 comparable landings, no confounder: SHORT, short_by 1, not a target") do
+  s = settle(before_rows([600] * 9), [])
+  s["verdict"] == "SHORT" && s["short_by"] == 1 && s["target"] == false
+end
+
+check("target 4: exactly K = 10 comparable landings, no confounder: CLEAN, a target") do
+  s = settle(ten600, [])
+  s["verdict"] == "CLEAN" && s["target"] == true
+end
+
+check("target 5: 6 landings with a same-phase trailer in them: SHORT, confounded, not a target") do
+  s = settle(before_rows([600] * 6), [tc(OTHER_SHA, -3, REVERT_MSG)])
+  s["verdict"] == "SHORT" && s["confounded"] == true && s["target"] == false
+end
+
+check("target 6: 12 landings with a same-phase trailer in the before-set: SETTLING, not a target") do
+  s = settle(before_rows([600] * 12), [tc(OTHER_SHA, -5, REVERT_MSG)])
+  s["verdict"] == "SETTLING" && s["target"] == false
+end
+
+check("target 7: tail with a measured nonzero tail on 3 landings: SHORT, short_by 7, not a target") do
+  rows = (1..3).map { |i| trow(-i, 3600) }
+  s = X.settling(rows, [], phase: "tail", metric: "phase", now: SET_NOW)
+  s["verdict"] == "SHORT" && s["short_by"] == 7 && s["target"] == false
+end
+
+check("target 8: no measured landing before now: SHORT, short_by K, not a target, before_na still named") do
+  s = settle([], [])
+  s["verdict"] == "SHORT" && s["short_by"] == X::K && s["target"] == false && s["before_na"].include?("no before-set")
+end
+
+check("target: an instrumentation check (na_share) that reads SHORT is not a target either") do
+  s = settle(before_rows([600] * 6), [], metric: "na_share")
+  s["verdict"] == "SHORT" && s["target"] == false
+end
+
+check("target 10: over every fixture, target is true exactly when the verdict is CLEAN") do
+  fixtures = [
+    [ten600, []], [before_rows([600] * 9), []], [before_rows([600] * 6), []], [[], []],
+    [before_rows([600] * 6), [tc(OTHER_SHA, -3, REVERT_MSG)]], [before_rows([600] * 12), [tc(OTHER_SHA, -5, REVERT_MSG)]],
+    [ten600, [tc(OTHER_SHA, -3, "Lead-time-experiment: custom queue phase\n")]],
+    [ten600, [tc(OTHER_SHA, -3, "Lead-time-experiment: custom\n")]]
+  ]
+  fixtures.all? do |rows, commits|
+    s = settle(rows, commits)
+    s["target"] == (s["verdict"] == "CLEAN")
+  end
+end
+
+check("target: the text ends the verdict line with the change-target answer") do
+  clean = X.settling_text("custom", settle(ten600, []))
+  short = X.settling_text("custom", settle(before_rows([600] * 6), []))
+  sett = X.settling_text("custom", settle(ten600, [tc(OTHER_SHA, -5, REVERT_MSG)]))
+  clean.lines.first.chomp.end_with?("change target: yes") &&
+    short.lines.first.chomp.end_with?("change target: no (SHORT, short by 4)") &&
+    sett.lines.first.chomp.end_with?("change target: no (SETTLING)")
+end
+
 # ── declared series breaks (DND-1810) ───────────────────────────────────────
 # A change to how a phase is measured: before and after it the ledger
 # measures the phase by different rules. The registry holds them; the

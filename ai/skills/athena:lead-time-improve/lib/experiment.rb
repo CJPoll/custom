@@ -1052,7 +1052,8 @@ module LeadTimeExperiment
   # and the exemptions are judge's own, never a copy.
   #
   # commits: [[sha, committer Time, message]], as confounders takes them.
-  # -> {"verdict" => CLEAN | SETTLING | SHORT, "confounded" => bool (what judge
+  # -> {"verdict" => CLEAN | SETTLING | SHORT, "target" => true only for CLEAN
+  #     (DND-1674: the one bit the pick step reads), "confounded" => bool (what judge
   #     would read), "confounders", "breaks", "latest", "after_latest", "needed",
   #     "short_by", "before" => {n, from, to} | nil, "before_na", "window",
   #     "malformed" => [{commit, value, why}], ...}
@@ -1105,12 +1106,21 @@ module LeadTimeExperiment
               elsif !hit then "CLEAN"
               else "SETTLING"
               end
-    { "verdict" => verdict, "phase" => metric.phase, "metric" => metric.name, "k" => K, "confounded" => hit,
+    { "verdict" => verdict, "target" => verdict == "CLEAN", "phase" => metric.phase, "metric" => metric.name, "k" => K, "confounded" => hit,
       "confounders" => confs, "breaks" => brks, "latest" => latest, "after_latest" => after_latest,
       "needed" => latest ? K - after_latest : 0, "short_by" => K - n,
       "before" => before && { "n" => n, "from" => before.first["landed_at"], "to" => before.last["landed_at"] },
       "before_na" => sides[:before_na], "window" => [from.utc.iso8601, to.utc.iso8601],
       "malformed" => found[:malformed].map { |sha, v, why| { "commit" => sha, "value" => v, "why" => why } } }
+  end
+
+  # The pick step's one bit as text (DND-1674): yes only for CLEAN; else the
+  # verdict, and for SHORT how many landings short.
+  def target_text(s)
+    return "change target: yes" if s["target"]
+
+    why = s["verdict"] == "SHORT" ? "SHORT, short by #{s['short_by']}" : s["verdict"]
+    "change target: no (#{why})"
   end
 
   # The settling report as text: one verdict line, then one line per
@@ -1139,7 +1149,7 @@ module LeadTimeExperiment
              "#{base}: #{s['short_by']} more comparable landing(s) to reach K; judge cannot settle a short " \
                "baseline but inconclusive#{conf}"
            end
-    lines = ["#{head}: #{body}"]
+    lines = ["#{head}: #{body}; #{target_text(s)}"]
     s["malformed"].each do |m|
       lines << "experiment settling: #{m['commit'][0, 12]} has a malformed #{T::KEY} trailer #{m['value'].inspect} " \
                "(#{m['why']}); it names no phase, so it is not counted as a confounder"

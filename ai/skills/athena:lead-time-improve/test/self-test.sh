@@ -775,6 +775,11 @@ eq "no trailer in the window: exit 0" "$(LEAD_TIME_STATE_DIR="${STATES}" LEAD_TI
 has "... CLEAN" "$(out)" '"verdict":"CLEAN"'
 eq "five landings before now: exit 0" "$(LEAD_TIME_STATE_DIR="${STATES}" LEAD_TIME_EXPERIMENT_NOW=2026-07-01T05:30:00Z run settling --repo custom --phase verify)" "0"
 has "... SHORT, with how many more reach K" "$(out)" "SHORT: before-set n=5 of K=10"
+has "... not a change target (DND-1674)" "$(out)" "change target: no (SHORT, short by 5)"
+eq "DND-1674: settling --json on a SHORT baseline: exit 0" "$(LEAD_TIME_STATE_DIR="${STATES}" LEAD_TIME_EXPERIMENT_NOW=2026-07-01T05:30:00Z run settling --repo custom --phase verify --json)" "0"
+has "... verdict SHORT, target false" "$(out)" '"verdict":"SHORT","target":false'
+eq "DND-1674: settling --json on a CLEAN baseline: exit 0" "$(LEAD_TIME_STATE_DIR="${STATES}" LEAD_TIME_EXPERIMENT_NOW=2026-07-02T00:00:00Z run settling --repo custom --phase verify --json)" "0"
+has "... verdict CLEAN, target true" "$(out)" '"verdict":"CLEAN","target":true'
 # The malformed trailer CM (the 8th, 14:00) sits in this window.
 eq "a malformed trailer in the window: exit 0" "$(sc2 run settling --repo custom --phase verify)" "0"
 has "... named as malformed, not counted (the miss)" "$(out)" "${CM:0:12} has a malformed Lead-time-experiment trailer \"custom\" (no phase after custom); it names no phase, so it is not counted as a confounder"
@@ -782,6 +787,9 @@ eq "test 11: an unreadable repo (no main): exit 3" "$(LEAD_TIME_STATE_DIR="${STA
 has "... could not look, never CLEAN" "$(err)" "could not look for confounders"
 has "... with Fix:" "$(err)" "Fix:"
 lacks "... no verdict printed" "$(out)" "CLEAN"
+lacks "... no change target printed (DND-1674)" "$(out)" "target"
+eq "DND-1674: unreadable repo with --json: exit 3" "$(LEAD_TIME_STATE_DIR="${STATE2}" ATHENA_LEADTIME_CONFIG="${TMP}/nomain.json" run settling --repo custom --phase verify --json)" "3"
+lacks "... no target key, never target true" "$(out)" "target"
 eq "no ledger: exit 3" "$(LEAD_TIME_STATE_DIR="${TMP}/no-state" run settling --repo custom --phase verify)" "3"
 has "... could not look, with the ingest Fix" "$(err)" "lead-time-phases --ingest"
 eq "settling with no --phase: exit 2" "$(run settling --repo custom)" "2"

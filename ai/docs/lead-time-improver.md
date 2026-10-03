@@ -490,6 +490,25 @@ Each `improve`-mode run does these steps in order:
    item 5). (c) A baseline built only from landings after the predecessor
    still needs K = 10 of them, so it is (b); shortening it means lowering K,
    a bar move too. No threshold, K or guard moved.
+
+   **Later (2026-10-03, DND-1674):** the pick step let a SHORT phase that
+   named no confounder be a change target, and judge then held its change
+   pending for 7 days and marked it inconclusive. Superseded: only a CLEAN
+   baseline is a change target, and the pick step reads SHORT exactly as
+   SETTLING (`no action`, or instrumentation on another phase; no
+   fall-through to the next contributor). A before-set is frozen at landing
+   (`sides` builds it from rows landed before the change), so no later
+   landing can fill a SHORT one, and the doomed change blocks the phase for
+   7 days. `experiment settling` gains `target` (true only for CLEAN) and the
+   skill reads that bit. Rejected, one line each: (a) allow a change when the
+   landing rate makes K reachable, because the rate fills the after-set, never
+   the before-set; (b) allow only an instrumentation change on the SHORT
+   phase, because SHORT means too few measured landings and the choice rule
+   already sends an n/a-dominated phase to instrumentation first; (c) change
+   the next contributor instead, because it would make SHORT unlike SETTLING
+   and a fall-through is coherent only for both, as its own decision; (d)
+   lower K, a bar move that stays with Cody. No K, window, threshold or guard
+   moved.
 5. **Journal** in `ai-artifacts/lead-time/journal.md`, with a *Decisions /
    Won't-change* section the next run honours.
 

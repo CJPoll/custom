@@ -264,14 +264,25 @@ instrumentation. For instrumentation, SETTLING means it would read
 confounded if it landed now: not a target this run, though nothing blocks
 it. Read SETTLING as a pending change on the phase:
 
+A phase is a change target only when settling's `target` (`--json`) is true,
+or its line says "change target: yes".
+
 - **CLEAN**: the phase is a change target.
 - **SETTLING**: not a target this run. The action is `no action` ("<phase>
   baseline settling after <sha>: N more landings", from its line), or
   instrumentation on another phase if one qualifies by the rule above.
-- **SHORT**: fewer than K=10 comparable landings. A SHORT that names a
-  confounder or a series break is read as SETTLING; its line gives "clean after N more". One
-  that names none is a target, and judge handles its short baseline as it
-  does today: pending for 7 days, then inconclusive, never keep or revert.
+- **SHORT**: not a target this run, confounder or not; read as SETTLING.
+  The action is `no action` ("<phase> baseline short: <short_by> more
+  comparable landings to K=10"), or instrumentation on another phase if one
+  qualifies by the rule above. Do not fall through to a change on the next
+  contributor. This holds for every phase, `tail` included, and for an
+  instrumentation check (`--metric na_share`) that reads SHORT.
+
+  **Later (2026-10-03, DND-1674):** this bullet read "One that names none is
+  a target … pending for 7 days, then inconclusive". Superseded: a before-set
+  is frozen at landing, so no later landing can fill a short one, and such a
+  change is certain to read pending, then inconclusive, while it blocks the
+  phase for 7 days.
 - **exit 3** (could not look): no change on that phase this run. Journal the
   reason it printed. It is never CLEAN.
 

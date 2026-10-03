@@ -232,6 +232,12 @@ HELP = <<~TXT
              SHORT     fewer than K comparable landings: judge cannot settle
                        such a baseline but inconclusive. Any confounder is
                        still named.
+           Only CLEAN is a change target (DND-1674): --json carries
+           "target" (true only for CLEAN) and the verdict line ends with
+           "change target: yes" or "change target: no (<verdict>[, short
+           by N])". SHORT is never a target: its before-set is frozen at
+           landing, so no later landing can fill it. An unreadable input
+           is exit 3 and prints no target.
            A malformed trailer is named, never counted. --metric na_share
            (an instrumentation change) is checked for series breaks only:
            a trailer confounds no instrumentation. Exit 0 for any verdict;
