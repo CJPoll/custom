@@ -44,16 +44,24 @@ Always refer to a ticket as `<PREFIX>-<number>`, never by raw page id.
    `~/dev/custom/ai/skills/athena:ticket-management/scripts/mark-in-progress --ref <TICKET>`.
    On a first dispatch (DND: from `Todo` or `Backlog`; work: from the statuses
    the private overlay names) the same write stamps the ticket's dispatch date
-   (DND: `In Progress at`; work: the overlay's property, DND-1341); a
-   re-dispatch keeps the first stamp. That
-   date is the START of the ticket's lead time (owner decision, Cody,
+   (DND: `In Progress at`; work: the overlay's property, DND-1341). A
+   re-dispatch from a park (DND: `Parked`; work: the overlay's optional
+   `.work.restart_dispatch_from`) restarts the stamp at the re-dispatch, so
+   the parked span is never lead time; any other re-dispatch keeps its stamp.
+   That date is the START of the ticket's lead time (owner decision, Cody,
    2026-09-30: lead time = captain dispatch → landed on main;
-   `~/dev/custom/ai/docs/lead-time-tracking.md`). A move made any other way
-   leaves no stamp, and `ai/bin/lead-time` then reports that ticket as
-   could-not-measure. For an unstamped ticket whose first dispatch time is on
-   record, add `--backfill --at <that time>`. With no private overlay a work
-   ticket is refused (exit 3, nothing written): move it with the connector,
-   and it has no start.
+   `~/dev/custom/ai/docs/lead-time-tracking.md` → *Decisions*). A move made
+   any other way leaves no stamp, and `ai/bin/lead-time` then reports that
+   ticket as could-not-measure. For an unstamped ticket whose dispatch time is
+   on record, add `--backfill --at <that time>`; for a stamp kept across a
+   Park, `--backfill --restart --at <re-dispatch time>`. With no private
+   overlay a work ticket is refused (exit 3, nothing written): move it with
+   the connector, and it has no start.
+
+   **Later (2026-10-03, DND-1838):** this read "a re-dispatch keeps the first
+   stamp". Superseded: a stamp kept across a Park counted the park as lead
+   time (DND-1438), and an unstamped ticket re-dispatched from `Parked` got no
+   stamp at all (DND-1095).
 3. **→ `Needs Attention`** (only for what needs Cody; see the Notes rule) — set `Assignee` = **Cody**, write the exact step
    Cody needs onto the ticket body (that is the whole point of the status), and
    **DM Cody** as Athena that the ticket needs him (see the Notes "Needs Attention

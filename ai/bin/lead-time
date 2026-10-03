@@ -10,7 +10,8 @@
 #
 # The END is recovered on demand from git + the forge's CI, which retain
 # history independently of any agent. The START is the one captured value: the
-# ticket's first move to In Progress, stamped in Notion at dispatch (DND-1318).
+# ticket's first move to In Progress, stamped in Notion at dispatch (DND-1318),
+# or its re-dispatch from a park, which restarts the stamp (DND-1838).
 # See ai/docs/lead-time-tracking.md for the design and the rejected markers.
 #
 # CROSS-FORGE: the repo's `origin` remote selects the backend —
@@ -20,7 +21,8 @@
 #
 # Markers:
 #   START = captain dispatch: the ticket's first move to In Progress (owner
-#           decision, Cody, 2026-09-30), read from the date that
+#           decision, Cody, 2026-09-30), or its latest re-dispatch from a
+#           park (DND-1838), read from the date that
 #           scripts/mark-in-progress stamps: DND Tickets' "In Progress at" for
 #           a DND ticket, or for a work ticket the work tracker's property
 #           named in the private overlay (DND-1341; ai/lib/dispatch_trackers.rb).
@@ -986,7 +988,8 @@ end
 # Owner decision (Cody, 2026-09-30): lead time = captain dispatch, the ticket's
 # move to In Progress, -> landed on main. The Notion API keeps no history of a
 # property, so the move is recorded as it happens: a date property, stamped
-# once, at the first move to In Progress, by
+# at the first move to In Progress, and restamped at a re-dispatch from a park
+# so a parked span is never lead time (DND-1838), by
 # ai/skills/athena:ticket-management/scripts/mark-in-progress. This reads it.
 # Which database and property hold it is the ticket's tracker
 # (ai/lib/dispatch_trackers.rb): DND Tickets for a DND ticket, the work
@@ -1077,8 +1080,11 @@ class NotionStart
 
     start = props.dig(prop, "date", "start")
     unless start
-      return [nil, "#{ref} has no '#{prop}' date (dispatched before the stamp existed, " \
-                   "or moved to In Progress without mark-in-progress)"]
+      return [nil, "#{ref} has no '#{prop}' date (dispatched before the stamp existed, moved to In Progress " \
+                   "without mark-in-progress, or re-dispatched from a status that is neither a first " \
+                   "dispatch nor a park). Fix: stamp its recorded dispatch with " \
+                   "ai/skills/athena:ticket-management/scripts/mark-in-progress --ref #{ref} --backfill " \
+                   "--at ISO8601"]
     end
     return [nil, "#{ref}'s '#{prop}' is a date with no time (#{start})"] unless start.include?("T")
     unless start.match?(LeadTime::ZONED_RE)

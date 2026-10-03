@@ -30,9 +30,13 @@ module DispatchTrackers
   # prefix: the unique_id prefix (DND-12 -> "DND"). label: how messages name
   # the database (never a work value). property: the date property holding the
   # stamp. first_dispatch_from: statuses a move to In Progress from which is a
-  # FIRST dispatch, so it may stamp now.
+  # FIRST dispatch, so it may stamp now. restart_from: park statuses a move to
+  # In Progress from which RESTARTS the stamp at the re-dispatch (DND-1838), so
+  # a parked span is never lead time; nil when the tracker declares none (the
+  # work tracker with no .work.restart_dispatch_from), which mark-in-progress
+  # names on every move whose park it cannot see.
   Tracker = Struct.new(:prefix, :label, :data_source, :property, :token_file, :first_dispatch_from,
-                       keyword_init: true)
+                       :restart_from, keyword_init: true)
 
   # tracker, or nil with reason (a line carrying Fix:). fault: false only when
   # the overlay is ABSENT on this machine (the feature is unavailable here);
@@ -48,6 +52,7 @@ module DispatchTrackers
     property: "In Progress at",
     token_file: File.join(Dir.home, ".claude", "notion-personal-token"),
     first_dispatch_from: %w[Todo Backlog].freeze,
+    restart_from: %w[Parked].freeze,
   ).freeze
 
   # The notion-work integration token (ai/secrets/registry.json ->
@@ -62,14 +67,19 @@ module DispatchTrackers
     property: ".work.in_progress_property",
     first_dispatch_from: ".work.first_dispatch_from",
   }.freeze
+  # Optional (DND-1838): an overlay written before it keeps working, and
+  # mark-in-progress names the key whenever its absence could hide a park.
+  OPTIONAL_WORK_KEYS = { restart_from: ".work.restart_dispatch_from" }.freeze
+  ALL_WORK_KEYS = WORK_KEYS.merge(OPTIONAL_WORK_KEYS).freeze
 
   PREFIX_RE = /\A[A-Z]{2,10}\z/.freeze
   REF_RE = /\A([A-Z]{2,10})-([1-9][0-9]{0,6})\z/.freeze
 
   module_function
 
-  # values: {data_source:, prefix:, property:, first_dispatch_from:} as the
-  # overlay renders them (first_dispatch_from is a JSON array string).
+  # values: {data_source:, prefix:, property:, first_dispatch_from:,
+  # restart_from:} as the overlay renders them (the two status lists are JSON
+  # array strings). restart_from may be nil: the overlay declares no restart.
   # -> Resolution.
   def work_from(values)
     prefix = values[:prefix].to_s
@@ -86,10 +96,29 @@ module DispatchTrackers
     return refuse(:first_dispatch_from, "is not a JSON array of status names") unless from
     return refuse(:first_dispatch_from, "names #{IN_PROGRESS}, so every re-dispatch would restamp") if from.include?(IN_PROGRESS)
 
+    restart, why = parse_restart(values[:restart_from], from)
+    return refuse(:restart_from, why) if why
+
     Resolution.new(tracker: Tracker.new(prefix: prefix, label: "the work tracker", data_source: ds,
                                         property: property, token_file: WORK_TOKEN_FILE,
-                                        first_dispatch_from: from.freeze).freeze,
+                                        first_dispatch_from: from.freeze, restart_from: restart).freeze,
                    reason: nil, fault: false)
+  end
+
+  # text: the overlay's restart list, or nil when the key is absent. from: the
+  # first-dispatch statuses. -> [list or nil, nil] or [nil, why it is refused].
+  def parse_restart(text, from)
+    return [nil, nil] if text.nil?
+
+    list = parse_statuses(text)
+    return [nil, "is not a JSON array of status names"] unless list
+    return [nil, "names #{IN_PROGRESS}, so every re-dispatch would restamp"] if list.include?(IN_PROGRESS)
+    unless (list & from).empty?
+      return [nil, "shares a status with the first-dispatch statuses " \
+                   "(#{WORK_KEYS.fetch(:first_dispatch_from)}), so one move would be both"]
+    end
+
+    [list.freeze, nil]
   end
 
   # ref: "DND-12" / "<work prefix>-12". work: -> Resolution, called only for a
@@ -125,8 +154,8 @@ module DispatchTrackers
 
   def refuse(key, why)
     Resolution.new(tracker: nil, fault: true,
-                   reason: "the private overlay's #{OVERLAY_FILE}#{WORK_KEYS.fetch(key)} #{why}. " \
-                           "Fix: correct #{WORK_KEYS.fetch(key)} in the overlay's overlay/#{OVERLAY_FILE}.json " \
+                   reason: "the private overlay's #{OVERLAY_FILE}#{ALL_WORK_KEYS.fetch(key)} #{why}. " \
+                           "Fix: correct #{ALL_WORK_KEYS.fetch(key)} in the overlay's overlay/#{OVERLAY_FILE}.json " \
                            "(ai/contracts/athena-private-overlay.md -> Keys in use).")
   end
 end

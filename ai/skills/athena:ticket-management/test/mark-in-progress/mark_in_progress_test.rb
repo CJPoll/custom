@@ -100,14 +100,61 @@ check("it queries DND Tickets by the ticket number") do
     body.dig("filter", "property") == "ID" && body.dig("filter", "unique_id", "equals") == 1318
 end
 
-# --- an unstamped ticket resumed from Parked is NOT stamped now: its first
-#     dispatch was earlier and unknown here.
+# --- DND-1838: a re-dispatch from Parked RESTARTS the stamp at now, so the
+#     parked span is never counted and the ticket is always measurable.
 resumed = FakeNotion.new(page(nil, status: "Parked"))
-code, out, err = run(["--ref", "DND-1318"], resumed)
-check("a resume from Parked moves the status and does not stamp") do
-  code == 0 && resumed.patches.first[2]["properties"].keys == ["Status"]
+code, out, = run(["--ref", "DND-1318"], resumed)
+check("DND-1838 an unstamped ticket re-dispatched from Parked is stamped now, with the status") do
+  code == 0 && resumed.patches.size == 1 &&
+    resumed.patches.first[2]["properties"] == {
+      "Status" => { "status" => { "name" => "In Progress" } },
+      "In Progress at" => { "date" => { "start" => "2026-09-30T05:32:00Z" } },
+    }
 end
-check("and says why, with the backfill fix") { out.include?("not stamped") && err.include?("--backfill") }
+check("DND-1838 it says the start restarted from Parked") { out.include?("restarted") && out.include?("Parked") }
+parked = FakeNotion.new(page("2026-09-28T01:00:00.000Z", status: "Parked"))
+code, out, = run(["--ref", "DND-1318"], parked)
+check("DND-1838 a stamped ticket re-dispatched from Parked has its stamp reset to now") do
+  code == 0 &&
+    parked.patches.first[2].dig("properties", "In Progress at", "date", "start") == "2026-09-30T05:32:00Z"
+end
+check("DND-1838 it names the discarded stamp, so the reset is on record") do
+  out.include?("restarted") && out.include?("2026-09-28T01:00:00.000Z")
+end
+
+# --- a re-dispatch with no record and no park (e.g. Attention Given) still
+#     stamps nothing, and says so with a Fix: never a silent zero.
+attn = FakeNotion.new(page(nil, status: "Attention Given"))
+code, out, err = run(["--ref", "DND-1318"], attn)
+check("an unstamped re-dispatch from Attention Given moves the status and does not stamp") do
+  code == 0 && attn.patches.first[2]["properties"].keys == ["Status"]
+end
+check("and says why, with Fix: and the backfill fix") do
+  out.include?("not stamped") && err.include?("Fix:") && err.include?("--backfill")
+end
+attn_kept = FakeNotion.new(page("2026-09-28T01:00:00.000Z", status: "Attention Given"))
+run(["--ref", "DND-1318"], attn_kept)
+check("a stamped re-dispatch from Attention Given keeps its stamp (no park, no reset)") do
+  attn_kept.patches.first[2]["properties"].keys == ["Status"]
+end
+
+# --- DND-1838: correcting a stamp that was kept across a Park.
+fix = FakeNotion.new(page("2026-09-28T01:00:00.000Z", status: "Done"))
+code, out, = run(["--ref", "DND-1318", "--backfill", "--restart", "--at", "2026-09-30T04:00:00Z"], fix)
+check("DND-1838 --backfill --restart --at overwrites a kept stamp, status untouched") do
+  code == 0 && fix.patches.size == 1 &&
+    fix.patches.first[2]["properties"] == { "In Progress at" => { "date" => { "start" => "2026-09-30T04:00:00Z" } } } &&
+    out.include?("restarted") && out.include?("2026-09-28T01:00:00.000Z")
+end
+code, _o, err = run(["--ref", "DND-1318", "--restart"], FakeNotion.new(page(nil)))
+check("DND-1838 --restart without --backfill --at is a usage error with Fix:") do
+  code == 2 && err.include?("Fix:")
+end
+fixdry = FakeNotion.new(page("2026-09-28T01:00:00.000Z", status: "Done"))
+code, out, = run(["--ref", "DND-1318", "--backfill", "--restart", "--at", "2026-09-30T04:00:00Z", "--dry-run"], fixdry)
+check("DND-1838 --backfill --restart --dry-run writes nothing and says what it would") do
+  code == 0 && fixdry.patches.empty? && out.include?("dry run") && out.include?("2026-09-30T04:00:00Z")
+end
 
 # --- a re-dispatch keeps the FIRST stamp.
 again = FakeNotion.new(page("2026-09-30T02:41:00.000Z"))
@@ -215,9 +262,29 @@ _c, _o, err = run(["--ref", "ZQ-12"], wpark)
 check("a move from any other status does not stamp, and says so") do
   wpark.patches.first[2]["properties"].keys == ["Status"] && err.include?("--backfill")
 end
+check("DND-1838 with no restart key in the overlay, it names the key, so an undetected park is visible") do
+  err.include?(".work.restart_dispatch_from") && err.include?("Fix:")
+end
 wkept = FakeNotion.new(work_page("2026-09-29T01:00:00.000Z"))
 run(["--ref", "ZQ-12"], wkept)
 check("a work re-dispatch keeps its first stamp") { wkept.patches.first[2]["properties"].keys == ["Status"] }
+wkept_park = FakeNotion.new(work_page("2026-09-29T01:00:00.000Z", status: "Parked"))
+_c, _o, err = run(["--ref", "ZQ-12"], wkept_park)
+check("DND-1838 a stamped work re-dispatch with no restart key keeps its stamp and names the key") do
+  wkept_park.patches.first[2]["properties"].keys == ["Status"] && err.include?(".work.restart_dispatch_from")
+end
+WORK_R = DispatchTrackers.work_from(
+  data_source: "0000aaaa-1111-2222-3333-444455556666", prefix: "ZQ", property: "Synthetic stamp",
+  first_dispatch_from: '["Todo","Backlog","Shaping"]', restart_from: '["Parked"]',
+)
+wrestart = FakeNotion.new(work_page("2026-09-29T01:00:00.000Z", status: "Parked"))
+code, out, err = run(["--ref", "ZQ-12"], wrestart, work: WORK_R)
+check("DND-1838 a work re-dispatch from an overlay restart status resets the overlay's stamp property") do
+  code == 0 && wrestart.patches.first[2]["properties"] == {
+    "Status" => { "status" => { "name" => "In Progress" } },
+    "Synthetic stamp" => { "date" => { "start" => "2026-09-30T05:32:00Z" } },
+  } && out.include?("restarted") && err.empty?
+end
 wnoprop = FakeNotion.new(work_page(nil, with_property: false))
 code, _o, err = run(["--ref", "ZQ-12"], wnoprop)
 check("a work tracker without the stamp property exits 3 naming it, with Fix:") do
@@ -279,8 +346,8 @@ r = dispatched
 ev = r.events.first
 check("T1 a first dispatch writes one ticket.dispatched") { code == 0 && r.status == :ok && r.events.size == 1 }
 check("T1 its unit is the ticket ref, given explicitly") { ev["unit"] == "DND-9001" && ev["unit_source"] == "explicit" }
-check("T1 tracker=dnd, first_dispatch=true, backfill=false") do
-  ev["attrs"] == { "tracker" => "dnd", "first_dispatch" => true, "backfill" => false }
+check("T1 tracker=dnd, first_dispatch=true, backfill=false, restart=false") do
+  ev["attrs"] == { "tracker" => "dnd", "first_dispatch" => true, "backfill" => false, "restart" => false }
 end
 check("T1 its at is the dispatch instant (now)") { ev["at"] == "2026-09-30T05:32:00.000Z" && ev["duration_s"].nil? }
 check("T1 zero drops") { r.failures.empty? && r.malformed.zero? }
@@ -297,15 +364,26 @@ run(["--ref", "DND-9001", "--backfill", "--at", "2026-09-30T02:41:00Z"], FakeNot
 r = dispatched
 check("T3 --backfill --at gives backfill=true at the recorded time") do
   e = r.events.first
-  r.events.size == 1 && e["attrs"] == { "tracker" => "dnd", "first_dispatch" => true, "backfill" => true } &&
+  r.events.size == 1 &&
+    e["attrs"] == { "tracker" => "dnd", "first_dispatch" => true, "backfill" => true, "restart" => false } &&
     e["at"] == "2026-09-30T02:41:00.000Z" && r.failures.empty?
 end
 
 fresh_store
-run(["--ref", "DND-9001"], FakeNotion.new(page(nil, status: "Parked")))
+run(["--ref", "DND-9001"], FakeNotion.new(page(nil, status: "Attention Given")))
 r = dispatched
-check("T3b a status-only move (resume from Parked) is a dispatch, first_dispatch=false") do
+check("T3b a status-only move (resume from Attention Given) is a dispatch, first_dispatch=false") do
   r.events.size == 1 && r.events.first["attrs"]["first_dispatch"] == false
+end
+
+fresh_store
+run(["--ref", "DND-9001"], FakeNotion.new(page("2026-09-28T01:00:00.000Z", status: "Parked")))
+r = dispatched
+check("T3d DND-1838 a re-dispatch from Parked gives restart=true and records the discarded stamp") do
+  e = r.events.first
+  r.events.size == 1 && r.failures.empty? &&
+    e["attrs"] == { "tracker" => "dnd", "first_dispatch" => false, "backfill" => false, "restart" => true,
+                    "previous_stamp" => "2026-09-28T01:00:00.000Z" }
 end
 
 fresh_store

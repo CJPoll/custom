@@ -148,6 +148,39 @@ Dir.mktmpdir("dispatch-trackers") do |tmp|
   lower = mk_root(File.join(tmp, "lower"), "work" => GOOD["work"].merge("ticket_prefix" => "zq"))
   lr = DispatchTrackers::Overlay.work(env: { "ATHENA_PRIVATE_ROOT" => lower, "HOME" => tmp })
   check("an overlay value the domain refuses is a fault") { lr.tracker.nil? && lr.fault }
+
+  # DND-1838: the optional restart key.
+  check("DND-1838 an overlay without .work.restart_dispatch_from still gives the tracker, restart undeclared") do
+    w.tracker && w.tracker.restart_from.nil?
+  end
+  rroot = mk_root(File.join(tmp, "restart"), "work" => GOOD["work"].merge("restart_dispatch_from" => ["Parked"]))
+  rw = DispatchTrackers::Overlay.work(env: { "ATHENA_PRIVATE_ROOT" => rroot, "HOME" => tmp })
+  check("DND-1838 an overlay naming restart statuses carries them") { rw.tracker && rw.tracker.restart_from == %w[Parked] }
+  broot = mk_root(File.join(tmp, "badrestart"), "work" => GOOD["work"].merge("restart_dispatch_from" => "Parked"))
+  bw = DispatchTrackers::Overlay.work(env: { "ATHENA_PRIVATE_ROOT" => broot, "HOME" => tmp })
+  check("DND-1838 a malformed restart key is a fault naming it") do
+    bw.tracker.nil? && bw.fault && bw.reason.include?(".work.restart_dispatch_from")
+  end
+end
+
+# --- DND-1838: a re-dispatch from a park restarts the stamp.
+check("DND-1838 a DND re-dispatch from Parked restarts the stamp") { dnd.restart_from == %w[Parked] }
+check("DND-1838 work values with no restart key leave restart undeclared (nil, not [])") do
+  DispatchTrackers.work_from(vals).tracker.restart_from.nil?
+end
+check("DND-1838 work values with a restart list carry it") do
+  DispatchTrackers.work_from(vals.merge(restart_from: '["Parked","On Hold"]')).tracker.restart_from == ["Parked", "On Hold"]
+end
+check("DND-1838 a restart list that is not a JSON array of names is refused by key") do
+  x = bad.call(restart_from: '"Parked"')
+  x.tracker.nil? && x.fault && x.reason.include?(DispatchTrackers::ALL_WORK_KEYS[:restart_from]) && x.reason.include?("Fix:")
+end
+check("DND-1838 a restart list naming In Progress is refused") do
+  bad.call(restart_from: '["In Progress"]').tracker.nil?
+end
+check("DND-1838 a restart list overlapping the first-dispatch statuses is refused") do
+  x = bad.call(restart_from: '["Backlog"]')
+  x.tracker.nil? && x.fault && x.reason.include?("first-dispatch")
 end
 
 if $failures.empty?

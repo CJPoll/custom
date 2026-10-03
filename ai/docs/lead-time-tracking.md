@@ -38,7 +38,7 @@ job stage).
 
 | | Marker | Where it lives |
 |---|---|---|
-| **START** | the ticket's first move to `In Progress` (captain dispatch) | a date property on the ticket, stamped by `mark-in-progress`: DND Tickets' `In Progress at`, or the work tracker's property named in the private overlay |
+| **START** | the ticket's first move to `In Progress` (captain dispatch), or its latest re-dispatch from a park (*Decisions* → *A Park restarts the start*) | a date property on the ticket, stamped by `mark-in-progress`: DND Tickets' `In Progress at`, or the work tracker's property named in the private overlay |
 | **END** | first of the 3 tiers below that exists | GitHub Actions runs / GitLab pipeline jobs / landing time (the merge, or the push that carried it) |
 
 ### The END rule — one 3-tier rule, forge-independent
@@ -242,10 +242,25 @@ recorded as it happens:
     (`ai/contracts/athena-private-overlay.md` → *Keys in use*).
 - **The stamp.** `ai/skills/athena:ticket-management/scripts/mark-in-progress
   --ref <TICKET>` picks the tracker from the ticket's prefix, sets `Status` to
-  `In Progress` and, only when the date is empty and the move is a first
-  dispatch, stamps it, in one write. A re-dispatched ticket keeps its
-  **first** stamp. A work ticket on a machine with no overlay, or with a key
-  missing, is refused (exit 3) with the resolver's line; nothing is guessed.
+  `In Progress` and stamps the date in the same write when the date is empty
+  and the move is a first dispatch, or when the move is a re-dispatch from a
+  park, which replaces any earlier stamp (*Decisions* → *A Park restarts the
+  start*). Any other re-dispatch keeps its stamp. A work ticket on a machine
+  with no overlay, or with a required key missing, is refused (exit 3) with
+  the resolver's line; nothing is guessed.
+
+  **Later (2026-10-03, DND-1838):** this read "A re-dispatched ticket keeps
+  its **first** stamp", with no exception for a park. Superseded: a kept
+  stamp counted the park as lead time (DND-1438, stamped 2026-09-30T23:49Z,
+  parked over the owner's pause, re-dispatched 2026-10-01T07:04Z), and an
+  unstamped ticket re-dispatched from `Parked` got no stamp at all (DND-1095,
+  could-not-measure on 2026-10-03).
+- **Which moves are a park.** DND Tickets: a move from `Parked`. The work
+  tracker: a move from a status in the overlay's optional
+  `.work.restart_dispatch_from` (a work value). With that key absent, no
+  park is detected on a work ticket, and `mark-in-progress` names the key
+  with a `Fix:` on every move from a status that is neither a first dispatch
+  nor `In Progress`.
 - **The read.** `lead-time` names the ticket from the PR's branch, else its
   title (`DND-1318`, `dnd-1318-…`, or a work ticket), and reads that tracker's
   date. Each row carries `start_source` (`DND-1318 In Progress at`, or the work
@@ -264,8 +279,15 @@ recorded as it happens:
 
 **Where it can misattribute.**
 
-- A ticket parked and resumed days later counts the parked time, because the
-  first stamp is kept.
+- A ticket re-dispatched from a park measures from the re-dispatch, so work
+  done before the Park is not in its lead. That undercount is chosen
+  (*Decisions* → *A Park restarts the start*).
+- A work ticket parked on a machine whose overlay has no
+  `.work.restart_dispatch_from` keeps its first stamp, so it counts the park.
+  `mark-in-progress` names the missing key at that move.
+- A park made by a status other than `Parked` (a ticket left `In Progress`
+  with no captain, or moved through `Attention Given`) is not a park to the
+  tool, so its span is counted.
 - A follow-up PR on a ticket that already landed once inherits the first
   dispatch, so it reads long.
 - A batch Mission stamps all its tickets at one dispatch, so they share a
@@ -276,10 +298,12 @@ recorded as it happens:
 What reads could-not-measure instead of a guess:
 
 - A ticket moved to `In Progress` without `mark-in-progress` has no stamp.
-- `mark-in-progress` stamps only a first dispatch (a move from one of the
-  tracker's first-dispatch statuses; DND: `Todo` or `Backlog`). An unstamped
-  ticket resumed from `Parked` or `Attention Given` is not stamped with the
-  resume time. The script says so and names the `--backfill` fix.
+- `mark-in-progress` stamps a first dispatch (a move from one of the
+  tracker's first-dispatch statuses; DND: `Todo` or `Backlog`) and a
+  re-dispatch from a park. An unstamped ticket resumed from any other status
+  (DND: `Attention Given`) is not stamped with the resume time. The script
+  says so with a `Fix:` naming `--backfill`, and `lead-time`'s
+  could-not-measure reason carries the same `Fix:`.
 - A stamp with no UTC offset cannot be placed in time.
 - A stamp later than the landing (a re-dispatch after the work landed, or a
   mistaken backfill) never yields a negative lead.
@@ -451,6 +475,80 @@ the design is `ai/docs/lead-time-improver.md` (Decisions 3-6).
 `ai/config/lead-time-repos.json` as the repo list. Superseded: that file is
 only the default, and a machine-local override replaces it, so the list is
 the resolver's.
+
+## Decisions
+
+### A Park restarts the start (DND-1838)
+
+**Decision.** A re-dispatch from a park restarts the start: `mark-in-progress`
+stamps the re-dispatch time, replacing any earlier stamp. Lead time for a
+ticket that was parked is re-dispatch → landed.
+
+**Why this one.** The ticket offered two rules: the sum of active spans, or a
+reset start with the parked span recorded. The bar was the simplest rule that
+makes a re-dispatch from a park always measurable and never counts a parked
+span as active work.
+
+- **Always measurable.** The re-dispatch is the one instant the tool is
+  always present for, so a stamp is always written. DND-1095's shape, an
+  unstamped ticket re-dispatched from `Parked`, now measures.
+- **The park is never counted.** The start is after the park ends.
+- **No new Notion property, no new tool.** The sum needs the park's start,
+  and nothing records it: the admiral moves a ticket to `Parked` by hand.
+  It would also need a property to carry the active seconds before the park,
+  a park step that writes it, and a reader that adds the spans. The reset
+  reuses the one stamp and the one reader.
+- **The cost, named.** Work done before the park is not in the lead. A
+  re-dispatched captain usually resumes from a worktree and a pushed branch,
+  so that work is real and is undercounted. An undercount of a parked ticket
+  is preferred to counting days of pause as captain time, which made one
+  outlier swamp a median. If the pre-park span is ever needed, the sum is
+  the follow-up: one number property (active seconds before the park), and a
+  park step that writes it.
+
+**The record of the reset.** The Notion page keeps only the new stamp. The
+discarded one is recorded twice, both without a schema change: the line
+`mark-in-progress` prints (`restarted: re-dispatch from "Parked"; discarded
+<old stamp>`), which the admiral's state log quotes, and the
+`ticket.dispatched` telemetry event (`restart: true`, `previous_stamp`).
+
+**Which moves are a park.** DND: a move from `Parked`. The work tracker: the
+overlay's optional `.work.restart_dispatch_from`, because the status names
+are work values. The key is optional so an overlay written before it keeps
+working, and its absence is never silent: `mark-in-progress` names it on
+every move it cannot classify. A move from `Attention Given` is not a park:
+the ticket waited on Cody with its captain's work in flight, so its stamp is
+kept.
+
+**Correcting existing rows.** Run each with `--dry-run` first, read the
+line, then run it without. Both times come from the admiral state logs
+(minute precision). `--backfill` leaves the status alone.
+
+- **DND-1095** (unstamped, re-dispatched from `Parked` at 07:03Z on
+  2026-10-03, `2026-10-01-leadtime-improver/state.md`):
+
+  ```
+  ai/skills/athena:ticket-management/scripts/mark-in-progress --ref DND-1095 --backfill --at 2026-10-03T07:03:00Z --dry-run
+  ```
+
+- **DND-1438** (stamped 2026-09-30T23:49:28Z, parked over the owner's
+  pause, re-dispatched at 07:04Z on 2026-10-01,
+  `2026-09-30-tool-creation/state.md`):
+
+  ```
+  ai/skills/athena:ticket-management/scripts/mark-in-progress --ref DND-1438 --backfill --restart --at 2026-10-01T07:04:00Z --dry-run
+  ```
+
+`lead-time` reads the stamp on every run, so a corrected stamp corrects every
+later `lead-time` read. The phase ledger is first-write-wins
+(`lead-time-phases --help` → `--rejoin`), so a landing it already ingested
+keeps the start it was ingested with.
+
+**A landing before the restart.** A ticket can land in parts across a park
+(DND-1095 landed its D1 and D2 commits before its 2026-10-03 re-dispatch).
+After the restart, `lead-time` reads each earlier landing as could-not-measure
+("start … is after the landing"), never as a negative lead. That is the same
+one-stamp limit as a follow-up PR (*Where it can misattribute*).
 
 ## Worked backfill — 2026-09-19 fleet run (dated snapshot)
 

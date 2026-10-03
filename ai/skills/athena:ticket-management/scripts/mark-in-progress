@@ -20,13 +20,21 @@
 #
 # One call does both writes, so the status and the stamp cannot drift apart:
 #   - Status -> In Progress;
-#   - the stamp -> now (or --at), ONLY when it is empty AND the ticket is
-#     moving from one of the tracker's first-dispatch statuses (DND: Todo or
-#     Backlog). A re-dispatch keeps its FIRST stamp; an unstamped ticket moving
-#     from any other status is not stamped (its first dispatch is unknown here)
-#     and says so, with the --backfill fix. Two dispatches of one ticket at the
-#     same instant could both see an empty stamp; the later write wins, seconds
-#     apart.
+#   - the stamp -> now (or --at), when it is empty AND the ticket is moving
+#     from one of the tracker's first-dispatch statuses (DND: Todo or
+#     Backlog);
+#   - the stamp -> now (or --at), REPLACING any earlier one, when the ticket
+#     is moving from one of the tracker's restart statuses (DND: Parked; the
+#     work tracker: the overlay's optional .work.restart_dispatch_from). A Park
+#     restarts the start, so the parked span is never lead time and a
+#     re-dispatch from a park is always measurable (DND-1838,
+#     ai/docs/lead-time-tracking.md -> Decisions). The line printed names the
+#     stamp it discarded.
+#   Any other re-dispatch keeps its stamp; an unstamped ticket moving from any
+#   other status is not stamped (its first dispatch is unknown here) and says
+#   so, with the --backfill fix. Two dispatches of one ticket at the same
+#   instant could both see an empty stamp; the later write wins, seconds
+#   apart.
 # It does not touch Assignee: that stays the admiral's step
 # (athena:ticket-management -> Status -> Assignee map).
 #
@@ -58,13 +66,14 @@ module MarkInProgress
 
   USAGE = <<~TXT
     Usage: mark-in-progress --ref TICKET [--at ISO8601] [--dry-run]
-           mark-in-progress --ref TICKET --backfill --at ISO8601 [--dry-run]
+           mark-in-progress --ref TICKET --backfill [--restart] --at ISO8601 [--dry-run]
            mark-in-progress --help
 
     Move a ticket to In Progress and, only if it has none yet, stamp its
     dispatch date: the START ai/bin/lead-time measures lead time from
-    (DND-1318). A re-dispatched ticket keeps its first stamp. Assignee is not
-    touched.
+    (DND-1318). A re-dispatch from a park (DND: Parked) restarts the stamp at
+    the re-dispatch, so the parked span is never lead time (DND-1838); any
+    other re-dispatch keeps its first stamp. Assignee is not touched.
 
       --ref TICKET  DND-N: DND Tickets, date "In Progress at" (notion-personal).
                     <work prefix>-N: the work tracker (notion-work). Its prefix,
@@ -75,6 +84,9 @@ module MarkInProgress
                     it must carry a time and a zone)
       --backfill    stamp only; leave Status as it is. For a ticket already
                     past In Progress whose dispatch time is on record. Needs --at.
+      --restart     with --backfill: replace an existing stamp with --at, the
+                    re-dispatch time of a ticket whose stamp was kept across a
+                    Park. The line printed names the stamp it discarded.
       --dry-run     print what would be written; write nothing
       --help        this text
 
@@ -93,11 +105,19 @@ module MarkInProgress
 
   # DOMAIN. page: the ticket page; at: the ISO time to stamp; status: false
   # for a backfill, which writes the stamp only (at an explicit time).
-  # tracker: whose property and first-dispatch statuses apply.
-  # -> {properties:, stamp:, kept:, skipped:} or raises Refused naming the fix.
-  # properties is empty when there is nothing to write; skipped is the reason
-  # a move did not stamp.
-  def plan(ref, page, at, status: true, tracker: DispatchTrackers::DND)
+  # tracker: whose property, first-dispatch and restart statuses apply.
+  # restart: true for --backfill --restart, which overwrites the stamp.
+  # -> {properties:, stamp:, kept:, skipped:, restarted:, previous:, note:}
+  # or raises Refused naming the fix. properties is empty when there is
+  # nothing to write; skipped is the reason a move did not stamp; restarted
+  # says the stamp was reset, previous is the stamp it discarded (or nil);
+  # note names an overlay key whose absence could hide a park.
+  #
+  # A Park restarts the start (DND-1838, ai/docs/lead-time-tracking.md ->
+  # Decisions): a move from one of the tracker's restart statuses stamps the
+  # re-dispatch, replacing any earlier stamp, so the parked span is never lead
+  # time and a re-dispatch from a park is always measurable.
+  def plan(ref, page, at, status: true, tracker: DispatchTrackers::DND, restart: false)
     prop = tracker.property
     props = page["properties"] || {}
     unless props.dig(prop, "type") == "date"
@@ -110,13 +130,32 @@ module MarkInProgress
     now_status = props.dig("Status", "status", "name")
     write = status ? { "Status" => { "status" => { "name" => STATUS } } } : {}
     skipped = nil
-    if existing.nil? && status && !tracker.first_dispatch_from.include?(now_status)
+    restarted = restart || (status && Array(tracker.restart_from).include?(now_status))
+    if restarted
+      write[prop] = { "date" => { "start" => at } }
+    elsif existing.nil? && status && !tracker.first_dispatch_from.include?(now_status)
       skipped = "not stamped: it was #{now_status.inspect}, so this is not its first dispatch. " \
                 "Fix: stamp its recorded first dispatch with --backfill --at ISO8601"
     elsif existing.nil?
       write[prop] = { "date" => { "start" => at } }
     end
-    { properties: write, stamp: existing || (skipped ? nil : at), kept: !existing.nil?, skipped: skipped, ref: ref }
+    { properties: write, stamp: restarted ? at : existing || (skipped ? nil : at),
+      kept: !restarted && !existing.nil?, skipped: skipped, ref: ref, restarted: restarted,
+      previous: restarted ? existing : nil, note: undeclared_restart_note(tracker, now_status, status) }
+  end
+
+  # DOMAIN. A move from a status that is neither a first dispatch nor In
+  # Progress, on a tracker that declares no restart statuses, may be a
+  # re-dispatch from a park this tool cannot see. Say so, naming the key.
+  def undeclared_restart_note(tracker, now_status, status)
+    return nil unless status && tracker.restart_from.nil?
+    return nil if tracker.first_dispatch_from.include?(now_status) || now_status == STATUS
+
+    key = DispatchTrackers::OPTIONAL_WORK_KEYS.fetch(:restart_from)
+    "#{tracker.label} declares no park statuses (the private overlay's " \
+      "#{DispatchTrackers::OVERLAY_FILE}#{key} is absent), so a re-dispatch from a park keeps its old stamp " \
+      "or none. Fix: add #{key}, a JSON array of the park status names, to the overlay's " \
+      "overlay/#{DispatchTrackers::OVERLAY_FILE}.json (ai/contracts/athena-private-overlay.md -> Keys in use)."
   end
 
   ZONED_RE = /T.*(Z|[+-]\d\d:?\d\d)\z/.freeze
@@ -137,7 +176,7 @@ module MarkInProgress
   # called only for a non-DND ref. -> exit code.
   def run(argv, transport_for:, now:, work: -> { DispatchTrackers::Overlay.work }, out: $stdout, err: $stderr)
     opts = StrictArgv.parse(argv, { "--ref" => :value, "--at" => :value, "--dry-run" => :switch,
-                                    "--backfill" => :switch })
+                                    "--backfill" => :switch, "--restart" => :switch })
     ref = opts["--ref"]
     unless ref
       err.puts "#{PROG}: pass one ticket id with --ref, like --ref DND-1318."
@@ -152,20 +191,25 @@ module MarkInProgress
     backfill = opts.fetch("--backfill", false)
     raise BadUsage, "--backfill needs --at, the recorded dispatch time. Fix: add --at ISO8601." if backfill && !opts["--at"]
 
+    restart = opts.fetch("--restart", false)
+    if restart && !backfill
+      raise BadUsage, "--restart corrects a recorded stamp and needs --backfill --at, the re-dispatch time. " \
+                      "Fix: pass --backfill --restart --at ISO8601 (a move from Parked restarts by itself)."
+    end
+
     at = opts["--at"] ? parse_at(opts["--at"]) : now.utc.iso8601
     transport = transport_for.call(tracker)
     page = find(transport, tracker, Integer(ref.split("-", 2).last, 10), ref)
-    p = plan(ref, page, at, status: !backfill, tracker: tracker)
+    p = plan(ref, page, at, status: !backfill, tracker: tracker, restart: restart)
     unless opts["--dry-run"] || p[:properties].empty?
       transport.call(:patch, "/v1/pages/#{page['id']}", { "properties" => p[:properties] })
       emit_dispatched(ref, tracker, p, at, backfill)
     end
     status_note = backfill ? "Status unchanged" : "Status #{STATUS}"
-    stamp_note = if p[:skipped] then "#{tracker.property} #{p[:skipped]}"
-                 else "#{tracker.property} #{p[:stamp]} (#{p[:kept] ? 'kept, already stamped' : 'stamped'})"
-                 end
-    out.puts "#{ref}: #{status_note}; #{stamp_note}#{opts['--dry-run'] ? ' [dry run]' : ''}"
+    out.puts "#{ref}: #{status_note}; #{tracker.property} #{stamp_note(p, page)}" \
+             "#{opts['--dry-run'] ? ' [dry run]' : ''}"
     err.puts "#{PROG}: #{ref} #{p[:skipped]}" if p[:skipped]
+    err.puts "#{PROG}: #{ref} #{p[:note]}" if p[:note]
     0
   rescue BadUsage => e
     err.puts "#{PROG}: #{e.message}"
@@ -183,12 +227,29 @@ module MarkInProgress
     3
   end
 
+  # DOMAIN. What the stdout line says about the stamp. A restart names the
+  # stamp it discarded, so the reset is on record (DND-1838).
+  def stamp_note(plan, page)
+    return plan[:skipped] if plan[:skipped]
+    return "#{plan[:stamp]} (#{plan[:kept] ? 'kept, already stamped' : 'stamped'})" unless plan[:restarted]
+
+    from = if plan[:properties].key?("Status")
+             "re-dispatch from #{page.dig('properties', 'Status', 'status', 'name').inspect}"
+           else "--restart"
+           end
+    "#{plan[:stamp]} (restarted: #{from}; discarded #{plan[:previous] || 'no earlier stamp'})"
+  end
+
   # DOMAIN. The ticket.dispatched attrs for a write that happened. tracker is
-  # dnd or work; first_dispatch is true when this write set the stamp.
+  # dnd or work; first_dispatch is true when this write set a first stamp;
+  # restart is true when it reset the stamp (DND-1838), and previous_stamp is
+  # then the stamp it discarded, when there was one.
   def dispatched_attrs(tracker, plan, backfill)
-    { "tracker" => tracker.equal?(DispatchTrackers::DND) ? "dnd" : "work",
-      "first_dispatch" => plan[:properties].key?(tracker.property),
-      "backfill" => backfill }
+    attrs = { "tracker" => tracker.equal?(DispatchTrackers::DND) ? "dnd" : "work",
+              "first_dispatch" => !plan[:restarted] && plan[:properties].key?(tracker.property),
+              "backfill" => backfill, "restart" => plan[:restarted] ? true : false }
+    attrs["previous_stamp"] = plan[:previous] if plan[:restarted] && plan[:previous]
+    attrs
   end
 
   # EFFECTS. One local ticket.dispatched event, after the Notion write
