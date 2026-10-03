@@ -98,12 +98,14 @@ fi
 # --- 1. subuid / subgid block: judged for BOTH files before either is written -
 # When one file already holds the user's block, the other gets the same block,
 # so uid and gid maps never diverge.
-if ! $SUBID_GIVEN; then
-  for f in subuid subgid; do
-    existing="$(grk_subid_entry "${R}/etc/${f}" "${USER_NAME}")"
-    if [ -n "${existing}" ]; then SUBID_START="${existing%%:*}"; break; fi
-  done
-fi
+for f in subuid subgid; do
+  existing="$(grk_subid_entry "${R}/etc/${f}" "${USER_NAME}")"
+  [ -n "${existing}" ] || continue
+  if ! $SUBID_GIVEN; then SUBID_START="${existing%%:*}"; break; fi
+  [ "${existing%%:*}" = "${SUBID_START}" ] || die \
+    "--subid-start ${SUBID_START} differs from ${USER_NAME}'s existing /etc/${f} block ${existing}; uid and gid maps would diverge" \
+    "omit --subid-start to reuse ${existing%%:*}, or remove ${USER_NAME}'s lines from /etc/subuid and /etc/subgid first"
+done
 declare -A SUBID_ADD=()
 for f in subuid subgid; do
   file="${R}/etc/${f}"

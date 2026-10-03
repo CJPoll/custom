@@ -319,6 +319,13 @@ kit setup-gitlab-runner-docker --user gitlab-runner-foxtrot "${NOIN}"
 expect_rc "docker foxtrot: a block present only in subgid is reused for subuid" 0
 eq "docker foxtrot: subuid gets subgid's block" "$(grep '^gitlab-runner-foxtrot:' "${ROOT}/etc/subuid")" \
   "gitlab-runner-foxtrot:$(( 1268435456 - 2 * 65536 )):65536"
+kit setup-gitlab-runner-user --user gitlab-runner-hotel "${NOIN}"
+printf 'gitlab-runner-hotel:%s:65536\n' "$(( 1268435456 - 4 * 65536 ))" >> "${ROOT}/etc/subgid"
+sub_before="$(cat "${ROOT}/etc/subuid" "${ROOT}/etc/subgid")"
+kit setup-gitlab-runner-docker --user gitlab-runner-hotel --subid-start $(( 1268435456 - 5 * 65536 )) "${NOIN}"
+expect_rc "docker hotel: --subid-start that differs from the user's existing block is refused" 1
+case "${ERR}" in *"maps would diverge"*Fix:*) ok "the diverging-block refusal carries Fix:" ;; *) bad "the diverging-block refusal carries Fix:" "${ERR}" ;; esac
+eq "docker hotel: the refusal writes neither file" "$(cat "${ROOT}/etc/subuid" "${ROOT}/etc/subgid")" "${sub_before}"
 printf 'tail-no-newline:1:1' >> "${ROOT}/etc/subuid"; printf 'tail-no-newline:1:1' >> "${ROOT}/etc/subgid"
 kit setup-gitlab-runner-user --user gitlab-runner-golf "${NOIN}"
 kit setup-gitlab-runner-docker --user gitlab-runner-golf --subid-start $(( 1268435456 - 3 * 65536 )) "${NOIN}"
