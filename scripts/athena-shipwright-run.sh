@@ -1400,7 +1400,10 @@ rm -f "${LANE_LOCK}" "${LANE_META}"
 # every later tick exited 75 without spawning. A provider outage that cleared
 # the next morning became a human-gated wedge, the exact outcome the paragraph
 # below forbids. A session that DID leave its receipt reached the model, so its
-# non-zero exit is still a failure whatever its log says.
+# non-zero exit is a failure whatever its log says, unless (DND-1560) it made no
+# commit of its own and the closing bytes of its output carry a known limit or
+# auth signature: then the provider stopped it and it is BLOCKED (the elif
+# below). A commit of its own, or no signature, keeps the failure.
 #
 # BLOCKED NEVER GATES THE NEXT SPAWN. The wedge exists to stop a broken lane
 # burning tokens; a blocked tick burns none and the cause is transient and
