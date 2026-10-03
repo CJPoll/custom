@@ -39,7 +39,15 @@
 # CLI run by absolute path, `command -p`, or a PATH that skips ai/agent-bin; a
 # gh/glab alias or extension (an unknown group reads as a read, as in the hook);
 # a non-CLI client (curl with the owner's token). Known false denies are the
-# classifier's (its header), plus a GraphQL query read from a file.
+# classifier's (its header), plus a GraphQL query read from a file, and two
+# more: a push the CLI itself runs on a routed call (`gh-athena repo create
+# --push`, `glab-athena mr create --push`) is judged by the git wrapper and
+# refused, so push first with `<route> git push`; and `glab-athena refresh`,
+# which mints with the OWNER's plain glab on purpose, is refused here, so it
+# runs only from the owner's own terminal (it is owner-gated anyway).
+#
+# A refusal names the command's group and verb, never the rest of its argv:
+# an argument can carry a secret (`gh secret set X --body …`).
 
 AFC_ESC='If the Athena wrapper itself fails, do not work around this; escalate to your admiral with the command and the error (athena:github -> "When a forge write can'"'"'t be done as Athena").'
 
@@ -82,7 +90,8 @@ afc_resolve_real() {
 }
 
 afc_help() {
-  if afc_resolve_real; then "$AFC_REAL" --help 2>/dev/null; fi
+  # The real help only: no update check, no network.
+  if afc_resolve_real; then GLAB_CHECK_UPDATE=false GH_NO_UPDATE_NOTIFIER=1 "$AFC_REAL" --help 2>/dev/null; fi
   local route=gh-athena
   [ "$AFC_TOOL" = glab ] && route=glab-athena
   printf '\n%s (agent wrapper): ai/agent-bin/%s, in front of the real %s in agent sessions (DND-1803).\n' "$AFC_TOOL" "$AFC_TOOL" "$AFC_TOOL"
@@ -115,7 +124,7 @@ afc_classify() {
   local lib text out rc=0
   lib="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/forge-write-class.awk"
   text="$(cat "$lib" 2>/dev/null)" && [ -n "$text" ] \
-    || afc_refuse "\`$AFC_TOOL $*\`: the classifier $lib cannot be read, so whether this is a forge write is unknown. Fix: restore ai/lib/forge-write-class.awk in the checkout that holds ai/agent-bin; meanwhile run the command through ~/dev/custom/ai/bin/$AFC_TOOL-athena. $AFC_ESC"
+    || afc_refuse "\`$AFC_TOOL …\`: the classifier $lib cannot be read, so whether this is a forge write is unknown. Fix: restore ai/lib/forge-write-class.awk in the checkout that holds ai/agent-bin; meanwhile run the command through ~/dev/custom/ai/bin/$AFC_TOOL-athena. $AFC_ESC"
   # Every literal `$` is masked as the hook masks single-quoted text: the argv
   # is already expanded, so a `$` in a GraphQL query is text, not expansion.
   out="$(awk "$text"'
@@ -128,9 +137,9 @@ afc_classify() {
       judge(1)
       print "READ"
       exit
-    }' "$AFC_TOOL" "$@" 2>&1)" || rc=$?
+    }' "$AFC_TOOL" "$@" 2>/dev/null)" || rc=$?
   if [ "$rc" != 0 ] || { [ "$out" != READ ] && [[ "$out" != "$AFC_TOOL"$'\t'* ]]; }; then
-    afc_refuse "\`$AFC_TOOL $*\`: the classifier failed (exit $rc: ${out:0:200}), so whether this is a forge write is unknown. Fix: run the command through ~/dev/custom/ai/bin/$AFC_TOOL-athena, and report the classifier failure to your admiral."
+    afc_refuse "\`$AFC_TOOL …\`: the classifier failed (exit $rc), so whether this is a forge write is unknown. Fix: run the command through ~/dev/custom/ai/bin/$AFC_TOOL-athena, and report the classifier failure to your admiral."
   fi
   AFC_VERDICT="$out"
 }
@@ -139,7 +148,7 @@ afc_main() {
   local who route grp verb reads
   if [ "$#" -eq 1 ] && [ "$1" = --help ]; then afc_help; exit 0; fi
   if ! afc_resolve_real; then
-    afc_refuse "\`$AFC_TOOL $*\`: no real $AFC_TOOL on PATH after the wrapper $AFC_SELF (PATH=$PATH). Fix: put the directory holding the real $AFC_TOOL on PATH after ai/agent-bin; a shim that execs this wrapper must have a real $AFC_TOOL after the wrapper on PATH." 127
+    afc_refuse "\`$AFC_TOOL …\`: no real $AFC_TOOL on PATH after the wrapper $AFC_SELF (PATH=$PATH). Fix: put the directory holding the real $AFC_TOOL on PATH after ai/agent-bin; a shim that execs this wrapper must have a real $AFC_TOOL after the wrapper on PATH." 127
   fi
   if afc_routed; then exec "$AFC_REAL" "$@"; fi
   afc_classify "$@"
@@ -148,9 +157,19 @@ afc_main() {
   if [ "$AFC_TOOL" = gh ]; then who='GitHub records it as the machine owner, not athena-harness[bot]'; route=gh-athena
   else who='GitLab records it as the machine owner, not athena-amby'; route=glab-athena; fi
   if [ "$grp" = api ]; then
-    afc_refuse "\`$AFC_TOOL $*\`: a plain \`$AFC_TOOL api\` call that WRITES (a method other than GET/HEAD, a field or --input with no -X GET, a method-override header, or a GraphQL mutation or a query read from a file). $who (DND-1803). Fix: run the same call through the Athena route, \`~/dev/custom/ai/bin/$route api …\` (check it with \`~/dev/custom/ai/bin/forge-preflight\` if it fails); to only READ, pass \`-X GET\`. $AFC_ESC"
+    afc_refuse "\`$AFC_TOOL api …\`: a plain \`$AFC_TOOL api\` call that WRITES (a method other than GET/HEAD, a field or --input with no -X GET, a method-override header, or a GraphQL mutation or a query read from a file). $who (DND-1803). Fix: run the same call through the Athena route, \`~/dev/custom/ai/bin/$route api …\` (check it with \`~/dev/custom/ai/bin/forge-preflight\` if it fails); to only READ, pass \`-X GET\`. $AFC_ESC"
   fi
+  if [ "$grp" = alias ]; then
+    afc_refuse "\`$AFC_TOOL alias $verb …\`: an alias can run a forge write under a name the classifier does not recognise, as the machine owner (DND-1179, DND-1803). Fix: do not define aliases; run the command itself, and run a write through \`~/dev/custom/ai/bin/$route\`. $AFC_ESC"
+  fi
+  if [ "$AFC_TOOL $grp $verb" = "gh pr merge" ]; then
+    afc_refuse "\`gh pr merge …\`: a merge on plain gh is stamped to the machine owner AND skips the pinned-head, all-green merge guard (DND-609, DND-1803). Fix: merge through the one guarded path: run \`~/dev/custom/ai/skills/athena:merge-boarding/scripts/integration-gate\` from the PR's worktree, then \`~/dev/custom/ai/skills/athena:merge-boarding/scripts/locked-merge --pr <n> --head <sha>\` with the SHA its INTEGRATION OK line names (athena:merge-boarding -> \"Landing onto a moving main\"). $AFC_ESC"
+  fi
+  case "$AFC_TOOL $grp $verb" in
+    "glab mr merge" | "glab mr accept")
+      afc_refuse "\`glab mr $verb …\`: a merge on plain glab is stamped to the machine owner AND skips the pinned-head, passed-pipeline merge guard (DND-742, DND-1803). Fix: board the merge train through the Athena route, \`~/dev/custom/ai/bin/glab-athena api -X POST \"projects/:id/merge_trains/merge_requests/<iid>\" -f sha=<head sha>\`, or with no train \`~/dev/custom/ai/bin/glab-athena mr merge <iid> --sha <head sha> --yes\`, once the head pipeline passed on that head. $AFC_ESC" ;;
+  esac
   reads="${reads#|}"; reads="${reads%|}"; reads="${reads//|/, }"
   [ -n "$reads" ] || reads='none; it runs an agent or a server that can write as the owner'
-  afc_refuse "\`$AFC_TOOL $*\`: \`$AFC_TOOL $grp $verb\` is a forge WRITE ($AFC_TOOL $grp reads are only: $reads). $who (DND-1803). Fix: run the same command through the Athena route, \`~/dev/custom/ai/bin/$route $grp $verb …\` (check it with \`~/dev/custom/ai/bin/forge-preflight\` if it fails). Reads may stay on plain $AFC_TOOL. $AFC_ESC"
+  afc_refuse "\`$AFC_TOOL $grp $verb …\`: a forge WRITE ($AFC_TOOL $grp reads are only: $reads). $who (DND-1803). Fix: run the same command through the Athena route, \`~/dev/custom/ai/bin/$route $grp $verb …\` (check it with \`~/dev/custom/ai/bin/forge-preflight\` if it fails). Reads may stay on plain $AFC_TOOL. $AFC_ESC"
 }

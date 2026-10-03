@@ -12,7 +12,7 @@
 # meant to shadow its real command; anything else here would shadow one by
 # accident. Pushes are judged for forge identity too: see "forge identity" below.
 #
-# WHY A WRAPPER, AND WHY THIS IS NOT THE ENFORCEMENT. The enforcement is the
+# WHY A WRAPPER, AND WHY IT IS NOT THE STASH ENFORCEMENT. The enforcement is the
 # reference-transaction hook ai/git-hooks/agent-stash-guard.sh, which runs
 # inside git. The hook cannot help in two places, and this wrapper covers them:
 #   - pop/apply: the hook refuses them only after git has written the entry's
@@ -56,6 +56,9 @@
 #      D5 tamper: a -c/--config-env key, or a GIT_CONFIG_PARAMETERS entry, for
 #         hook.agentstash.* or hook.reference-transaction.*; or a GIT_CONFIG_KEY_n
 #         that disables either or names one of them twice.
+#   4b. push: judged for forge identity by ai/lib/agent-forge-push.sh (DND-1803;
+#      the "forge identity" block below), which refuses with a Fix:. For a
+#      push this wrapper IS the process-layer enforcement.
 #   5. Everything else: exec the real git with argv unchanged.
 #
 # RESIDUAL (accepted by the owner, Q2, 2026-09-27). Bypassed by: absolute-path
@@ -73,7 +76,8 @@
 # COST. The common path (a builtin subcommand, no alias) forks nothing before it
 # execs git: identity is `test -ef`, quoting and case-folding are parameter
 # expansion and glob patterns. Only a non-builtin subcommand pays for one
-# `git config --get` (and an awk split when it is an alias).
+# `git config --get` (and an awk split when it is an alias). A push pays for a
+# bash run of ai/lib/agent-forge-push.sh and its local `git config` reads.
 
 set -f
 

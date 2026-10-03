@@ -11,7 +11,7 @@ AFC_SELF=$0
 _afc_lib="$(dirname "$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")")/../lib/agent-forge-cli.sh"
 # shellcheck source=../lib/agent-forge-cli.sh
 if ! . "$_afc_lib" 2>/dev/null || ! declare -F afc_main >/dev/null; then
-  printf 'gh (agent wrapper): REFUSED `gh %s`: cannot load %s, so whether this is a forge write is unknown. Fix: restore ai/lib/agent-forge-cli.sh in the checkout that holds ai/agent-bin; meanwhile run the command through ~/dev/custom/ai/bin/gh-athena.\n' "$*" "$_afc_lib" >&2
+  printf 'gh (agent wrapper): REFUSED `gh …`: cannot load %s, so whether this is a forge write is unknown. Fix: restore ai/lib/agent-forge-cli.sh in the checkout that holds ai/agent-bin; meanwhile run the command through ~/dev/custom/ai/bin/gh-athena.\n' "$_afc_lib" >&2
   exit 1
 fi
 afc_main "$@"

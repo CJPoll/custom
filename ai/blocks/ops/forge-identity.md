@@ -7,5 +7,6 @@ same commands as `gh`/`glab` — so writes are attributed to Athena, not the
 machine owner. The App config is present, so the wrapper works. READS
 may use plain `gh`/`glab`. Verify wrapper health with
 `~/dev/custom/ai/bin/forge-preflight` if a write fails. (Enforced twice, each with a
-`Fix:`: the `forge-identity-guard.sh` hook denies the command text, and the agent
-PATH `git`/`gh`/`glab` wrappers refuse the process, scripts included.)
+`Fix:`: the `forge-identity-guard.sh` hook denies the command text, and, where the
+agent env is active, the agent PATH `git`/`gh`/`glab` wrappers refuse the process,
+scripts included.)

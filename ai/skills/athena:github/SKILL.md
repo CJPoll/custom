@@ -126,7 +126,10 @@ naming this form (DND-577). It reads only the command text, so the agent PATH
 (DND-1803; `ai/lib/agent-forge-push.sh`): a push to github.com or gitlab.com
 runs only with this route's credential isolation. The agent PATH `gh` and
 `glab` wrappers refuse a plain forge write the same way
-(`ai/lib/agent-forge-cli.sh`); reads pass.
+(`ai/lib/agent-forge-cli.sh`); reads pass. Both layers need the agent env
+active (`check-hooks-registered` ACTIVE), and neither is a sandbox: each
+file's header names what it cannot see (an SSH Host alias, a push git starts
+itself, git by absolute path).
 
 Afterwards, check who the push was attributed to:
 

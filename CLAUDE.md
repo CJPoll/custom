@@ -920,10 +920,10 @@ and pronoun-guard; nothing detected it. The durable fix:
   `glab-athena git` (`ai/lib/agent-forge-push.sh`), and the `gh` / `glab`
   wrappers refuse a forge write not made through `gh-athena` / `glab-athena`
   (`ai/lib/agent-forge-cli.sh`), wherever the command came from, a script
-  included. `forge-identity-guard.sh` stays the earlier, lexical layer. A new
-  file in `ai/agent-bin/` needs no env change: it is on PATH once it lands in
-  the main checkout, and `check-hooks-registered` fails on any file there but
-  `git`, `gh` and `glab`.
+  included. `forge-identity-guard.sh` stays the earlier, lexical layer. The
+  `gh` and `glab` wrappers need no env change: they are on PATH once they land
+  in the main checkout. `check-hooks-registered` fails on any other file in
+  `ai/agent-bin/`, because it would shadow a real command.
   `check-hooks-registered` prints its own agent-stash line: INACTIVE (exit 0),
   ACTIVE (exit 0, runtime asserted), PENDING RESTART (exit 0), DRIFT/FAIL
   (exit 1), or COULD NOT MEASURE (exit 3: guard keys present but the landed

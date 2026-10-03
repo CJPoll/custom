@@ -221,6 +221,19 @@ run "${R}" env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://gitlab.com/.extr
 refused "F3. a gitlab.com header on a github.com push" git gh-athena 'REAL-GIT'
 run "${R}" env GH_TOKEN=forged gh pr create --title t --body b
 refused "F4. gh with a token in the env but no isolated config dir" gh gh-athena 'REAL-GH'
+repo 'git@github.com:synth-owner/synth-repo.git'
+run "${R}" env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
+  'GIT_CONFIG_VALUE_0=AUTHORIZATION: basic eDp5' git -c credential.helper= -c core.askPass= push origin HEAD
+refused "F6. the full marker on an SSH-form remote with no rewrite (git would push over SSH)" git gh-athena 'REAL-GIT'
+repo 'https://synth-user:SYNTHSECRET0000@github.com/synth-owner/synth-repo.git'
+run "${R}" git push origin HEAD
+if [[ "${OUT}" != *"SYNTHSECRET0000"* ]]; then refused "F7. a credential in the remote URL: refused, never printed" git gh-athena 'REAL-GIT'
+else bad "F7. a credential in the remote URL is printed" "out=$(printf '%s' "${OUT}" | head -c 400)"; fi
+"${REAL_G}" init -q -b main "${TMP}/sub"; "${REAL_G}" -C "${TMP}/sub" commit -q --allow-empty -m s
+repo "${TMP}/nowhere.git"
+printf '[submodule "s"]\n\tpath = s\n\turl = https://github.com/synth-owner/synth-sub.git\n' > "${R}/.gitmodules"
+run "${R}" git -c submodule.recurse=true push origin HEAD
+refused "F8. submodule.recurse=true in a repo with submodules (each submodule push is unchecked)" git 'no-recurse-submodules' 'REAL-GIT'
 mkdir -p "${TMP}/not-isolated"
 run "${R}" env GH_TOKEN=forged GH_HOST=github.com GH_CONFIG_DIR="${TMP}/not-isolated" gh pr create --title t --body b
 refused "F5. gh with a config dir that is not gh-athena's" gh gh-athena 'REAL-GH'
@@ -259,6 +272,15 @@ run "${R}" glab mr note 1 -m hi
 refused "W7. glab mr note" glab 'glab-athena mr note' 'REAL-GLAB'
 run "${R}" glab api -X PUT projects/1/merge_requests/2/merge
 refused "W8. glab api PUT" glab 'glab-athena api' 'REAL-GLAB'
+run "${R}" gh pr merge 1 --squash
+refused "W9. gh pr merge: the Fix names the guarded merge path" gh 'locked-merge' 'REAL-GH'
+run "${R}" glab mr merge 1
+refused "W10. glab mr merge: the Fix names the pinned merge-train path" glab 'merge_trains' 'REAL-GLAB'
+run "${R}" gh secret set SYNTH_NAME --body SYNTHSECRET0000
+if [[ "${OUT}" != *"SYNTHSECRET0000"* ]]; then refused "W11. gh secret set: refused, its value never printed" gh 'gh-athena secret set' 'REAL-GH'
+else bad "W11. gh secret set prints the value" "out=$(printf '%s' "${OUT}" | head -c 400)"; fi
+run "${R}" gh alias set co2 'pr create'
+refused "W12. gh alias set: the alias Fix" gh 'do not define aliases' 'REAL-GH'
 
 echo
 echo "--- reads pass through ---"
@@ -279,6 +301,9 @@ run "${R}" git ls-remote origin
 passed "D7. git ls-remote on github.com" 'REAL-GIT ls-remote origin'
 run "${R}" git pull --ff-only origin main
 passed "D8. git pull --ff-only from github.com" 'REAL-GIT pull --ff-only origin main'
+run "${R}" git push -h
+if [[ "${OUT}" != *"REFUSED"* ]] && [[ "${CALLS}" == *"REAL-GIT push -h"* ]]; then ok "D10. git push -h in a github.com repo is not judged"
+else bad "D10. git push -h" "rc=${RC} calls=[${CALLS}] out=$(printf '%s' "${OUT}" | head -c 400)"; fi
 "${REAL_G}" init -q --bare "${TMP}/local.git"
 repo "${TMP}/local.git"
 run "${R}" env SHIM_REAL_PUSH=1 git push origin HEAD:refs/heads/feat

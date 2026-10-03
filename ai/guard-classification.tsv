@@ -28,7 +28,7 @@ ai/hooks/athena-slack-poll.sh	no-fail-path	SessionStart Slack backstop poll; emi
 ai/hooks/secret-env-warn.sh	no-fail-path	SessionStart warning (DND-845); prints one context line per secret in the session env, never denies or fails a turn (its Fix: text is guidance, not a denial)
 ai/bin/contention-census	tool	reads and prints host load/contention numbers for a report; never denies, gates, or retries anything
 
-# --- DND-775 agent-stash guard: a git reference-transaction hook and the agent PATH git wrapper. Both refuse with a Fix:.
+# --- DND-775 agent-stash guard (a git reference-transaction hook, the agent PATH git wrapper) and DND-1803 forge identity (the gh/glab wrappers and their libs). Each guard refuses with a Fix:.
 ai/git-hooks/agent-stash-guard.sh	guard
 ai/agent-bin/git	guard
 ai/agent-bin/gh	guard

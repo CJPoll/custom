@@ -6,23 +6,28 @@
 #
 # The wrapper passes the argv it resolved (aliases expanded, global options
 # kept). Exit 0: the push may run. Exit 1: refused, one stderr line ending in a
-# Fix:. The wrapper exits with that status before git runs.
+# Fix:. The wrapper exits with that status before git runs. `push -h` and
+# `push --help` are not judged.
 #
 # WHY. ai/hooks/forge-identity-guard.sh reads the Bash command TEXT. A `git
 # push` inside a script run as `bash <script>` is not in that text, and on
 # 2026-10-02 one went out with the machine owner's credentials. This check runs
 # in the git process tree, on the real argv, wherever the push came from.
 #
-# WHAT IS A FORGE PUSH. Every URL the push would reach, resolved the way the
-# Athena passthrough resolves it: fg_refuse_non_https in
+# WHAT IS A FORGE PUSH. Every URL the push would reach, resolved by the Athena
+# passthrough's own resolver, fg_refuse_non_https in
 # ai/lib/forge-git-passthrough.sh, run once per forge host (github.com,
 # gitlab.com). That covers the default remote (pushRemote, pushDefault,
 # branch.<cur>.remote, origin), pushurl, insteadOf and pushInsteadOf, --repo, a
-# literal URL, and an SSH-form remote. A URL whose host is the forge host or a
-# subdomain of it is a forge push. A push the passthrough itself refuses (the
-# forge over SSH or another non-HTTPS transport, or a push that recurses into
-# submodules it cannot inspect) is refused here too: it could reach the forge
-# with the owner's SSH key. A local path or another host is allowed.
+# literal URL, and an SSH-form remote. The resolver's own SSH-to-HTTPS rewrite
+# is switched off here (fg_rewrite below), so a URL is rewritten only by the
+# push's own config, as git will rewrite it. A URL whose host is the forge host
+# or a subdomain of it (a trailing dot ignored) is a forge push. Refused
+# outright: a forge push over SSH or another non-HTTPS transport (the owner's
+# SSH key would carry it), and a push that recurses into submodules, by
+# argument, push.recurseSubmodules or submodule.recurse, in a repository that
+# has submodules (each submodule push runs through git's exec-path, where no
+# wrapper sees it). A local path or another host is allowed.
 #
 # WHAT IS ROUTED. A forge push is allowed only when it carries the credential
 # isolation the Athena passthrough (fg_git_exec) gives git, for that host:
@@ -34,20 +39,25 @@
 #   * an http.https://<host>/.extraheader entry in the environment config
 #     channel (GIT_CONFIG_KEY_n) whose value is an `AUTHORIZATION: basic`
 #     header: the bot's credential.
-# A plain shell sets none of this. With all of it, the push is HTTPS (the
-# SSH case was refused above) and its only credential is the header the
-# caller supplied, so the owner's SSH key, credential helper and keyring are
-# out of reach.
+# A plain shell sets none of this. With all of it, and the URL HTTPS (checked
+# on the URL git will use), the push's only credential is the header the
+# caller supplied: the owner's SSH key, credential helper and keyring are out
+# of reach.
 #
 # RESIDUAL (it is not a sandbox). Defeated by: a caller that builds the whole
 # marker by hand with the OWNER's token in the header (deliberate, and it needs
 # the token read out first); git run by absolute path or with a PATH that skips
-# the wrapper (the DND-775 residual list in ai/agent-bin/git); a push git runs
-# from inside itself (a `!` alias, git-subtree, send-pack), which uses git's
-# exec-path, not PATH; a non-git client (libgit2, an HTTP call); and an
-# ~/.ssh/config Host alias for the forge (`myalias:owner/repo`), which no URL
-# names. The passthrough's own residuals (ai/lib/forge-git-passthrough.sh)
-# apply to the resolution.
+# the wrapper (the DND-775 residual list in ai/agent-bin/git); a push from a
+# process git starts itself (a `!` alias, git-subtree, send-pack, `rebase -x`,
+# `submodule foreach`, `bisect run`, a git hook), which runs with git's
+# exec-path first on PATH, where a real `git` sits; a non-git client (libgit2,
+# an HTTP call); and a forge host no URL spells as github.com or gitlab.com
+# (an ~/.ssh/config Host alias such as `myalias:owner/repo`, an IP literal).
+# The passthrough's own resolution residuals (its header) apply too.
+# A known false refusal: a push the forge CLI runs on a routed call
+# (`gh-athena repo create --push`, `glab-athena mr create --push`) carries no
+# bot header, so it is refused; push first with `gh-athena git push` /
+# `glab-athena git push`, then run the CLI command without --push.
 
 AFP_TAG='git (agent wrapper)'
 AFP_ESC='If the wrapper refuses or fails, do not work around this; escalate to your admiral with the command and the error (athena:github -> "When a forge write can'"'"'t be done as Athena").'
@@ -65,6 +75,13 @@ afp_fix() {
   esac
 }
 
+# afp_shown <url> : the URL with any user:password@ removed, for a message.
+afp_shown() {
+  local u="$1"
+  case "$u" in *://*@*) u="${u%%://*}://${u#*@}" ;; esac
+  printf '%s' "$u"
+}
+
 AFP_REAL="${ATHENA_REAL_GIT:-}"
 if [ -z "$AFP_REAL" ] || [ ! -x "$AFP_REAL" ]; then
   afp_refuse "git push: the forge-identity check was not given the real git (ATHENA_REAL_GIT='${AFP_REAL}'), so it cannot tell where this push goes." \
@@ -79,31 +96,78 @@ if ! . "$AFP_LIB" 2>/dev/null || ! declare -F fg_refuse_non_https >/dev/null; th
   afp_refuse "git push: cannot load $AFP_LIB, so whether this push goes to a forge is unknown." \
     "restore ai/lib/forge-git-passthrough.sh beside ai/lib/agent-forge-push.sh in the checkout that holds ai/agent-bin; to push to a forge meanwhile, use ~/dev/custom/ai/bin/gh-athena git push … or ~/dev/custom/ai/bin/glab-athena git push …."
 fi
+# The resolver adds its own SSH-to-HTTPS rewrite to every probe, because the
+# passthrough adds the same rewrite to the git it runs. This push carries only
+# the rewrites in its own config, so the probes must too: a harmless key here.
+fg_rewrite() { printf 'agentforgepush.noop=1'; }
 
-# The git global options before `push`, for the config probes below.
+# The git global options before `push`, by git's grammar (the options that
+# take a separate value), for the config probes below; the push's own args.
 AFP_GLOB=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -C | -c | --git-dir | --work-tree | --namespace | --super-prefix | --attr-source | --config-env)
+      [ $# -ge 2 ] || break
+      AFP_GLOB+=("$1" "$2"); shift 2 ;;
+    push) break ;;
+    *) AFP_GLOB+=("$1"); shift ;;
+  esac
+done
+AFP_ARGV=("${AFP_GLOB[@]}" "$@")
+[ "${1:-}" = push ] && shift
 for a in "$@"; do
-  [ "$a" = push ] && break
-  AFP_GLOB+=("$a")
+  case "$a" in -h | --help) exit 0 ;; --) break ;; esac
 done
 
-# afp_reaches <host> <git argv...> : sets AFP_URL to the first resolved URL on
-# <host> (or a subdomain), or "" when none; returns 3 when the passthrough
-# refuses the push for that host, 2 when it fails otherwise.
+# afp_reaches <host> : sets AFP_URL to the first resolved URL on <host> (or a
+# subdomain); returns 3 when the passthrough refuses the push for that host
+# (non-HTTPS forge, or recursion it cannot inspect), 2 when it fails otherwise.
 afp_reaches() {
   local host="$1" urls rc u hs h
-  shift
   AFP_URL=""
   urls="$(FG_HOST="$host"; FG_TOOL="$AFP_TAG"; FG_BOT=bot
-          fg_refuse_non_https "$@" >/dev/null 2>&1 || exit $?
+          fg_refuse_non_https "${AFP_ARGV[@]}" >/dev/null 2>&1 || exit $?
           printf '%s' "$FG_RESOLVED_URLS")" || { rc=$?; [ "$rc" = 3 ] && return 3; return 2; }
   while IFS= read -r u; do
     [ -n "$u" ] || continue
     hs="$(fg_url_host_scheme "$u")"
+    [ -n "$hs" ] || continue
     h="${hs#* }"
-    case "$h" in "$host" | *."$host") AFP_URL="$u"; return 0 ;; esac
+    while [ "${h%.}" != "$h" ]; do h="${h%.}"; done
+    case "$h" in
+      "$host" | *."$host")
+        AFP_URL="$u"
+        [ "${hs%% *}" = https ] || return 3
+        return 0 ;;
+    esac
   done <<<"$urls"
   return 0
+}
+
+# afp_recurses : 0 when this push pushes submodules too, in a repository that
+# has them (submodule.recurse=true means on-demand when push.recurseSubmodules
+# is unset; the passthrough's resolver reads only the argument and
+# push.recurseSubmodules).
+afp_recurses() {
+  local a mode="" top
+  for a in "$@"; do
+    case "$a" in
+      --no-recurse-submodules | --recurse-submodules=no | --recurse-submodules=check) return 1 ;;
+      --recurse-submodules | --recurse-submodules=*) mode=on ;;
+    esac
+  done
+  if [ -z "$mode" ]; then
+    case "$(git "${AFP_GLOB[@]}" config --get push.recurseSubmodules 2>/dev/null)" in
+      no | check) return 1 ;;
+      on-demand | only) mode=on ;;
+    esac
+  fi
+  if [ -z "$mode" ]; then
+    [ "$(git "${AFP_GLOB[@]}" config --type=bool --get submodule.recurse 2>/dev/null)" = true ] || return 1
+  fi
+  git "${AFP_GLOB[@]}" config --get-regexp '^submodule\..*\.url$' >/dev/null 2>&1 && return 0
+  top="$(git "${AFP_GLOB[@]}" rev-parse --show-toplevel 2>/dev/null)" || return 1
+  [ -n "$top" ] && [ -f "$top/.gitmodules" ]
 }
 
 # afp_routed <host> : 0 when the push carries the passthrough's isolation for <host>.
@@ -127,18 +191,22 @@ afp_routed() {
   [ "$found" = 1 ]
 }
 
+if afp_recurses "$@"; then
+  afp_refuse "this git push: it pushes submodules too (--recurse-submodules, push.recurseSubmodules or submodule.recurse), and each submodule push runs through git's exec-path, where no check sees which forge it reaches or as whom (DND-1803)." \
+    "push with --no-recurse-submodules, and push each submodule separately from its own directory; a push to github.com or gitlab.com goes through ~/dev/custom/ai/bin/gh-athena git push … or ~/dev/custom/ai/bin/glab-athena git push …."
+fi
 for host in github.com gitlab.com; do
-  rc=0; afp_reaches "$host" "$@" || rc=$?
+  rc=0; afp_reaches "$host" || rc=$?
   case "$rc" in
     0) ;;
-    3) afp_refuse "this git push: it would reach $host over SSH or another non-HTTPS transport, or recurse into submodules this check cannot inspect, so it can go out with the machine owner's SSH key, not Athena's (DND-1803)." \
+    3) afp_refuse "this git push${AFP_URL:+ to $(afp_shown "$AFP_URL")}: it would reach $host over SSH or another non-HTTPS transport, or recurse into submodules, so it can go out with the machine owner's SSH key, not Athena's (DND-1803)." \
          "$(afp_fix "$host") Point the remote at https://$host/<owner>/<repo>.git (or git@$host:<owner>/<repo>.git, which the route rewrites) and push each submodule separately." ;;
     *) afp_refuse "this git push: its remote could not be resolved (exit $rc), so whether it goes to $host as the machine owner is unknown (DND-1803)." \
          "run it again from inside the repository with a configured remote; to push to a forge, $(afp_fix "$host")" ;;
   esac
   [ -n "$AFP_URL" ] || continue
   afp_routed "$host" && continue
-  afp_refuse "a plain git push to $host ($AFP_URL): it authenticates with the machine owner's SSH key or credential helper, so the forge records the owner, not Athena (DND-1803)." \
+  afp_refuse "a plain git push to $host ($(afp_shown "$AFP_URL")): it authenticates with the machine owner's SSH key or credential helper, so the forge records the owner, not Athena (DND-1803)." \
     "$(afp_fix "$host")"
 done
 exit 0

@@ -52,9 +52,10 @@
 #       pass. Call it at the end of the suite and count a non-zero return as a
 #       failure.
 #
-# The agent PATH git wrapper (ai/agent-bin/git, DND-775) sits on PATH in agent
-# sessions. A guard in front of it answers first, so neither the wrapper nor
-# the git behind it runs; without the wrapper the guard answers the same way.
+# The agent PATH wrappers (ai/agent-bin/git, gh and glab; DND-775, DND-1803)
+# sit on PATH in agent sessions. A guard in front of one answers first, so
+# neither the wrapper nor the tool behind it runs; without the wrapper the
+# guard answers the same way.
 #
 # What it cannot see (named, not hidden): a call to the real tool by absolute
 # path (/usr/bin/git), a PATH the suite rebuilds without "${FSG_DIR}", and a

@@ -449,6 +449,7 @@ done
 # the PATH wrappers still refuse the write when it runs.
 FWC_LIB="$(dirname "$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")")/../lib/forge-write-class.awk"
 FWC_TEXT=$(cat "$FWC_LIB" 2>/dev/null) || FWC_TEXT=""
+[ -n "$FWC_TEXT" ] || printf 'forge-identity: cannot read %s, so the plain gh/glab write rule (DND-1179) is not checked here. Fix: restore ai/lib/forge-write-class.awk beside ai/hooks.\n' "$FWC_LIB" >&2
 FORGE_WRITE=$(printf '%s\n' "$CMD" | awk "$FWC_TEXT"'
   BEGIN { fwc_init() }
   # judge_words(w, nw): judge every gh/glab word of one command segment.
