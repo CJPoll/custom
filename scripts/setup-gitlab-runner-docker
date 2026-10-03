@@ -13,7 +13,8 @@
 #   --user <name>        gitlab-runner (default) or gitlab-runner-<suffix>
 #   --subid-start <N>    first id of the user's 65536-id /etc/subuid + /etc/subgid
 #                        block. Default: gitlab-runner keeps 296608; any other
-#                        user gets 1000000000 + (CRC32(name) mod 4096) * 65536.
+#                        user gets 1000000000 + (cksum(name) mod 4096) * 65536,
+#                        cksum being the POSIX `cksum` CRC (not zlib's CRC32).
 #                        Needed only when that block overlaps an existing line.
 #   --dry-run            print what would change; change nothing
 #   -h, --help           this text (stdout, exit 0, does nothing else)
