@@ -1034,3 +1034,49 @@ The canary reads usage under LC_ALL=C. After: `RESULT: 429 passed, 0 failed`.
 | S-1897-4 | a command start after the word does not end its arguments | CS17, CS26 |
 | S-1897-5 | the arguments after the zsh word are never read | CS1-CS12, CS19, CS20, CS22-CS25 |
 | S-1897-6 | the first cut's gap regex in place of the command start | CS22-CS25 |
+
+## 2026-10-03 — DND-1896, git-stash-guard: a zsh glob group or qualifier in argument position
+
+- **Domain:** the PreToolUse git-stash text guard (`ai/hooks/git-stash-guard.sh`):
+  the arguments of a git, git-stash, glob, expanded or substitution-built
+  command word, and of a shell alias expansion, when one of them is a zsh
+  word holding a glob group or qualifier (gargs, zarg, zcand, atail), and
+  how git_verdict and plumb judge a word that may be any text (`\003`).
+- **Suite run:** `sh ai/hooks/git-stash-guard.self-test.sh`, section AQ.
+  Mutations ran on a `mktemp -d` copy of the hook with the committed suite;
+  the committed files were never edited.
+- **Fail-first:** section AQ written first. Against the unfixed hook
+  (`c0178fd1`), the first cases gave `RESULT: 634 passed, 15 failed`; the
+  final suite gives `RESULT: 637 passed, 33 failed`: every AQ case but
+  AQ16, AQ23 and AQ35 (labelled "denied before and after"), and no other
+  case. The failing allow cases are AQ24, AQ25 and AQ36, which the unfixed
+  hook denied: AQ36 (`git stash l(i)st`) as the verb `l`, AQ24 and AQ25 as
+  a glob word with no arguments. After: `RESULT: 670 passed, 0 failed`.
+- **Review round:** the review floor found AQ21, AQ22 (a paren-opened
+  subcommand right after a substitution-built word) and AQ29-AQ33 (a word
+  that may be any text in an option slot, an option value, or a push
+  refspec) allowed by the first cut; self-review found AQ26-AQ28 (a line
+  continuation) and AQ34 (a reflog verb). Each case was written before its
+  fix.
+
+| id | Mutation | Observed failure |
+|---|---|---|
+| S-1896-1 | gargs reads no zsh word (plain words only) | AQ1-AQ15, AQ17-AQ22, AQ26-AQ34, AQ36 |
+| S-1896-2 | a renaming or code-running qualifier argument read as a filter | AQ1-AQ3, AQ9, AQ10, AQ13, AQ29, AQ30, AQ33, AQ34 |
+| S-1896-3 | zarg ignores a glob option set anywhere (GO) | AQ4 |
+| S-1896-4 | several alternatives give the first one | AQ6, AQ31, AQ32 |
+| S-1896-5 | zcand drops its glob check | AQ16 |
+| S-1896-6 | a zsh word opening with its paren does not continue the command | AQ15, AQ28, AQ32 |
+| S-1896-7 | the alias tail built from the tokenized words (the pre-fix code) | AQ17, AQ18, AQ36 |
+| S-1896-8 | (removed: it mutated a `\003` check in decide, which git_verdict made dead code; the check was deleted) | — |
+| S-1896-9 | the glob-head rule reads only the tokenized words | AQ11, AQ24, AQ25 |
+| S-1896-10 | the substitution-built word reads only the tokenized words | AQ19, AQ22 |
+| S-1896-11 | git-stash reads only the tokenized words | AQ12 |
+| S-1896-12 | the expanded head reads only the tokenized words | AQ20 |
+| S-1896-13 | a command word that starts a zsh word reads the pieces inside its paren | ZG32, CS1-CS12, CS19, CS20, CS22-CS25, AQ14, AQ19, AQ21, AQ22, AQ24, AQ25 |
+| S-1896-14 | a line continuation that starts the span is kept | AQ26, AQ28 |
+| S-1896-15 | zdeq keeps an unquoted line continuation | AQ27 |
+| S-1896-16 | git_verdict reads a `\003` word in an option slot as an option | AQ29-AQ32 |
+| S-1896-17 | plumb reads no `\003` refspec in push or fetch | AQ33 |
+| S-1896-18 | a `\003` reflog verb is no delete or expire | AQ34 |
+| S-1896-19 | no paren-opened word right after a command word that is a zsh word | AQ21, AQ22 |

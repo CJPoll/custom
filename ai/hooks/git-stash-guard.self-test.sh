@@ -1573,6 +1573,151 @@ d2 "CS26. a paren-opened prose argument under an unread config (review floor)" a
 cd "$S" && git -C "$S" status && echo "- $(date -u +%H:%MZ) (handoff) captain returned" >> log.md
 EOF
 
+echo "== AQ: a zsh glob group or qualifier in argument position (DND-1896) =="
+# zsh rewrites an argument word through a glob group or qualifier too, so
+# the word git reads as its subcommand, or the verb after `git stash`, can
+# become `stash` or `pop`. Each deny case ran a fake ./git under zsh 5.9 in
+# a scratch dir: the `:` and `e` qualifiers under zsh defaults (a `zsh -c`
+# payload), `(#q...)` under EXTENDED_GLOB, and a group under the Bash
+# tool's NO_BARE_GLOB_QUAL with a file named `stash` present. Each was
+# ALLOWED before DND-1896, except those whose label says "denied before
+# and after".
+d2 "AQ1. a :s qualifier on . renaming the subcommand to stash" deny <<'EOF'
+git .(:s/./stash/) pop
+EOF
+d2 "AQ2. an e qualifier setting the subcommand to stash" deny <<'EOF'
+./git .(e:REPLY=stash:) pop
+EOF
+d2 "AQ3. a :s qualifier on a plain word" deny <<'EOF'
+git xt(:s/xt/stash/) pop
+EOF
+d2 "AQ4. an explicit (#q...) qualifier under extendedglob" deny <<'EOF'
+setopt extendedglob; git .(#q:s/./stash/) pop
+EOF
+d2 "AQ5. a one-alternative group spelling stash" deny <<'EOF'
+git st(a)sh pop
+EOF
+d2 "AQ6. an alternation group whose second alternative spells stash" deny <<'EOF'
+git st(x|a)sh pop
+EOF
+d2 "AQ7. a :s qualifier renaming a read verb to pop" deny <<'EOF'
+git stash list(:s/list/pop/)
+EOF
+d2 "AQ8. a :s qualifier on the show verb" deny <<'EOF'
+git stash show(:s/show/drop/)
+EOF
+d2 "AQ9. git options before the qualifier subcommand" deny <<'EOF'
+git -C . -c a=b .(:s/./stash/) pop
+EOF
+d2 "AQ10. a redirection before the qualifier subcommand" deny <<'EOF'
+git >/dev/null .(:s/./stash/) pop
+EOF
+d2 "AQ11. a group subcommand after a glob command word" deny <<'EOF'
+/usr/bin/g?t st(a)sh pop
+EOF
+d2 "AQ12. a qualifier verb after git-stash" deny <<'EOF'
+git-stash list(:s/list/pop/)
+EOF
+d2 "AQ13. a qualifier subcommand in a sh -c payload" deny <<'EOF'
+sh -c 'git .(:s/./stash/) pop'
+EOF
+d2 "AQ14. a group subcommand after a substitution-built word" deny <<'EOF'
+./g$(:)it st(a)sh pop
+EOF
+d2 "AQ15. a subcommand that opens with its group paren" deny <<'EOF'
+git (sta|x)sh pop
+EOF
+d2 "AQ16. a glob beside a group (denied before and after; pins zcand)" deny <<'EOF'
+git s?(a)sh pop
+EOF
+d2 "AQ17. a qualifier verb after a shell alias ending in git stash" deny <<'EOF'
+gsx list(:s/list/pop/)
+EOF
+d2 "AQ18. a group subcommand after the g=git shell alias" deny <<'EOF'
+g st(a)sh pop
+EOF
+d2 "AQ19. a group subcommand after a backtick-built word" deny <<'EOF'
+./g`:`it st(a)sh pop
+EOF
+d2 "AQ20. a group subcommand after an expanded command word" deny <<'EOF'
+$G st(a)sh pop
+EOF
+d2 "AQ21. a paren-opened subcommand right after a substitution-built word (review floor)" deny <<'EOF'
+./g$(:)it (sta)sh pop
+EOF
+d2 "AQ22. a paren-opened subcommand right after a backtick-built word (review floor)" deny <<'EOF'
+./g`:`it (sta)sh pop
+EOF
+# A glob command word that also starts a qualifier or group word takes
+# the words after the whole zsh word as its arguments, as zsh passes them
+# (`./g?t(x) sp` runs `git sp`). Before DND-1896 it took the pieces inside
+# its paren, found none, and was denied as a word with no arguments.
+d2 "AQ23. a stash alias after a glob and qualifier command word (denied before and after)" deny <<'EOF'
+./g?t(x) sp
+EOF
+d2 "AQ24. a builtin after a glob and qualifier command word" allow <<'EOF'
+./g?t(x) status
+EOF
+d2 "AQ25. a jq object whose word holds a brace and a group" allow <<'EOF'
+jq '{count:(.results|length), has_more}' f
+EOF
+# A line continuation is removed before zsh reads the word, so it neither
+# starts the word nor stays inside it.
+d2 "AQ26. a line continuation before a group subcommand" deny <<'EOF'
+git \
+st(a)sh pop
+EOF
+d2 "AQ27. a line continuation inside a group subcommand" deny <<'EOF'
+git st\
+(a)sh pop
+EOF
+d2 "AQ28. a line continuation before a paren-opened subcommand" deny <<'EOF'
+git \
+(sta|x)sh pop
+EOF
+# A word that may be any text may also be several words or none (an e
+# qualifier setting `reply`, the N qualifier, a group matching several
+# files), so in an option slot or an option value it may be the
+# subcommand, and in plumbing it may be any verb or refspec (review floor).
+d2 "AQ29. a qualifier word in an option slot (review floor)" deny <<'EOF'
+git -(:s/-/stash/) pop
+EOF
+d2 "AQ30. an e qualifier setting -C and the subcommand (review floor)" deny <<'EOF'
+git -C .(oNe:'reply=(. stash)':) pop
+EOF
+d2 "AQ31. an N qualifier vanishing from the -c value (review floor)" deny <<'EOF'
+git -c x(N) a.b=c stash pop
+EOF
+d2 "AQ32. a group matching a dir and a stash file as the -C value (review floor)" deny <<'EOF'
+git -C (a|st(a)sh) pop
+EOF
+d2 "AQ33. an e qualifier spelling a refspec into the stash ref (review floor)" deny <<'EOF'
+git push . .(e,REPLY=:refs/stash,)
+EOF
+d2 "AQ34. a :s qualifier spelling the reflog expire verb" deny <<'EOF'
+git reflog .(:s/./expire/) --all
+EOF
+d2 "AQ35. an e qualifier setting the stash verb (denied before and after)" deny <<'EOF'
+git stash .(e:'reply=(pop x)':)
+EOF
+# Precision: these read-only or non-git forms stay allowed. A group whose
+# only alternative is a read verb is that verb; quoted parens are data.
+d2 "AQ36. a group spelling the list verb" allow <<'EOF'
+git stash l(i)st
+EOF
+d2 "AQ37. prose in parens after a git subcommand" allow <<'EOF'
+git log (see notes)
+EOF
+d2 "AQ38. a quoted paren in a commit message" allow <<'EOF'
+git commit -m "fix (x)" && git log --format='%(x)' -1
+EOF
+d2 "AQ39. a quoted paren in a pathspec and a grep pattern" allow <<'EOF'
+git diff -- 'a(b)' | grep -E '(fix|feat)'
+EOF
+d2 "AQ40. a read verb followed by prose in parens" allow <<'EOF'
+git stash list (read-only)
+EOF
+
 echo "== F: fail-open =="
 run ''
 check "F1. empty stdin" allow
