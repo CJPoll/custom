@@ -1213,11 +1213,13 @@ while [ "${i}" -lt "${GIT_CONFIG_COUNT:-0}" ]; do
     http.https://*/.extraheader)
       dec="$(printf '%s' "${!v#AUTHORIZATION: basic }" | openssl base64 -d -A 2>/dev/null)"
       if [ "${!v}" = "AUTHORIZATION: basic ${X_B64}" ]; then hdr="ok:${dec%%:*}"; else hdr="wrong:${dec%%:*}"; fi ;;
-    gpg.program|gpg.openpgp.program|gpg.x509.program|gpg.ssh.program) gpg="${gpg}${!k}=${!v##*/},"; via=transport ;;
   esac
   i=$((i + 1))
 done
-printf 'start via=%s url=%s hdr=%s gpg=%s argv=%s\n' "${via}" "${url}" "${hdr}" "${gpg}" "$*" >> "${X_STUB_LOG}"
+case "${GIT_CONFIG_PARAMETERS:-}" in *refuse-signing*) via=transport ;; esac
+for k in gpg.program gpg.openpgp.program gpg.x509.program gpg.ssh.program; do gpg="${gpg}${k}=$(git config --get "${k}" | sed 's|.*/||'),"; done
+eff="gpg:$(git config --get gpg.program | sed 's|.*/||'),helper:$(git config --get-all credential.helper | tail -n 1 | sed 's|.*/||'),askpass:$(git config --get core.askPass | sed 's|.*/||')"
+printf 'start via=%s url=%s hdr=%s gpg=%s eff=%s argv=%s\n' "${via}" "${url}" "${hdr}" "${gpg}" "${eff}" "$*" >> "${X_STUB_LOG}"
 repo="${X_FORGE}/${url#https://*/}"
 while IFS= read -r line; do
   case "${line}" in
@@ -1419,6 +1421,16 @@ xgh "${X}/src" -c gpg.program="$(mkprobe c6)" -c user.signingKey=synthetic push 
 if probe_clean c6 && grep -q 'gpg=gpg.program=refuse-signing,gpg.openpgp.program=refuse-signing,gpg.x509.program=refuse-signing,gpg.ssh.program=refuse-signing,' "${X_STUB_LOG}"; then
   ok "C6. a signed push: gpg.program gets no header and finds the grant used; the transport's four signing programs are refuse-signing"
 else bad "C6. signed push" "$(xdiag)"; fi
+
+# C6b (critic round). A caller's own -c beats the environment config
+# channel, and reaches the transport's subtree through GIT_CONFIG_PARAMETERS:
+# gpg.program, credential.helper and core.askPass set by the caller must not
+# be what git uses where the header is.
+x_reset; x_sync; git -C "${X}/src" commit -q --allow-empty -m c6b
+xgh "${X}/src" -c gpg.program="$(mkprobe c6b)" -c credential.helper="$(mkprobe c6h)" -c core.askPass="$(mkprobe c6a)" push -q origin HEAD:main
+if [ "${RC}" = 0 ] && grep -q '^start via=transport .* eff=gpg:refuse-signing,helper:,askpass: ' "${X_STUB_LOG}"; then
+  ok "C6b. a caller's -c gpg.program / credential.helper / core.askPass: inside the transport git uses refuse-signing, no helper and no askpass"
+else bad "C6b. caller -c inside the transport" "$(xdiag)"; fi
 
 # C7. A caller-written athena-forge:: rewrite to another host.
 xdry "${X}/src" -c 'url.athena-forge::https://evil.invalid/.insteadOf=https://github.com/o/' push origin HEAD:main

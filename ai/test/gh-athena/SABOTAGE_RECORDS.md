@@ -162,3 +162,13 @@ Case X1d was added first. On the review-round head (rebased as 8645ae99) the
 transport ran `/bin/true` from a forged grant and exited 0 (`rc=0 out=`), so
 X1d was red. After (the transport resolves `git --exec-path` itself and runs
 the grant's helper only when the two agree): `RESULT: 231 passed, 0 failed`.
+
+The second critic round found that a caller's own `-c` beats the
+environment config channel and reaches the transport's subtree through
+GIT_CONFIG_PARAMETERS, so `-c gpg.program`, `-c credential.helper` and
+`-c core.askPass` still named the programs git used where the header is.
+Case C6b was added first (the fixture helper records the effective config in
+its subtree). On 9e978d9b: `RESULT: 231 passed, 1 failed`,
+`FAIL C6b` with `eff=gpg:p-c6b,helper:p-c6h,askpass:p-c6a`. After (the
+transport appends its values last to GIT_CONFIG_PARAMETERS):
+`RESULT: 232 passed, 0 failed`.

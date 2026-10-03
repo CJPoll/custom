@@ -11,8 +11,10 @@
 #   ATHENA_FG_HOST     the forge host the grant is for (github.com / gitlab.com).
 # git starts this program as `git-remote-athena-forge <remote> <url>`, with the
 # URL after the `athena-forge::` prefix. It drains the pipe, closes it, and
-# execs git's git-remote-https with the header (and four signing programs set
-# to refuse-signing) appended to the environment config channel. Only that one
+# execs git's git-remote-https with the header appended to the environment
+# config channel, and, last in GIT_CONFIG_PARAMETERS where they beat a
+# caller's -c, every signing program set to refuse-signing, the credential
+# helper list reset and no askpass. Only that one
 # process, and the send-pack / fetch-pack it runs, hold the header. A hook, a
 # config or environment command, or a nested git that git starts later finds
 # the pipe empty: its own transport fails here, loudly.
@@ -98,10 +100,20 @@ n="${GIT_CONFIG_COUNT:-0}"
 case "${n}" in '' | *[!0-9]*) n=0 ;; esac
 export "GIT_CONFIG_KEY_${n}=http.https://${host}/.extraheader" "GIT_CONFIG_VALUE_${n}=${header}"
 n=$((n + 1))
-for k in gpg.program gpg.openpgp.program gpg.x509.program gpg.ssh.program; do
-  export "GIT_CONFIG_KEY_${n}=${k}" "GIT_CONFIG_VALUE_${n}=${HERE}/refuse-signing"
-  n=$((n + 1))
-done
 export GIT_CONFIG_COUNT="${n}"
 unset header
+# The programs git-remote-https and its children (send-pack --stateless-rpc
+# signs a push there) may run, where the header is. A caller's own -c beats
+# the environment config channel and reaches this subtree through
+# GIT_CONFIG_PARAMETERS, so these go LAST in GIT_CONFIG_PARAMETERS, where
+# they win: every signing program is refuse-signing, the credential helper
+# list is reset to empty, and there is no askpass.
+sq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+for kv in "gpg.program=${HERE}/refuse-signing" "gpg.openpgp.program=${HERE}/refuse-signing" \
+          "gpg.x509.program=${HERE}/refuse-signing" "gpg.ssh.program=${HERE}/refuse-signing" \
+          "credential.helper=" "core.askPass="; do
+  GIT_CONFIG_PARAMETERS="${GIT_CONFIG_PARAMETERS:+${GIT_CONFIG_PARAMETERS} }$(sq "${kv%%=*}")=$(sq "${kv#*=}")"
+done
+export GIT_CONFIG_PARAMETERS
+unset GIT_ASKPASS SSH_ASKPASS
 exec "${rh}" "$@"
