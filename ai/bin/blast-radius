@@ -4007,8 +4007,9 @@ def self_test
             candidates << lib if File.file?(File.join(repo_root, lib))
           end
         end
-        # DND-1905: a config or data file a held enforcer reads its bar from (a literal ai/config/X.json,
-        # or ../config/X.json from the guard's own directory) is a candidate, so loosening it cannot read COLD.
+        # DND-1905: a config file a held enforcer (the merge guard's red-main content declaration) reads its bar
+        # from is a candidate, so loosening it cannot read COLD. Only the LITERAL forms ai/config/X.json and
+        # ../config/X.json are read, comment lines included (an over-include is harmless; File.file? bounds it).
         line.scan(%r{(?:ai/|\.\./)config/([A-Za-z0-9_.-]+\.json)}) do |(name)|
           cfg = "ai/config/#{name}"
           candidates << cfg if File.file?(File.join(repo_root, cfg))
