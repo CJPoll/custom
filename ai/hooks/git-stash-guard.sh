@@ -220,6 +220,26 @@
 # or a `:`, in command position (awk `length($0) > 80`, ruby
 # `printf("%3d", $.)`).
 #
+# JOINED SUBSTITUTIONS (DND-1897): an unquoted `$(...)` or backtick
+# substitution joined to other text is one zsh word with it, so
+# `./g$(:)it stash pop` and `$(echo ./g)it stash pop` run git. The
+# tokenizer splits such a word at the substitution, and before DND-1897
+# only a literal `stash` right after its closing paren was read. zseg's
+# joining scan now marks every zsh word that holds an unquoted
+# substitution ("exp"), group or not, and analyze judges it in command
+# position like `$GIT`: an expanded command word whose arguments are the
+# words after the whole zsh word, read past a redirection or a line
+# continuation. So it denies a stash write, a stash alias, stash plumbing,
+# or (when the command points git at a config the hook does not read) a
+# non-builtin subcommand, and allows `./g$(:)it status`. A separator after
+# the word ends its arguments. An argument that opens with a paren or a
+# backtick is not read: a substitution there is the `$G $S` class under
+# NOT CATCHABLE, and prose such as `- $(date) (note)` in a quoted payload
+# is no command. A `${...}` expansion never split the word, so the
+# expansion rule already judged it. Accepted false positive, as for `$X`:
+# a quoted payload re-read as a command whose expanded word (`- $(date)`)
+# is followed by prose, under a config the hook does not read (`cd $S`).
+#
 # HERE-STRINGS (DND-1859): a here-string (`<<<word`) is a redirection, so
 # its word is no argument, but it is the text the command reads on stdin.
 # Before DND-1859 it was dropped unread, and `xargs git <<<'stash pop'`,
@@ -817,7 +837,9 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   # substitution inside the word, and reads a `(` right after one as a
   # group (`./g$(:)(i|x)t` runs git); it judges only the words that hold a
   # substitution, which the first scan split, while the first scan still
-  # finds the words inside the substitution, which zsh runs too.
+  # finds the words inside the substitution, which zsh runs too. A joined
+  # word that holds a substitution and no group gets the verdict "exp"
+  # (DND-1897): analyze judges it like `$GIT`.
   # The verdict goes on the first tokenized word inside the zsh word (ZV);
   # its arguments are the words after it up to the next simple-command
   # start, read only when nothing but blanks separates them from it (ZA).
@@ -830,17 +852,31 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
     for (jm = 0; jm <= 1; jm++) {
       ns = zscan(text, L, jm, BRK, OPC, GG, SS, SE, SH, SP, SX)
       for (g = 1; g <= ns; g++) {
-        if (!SH[g] || (jm && !SX[g])) continue
+        if (jm ? !SX[g] : !SH[g]) continue
         for (k = 1; k <= n && WS[k] < SS[g]; k++) ;
         if (k > n || WS[k] > SE[g] || (k in ZV)) continue
         # Text before the first word that is no group paren was dropped by
         # the tokenizer: the zsh word is a redirection target, not a
         # command (`-> IO.inspect(reason)` in a heredoc).
         if (WS[k] > SS[g] && substr(text, SS[g], WS[k] - SS[g]) !~ /^[(]+$/) continue
-        ZV[k] = SP[g] ? "err" : zwcat(substr(text, SS[g], SE[g] - SS[g] + 1)); ZA[k] = 0; ZB[k] = 0; ZP[k] = (WS[k] > SS[g])
+        ZV[k] = SP[g] ? "err" : (SH[g] ? zwcat(substr(text, SS[g], SE[g] - SS[g] + 1)) : "exp"); ZA[k] = 0; ZB[k] = 0; ZP[k] = (WS[k] > SS[g])
         for (a = k; a <= n && WS[a] <= SE[g]; a++) ;
         if (a > n) continue
         gp = substr(text, SE[g] + 1, WS[a] - SE[g] - 1)
+        # DND-1897: a word built by a joined substitution ("exp") keeps its
+        # arguments past a redirection or a line continuation, as the
+        # tokenizer reads them (`./g$(:)it 2>/dev/null stash pop`): its
+        # rule denies only on a stash write, so an unread argument would
+        # be a miss. A separator ends the command (ZA 0). So does an
+        # argument that opens with a paren or a backtick: a subcommand
+        # built by substitution after an expanded command word is the
+        # `$G $S` class under NOT CATCHABLE, and prose such as `- $(date)
+        # (note)` in a quoted payload is no command.
+        if (!SH[g]) {
+          gsub(/\\\n|[0-9]*(&>|>&|<&)/, "", gp)
+          if (gp !~ /[;&|\n()`]/) { ZA[k] = a; ZB[k] = a; while (ZB[k] < n && !SB[ZB[k] + 1]) ZB[k]++ }
+          continue
+        }
         if (gp ~ /[<>]/ || gp ~ /^[ \t]*(\\\n[ \t]*)+$/) { ZA[k] = -1; continue }
         if (gp !~ /^[ \t]*$/) continue
         ZA[k] = a; ZB[k] = a
@@ -1578,7 +1614,7 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   }
   # analyze(text, depth): the most specific finding in text (see rank), or
   # "" when it runs no stash write. It stops early only on a literal stash.
-  function analyze(text, depth,    W, QF, SB, UX, PQ, AS, SC, QM, AD, ZV, ZA, ZB, ZP, HT, HI, HA, PB, h, hf, hc, n, k, e, r, sw, m, i, cp, rs, prs, ap, pap, asgw, t, j, x, best, gc, ra, tbe, pgc, so, ne, pcp, zcp) {
+  function analyze(text, depth,    W, QF, SB, UX, PQ, AS, SC, QM, AD, ZV, ZA, ZB, ZP, HT, HI, HA, PB, h, hf, hc, n, k, e, r, sw, m, i, cp, rs, prs, ap, pap, asgw, t, j, x, best, gc, ra, tbe, pgc, so, ne, pcp, zcp, xw, xn) {
     # Past the nesting bound, text that still names stash is a deny.
     if (depth > 8) {
       if (!mentions_stash(text)) return ""
@@ -1732,6 +1768,18 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
         # redirection or a line continuation after it) may run anything:
         # judge it as may be git, with no arguments, which denies.
         else if (ZA[k] < 0 && gc == "glob") gc = "git"
+      }
+      # DND-1897: word k starts a zsh word built by a joined `$(...)` or
+      # backtick substitution (`./g$(:)it`, `$(echo ./g)it`), which the
+      # tokenizer split at the substitution. It is judged like `$GIT`: an
+      # expanded command word whose arguments are the words after the
+      # whole zsh word (ZA..ZB; none when ZA is 0).
+      if (zcp && !asgw && k > tbe && gc != "git" && (k in ZV) && ZV[k] == "exp") {
+        delete xw; xn = 0
+        if (ZA[k] > 0) for (i = ZA[k]; i <= ZB[k]; i++) xw[++xn] = W[i]
+        r = git_verdict(xw, xn, 1, 1, 0)
+        note(r, W, k, (ZA[k] > 0 ? ZB[k] : k), depth, 0)
+        best = better(best, r)
       }
       if (gc == "git") {
         for (i = 1; i <= m && sw[i] ~ /^-/; i++) ;

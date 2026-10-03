@@ -1485,6 +1485,79 @@ d2 "HS39. a reader piped into another reader" allow <<'EOF'
 grep x <<<'git stash pop' | wc -l
 EOF
 
+echo "== CS: a command substitution joined into a command word (DND-1897) =="
+# An unquoted `$(...)` or backtick substitution splits the tokenized word,
+# but zsh keeps the text around it one word: `./g$(:)it` runs ./git. Each
+# deny case ran a fake ./git under zsh 5.9 in a scratch dir, and each was
+# ALLOWED before DND-1897. The word is judged like `$GIT`: denied when a
+# stash write or a stash alias follows it.
+d2 "CS1. an empty command substitution inside git" deny <<'EOF'
+./g$(:)it stash pop
+EOF
+d2 "CS2. an empty backtick substitution inside git" deny <<'EOF'
+./g`:`it stash pop
+EOF
+d2 "CS3. a substitution filling a letter of git" deny <<'EOF'
+./g$(echo i)t stash pop
+EOF
+d2 "CS4. a word that starts with a substitution" deny <<'EOF'
+$(echo ./g)it stash pop
+EOF
+d2 "CS5. two joined substitutions and a stash alias" deny <<'EOF'
+$(echo ./g)$(echo it) sp
+EOF
+d2 "CS6. a joined substitution and a stash alias" deny <<'EOF'
+./g$(:)it sp
+EOF
+d2 "CS7. a joined substitution after an assignment" deny <<'EOF'
+X=1 ./g$(:)it stash pop
+EOF
+d2 "CS8. a joined substitution after env" deny <<'EOF'
+env ./g$(:)it stash pop
+EOF
+d2 "CS9. a joined backtick after nohup" deny <<'EOF'
+nohup ./g`:`it stash pop
+EOF
+d2 "CS10. a git option before the stash write" deny <<'EOF'
+./g$(:)it -c a=b stash pop
+EOF
+d2 "CS11. a redirection between the word and the stash write" deny <<'EOF'
+./g$(:)it 2>/dev/null stash pop
+EOF
+d2 "CS12. a joined substitution in a sh -c payload" deny <<'EOF'
+sh -c './g$(:)it stash pop'
+EOF
+d2 "CS19. an fd-duplicating redirection before the stash write" deny <<'EOF'
+./g$(:)it >&2 stash pop
+EOF
+d2 "CS20. a line continuation before the stash write" deny <<'EOF'
+./g$(:)it \
+ stash pop
+EOF
+# Precision: these pass before and after. A joined substitution with a
+# read-only verb, or an argument that is no stash write, stays allowed.
+d2 "CS13. a joined substitution with stash list" allow <<'EOF'
+./g$(:)it stash list
+EOF
+d2 "CS14. a joined substitution with status" allow <<'EOF'
+./g$(:)it status
+EOF
+d2 "CS15. a toplevel path built by a substitution" allow <<'EOF'
+$(git rev-parse --show-toplevel)/bin/check --fast 2>/dev/null
+EOF
+d2 "CS16. a substitution in an argument" allow <<'EOF'
+echo $(date)x stash list; ls a$(echo b)
+EOF
+d2 "CS17. a separator ends the command after the word" allow <<'EOF'
+./b$(:)in/build && sp
+EOF
+d2 "CS21. an expanded argument after a substitution-built word" allow <<'EOF'
+$(git rev-parse --show-toplevel)/bin/tool "$ARG"
+EOF
+d2 "CS18. a dated log line whose prose opens with a paren" allow <<'EOF'
+echo "- $(date -u +%H:%MZ) (a1b2c3, after handoff) captain returned DONE" >> log.md
+EOF
+
 echo "== F: fail-open =="
 run ''
 check "F1. empty stdin" allow
