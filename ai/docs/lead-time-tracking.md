@@ -296,7 +296,9 @@ a property, so the move is recorded as it happens:
   with no captain, or moved through `Attention Given`) is not a park to the
   tool, so its span is counted.
 - A follow-up PR on a ticket that already landed once inherits the first
-  dispatch, so it reads long.
+  dispatch, so it reads long. `lead-time` accepts that. The phase ledger does
+  not: its `implement` for a later landing starts at the follow-up dispatch
+  or the previous landing (DND-1904).
 - A batch Mission stamps all its tickets at one dispatch, so they share a
   start. That is real, not an artefact.
 - A stamp set with `--backfill --at` is only as good as the record it came
@@ -564,7 +566,9 @@ keeps the start it was ingested with.
 (DND-1095 landed commits before its 2026-10-03 re-dispatch). After the
 restart, `lead-time` reads each earlier landing as could-not-measure ("start
 … is after the landing"), never as a negative lead. That is the same
-one-stamp limit as a follow-up PR (*Where it can misattribute*).
+one-stamp limit as a follow-up PR (*Where it can misattribute*). The phase
+ledger's `implement` is not bound by it: a later landing starts at its
+follow-up `ticket.dispatched`, else the previous landing (DND-1904).
 
 **The phase ledger after a restart.** A resumed captain has usually run a
 gate before the park. `lead-time-phases` takes `implement` to the first gate

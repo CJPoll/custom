@@ -114,6 +114,20 @@ Lead time is the owner's definition: captain dispatch (the ticket's
    | `integrate` | integration-gate start | its end (receipt) |
    | `merge` | integration-gate end | the landing push |
 
+   **Later (2026-10-03, DND-1904):** `implement` started at the dispatch
+   stamp for every landing, so a later landing of an already-landed ticket
+   held the first landing's span and the idle gap between them, and the
+   first landing's row had already counted that span. A ticket's first
+   landing is unchanged. A later landing starts `implement` at
+   max(stamp, S): S is the unit's earliest `ticket.dispatched` after the
+   previous landing, else the previous landing. The row records the anchor
+   source and `implement_inherited_s` (start minus stamp); `code_s` still
+   starts at the stamp, so `--summary` reports the moved span as
+   `unattributed.inherited_s` and `unattributed.sum_s` leaves it out. The
+   phases telescope to landing minus the `implement` start. Rows already in
+   the ledger keep their start (`--rejoin` does not re-derive `implement`).
+   **The series breaks here for `implement`** (`ai/config/lead-time-series-breaks.json`).
+
    Counters ride along: gate runs, gate wall total, slot wait total, critic
    rounds and BLOCKs, critic wall total, lock wait, the top per-check walls on
    the landed head. A missing anchor makes its two adjacent phases n/a with a

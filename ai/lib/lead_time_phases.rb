@@ -497,8 +497,16 @@ module LeadTimePhases
       missing("dispatch stamp: #{landing['start_na'] || "no stamp for #{landing['ticket']}"}")
     end
 
+    # A store that could not be read is not "no follow-up dispatch": with no
+    # follow-up found, the anchor is missing and says so, never the previous
+    # landing as if the lookup had come back empty.
     def later_landing(landing, dispatches, stamp)
-      follow = dispatches ? Match.for_unit(dispatches.items, landing, "ticket.dispatched").map { |e| Match.at(e) }.min : nil
+      follow = earliest_follow_up(landing, dispatches)
+      if follow.nil? && (dispatches.nil? || dispatches.could_not_look?)
+        return missing("implement start: follow-up dispatch could not be looked up " \
+                       "(telemetry: could not look: #{dispatches&.reason || 'no dispatch events given'})")
+      end
+
       floor_at, source = if follow
                            [Util.floor(follow), "follow-up ticket.dispatched #{Util.iso(Util.floor(follow))}"]
                          else
@@ -508,6 +516,12 @@ module LeadTimePhases
       return stamp if stamp.at >= floor_at
 
       found(floor_at, source)
+    end
+
+    def earliest_follow_up(landing, dispatches)
+      return nil unless dispatches
+
+      Match.for_unit(dispatches.items, landing, "ticket.dispatched").map { |e| Match.at(e) }.min
     end
 
     # Whole seconds a later landing's implement start moved past its stamp

@@ -1507,6 +1507,27 @@ check("D8 the follow-up is read from the dispatch events when given apart from t
   sep["dispatch"].at == t(D2)
 end
 
+unread = fixture { anchors(l2, S.ok([G2_RUN]), dispatches: S.could_not_look("store unreadable")) }
+check("D12 an unreadable dispatch store is a missing anchor naming it, never the previous landing") do
+  unread["dispatch"].at.nil? && unread["dispatch"].reason.include?("could not look: store unreadable") &&
+    L::Phases.compute(unread).dig("implement", "s").nil?
+end
+partial = fixture { anchors(l2, S.ok([G2_RUN]), dispatches: S.could_not_look("partial", [follow_up(D2)])) }
+check("D12 a partial read that did find the follow-up still anchors on it") { partial["dispatch"].at == t(D2) }
+no_stamp_l2 = second_landing(start: nil)
+check("D12 a later landing with no stamp stays n/a and has no inherited span") do
+  a = fixture { anchors(no_stamp_l2, S.ok([follow_up(D2), G2_RUN])) }
+  a["dispatch"].at.nil? && L::Anchors.inherited_s(no_stamp_l2, a).nil?
+end
+
+# A first gate run recorded before the follow-up dispatch event (the captain
+# worked before mark-in-progress ran) reads invalid, as for any gate before its
+# dispatch anchor; it is not hidden as a clamped 0.
+early_gate = ev("harness_gate.run", "2026-10-02T00:30:00Z", duration_s: 60.0, attrs: { "ok" => true })
+check("D13 a first gate before the follow-up dispatch: implement is invalid, not clamped") do
+  fixture { L::Phases.compute(anchors(l2, S.ok([follow_up(D2), early_gate, G2_RUN]))) }.dig("implement", "invalid") == true
+end
+
 # The ledger row: the first row has no new key, the later one records the moved span.
 ingested = t("2026-10-03T00:00:00Z")
 row_first = fixture do
