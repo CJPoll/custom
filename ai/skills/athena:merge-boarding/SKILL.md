@@ -87,7 +87,9 @@ The landing, as Cody confirmed it (2026-10-01):
    `origin/main` if main moved. Record the fetched `origin/main` SHA: it is
    the landed range's base in steps 3 and 5.
 3. A **clean** rebase (no textual or semantic conflict, *Merge one at a time*)
-   lands with no re-gate: push the rebased head
+   lands with no re-gate. After the rebase, compare the head's migration
+   versions with the fetched `origin/main`'s; a shared version is a semantic
+   conflict, so go to step 4. Push the rebased head
    fast-forward (`gh-athena git push origin <sha>:main`), still under the
    lock, then release it. The pushed SHA is not the reported one; the clean
    rebase carries the reported head's gate and verdict. `gh-athena` checks
@@ -104,8 +106,8 @@ The landing, as Cody confirmed it (2026-10-01):
    --to <the head>`. If it names an installer and nothing authorizes you to
    run it (step 5), do not push: release the lock, hold the landing, and
    report the install as the step awaiting authorization.
-4. A **conflicted** rebase, textual or semantic, is the one case that needs a
-   full re-gate: release the lock, resolve the conflict, run `integration-gate --with-critic` on the
+4. A **conflicted** rebase, textual or semantic, is the one case that needs
+   a full re-gate: release the lock, resolve the conflict, run `integration-gate --with-critic` on the
    new head, and start again.
 5. **Fast-forward, install, then check `main` after the push**, outside the
    lock, in this order:
@@ -181,8 +183,8 @@ the lock gating DND-1359, whose push then failed NOT-FF and cost a re-gate.
 with the risk of multiple merges at the same time; sometimes that will cause
 issues and we'll fix those asap. The velocity increase is worth the risk of
 incompatible concurrent merges." "That is true for both custom and gen_saas."
-A rebase onto a moved main with no textual or semantic conflict is accepted
-without a re-gate. The lock still serialises the push itself.
+A clean rebase onto a moved main is accepted without a re-gate. The lock
+still serialises the push itself.
 
 For any other no-CI repo, land CI first, or escalate the merge to Cody as a
 step only Cody can run. Measured 2026-09-29 (`2026-09-25-dnd-671-650-644`,
@@ -709,8 +711,7 @@ above had no exception: a rebase always needed a new gate and verdict, and the
 SHA landed was always the one `INTEGRATION OK` names. Superseded by the
 owner's landing doctrine as the DND-1463 ticket records it: custom lands by a
 clean rebase plus ff push, with `custom-merge.lock` around the push only, and
-re-gates only after a conflicted rebase (textual or semantic, *Merge one at
-a time*). Cody's words behind it are quoted
+re-gates only after a conflicted rebase. Cody's words behind it are quoted
 under the no-CI landing in *The merge bar*.
 
 **Later (2026-09-27, DND-965):** this paragraph said the gate "never rebases or
@@ -795,7 +796,8 @@ can each pass the gate and fail together: the admiral's rendered-line budget is
 a single global number (496/500 today — four lines of headroom), and
 `ai/hooks/registry.json` / `ai/inbox/registry.json` are single documents. Git
 sees no conflict. Since DND-1463 that combination is **not gated before it
-lands**: each car's gate ran on its own base, and a car whose base main has
+lands** (a migration-version collision is the exception, *Merge one at a
+time*): each car's gate ran on its own base, and a car whose base main has
 moved past lands without a re-gate. The defect is caught after landing, by the
 next gate that runs on a `main` containing both (gen_saas: its post-merge CI;
 `~/dev/custom`: the next `integration-gate`, see the no-CI landing above), and
@@ -811,9 +813,9 @@ integration result runs only after a conflict.
 merge call itself stays serial under the lock. But a receipt whose recorded
 base is an **ancestor** of current `origin/<base>` is accepted: car N landing
 does not invalidate car N+1's gate. Car N+1 lands if its head merges into the
-new tip with no conflict. A textual conflict is refused (by `locked-merge`
-before the call, and by GitHub). A semantic conflict is not: see below. Only
-then do you bring main in and re-gate: merge
+new tip with no textual conflict. A textual conflict is refused (by
+`locked-merge` before the call, and by GitHub); a semantic one is not (see
+below). On either, bring main in and re-gate: merge
 `origin/<base>` into a published PR branch (never rebase it), or rebase an
 unpublished one, resolve, and re-gate. Stop the line on a red main or a failed
 deploy: land nothing more until it is fixed.
