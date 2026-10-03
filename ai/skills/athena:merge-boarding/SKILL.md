@@ -753,12 +753,12 @@ Re-run `integration-gate`; never merge on it. A `--with-critic` judge is still
 joined first, so its verdict is recorded and the re-run does not pay for it
 again. `test-slot --status` names what holds the pool. A test-slot missing
 from the main checkout (`~/dev/custom/ai/bin/test-slot`) is exit 2: update that
-checkout; the gate never runs unslotted. **Exit 7 means another gate holds this
+checkout; the gate never runs unslotted. `--slot-wait-timeout <secs>` sets the wait. It can only turn a wait
+into exit 6, never into a pass. **Exit 7 means another gate holds this
 worktree** (DND-1878): one gate per worktree, a flock on `<git dir>/integration-gate.lock`
 held for the whole run. The refused run starts nothing and writes no receipt; its
 `Fix:` names the holder's pid. Block on it (`timeout 1500 tail --pid=<pid> -f /dev/null`)
-and read its receipt. Neither OK nor RED. `--slot-wait-timeout <secs>` sets the wait. It can only turn a wait
-into exit 6, never into a pass. Running `integration-gate` itself under
+and read its receipt. It is neither OK nor RED. Running `integration-gate` itself under
 `test-slot` (the captain brief's form) is safe: the inner wrap sees the slot it
 already holds and does not queue again. A dirty tree and missing `--with-critic`
 tools are refused before the wait, so they never cost a queue. The
