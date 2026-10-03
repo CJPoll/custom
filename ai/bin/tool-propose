@@ -1,0 +1,803 @@
+#!/usr/bin/ruby
+# frozen_string_literal: true
+
+# tool-propose — turn a written-down gap (committed harness-eval bin-stdin
+# target cases) into ONE measured, human-reviewable proposal for a NEW
+# ai/bin tool (DND-176, epic "Harness — sandboxed tool creation"). It never
+# adopts: no ref, no commit on any host repo, no PR. Operator doc:
+# ai/docs/tool-propose.md.
+#
+#   ai/bin/tool-propose --case PREFIX [--case PREFIX ...] --out-dir DIR [--candidate FILE] [--timeout SECS]
+#
+# Flow (R2-5; every input exists at its step):
+#   1. strict argv; --out-dir checked first (new or empty, under the temp root
+#      or the state dir, in no git tree, not under ~/.claude or ~/dev).
+#   2. base = origin/main, resolved once. Targets read at base (ls-tree,
+#      cat-file), never the working tree; REJECTED before any cost if invalid.
+#   3. The candidate: --candidate FILE (data), or ONE text-only proposer call.
+#      Shape review on the string; REJECTED before any clone if it fails.
+#   4. Clone A (tool-sandbox --prepare-clone at base). The candidate commit is
+#      built there with plumbing on a temp index; proposal.diff is read. All
+#      host git on A happens here, before A's first sandbox run.
+#   5. A is marked used, then test-slot + tool-sandbox runs variant-eval over
+#      it. /out is read as untrusted data (no symlink, 1 MiB).
+#   6. BLOCKED: the baseline gate on a FRESH clone B. KEEP with every target
+#      fixed: each target re-run alone in its own fresh sandbox (the isolated
+#      re-check), classified by the host.
+#   7. Label.decide; the out-dir is written from host memory, proposal.md last;
+#      the label is printed only after every write succeeded.
+#   8. ensure: the scratch tree (clones, case dirs) is removed on every path.
+#
+# Exit: 0 RECOMMENDED; 1 REJECTED / NOT RECOMMENDED; 2 usage (incl. a refused
+# --out-dir); 3 an infrastructure fault (never a RECOMMENDED line).
+#
+# 5-bucket layout: Framework (CLI_SPEC, main) and Manager (Manager.run) here;
+# Domain in ai/lib/tool_propose/{target,candidate,label,out_dir}.rb; Side
+# Effects in ai/lib/tool_propose/adapters.rb, the ONE exec site (capture,
+# guarded by command_allowed?). --self-test drives the Manager with fake
+# adapters (no git, no model, no bwrap) and proves the containment; the
+# end-to-end suite is ai/lib/test/tool-propose/self-test.sh.
+#
+# Stdlib only; run with the system ruby.
+
+require "json"
+require "stringio"
+require "tmpdir"
+require_relative "../lib/strict_argv"
+require_relative "../lib/tool_propose/target"
+require_relative "../lib/tool_propose/candidate"
+require_relative "../lib/tool_propose/label"
+require_relative "../lib/tool_propose/out_dir"
+require_relative "../lib/tool_propose/adapters"
+
+TP = ToolPropose
+CUSTOM_DIR = File.expand_path("../..", __dir__)
+DEFAULT_TIMEOUT = 3600
+
+# ---------------------------------------------------------------------------
+# MANAGER — orchestrates adapters and the domain; returns an exit code.
+# ---------------------------------------------------------------------------
+module Manager
+  class Reject < StandardError
+    attr_reader :raw
+
+    def initialize(msg, raw: nil)
+      super(msg)
+      @raw = raw
+    end
+  end
+
+  module_function
+
+  # opts: cases:, candidate: (path or nil), timeout:, run_id:
+  # out: where the label is printed. -> exit code
+  def run(opts, io, out: $stdout)
+    st = { run_id: opts[:run_id], targets: [], guard: nil, base: nil, cand: nil, isolated: nil, scorecard: nil }
+    label = begin
+      decide(opts, io, st)
+    rescue Reject => e
+      io.write_out("rejected-candidate.txt", e.raw) if e.raw
+      { label: e.message, exit: 1 }
+    end
+    md = TP::Proposal.render(label: label, targets: st[:targets], guard: st[:guard], run_id: st[:run_id],
+                             cand_sha: st[:cand], base_sha: st[:base], scorecard: st[:scorecard], isolated: st[:isolated])
+    io.write_out("proposal.md", md) # last: a failed write raises Infra before any label is printed
+    out.puts label[:label]
+    out.puts "  proposal: #{File.join(opts[:out_dir].to_s, 'proposal.md')}" if opts[:out_dir]
+    label[:exit]
+  end
+
+  def decide(opts, io, st)
+    base = io.base_sha
+    st[:base] = base
+    target = targets(opts, io, base)
+    st[:guard] = target[:guard]
+    st[:targets] = target[:cases].map { |c| { name: c[:name], expect: c[:expect] } }
+
+    text = candidate(opts, io, target)
+    risk, gate = gate_files(io, base, target[:guard])
+    files = TP::Candidate.files(guard: target[:guard], text: text, run_id: st[:run_id], risk: risk, gate: gate)
+
+    io.with_scratch { measure(opts, io, st, target, files) }
+  end
+
+  def targets(opts, io, base)
+    names = io.fixture_names(base)
+    ok, picked = TP::Target.resolve(opts[:cases], names, sha: base)
+    raise Reject, "REJECTED: target: #{picked}" unless ok == :ok
+
+    metas = picked.map do |name|
+      meta = TP::Target.parse_meta(io.blob(base, "ai/eval/fixtures/#{name}/meta").to_s)
+      input = meta["input"].to_s
+      bytes = TP::Target::INPUT_NAME_RE.match?(input) ? io.blob(base, "ai/eval/fixtures/#{name}/#{input}") : nil
+      { name: name, meta: meta, input: bytes }
+    end
+    guard = metas.first[:meta]["guard"].to_s
+    existing = if TP::Target::GUARD_NAME_RE.match?(guard)
+                 { bin: io.exists?(base, "ai/bin/#{guard}"),
+                   self_test: io.exists?(base, TP::Candidate.self_test_rel(guard)) }
+               else
+                 { bin: false, self_test: false } # validate refuses the name before it reads these
+               end
+    ok, target = TP::Target.validate(metas, existing: existing)
+    raise Reject, "REJECTED: target: #{target}" unless ok == :ok
+
+    target
+  end
+
+  def candidate(opts, io, target)
+    raw = if opts[:candidate]
+            io.read_candidate(opts[:candidate])
+          else
+            proposed(io, target)
+          end
+    ok, why = TP::Candidate.validate(raw)
+    raise Reject.new("REJECTED: candidate: #{why}", raw: raw) unless ok == :ok
+
+    raw
+  end
+
+  def proposed(io, target)
+    ok, out, err, stray = io.propose(TP::Candidate.prompt(guard: target[:guard], cases: target[:cases]))
+    unless stray.empty?
+      raise Reject.new("REJECTED: candidate: the proposer left #{stray.size} file(s) in its empty cwd; " \
+                       "containment failed, the reply is not used", raw: out)
+    end
+    raise Reject.new("REJECTED: candidate: the proposer failed (#{err.to_s.lines.last.to_s.strip[0, 160]})", raw: out) unless ok
+
+    ok, text = TP::Candidate.extract(out)
+    raise Reject.new("REJECTED: candidate: #{text}", raw: out) unless ok == :ok
+
+    text
+  end
+
+  def gate_files(io, base, guard)
+    ok, risk = TP::Candidate.risk_text(io.blob(base, TP::Candidate::RISK_REL).to_s, guard)
+    raise TP::Infra, "#{risk}. Fix: check ai/tools/risk.yml at origin/main." unless ok == :ok
+
+    ok, gate = TP::Candidate.gate_text(io.blob(base, TP::Candidate::GATE_REL).to_s, guard)
+    raise TP::Infra, "#{gate}. Fix: update ToolPropose::Candidate.gate_text to harness-gate's layout." unless ok == :ok
+
+    [risk, gate]
+  end
+
+  def measure(opts, io, st, target, files)
+    base = st[:base]
+    repo = io.prepare_clone("a", base)
+    cand = io.build_commit(repo, base, files)
+    st[:cand] = cand
+    diff, paths = io.diff(repo, base, cand)
+    ok, why = TP::Candidate.check_paths(paths, target[:guard])
+    raise Reject, "REJECTED: candidate: #{why}" unless ok == :ok
+
+    files.each { |path, (_mode, bytes)| io.write_out("candidate/#{path}", bytes) }
+    io.write_out("proposal.diff", diff)
+
+    io.mark_used(repo) # from here on, no host process runs in or on clone A
+    code = io.variant_eval(repo, cand, base, opts[:timeout])
+    raw = io.read_out("scorecard.json")
+    txt = io.read_out("scorecard.txt")
+    io.write_out("scorecard.json", raw) if raw
+    io.write_out("scorecard.txt", txt) if txt
+    st[:scorecard] = txt || raw
+
+    json = raw.nil? ? nil : raw
+    args = { json: json, cand_sha: cand, base_sha: base, targets: st[:targets], sandbox_exit: code,
+             baseline_gate: nil, isolated: nil }
+    first = TP::Label.decide(**args)
+    if blocked?(json, code)
+      args[:baseline_gate] = io.baseline_gate(base, opts[:timeout])
+      return TP::Label.decide(**args)
+    end
+    return first unless first[:recheck]
+
+    st[:isolated] = io.isolated(target[:guard], files["ai/bin/#{target[:guard]}"][1], target[:cases])
+    TP::Label.decide(**args, isolated: st[:isolated])
+  end
+
+  # Only a measured BLOCKED (a parsable JSON for this run) earns the second,
+  # baseline gate run; Label re-checks the identity of the JSON itself.
+  def blocked?(json, code)
+    return false unless [0, 1].include?(code) && json
+
+    JSON.parse(json).then { |d| d.is_a?(Hash) && d["verdict"] == "blocked" }
+  rescue JSON::ParserError
+    false
+  end
+end
+
+# ---------------------------------------------------------------------------
+# FRAMEWORK — argv, --help, dispatch.
+# ---------------------------------------------------------------------------
+CLI_SPEC = {
+  "--case" => :value, "--out-dir" => :value, "--candidate" => :value, "--timeout" => :integer,
+  "--self-test" => :switch, "--help" => :switch
+}.freeze
+
+HELP = <<~TXT
+  Usage:
+    ai/bin/tool-propose --case PREFIX [--case PREFIX ...] --out-dir DIR [--candidate FILE] [--timeout SECS]
+    ai/bin/tool-propose --self-test    manager + containment suite (fake adapters: no git, no model, no bwrap)
+    ai/bin/tool-propose --help         this text
+
+  Proposes ONE new ai/bin tool for committed harness-eval bin-stdin target cases
+  and measures it inside ai/bin/tool-sandbox with `variant-eval --corpus
+  deterministic`. It never adopts: no ref, no commit on a host repo, no PR.
+
+  Options:
+    --case PREFIX    a target fixture under ai/eval/fixtures at origin/main (full
+                     name or a unique prefix); repeat it. Together the targets must
+                     be bin-stdin, name ONE tool that does not exist yet, and hold
+                     >=1 expect=fires and >=1 expect=clean case.
+    --out-dir DIR    absolute, new or empty, beneath #{Dir.tmpdir} or
+                     $XDG_STATE_HOME/athena/tool-propose/; in no git work tree and
+                     not under ~/.claude or ~/dev. Receives proposal.md,
+                     proposal.diff, candidate/, scorecard.json, scorecard.txt
+                     (rejected-candidate.txt on a rejection).
+    --candidate FILE a human-written tool (read as data) instead of the one
+                     text-only model call; it takes the identical checks.
+    --timeout SECS   the sandboxed measurement's wall limit (default #{DEFAULT_TIMEOUT}, max 7200)
+
+  Labels (exactly one):
+    RECOMMENDED — MEASURED IMPROVEMENT; human adoption required       exit 0
+    NOT RECOMMENDED: UNMEASURED | gate red | regression | target not fixed (…)   exit 1
+    REJECTED: target: … | REJECTED: candidate: …                      exit 1
+  A usage error (incl. a refused --out-dir) exits 2; an infrastructure fault
+  exits 3 with Fix: and never prints RECOMMENDED.
+
+  #{TP::Label::ADOPTION}
+TXT
+
+# -> [opts, nil] or [nil, reason]
+def parse_cli(argv)
+  cases = []
+  rest = []
+  i = 0
+  while i < argv.size # --case repeats; StrictArgv refuses a repeated flag, so collect it here
+    if argv[i] == "--case"
+      val = argv[i + 1]
+      return [nil, "--case needs a value"] if val.nil? || val.empty? || val.start_with?("-")
+
+      cases << val
+      i += 2
+    else
+      rest << argv[i]
+      i += 1
+    end
+  end
+  o = StrictArgv.parse(rest, CLI_SPEC.reject { |k, _| k == "--case" })
+  if o["--self-test"]
+    return [nil, "--self-test takes no other flag"] unless o.keys == ["--self-test"] && cases.empty?
+
+    return [{ self_test: true }, nil]
+  end
+  return [nil, "--case is required (at least one fires and one clean target)"] if cases.empty?
+  return [nil, "--out-dir is required"] unless o["--out-dir"]
+
+  timeout = o.fetch("--timeout", DEFAULT_TIMEOUT)
+  return [nil, "--timeout #{timeout} is outside 1-7200"] unless (1..7200).cover?(timeout)
+
+  [{ cases: cases, out_dir: o["--out-dir"], candidate: o["--candidate"], timeout: timeout }, nil]
+rescue StrictArgv::UsageError => e
+  [nil, e.message]
+end
+
+def usage_error(reason, err = $stderr)
+  err.puts "tool-propose: usage error — #{reason}."
+  err.puts "  Fix: re-run with the flags `ai/bin/tool-propose --help` lists: one --case per target fixture and an " \
+           "absolute --out-dir that is new or empty beneath the temp root (or $XDG_STATE_HOME/athena/tool-propose/), " \
+           "outside every git tree. An unrecognised argument is refused, never ignored."
+  2
+end
+
+def infra_error(err_io, message)
+  err_io.puts "tool-propose: FAILED — #{message}"
+  unless message.include?("Fix:")
+    err_io.puts "  Fix: this is an environment fault or a defect, not a label; nothing was recommended. Check that " \
+                "origin/main is fetched and `ai/bin/tool-sandbox --self-test` passes, then re-run."
+  end
+  3
+end
+
+def run_id
+  "#{Time.now.utc.strftime('%Y%m%dT%H%M%SZ')}-#{Process.pid}"
+end
+
+def main(argv)
+  opts, reason = parse_cli(argv)
+  return usage_error(reason) if reason
+  return self_test if opts[:self_test]
+
+  if opts[:candidate] && !(File.file?(opts[:candidate]) && File.readable?(opts[:candidate]))
+    return usage_error("--candidate #{opts[:candidate]} is not a readable file")
+  end
+  why = TP::OutDir.problem(TP::OutDirFacts.gather(opts[:out_dir]))
+  return usage_error(why) if why
+
+  out_dir = TP::OutDirFacts.gather(opts[:out_dir])[:realpath]
+  Dir.mkdir(out_dir, 0o700) unless File.directory?(out_dir)
+  opts = opts.merge(out_dir: out_dir, run_id: run_id)
+  Manager.run(opts, TP::Adapters.new(custom_dir: CUSTOM_DIR, out_dir: out_dir, run_id: opts[:run_id]))
+rescue TP::MutationAttempt, TP::Infra => e
+  infra_error($stderr, e.message)
+rescue SignalException => e
+  $stderr.puts "tool-propose: interrupted (#{e.message}); the scratch tree was removed and nothing was recommended."
+  $stderr.puts "  Fix: re-run it if the interruption was not intended."
+  128 + (e.signo || 15)
+rescue StandardError => e
+  infra_error($stderr, "#{e.class}: #{e.message}")
+end
+
+# ---------------------------------------------------------------------------
+# --self-test — Manager with fake adapters (no git, no model, no bwrap) +
+# containment (QA plan M-*, C-*).
+# ---------------------------------------------------------------------------
+class FakeAdapters
+  BASE = "b" * 40
+  CAND = "c" * 40
+  GATE = "x = 1\nINLINE_SELF_TEST_COVERED_BY = {\n}.freeze\n"
+  RISK = "default: destructive\ntools:\n  block-optimize: { class: idempotent, reason: propose }\n"
+
+  attr_reader :calls, :out, :prompts, :blobs_written
+
+  def initialize(**over)
+    @cfg = {
+      fixtures: %w[20-foo-fires 21-foo-clean 05-other],
+      metas: {
+        "20-foo-fires" => "regression=r\nguard=foo-check\nmode=bin-stdin\nexpect=fires\ninput=in.txt\n",
+        "21-foo-clean" => "regression=r\nguard=foo-check\nmode=bin-stdin\nexpect=clean\ninput=in.txt\n"
+      },
+      bins: [], candidate: nil, proposal: nil, proposer_ok: true, stray: [], paths: :default,
+      ve_exit: 0, ve_json: :keep, ve_raise: false, gate: :green, isolated: :match, write_fail: nil
+    }.merge(over)
+    @calls = []
+    @out = {}
+    @prompts = []
+    @blobs_written = []
+    @scratch_open = false
+  end
+
+  def scratch_open?
+    @scratch_open
+  end
+
+  def base_sha
+    @calls << :base_sha
+    BASE
+  end
+
+  def fixture_names(_sha)
+    @cfg[:fixtures]
+  end
+
+  def exists?(_sha, path)
+    @cfg[:bins].include?(path)
+  end
+
+  def blob(_sha, path)
+    return GATE if path == "ai/bin/harness-gate"
+    return RISK if path == "ai/tools/risk.yml"
+
+    name = path.split("/")[3]
+    return @cfg[:metas][name] if path.end_with?("/meta")
+
+    @cfg[:metas].key?(name) ? "input of #{name}\n" : nil
+  end
+
+  def read_candidate(_path)
+    @calls << :read_candidate
+    @cfg[:candidate]
+  end
+
+  def propose(prompt)
+    @calls << :propose
+    @prompts << prompt
+    [@cfg[:proposer_ok], @cfg[:proposal], "", @cfg[:stray]]
+  end
+
+  def with_scratch
+    @calls << :scratch_open
+    @scratch_open = true
+    yield
+  ensure
+    if @calls.include?(:scratch_open)
+      @calls << :scratch_removed
+      @scratch_open = false
+    end
+  end
+
+  def prepare_clone(name, _sha)
+    @calls << :"clone_#{name}"
+    "/tmp/fake/#{name}/repo"
+  end
+
+  def build_commit(_repo, _base, files)
+    @calls << :build_commit
+    @blobs_written.concat(files.keys)
+    @files = files
+    CAND
+  end
+
+  def diff(_repo, _base, _cand)
+    @calls << :diff
+    paths = @cfg[:paths] == :default ? @files.keys : @cfg[:paths]
+    ["diff --git a b\n", paths]
+  end
+
+  def mark_used(_repo)
+    @calls << :mark_used
+  end
+
+  def variant_eval(_repo, cand, base, _timeout)
+    @calls << :variant_eval
+    raise TP::Infra, "boom inside the sandbox adapter" if @cfg[:ve_raise]
+
+    @ve = FakeAdapters.json(@cfg[:ve_json], cand, base)
+    @cfg[:ve_exit]
+  end
+
+  def read_out(name)
+    return "card\n" if name == "scorecard.txt" && @ve
+    return @ve if name == "scorecard.json"
+
+    nil
+  end
+
+  def baseline_gate(_base, _timeout)
+    @calls << :baseline_gate
+    @cfg[:gate]
+  end
+
+  def isolated(_guard, _bytes, cases)
+    @calls << :isolated
+    return cases.to_h { |c| [c[:name], c[:expect]] } if @cfg[:isolated] == :match
+
+    cases.to_h { |c| [c[:name], "clean"] }
+  end
+
+  def write_out(rel, bytes)
+    raise TP::Infra, "could not write #{rel}. Fix: disk" if @cfg[:write_fail] == rel
+
+    @out[rel] = bytes
+  end
+
+  def self.json(kind, cand, base)
+    return nil if kind.nil?
+    return kind if kind.is_a?(String)
+
+    verdict, fixed = {
+      keep: ["keep", %w[he:20-foo-fires he:21-foo-clean]], noop: ["keep", %w[he:21-foo-clean]],
+      blocked: ["blocked", nil], other_cand: ["keep", %w[he:20-foo-fires he:21-foo-clean]]
+    }.fetch(kind)
+    JSON.generate(
+      "schema" => "variant-eval/proposal@1", "variant_sha" => kind == :other_cand ? "d" * 40 : cand,
+      "baseline_sha" => base, "corpus" => "deterministic", "verdict" => verdict, "gate_ok" => verdict != "blocked",
+      "gate_detail" => verdict == "blocked" ? ["check-bin-help FAILED"] : nil, "unmeasured" => nil,
+      "deterministic" => fixed && { "regressed" => [], "fixed" => fixed, "new" => [] },
+      "regressions" => fixed && [], "improvements" => fixed
+    )
+  end
+end
+
+GOOD_TOOL = <<~BASH
+  #!/usr/bin/env bash
+  case "${1:-}" in
+    --help) echo "usage"; exit 0 ;;
+    --self-test) exit 0 ;;
+  esac
+  if grep -q bad; then echo "Fix: remove bad"; exit 1; fi
+  exit 0
+BASH
+
+def st_run(fake, **opts)
+  opts = { cases: %w[20 21], candidate: "cand", timeout: 60, run_id: "t1", out_dir: "/tmp/out" }.merge(opts)
+  sink = StringIO.new
+  code = Manager.run(opts, fake, out: sink)
+  [code, sink.string]
+end
+
+def st_main(argv)
+  err = $stderr
+  $stderr = StringIO.new
+  [main(argv), $stderr.string]
+ensure
+  $stderr = err
+end
+
+def self_test
+  require "ripper"
+  failures = []
+  count = 0
+  check = lambda do |desc, cond|
+    count += 1
+    failures << desc unless cond
+  end
+
+  # M-1 happy path, --candidate
+  f = FakeAdapters.new(candidate: GOOD_TOOL)
+  code, printed = st_run(f)
+  check.("M-1 RECOMMENDED exits 0 (got #{code}: #{printed})", code.zero? && printed.start_with?(TP::Label::RECOMMENDED))
+  want = %w[proposal.md proposal.diff scorecard.json scorecard.txt] + f.blobs_written.map { |p| "candidate/#{p}" }
+  check.("M-1 the out-dir holds proposal.md, proposal.diff, candidate/, scorecard.* (got #{f.out.keys.sort})",
+         f.out.keys.sort == want.sort)
+  check.("M-1 no proposer call with --candidate", !f.calls.include?(:propose))
+  check.("M-1 the isolated re-check ran", f.calls.include?(:isolated))
+  check.("M-1 proposal.md is written last", f.out.keys.last == "proposal.md")
+  order = %i[clone_a build_commit diff mark_used variant_eval isolated].map { |c| f.calls.index(c) }
+  check.("M-1 the order is clone, commit, diff, mark used, measure, isolated re-check (got #{f.calls.inspect})",
+         order.all? && order.each_cons(2).all? { |a, b| a < b })
+  check.("M-1 the adoption sentence is in proposal.md", f.out["proposal.md"].include?(TP::Label::ADOPTION))
+
+  # M-2 proposer path
+  f = FakeAdapters.new(candidate: nil, proposal: "Here:\n```bash\n#{GOOD_TOOL}```\n")
+  code, printed = st_run(f, candidate: nil)
+  check.("M-2 the proposer path is RECOMMENDED (got #{code}: #{printed})", code.zero?)
+  check.("M-2 exactly one proposer call", f.calls.count(:propose) == 1)
+  check.("M-2 the prompt carries the targets", f.prompts.first.to_s.include?("input of 20-foo-fires"))
+
+  # M-3 proposer reply unusable
+  f = FakeAdapters.new(proposal: "```\na\n```\n```\nb\n```\n")
+  code, printed = st_run(f, candidate: nil)
+  check.("M-3 two blocks: REJECTED: candidate, exit 1", code == 1 && printed.start_with?("REJECTED: candidate"))
+  check.("M-3 rejected-candidate.txt saved", f.out.key?("rejected-candidate.txt"))
+  check.("M-3 no clone, no sandbox", !f.calls.include?(:clone_a) && !f.calls.include?(:variant_eval))
+  f = FakeAdapters.new(proposal: "```\n#{GOOD_TOOL}```\n", stray: ["x"])
+  code, printed = st_run(f, candidate: nil)
+  check.("M-3 a proposer that leaves a file is REJECTED", code == 1 && printed.include?("containment failed"))
+  f = FakeAdapters.new(candidate: GOOD_TOOL.sub("--self-test", "--st"))
+  code, printed = st_run(f)
+  check.("D-C3/M-3 a candidate without --self-test is REJECTED before any clone",
+         code == 1 && printed.include?("--self-test") && !f.calls.include?(:clone_a))
+
+  # M-4 gate red
+  f = FakeAdapters.new(candidate: GOOD_TOOL, ve_exit: 1, ve_json: :blocked, gate: :green)
+  code, printed = st_run(f)
+  check.("M-4 BLOCKED + green baseline: gate red", code == 1 && printed.start_with?("NOT RECOMMENDED: gate red"))
+  check.("M-4 the baseline gate ran once, on a fresh clone",
+         f.calls.count(:baseline_gate) == 1 && !f.calls.include?(:isolated))
+  f = FakeAdapters.new(candidate: GOOD_TOOL, ve_exit: 1, ve_json: :blocked, gate: { red: ["x"] })
+  _code, printed = st_run(f)
+  check.("M-4 BLOCKED + red baseline: UNMEASURED", printed.start_with?("NOT RECOMMENDED: UNMEASURED (sandbox env"))
+
+  # M-5 target rejected before any cost
+  f = FakeAdapters.new(candidate: GOOD_TOOL, bins: ["ai/bin/foo-check"])
+  code, printed = st_run(f)
+  check.("M-5 an existing tool: REJECTED: target", code == 1 && printed.include?("REJECTED: target") &&
+                                                  printed.include?("new tools only"))
+  check.("M-5 no candidate read, no proposer, no clone, no sandbox",
+         (%i[read_candidate propose clone_a variant_eval] & f.calls).empty?)
+  f = FakeAdapters.new(candidate: GOOD_TOOL)
+  code, printed = st_run(f, cases: %w[99])
+  check.("D-T10 a target not on origin/main: REJECTED naming the sha",
+         code == 1 && printed.include?("not on origin/main at #{FakeAdapters::BASE}") && !f.calls.include?(:clone_a))
+
+  # M-6 out-dir refused first (through main, before any adapter exists)
+  Dir.mktmpdir("tool-propose-st-") do |d|
+    File.write(File.join(d, "x"), "x")
+    code, err = st_main(["--case", "20", "--case", "21", "--out-dir", d])
+    check.("M-6 a non-empty out-dir: exit 2 with Fix:", code == 2 && err.include?("not empty") && err.include?("Fix:"))
+    Dir.mkdir(File.join(d, "repo"))
+    Dir.mkdir(File.join(d, "repo", ".git"))
+    code, err = st_main(["--case", "20", "--case", "21", "--out-dir", File.join(d, "repo", "out")])
+    check.("M-6 an out-dir inside a git tree: exit 2", code == 2 && err.include?("git work tree"))
+  end
+  code, err = st_main(["--case", "20", "--case", "21", "--out-dir", File.join(Dir.home, ".claude", "tp-out")])
+  check.("M-6 an out-dir under ~/.claude: exit 2", code == 2 && err.include?(".claude"))
+  code, err = st_main(["--case", "20", "--case", "21", "--out-dir", "relative/out"])
+  check.("M-6 a relative out-dir: exit 2", code == 2 && err.include?("not absolute"))
+
+  # M-7 scratch removed on every path
+  f = FakeAdapters.new(candidate: GOOD_TOOL, ve_raise: true)
+  code = begin
+    st_run(f)
+    :no_raise
+  rescue TP::Infra
+    3
+  end
+  check.("M-7 an exception in the sandbox adapter propagates as infra (exit 3 at main)", code == 3)
+  check.("M-7 ... and the scratch was removed", f.calls.include?(:scratch_removed) && !f.scratch_open?)
+  check.("M-7 ... and nothing said RECOMMENDED", !f.out.key?("proposal.md"))
+  [FakeAdapters.new(candidate: GOOD_TOOL), FakeAdapters.new(candidate: GOOD_TOOL, ve_json: :noop),
+   FakeAdapters.new(candidate: GOOD_TOOL, paths: %w[ai/eval/fixtures/x/meta])].each_with_index do |fk, i|
+    st_run(fk)
+    check.("M-7 path #{i}: scratch removed", fk.calls.include?(:scratch_removed) && !fk.scratch_open?)
+  end
+  check.("M-7 main maps Infra to exit 3 with Fix:", infra_error(StringIO.new, "x. Fix: y") == 3)
+
+  # M-8 out-dir write fails
+  f = FakeAdapters.new(candidate: GOOD_TOOL, write_fail: "proposal.md")
+  printed = StringIO.new
+  raised = begin
+    Manager.run({ cases: %w[20 21], candidate: "c", timeout: 60, run_id: "t1" }, f, out: printed)
+    false
+  rescue TP::Infra
+    true
+  end
+  check.("M-8 a failed proposal.md write raises infra and prints no label", raised && !printed.string.include?("RECOMMENDED"))
+
+  # M-9 argv
+  code, = st_main(["--case", "20", "--out-dir", "/tmp/x", "--runs", "3"])
+  check.("M-9 an unknown flag is exit 2", code == 2)
+  _o, r = parse_cli(%w[--case 20 --out-dir /tmp/x --runs 3])
+  check.("M-9 ... naming it", r.to_s.include?("--runs"))
+  _o, r = parse_cli(%w[--out-dir /tmp/x])
+  check.("M-9 --case is required", r.to_s.include?("--case"))
+  _o, r = parse_cli(%w[--case 20])
+  check.("M-9 --out-dir is required", r.to_s.include?("--out-dir"))
+  _o, r = parse_cli(%w[--case 20 --out-dir /tmp/x --timeout 9000])
+  check.("M-9 --timeout is bounded", r.to_s.include?("1-7200"))
+  o1, = parse_cli(%w[--case 20 --out-dir /tmp/x --case 21])
+  o2, = parse_cli(%w[--out-dir /tmp/x --case 20 --case 21])
+  check.("M-9 flag order does not matter; --case repeats", o1 && o1 == o2 && o1[:cases] == %w[20 21])
+  _o, r = parse_cli(%w[--self-test --case 20])
+  check.("M-9 --self-test takes no other flag", r.to_s.include?("--self-test"))
+
+  # Label paths through the manager
+  f = FakeAdapters.new(candidate: GOOD_TOOL, ve_json: :noop)
+  code, printed = st_run(f)
+  check.("M D-L2 a no-op: target not fixed, no isolated re-check",
+         code == 1 && printed.start_with?("NOT RECOMMENDED: target not fixed") && !f.calls.include?(:isolated))
+  f = FakeAdapters.new(candidate: GOOD_TOOL, isolated: :mismatch)
+  code, printed = st_run(f)
+  check.("M D-L14 a forged KEEP the isolated re-check refutes: NOT RECOMMENDED (isolated re-check)",
+         code == 1 && printed.include?("isolated re-check"))
+  f = FakeAdapters.new(candidate: GOOD_TOOL, ve_json: nil)
+  code, printed = st_run(f)
+  check.("M D-L13 exit 0 with no JSON: UNMEASURED", code == 1 && printed.start_with?("NOT RECOMMENDED: UNMEASURED"))
+  f = FakeAdapters.new(candidate: GOOD_TOOL, ve_json: :other_cand)
+  code, printed = st_run(f)
+  check.("M D-L9 a JSON for another candidate: UNMEASURED", code == 1 && printed.include?("another candidate"))
+  f = FakeAdapters.new(candidate: GOOD_TOOL, paths: %w[ai/bin/foo-check ai/eval/fixtures/99-x/meta])
+  code, printed = st_run(f)
+  check.("M D-C10 a commit touching ai/eval: REJECTED, never measured",
+         code == 1 && printed.include?("touches eval fixtures") && !f.calls.include?(:variant_eval))
+
+  containment_checks(check)
+
+  if failures.empty?
+    puts "tool-propose: self-test OK (#{count} checks)"
+    0
+  else
+    failures.each { |m| warn "tool-propose: self-test FAIL — #{m}" }
+    warn "  Fix: the Manager must refuse before any cost on a bad target or candidate, build and diff before the " \
+         "first sandbox run, measure only inside tool-sandbox, re-check targets in isolation, write proposal.md " \
+         "last and always remove its scratch; `capture` must be the one exec site and command_allowed? must deny " \
+         "every mutation family."
+    1
+  end
+end
+
+def containment_checks(check)
+  ctx = TP::Containment.new("/repo")
+  ctx.scratch = "/tmp/tp-x"
+  a = "/tmp/tp-x/a/repo"
+  ctx.clones[a] = false
+  ctx.out_scratch = "/tmp/tp-x/out"
+  ts = ctx.tool_sandbox
+  sl = ctx.test_slot
+  sha = "b" * 40
+  cand = "c" * 40
+  idx = { "GIT_INDEX_FILE" => "/tmp/tp-x/index-a" }
+  allowed = ->(argv, chdir: nil, env: nil) { TP::Exec.command_allowed?(argv, ctx: ctx, chdir: chdir, env: env) }
+  ve = TP::Exec.variant_eval_cmd(cand, sha)
+
+  # C-1: every mutation family is denied.
+  denied = [
+    %w[gh pr merge 1], %w[glab mr merge 1], %w[gh-athena pr create], %w[glab-athena mr create], %w[curl x], %w[wget x],
+    %w[ssh host], %w[docker run x], %w[sh -c x], %w[bash -c x], %w[ruby -e x], [],
+    ["git", "-C", "/repo", "push"], ["git", "-C", "/repo", "merge", "x"], ["git", "-C", "/repo", "commit", "-m", "x"],
+    ["git", "-C", "/repo", "rebase", "x"], ["git", "-C", "/repo", "reset", "--hard"],
+    ["git", "-C", "/repo", "checkout", "x"], ["git", "-C", "/repo", "switch", "x"],
+    ["git", "-C", "/repo", "update-ref", "refs/heads/x", sha], ["git", "-C", "/repo", "branch", "x"],
+    ["git", "-C", "/repo", "tag", "x"], ["git", "-C", "/repo", "worktree", "add", "/tmp/x"],
+    ["git", "-C", "/repo", "stash"], ["git", "-C", "/repo", "fetch"], ["git", "-C", "/repo", "pull"],
+    ["git", "-C", "/repo", "show", "#{sha}:x"], ["git", "-C", "/repo", "hash-object", "-w", "--stdin"],
+    ["git", "-C", a, "commit", "-m", "x"], ["git", "-C", a, "update-ref", "refs/heads/x", cand],
+    ["git", "-C", a, "push"], ["git", "-C", a, "checkout", cand], ["git", "-C", a, "diff", sha, cand],
+    ["git", "-C", "/elsewhere", "rev-parse", "HEAD"], %w[git rev-parse HEAD], ["git", "-c", "alias.x=!sh", "x"],
+    ["git", "-C", "/repo", "cat-file", "--textconv", "#{sha}:x"],
+    ["git", "-C", "/repo", "rev-parse", "--output=/tmp/x"],
+    ["ai/bin/variant-eval", *ve.drop(1)], ["ai/bin/harness-eval"], ["/repo/ai/bin/variant-eval", *ve.drop(1)],
+    [ts, "--work", a, "--out", ctx.out_scratch, "--timeout", "60", "--", *ve, "--update-baseline"],
+    ["claude", "-p"], ["claude", "-p", "--dangerously-skip-permissions"], TP::Exec::PROPOSER_ARGV + ["--tools", "Bash"],
+    ["/tmp/tp-x/case-0/work/ai/bin/foo-check"], ["/tmp/candidate"]
+  ]
+  denied.each { |argv| check.("C-1 denies #{argv.inspect}", !allowed.(argv, chdir: "/repo")) }
+  check.("C-1 read-tree without the scratch index is denied", !allowed.(["git", "-C", a, "read-tree", sha]))
+  check.("C-1 the proposer outside its empty cwd is denied", !allowed.(TP::Exec::PROPOSER_ARGV, chdir: "/repo"))
+
+  # C-2: only the listed shapes, and not with another -C path or extra args after --.
+  ok_shapes = [
+    [["git", "-C", "/repo", "rev-parse", "--verify", "origin/main^{commit}"], nil, nil],
+    [["git", "-C", "/repo", "ls-tree", "--name-only", "-d", "#{sha}:ai/eval/fixtures"], nil, nil],
+    [["git", "-C", "/repo", "cat-file", "blob", "#{sha}:x"], nil, nil],
+    [["git", "-C", a, "read-tree", sha], nil, idx], [["git", "-C", a, "hash-object", "-w", "--stdin"], nil, nil],
+    [["git", "-C", a, "update-index", "--add", "--cacheinfo", "100755,#{sha},ai/bin/x"], nil, idx],
+    [["git", "-C", a, "write-tree"], nil, idx], [["git", "-C", a, "commit-tree", sha, "-p", sha, "-m", "m"], nil, nil],
+    [["git", "-C", a, "diff", "--no-ext-diff", "--no-textconv", "--binary", sha, cand], nil, nil]
+  ]
+  ok_shapes.each { |argv, chdir, env| check.("C-2 allows #{argv.inspect}", allowed.(argv, chdir: chdir, env: env)) }
+  ctx.pending << "/tmp/tp-x/a"
+  check.("C-2 allows --prepare-clone of a registered DEST from the host repo",
+         allowed.([ts, "--prepare-clone", "/tmp/tp-x/a", "--sha", sha], chdir: "/repo"))
+  check.("C-2 denies --prepare-clone of an unregistered DEST",
+         !allowed.([ts, "--prepare-clone", "/tmp/other", "--sha", sha], chdir: "/repo"))
+  run_ve = [ts, "--work", a, "--out", ctx.out_scratch, "--timeout", "60", "--", *ve]
+  check.("C-2 denies the measurement over a clone not yet marked used", !allowed.(run_ve))
+  ctx.mark_used(a)
+  check.("C-2 allows the measurement over a used clone", allowed.(run_ve))
+  check.("C-2 allows it inside test-slot", allowed.([sl, "--pool", "cpu", "--label", "tool-propose t1", "--", *run_ve]))
+  check.("C-2 denies extra args after --", !allowed.(run_ve + ["--extra"]))
+  check.("C-2 denies another --out", !allowed.([ts, "--work", a, "--out", "/tmp/elsewhere", "--timeout", "60", "--", *ve]))
+  check.("C-2 denies another command after --", !allowed.([ts, "--work", a, "--timeout", "60", "--", "/usr/bin/sh"]))
+  check.("C-2 allows the gate over a used clone", allowed.([ts, "--work", a, "--timeout", "60", "--", "ai/bin/harness-gate"]))
+  check.("C-2 denies test-slot around anything else", !allowed.([sl, "--pool", "cpu", "--label", "tool-propose t1", "--", "git", "push"]))
+
+  # C-5: once a clone is marked used, every host git verb on it is refused (R2-1).
+  [["read-tree", sha], ["hash-object", "-w", "--stdin"], ["write-tree"], ["commit-tree", sha, "-p", sha, "-m", "m"],
+   ["diff", "--no-ext-diff", "--no-textconv", "--binary", sha, cand], ["rev-parse", "HEAD"]].each do |rest|
+    check.("C-5 #{rest.first} on a used clone is refused", !allowed.(["git", "-C", a, *rest], env: idx))
+  end
+  check.("C-5 capture raises MutationAttempt with Fix:",
+         begin
+           TP::Exec.capture(["git", "-C", a, "write-tree"], ctx: ctx, env: idx)
+           false
+         rescue TP::MutationAttempt => e
+           e.message.include?("Fix:")
+         end)
+
+  # The isolated re-check: only the registered case dir, its stdin file, the candidate, 60 s.
+  ctx.guard = "foo-check"
+  w = "/tmp/tp-x/case-0/work"
+  i = "/tmp/tp-x/case-0/in/input"
+  ctx.case_dirs << w
+  ctx.stdin_files << i
+  iso = [ts, "--work", w, "--stdin", i, "--timeout", "60", "--", "/work/ai/bin/foo-check", "--strict"]
+  check.("C-2 allows the isolated re-check", allowed.(iso))
+  check.("C-2 denies it with another stdin file", !allowed.(iso.map { |x| x == i ? "/etc/passwd" : x }))
+  check.("C-2 denies it running another program", !allowed.(iso.map { |x| x == "/work/ai/bin/foo-check" ? "/usr/bin/sh" : x }))
+  check.("C-2 denies it with another timeout", !allowed.(iso.map { |x| x == "60" ? "600" : x }))
+
+  # C-3: one exec site. capture's popen3 is the only spawn in the bin and libs.
+  ai_dir = File.expand_path("..", __dir__)
+  files = [__FILE__] + %w[target candidate label out_dir adapters].map { |n| File.join(ai_dir, "lib/tool_propose/#{n}.rb") }
+  counts = Hash.new(0)
+  files.each do |path|
+    toks = Ripper.lex(File.read(path))
+    check.("C-3 no backtick or %x in #{File.basename(path)}", toks.none? { |t| t[1] == :on_backtick })
+    toks.select { |t| t[1] == :on_ident }.each { |t| counts[t[2]] += 1 }
+  end
+  check.("C-3 exactly one popen3 call (got #{counts['popen3']})", counts["popen3"] == 1)
+  %w[system spawn exec capture2 capture2e capture3 popen pipeline fork syscall].each do |prim|
+    check.("C-3 no #{prim} call (got #{counts[prim]})", counts[prim].zero?)
+  end
+
+  # C-4: the candidate is never executed outside the sandbox.
+  Dir.mktmpdir("tool-propose-c4-") do |d|
+    marker = File.join(d, "ran")
+    evil = GOOD_TOOL.sub("exit 0\n", "touch #{marker}\nexit 0\n")
+    f = FakeAdapters.new(candidate: evil)
+    st_run(f)
+    check.("C-4 a full fake run never runs the candidate (marker absent)", !File.exist?(marker))
+    check.("C-4 the candidate only reaches the commit as data", f.blobs_written.include?("ai/bin/foo-check"))
+  end
+
+  # The proposer argv (S1).
+  pa = TP::Exec::PROPOSER_ARGV
+  check.("S1 proposer argv loads no MCP server",
+         pa.include?("--strict-mcp-config") && pa[pa.index("--mcp-config") + 1] == TP::Exec::EMPTY_MCP_CONFIG)
+  check.("S1 proposer argv removes every built-in tool", pa[pa.index("--tools") + 1] == "")
+  check.("S1 --disallowedTools is last with the full list",
+         pa[(pa.index("--disallowedTools") + 1)..] == %w[Bash Task Write Edit NotebookEdit WebFetch WebSearch])
+end
+
+if $PROGRAM_NAME == __FILE__
+  if ARGV.include?("--help")
+    if ARGV == ["--help"]
+      puts HELP
+      exit 0
+    end
+    exit usage_error("--help takes no other flag")
+  end
+  exit main(ARGV)
+end

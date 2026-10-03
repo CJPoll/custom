@@ -9,6 +9,7 @@ require "json"
 require_relative "../../tool_propose/target"
 require_relative "../../tool_propose/candidate"
 require_relative "../../tool_propose/label"
+require_relative "../../tool_propose/out_dir"
 
 $failures = []
 $checks = 0
@@ -337,6 +338,36 @@ check("isolated_verdict: 0 clean, 1+Fix: fires, everything else error") do
   v = ->(code, out = "") { L.isolated_verdict(exit_status: code, output: out) }
   v.(0) == "clean" && v.(1, "x\nFix: y") == "fires" && v.(1, "no fix") == "error" &&
     [2, 124, 125, 126, 137, 143, nil].all? { |c| v.(c, "Fix: forged") == "error" }
+end
+
+# ---------------------------------------------------------------------------
+# OutDir.problem (PRD R7)
+# ---------------------------------------------------------------------------
+O = ToolPropose::OutDir
+def odf(**over)
+  { given: "/tmp/tp/out", realpath: "/tmp/tp/out", exists: false, directory: false, empty: false, symlink: false,
+    git_ancestor: nil, roots: ["/tmp", "/home/u/.local/state/athena/tool-propose"],
+    denied: ["/home/u/.claude", "/home/u/dev"] }.merge(over)
+end
+check("R7 a new dir beneath the temp root is usable") { O.problem(odf).nil? }
+check("R7 an existing empty dir is usable") { O.problem(odf(exists: true, directory: true, empty: true)).nil? }
+check("R7 the state dir is usable") do
+  O.problem(odf(given: "/home/u/.local/state/athena/tool-propose/r1",
+                realpath: "/home/u/.local/state/athena/tool-propose/r1")).nil?
+end
+{
+  "relative" => [odf(given: "out"), /not absolute/],
+  "non-empty" => [odf(exists: true, directory: true, empty: false), /not empty/],
+  "a file" => [odf(exists: true, directory: false), /not a directory/],
+  "a symlink" => [odf(symlink: true), /symlink/],
+  "inside a git work tree" => [odf(git_ancestor: "/tmp/tp"), /git work tree/],
+  "under ~/.claude" => [odf(given: "/home/u/.claude/x", realpath: "/home/u/.claude/x"), /\.claude/],
+  "under ~/dev" => [odf(given: "/home/u/dev/custom/x", realpath: "/home/u/dev/custom/x"), %r{/home/u/dev}],
+  "elsewhere in HOME" => [odf(given: "/home/u/x", realpath: "/home/u/x"), /not beneath/],
+  "the temp root itself" => [odf(given: "/tmp", realpath: "/tmp", exists: true, directory: true, empty: true), /not beneath/],
+  "an unresolvable parent" => [odf(realpath: nil), /parent/]
+}.each do |what, (facts, pattern)|
+  check("M-6 out-dir #{what} is refused") { O.problem(facts).to_s.match?(pattern) }
 end
 
 if $failures.empty?
