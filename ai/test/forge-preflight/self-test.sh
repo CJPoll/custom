@@ -253,6 +253,28 @@ for rem in "https://gitlab.com/someone-else/app.git|NO ENTRY" "https://gitlab.co
   else bad "identity miss '${rem%%|*}' refused" "rc=${RC} err='${ERR}' argv='$(cat "${ARGV}")'"; fi
 done
 
+#     In production (no FORGE_PREFLIGHT_REMOTE) the preflight resolves origin
+#     the way glab-athena does in that checkout, its other-remotes check
+#     included: origin alone passes; a remote of another bot refuses.
+setup_case
+PF_REPO="${TMP}/pf-repo${CASE_N}"; git init -q "${PF_REPO}"; git -C "${PF_REPO}" remote add origin https://gitlab.com/cjpoll/custom.git
+pf_run_in_repo() { # <glab shim>
+  set +e
+  OUT="$(cd "${PF_REPO}" && env -u FORGE_PREFLIGHT_REMOTE HOME="${CHOME}" GH_ATHENA_BIN=/nonexistent/gh GLAB_ATHENA_BIN="$1" \
+    "${PREFLIGHT}" 2>"${TMP}/err${CASE_N}")"; RC=$?
+  ERR="$(cat "${TMP}/err${CASE_N}")"
+}
+pf_run_in_repo "$(make_shim glab_personal)"
+if [[ "${RC}" == 0 && -z "${OUT}" && -z "${ERR}" ]] && grep -q 'api user' "${ARGV}"; then
+  ok "production path: a cjpoll/ checkout (origin only) passes with the personal bot"
+else bad "production path: origin-only checkout passes" "rc=${RC} err='${ERR}' argv='$(cat "${ARGV}")'"; fi
+setup_case
+git -C "${PF_REPO}" remote add upstream https://gitlab.com/example-group/custom.git
+pf_run_in_repo "$(make_shim glab_personal)"
+if [[ "${RC}" != 0 ]] && [[ "${ERR}" == *"BAD KEY"* ]] && [[ "${ERR}" == *"'upstream'"* ]] && [[ "${ERR}" == *"Fix:"* ]] && [[ ! -s "${ARGV}" ]]; then
+  ok "production path: the same checkout with an upstream of another bot refuses (BAD KEY, pass -R), probes no wrapper"
+else bad "production path: other-remotes refusal" "rc=${RC} err='${ERR}' argv='$(cat "${ARGV}")'"; fi
+
 # 5c. A FAILED lookup must never look like a clean pass (repo doctrine). No
 #     origin remote and no override → the forge cannot be resolved, so a PR
 #     opened now would bypass the guard. Refuse with a Fix:, do not exit 0.
