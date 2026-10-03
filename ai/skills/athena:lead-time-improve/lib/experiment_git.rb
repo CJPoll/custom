@@ -177,6 +177,25 @@ module LeadTimeExperimentGit
     Source.could_not_look("git could not run (#{e.message})")
   end
 
+  # A file as LANDED on the repo's main (DND-1810: the series-break
+  # registry is read out of git, never from a working tree a diff can
+  # edit). Source.ok([content, ref]); a path main does not carry, or git
+  # failing, is could not look (the reason says which), never an empty file.
+  def landed_file(repo, path)
+    ref, why = main_ref(repo)
+    return Source.could_not_look(why) unless ref
+
+    _, _, there = Open3.capture3("git", "-C", repo, "cat-file", "-e", "#{ref}:#{path}")
+    return Source.could_not_look("#{ref} in #{repo} carries no #{path} (not landed)") unless there.success?
+
+    out, err, st = Open3.capture3("git", "-C", repo, "show", "#{ref}:#{path}")
+    return Source.could_not_look("git show #{ref}:#{path} in #{repo} failed (#{err.strip.lines.first.to_s.strip})") unless st.success?
+
+    Source.ok([out, ref])
+  rescue SystemCallError => e
+    Source.could_not_look("git could not run (#{e.message})")
+  end
+
   # Whether main carries a commit reverting sha. Source.ok([true|false]).
   def reverted?(repo, sha)
     ref, why = main_ref(repo)

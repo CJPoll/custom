@@ -35,9 +35,9 @@
 #                              a run whose brief names another state dir sets it
 #   ATHENA_LEADTIME_CONFIG     the repo list (see ai/bin/lead-time-repos --help)
 #   LEAD_TIME_EXPERIMENT_NOW   "now", RFC 3339 (tests)
-#   LEAD_TIME_SERIES_BREAKS    the series-break registry (default:
-#                              ai/config/lead-time-series-breaks.json beside
-#                              this tool; DND-1810)
+#
+# The series-break registry (DND-1810) has no override: it is read as
+# landed on the harness repo's main (Breaks).
 #
 # Exit: 0 ok; 1 a tool or state error; 2 a usage error or a refusal;
 # 3 could not look (no ledger; git could not say whether a commit is on main;
@@ -166,7 +166,9 @@ HELP = <<~TXT
            A DECLARED SERIES BREAK confounds too (DND-1810): a landing that
            changed how a phase is measured, declared in the registry
            ai/config/lead-time-series-breaks.json (the one place to declare
-           one). One whose phases name the experiment's phase and whose
+           one), read as LANDED on the harness repo's main, never from a
+           working tree: an unlanded row is named as pending and applies
+           to nothing. One whose phases name the experiment's phase and whose
            landing (the committer time of its first-parent landing on the
            harness repo's main) is inside the window makes the verdict
            CONFOUNDED, naming the break. Instrumentation is NOT exempt: a
@@ -291,9 +293,10 @@ HELP = <<~TXT
 
   State: <main checkout>/ai-artifacts/lead-time/experiments.jsonl
   (gitignored), or LEAD_TIME_STATE_DIR.
-  Series breaks: ai/config/lead-time-series-breaks.json beside this tool, or
-  LEAD_TIME_SERIES_BREAKS (a test seam; judge's summary names the path it
-  read).
+  Series breaks: ai/config/lead-time-series-breaks.json AS LANDED on the
+  harness repo's main (origin/main, else main), read out of git, never from
+  a working tree; a row only in the local copy is named as pending and not
+  applied. Judge's summary names the ref it read.
 
   Exit: 0 ok; 1 tool or state error; 2 usage error or refusal; 3 could not
   look (no ledger: run ai/bin/lead-time-phases --ingest first; git could
@@ -541,7 +544,7 @@ module Record
     xtext = X.cross_text(row)
     puts "experiment: recorded #{row['id']} kind=#{row['kind']} metric=#{row['metric']} phase=#{row['phase']} " \
          "#{xtext ? "#{xtext} " : ''}baseline #{describe_baseline(row['baseline'])}#{describe_tests(tests)}"
-    warn_confounded(row, rows, repo, res, now, env)
+    warn_confounded(row, rows, repo, res, now)
     0
   end
 
@@ -553,7 +556,7 @@ module Record
   # refusing after the landing only leaves an unrecorded change. Judge's own
   # split, sides, window, confounders and breaks. Instrumentation is checked
   # for breaks only, as judge checks it.
-  def warn_confounded(row, rows, repo, res, now, env)
+  def warn_confounded(row, rows, repo, res, now)
     split = X.split(row, rows)
     boundary = split ? split[:boundary] : now
     metric = X::Metric.parse(row["metric"], phase: row["phase"])
@@ -562,7 +565,7 @@ module Record
     confs = row["kind"] == "instrumentation" ? [] : X.confounders(row, Confound.commits(repo, res, from), from: from, to: to)[:confounders]
     # The registry read is its own step, so a bad one does not hide a
     # trailer confounder already found.
-    brks, unknown = record_breaks(env, repo, res, row, from, to)
+    brks, unknown = record_breaks(repo, res, row, from, to)
     parts = []
     parts << confs.map { |c| X.confounder_text(c) }.join(", ") unless confs.empty?
     parts << "a declared series break on #{row['phase']}: #{brks.map { |b| X.break_text(b) }.join(', ')}" unless brks.empty?
@@ -578,8 +581,8 @@ module Record
 
   # -> [breaks inside the record's window, nil] or [[], why the registry
   # could not be judged].
-  def record_breaks(env, repo, res, row, from, to)
-    breaks, = Breaks.load(env, repo, res)
+  def record_breaks(repo, res, row, from, to)
+    breaks, = Breaks.load(repo, res)
     [X.breaks_inside(row, breaks, from: from, to: to), nil]
   rescue Refusal => e
     [[], e.message]
@@ -805,46 +808,71 @@ end
 
 # The registry of landings that changed how a phase is measured
 # (ai/config/lead-time-series-breaks.json, the one place a break is
-# declared). Each break's commit must be on the harness repo's main; its
-# time is the committer time of its first-parent landing there, the clock
-# the trailer confound reads. A registry that cannot be read, is not JSON,
-# is malformed, or names a commit that is not on main is "could not judge"
-# (exit 3), never "no break": a wrongly computed key and a registry that
-# declares nothing must not read the same.
+# declared). It is read AS LANDED, out of the harness repo's main
+# (origin/main, else main), never from a working tree: a row a lane or a
+# branch adds is not applied until it lands, so no unlanded edit can
+# confound (and so cancel) a verdict (~/dev/custom/CLAUDE.md -> *A check's
+# own bar must not live in the diff it is checking*). A row only in the
+# local copy is named as pending. Each break's commit must be on that main;
+# its time is the committer time of its first-parent landing there, the
+# clock the trailer confound reads. A registry main does not carry, that is
+# not JSON, is malformed, or names a commit that is not on main is "could
+# not judge" (exit 3), never "no break": a wrongly computed key and a
+# registry that declares nothing must not read the same.
 module Breaks
   module_function
 
-  ENV_KEY = "LEAD_TIME_SERIES_BREAKS"
-  DEFAULT = File.join(AI_DIR, "config", "lead-time-series-breaks.json")
-  FIX = "restore ai/config/lead-time-series-breaks.json from main (git show origin/main:ai/config/lead-time-series-breaks.json), " \
-        "or correct the row it names; #{ENV_KEY} overrides the path. Nothing was judged or written"
+  REL = "ai/config/lead-time-series-breaks.json"
+  LOCAL = File.join(AI_DIR, "config", "lead-time-series-breaks.json")
+  FIX = "land a well-formed #{REL} on main (rows of ticket, commit as landed, phases, what), or correct the row " \
+        "it names, then fetch main; nothing was judged or written"
 
-  def path(env) = env[ENV_KEY].to_s.empty? ? DEFAULT : env[ENV_KEY].to_s
-
-  # -> [breaks with "at", path]
-  def load(env, repo, res)
-    file = path(env)
-    breaks, why = X.series_breaks(parse(file))
-    refuse(3, "could not judge: the series-break registry #{file} is malformed: #{why}; this is not \"no break\"", FIX) if why
-
+  # -> [breaks with "at", where (e.g. "custom's origin/main:<REL>"), pending]
+  # pending: "ticket sha12" of each local-copy row main does not carry.
+  def load(repo, res)
     name, harness = Confound.paths(repo, res).first
-    [breaks.map { |b| b.merge("at" => landed!(file, name, harness, b)) }, file]
+    src = XG.landed_file(harness, REL)
+    refuse(3, "could not judge: the series-break registry: #{src.reason}; this is not \"no break\"", FIX) if src.could_not_look?
+
+    text, ref = src.items
+    where = "#{name}'s #{ref}:#{REL}"
+    breaks, why = X.series_breaks(parse(text, where))
+    refuse(3, "could not judge: the series-break registry #{where} is malformed: #{why}; this is not \"no break\"", FIX) if why
+
+    [breaks.map { |b| b.merge("at" => landed!(where, name, harness, b)) }, where, pending(breaks)]
   end
 
-  def parse(file)
-    JSON.parse(File.read(file, encoding: "UTF-8"))
-  rescue SystemCallError => e
-    refuse(3, "could not judge: the series-break registry #{file} cannot be read (#{e.class.name.split('::').last}); " \
-              "this is not \"no break\"", FIX)
+  # load, or the Refusal it raised: each caller applies it where it needs
+  # breaks (Judge: a pending verdict re-raises it; a settled one is counted
+  # as not re-checked).
+  def try_load(repo, res)
+    load(repo, res)
+  rescue Refusal => e
+    e
+  end
+
+  def parse(text, where)
+    JSON.parse(text)
   rescue JSON::ParserError => e
-    refuse(3, "could not judge: the series-break registry #{file} is not JSON (#{e.message.lines.first.to_s.strip[0, 120]}); " \
+    refuse(3, "could not judge: the series-break registry #{where} is not JSON (#{e.message.lines.first.to_s.strip[0, 120]}); " \
               "this is not \"no break\"", FIX)
+  end
+
+  # The local copy's rows main does not carry (a branch's or a lane's
+  # unlanded edit): named, never applied. A local copy that is missing,
+  # unreadable or malformed has none to name.
+  def pending(landed)
+    have = landed.map { |b| [b["ticket"], b["commit"]] }
+    local, = X.series_breaks(JSON.parse(File.read(LOCAL, encoding: "UTF-8")))
+    (local || []).reject { |b| have.include?([b["ticket"], b["commit"]]) }.map { |b| "#{b['ticket']} #{short(b['commit'])}" }
+  rescue SystemCallError, JSON::ParserError
+    []
   end
 
   # The committer time of the break's first-parent landing on the harness
   # repo's main, RFC 3339.
-  def landed!(file, name, harness, b)
-    what = "series break #{b['ticket']} #{short(b['commit'])} in #{file}"
+  def landed!(where, name, harness, b)
+    what = "series break #{b['ticket']} #{short(b['commit'])} in #{where}"
     on = XG.on_main(harness, b["commit"])
     refuse(3, "could not judge: could not look whether #{what} is on #{name}'s main: #{on.reason}", FIX) if on.could_not_look?
     unless on.items.first
@@ -882,7 +910,21 @@ module Judge
     mine = all.select { |e| e["repo"] == repo.name }
     shas = all.map { |e| e["commit"] }
     # Before any write: a registry it cannot read refuses (exit 3).
-    breaks, breaks_path = Breaks.load(env, repo, res)
+    # The registry, or the Refusal reading it raised. A pending verdict that
+    # needs breaks re-raises it (exit 3, nothing written: verdict); a
+    # settled verdict is then not re-checked, and the summary counts it.
+    loaded = Breaks.try_load(repo, res)
+    refused = loaded.is_a?(Refusal)
+    breaks = refused ? loaded : loaded[0]
+    if !refused && !loaded[2].empty?
+      warn "experiment: #{loaded[2].size} series break row(s) in #{Breaks::LOCAL} are not on main yet, so judge " \
+           "does not apply them until they land: #{loaded[2].join(', ')}"
+    end
+    # Settled verdicts judge cannot re-check (their landing is not in the
+    # ledger, or the registry could not be judged): counted in the summary,
+    # never read as "no break".
+    rechecked = mine.select { |e| X::RECHECKED.include?(e["status"]) }
+    unchecked = refused ? rechecked.size : rechecked.count { |e| X.split(e, rows).nil? }
     # [experiment, verdict, phase context (check metrics only; printed, never judged)]
     pending = mine.select { |e| e["status"] == "pending" }.map { |e| Live.upgrade(e, state, repo, res) }
     results = pending.map { |e| [e, *verdict(e, rows, repo, shas, now, res, breaks)] }
@@ -903,22 +945,31 @@ module Judge
          "#{rows.size} landing(s) in the ledger; #{declined} declined (a revert the hard constraint forbids; not judged); " \
          "#{held_count} held (a revert whose plain git revert would delete test additions, or could not tell); " \
          "#{judged.count('confounded')} confounded (another experiment's change, or a declared series break, on the same " \
-         "phase landed inside the window; treated as inconclusive); #{breaks.size} series break(s) declared in #{breaks_path}"
+         "phase landed inside the window; treated as inconclusive); #{breaks_text(loaded)}" \
+         "#{unchecked.zero? ? '' : "; #{unchecked} settled verdict(s) NOT re-checked for series breaks"}"
+    if refused
+      warn "experiment: #{loaded.message}"
+      warn "Fix: #{loaded.fix}"
+    end
     0
+  end
+
+  def breaks_text(loaded)
+    return "series breaks could not be judged (the registry refused: see stderr)" if loaded.is_a?(Refusal)
+
+    "#{loaded[0].size} series break(s) declared in #{loaded[1]}"
   end
 
   # A settled verdict (keep, or an owed revert) whose window, recomputed from
   # the ledger, holds a declared break on its phase: the confounded verdict,
   # naming the break and what it read. nil when none does, when a worse
   # guard drove the revert (X.guard_revert?: it stands), or when its landing
-  # is no longer in the ledger (warned: not re-checked is not "no break").
+  # is no longer in the ledger (counted in judge's summary, never "no break").
   def broken(exp, rows, breaks)
+    return nil if breaks.is_a?(Refusal)
+
     split = X.split(exp, rows)
-    unless split
-      warn "experiment: #{exp['id']} (#{exp['status']}) was not re-checked for series breaks: its landing " \
-           "#{short(exp['commit'])} is not in the ledger"
-      return nil
-    end
+    return nil unless split
 
     metric = X::Metric.parse(exp["metric"], phase: exp["phase"])
     from, to = X.window(X.sides(rows, metric: metric, exclude: split[:exclude], boundary: split[:boundary]), split[:boundary])
@@ -1038,6 +1089,7 @@ module Judge
     # Instrumentation is never confounded by a trailer (X.confounders), so
     # its logs are not read; a declared series break confounds every kind.
     confs = exp["kind"] == "instrumentation" ? [] : Confound.find(exp, repo, res, from, to)
+    raise breaks if breaks.is_a?(Refusal) # could not judge: exit 3, before any write
     v = X.confound(v, confs, phase: exp["phase"], breaks: X.breaks_inside(exp, breaks, from: from, to: to))
     [v, metric.check? ? X.phase_context(s[:before], s[:after], phase: exp["phase"]) : nil]
   end
@@ -1209,10 +1261,10 @@ module Settling
     phase = opts["--phase"]
     usage { X.settling_metric(phase, metric) } # before any read
     rows = Setup.ledger_rows(Setup.state_dir(env), repo.name)
-    breaks, = Breaks.load(env, repo, res)
     from, = X.settling_window(rows, phase: phase, metric: metric, now: now)
     # No trailer confounds instrumentation, so na_share reads no log.
     commits = metric == X::NA_SHARE ? [] : Confound.commits(repo, res, from)
+    breaks, = Breaks.load(repo, res)
     s = X.settling(rows, commits, phase: phase, metric: metric, now: now, breaks: breaks)
     puts opts["--json"] ? JSON.generate({ "repo" => repo.name, "now" => now.utc.iso8601 }.merge(s)) : X.settling_text(repo.name, s)
     0

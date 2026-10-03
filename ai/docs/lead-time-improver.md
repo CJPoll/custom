@@ -364,6 +364,9 @@ Each `improve`-mode run does these steps in order:
    the one place to declare one: a row of `ticket`, `commit` (as landed on
    custom's main), `phases` and `what`, added after the landing by the
    admiral that lands it (`athena:merge-boarding` → *The merge bar*).
+   Judge reads it as landed on main, out of git, never from a working
+   tree, so an unlanded row cannot cancel a verdict (`~/dev/custom/CLAUDE.md`
+   → *A check's own bar must not live in the diff it is checking*).
    DND-1501 (verify, queue, merge), DND-1809 (integrate, verify, queue,
    merge) and DND-1819 (verify, implement) are its first rows. A break on
    an experiment's phase inside its window (the before-set's first landing

@@ -92,12 +92,27 @@ HYP="${TMP}/hypothesis.txt"
 printf 'Caching the gate fixture should cut verify by a fifth.\n' >"${HYP}"
 
 export LEAD_TIME_STATE_DIR="${STATE}" ATHENA_LEADTIME_CONFIG="${CONFIG}" LEAD_TIME_EXPERIMENT_NOW="2026-09-21T12:00:00Z"
-# The series-break registry (DND-1810). The tracked one names real custom
-# SHAs this fixture repo does not have, so every case reads an empty one
-# unless it names its own (the *series breaks* section).
+# The series-break registry (DND-1810) is read as LANDED on the harness
+# repo's main, never from a working tree, so a case sets one by committing
+# it to the fixture repo's main: setreg FILE commits FILE as
+# ai/config/lead-time-series-breaks.json, or removes it when FILE does not
+# exist. Silent on stdout (cases call it inside $(...)); a commit only when
+# the content changes. Dated August, before every fixture window.
+setreg() {
+  local dst="${REPO}/ai/config/lead-time-series-breaks.json"
+  if [ -f "$1" ]; then
+    mkdir -p "${REPO}/ai/config" && cp "$1" "${dst}" && "${G[@]}" add ai/config/lead-time-series-breaks.json
+  else
+    "${G[@]}" rm -q --ignore-unmatch ai/config/lead-time-series-breaks.json >/dev/null
+  fi
+  "${G[@]}" diff --cached --quiet && return 0
+  GIT_COMMITTER_DATE=2026-08-01T00:00:00Z GIT_AUTHOR_DATE=2026-08-01T00:00:00Z \
+    "${G[@]}" commit -q -m "fixture: series-break registry" >/dev/null
+}
 REG0="${TMP}/breaks-none.json"
 printf '%s\n' '{"schema":1,"breaks":[]}' >"${REG0}"
-export LEAD_TIME_SERIES_BREAKS="${REG0}"
+setreg "${REG0}"
+RLANDED="custom's main:ai/config/lead-time-series-breaks.json"
 
 run() { "${BIN}" "$@" >"${TMP}/out" 2>"${TMP}/err"; echo $?; }
 out() { cat "${TMP}/out"; }
@@ -461,6 +476,11 @@ cp "${STATE8}/ledger.jsonl" "${STATE8}/experiments.jsonl" "${STATE9}/"
 eq "judge an owed revert where git cannot show the commit: exit 0" "$(LEAD_TIME_STATE_DIR="${STATE9}" ATHENA_LEADTIME_CONFIG="${TMP}/nomain.json" LEAD_TIME_EXPERIMENT_NOW=2026-10-01T12:00:00Z run judge --repo custom)" "0"
 has "an unknown answer is held (fail closed)" "$(out)" "${HID} REVERT HELD kind=change"
 has "... saying it could not look" "$(out)" "could not look whether reverting ${TADD:0:12} deletes test additions"
+# No main also means no landed series-break registry (DND-1810): the owed
+# revert stays owed, and the summary counts it as NOT re-checked.
+has "... a registry it cannot judge leaves the settled verdict counted as not re-checked" "$(out)" \
+  "series breaks could not be judged (the registry refused: see stderr); 1 settled verdict(s) NOT re-checked for series breaks"
+has "... and names why, with Fix:" "$(err)" "could not judge: the series-break registry"
 has "the git adapter reads a bad repo path as could not look, never as no tests" \
   "$(/usr/bin/ruby -e 'require ARGV[0]; s = LeadTimeExperimentGit.numstat(ARGV[1], ARGV[2]); puts s.could_not_look? ? "could_not_look: #{s.reason}" : "ok: #{s.items.inspect}"' \
      "${HERE}/../lib/experiment_git.rb" "${TMP}/no-such-repo" "${TADD}")" "could_not_look:"
@@ -921,7 +941,7 @@ breaks "${REGQ}" DND-9811 "${BRK}" '["queue"]' DND-9812 "${BRKOLD}" '["verify"]'
 SBID="custom:verify:${SBX:0:12}"
 SIID="custom:implement:${SBX:0:12}"
 # sb STATE REGISTRY CMD...: one case's state dir and registry, noon after the landing
-sb() { local st="$1" reg="$2"; shift 2; LEAD_TIME_STATE_DIR="${st}" LEAD_TIME_SERIES_BREAKS="${reg}" LEAD_TIME_EXPERIMENT_NOW=2026-11-11T12:00:00Z "$@"; }
+sb() { local st="$1" reg="$2"; shift 2; setreg "${reg}"; LEAD_TIME_STATE_DIR="${st}" LEAD_TIME_EXPERIMENT_NOW=2026-11-11T12:00:00Z "$@"; }
 sbrec() { sb "$1" "$2" run record --repo custom --phase "$3" --metric "$4" --commit "${SBX}" --kind "$5" --hypothesis-file "${HYP}"; }
 # Hourly landings on the 10th: before 01:00-10:00, SBX at 11:00, after 12:00-21:00.
 STATESB1="${TMP}/statesb1"
@@ -940,7 +960,7 @@ has "... and what it would have read (never keep)" "$(out)" "unconfounded it rea
 has "regression: an instrumentation experiment straddling one: CONFOUNDED" "$(out)" "${SIID} CONFOUNDED kind=instrumentation"
 has "... naming the break on its phase" "$(out)" "a declared series break on implement landed inside the window: DND-9810"
 has "... both counted confounded" "$(out)" "2 confounded"
-has "... the summary names the registry it read and how many breaks it declares" "$(out)" "1 series break(s) declared in ${REGV}"
+has "... the summary names the registry it read and how many breaks it declares" "$(out)" "1 series break(s) declared in ${RLANDED}"
 has "the status row records the break" "$(grep "\"id\":\"${SBID}\"" "${STATESB1}/experiments.jsonl" | grep '"status":"confounded"')" \
   "\"breaks\":[{\"ticket\":\"DND-9810\",\"commit\":\"${BRK}\""
 eq "list: exit 0" "$(sb "${STATESB1}" "${REGV}" run list --repo custom)" "0"
@@ -956,7 +976,15 @@ eq "judge with breaks on another phase and before the window: exit 0" "$(sb "${S
 has "an experiment with no break on its phase inside is unchanged: KEEP" "$(out)" "${SBID} KEEP"
 has "... the instrumentation too" "$(out)" "${SIID} KEEP"
 has "... 0 confounded" "$(out)" "0 confounded"
-has "... and the registry was read, never skipped: 2 breaks declared" "$(out)" "2 series break(s) declared in ${REGQ}"
+has "... and the registry was read, never skipped: 2 breaks declared" "$(out)" "2 series break(s) declared in ${RLANDED}"
+# Read as landed: a row written into the harness checkout but not committed
+# to its main applies to nothing (no unlanded edit can confound a verdict).
+cp "${REGV}" "${REPO}/ai/config/lead-time-series-breaks.json"
+eq "an uncommitted registry row in the harness checkout: exit 0" "$(LEAD_TIME_STATE_DIR="${STATESB2}" LEAD_TIME_EXPERIMENT_NOW=2026-11-11T12:00:00Z run judge --repo custom)" "0"
+has "... is never applied: nothing appended" "$(out)" "0 status row(s) appended"
+has "... the landed registry is the one read" "$(out)" "2 series break(s) declared in ${RLANDED}"
+has "... a local-copy row main lacks is named pending, never applied (the tracked registry's DND-1501)" "$(err)" "not on main yet, so judge does not apply them until they land: DND-1501"
+"${G[@]}" checkout -q -- ai/config/lead-time-series-breaks.json
 eq "the same keeps re-judged once the break is declared (a registry gaining a row): exit 0" "$(sb "${STATESB2}" "${REGV}" run judge --repo custom)" "0"
 has "a settled keep whose window straddles the break becomes CONFOUNDED" "$(out)" "${SBID} CONFOUNDED"
 has "... the instrumentation keep too" "$(out)" "${SIID} CONFOUNDED"
@@ -1010,7 +1038,7 @@ breaks "${TMP}/breaks-nevermain.json" DND-9814 "${NEVER}" '["verify"]'
 eq "a break whose commit is not on main (a wrongly computed key): exit 3" "$(sb "${STATESB4}" "${TMP}/breaks-nevermain.json" run judge --repo custom)" "3"
 has "... naming the break" "$(err)" "DND-9814"
 eq "... still nothing written" "$(statuses "${STATESB4}/experiments.jsonl")" "0"
-eq "record with a missing registry still records (exit 0)" "$(LEAD_TIME_STATE_DIR="${STATESB4}" LEAD_TIME_SERIES_BREAKS="${TMP}/no-such-breaks.json" LEAD_TIME_EXPERIMENT_NOW=2026-11-11T12:00:00Z run record --repo custom --phase implement --metric na_share --commit "${SBX}" --kind instrumentation --hypothesis-file "${HYP}")" "0"
+eq "record with a missing registry still records (exit 0)" "$(setreg "${TMP}/no-such-breaks.json"; LEAD_TIME_STATE_DIR="${STATESB4}" LEAD_TIME_EXPERIMENT_NOW=2026-11-11T12:00:00Z run record --repo custom --phase implement --metric na_share --commit "${SBX}" --kind instrumentation --hypothesis-file "${HYP}")" "0"
 has "... and says whether its baseline is clean is unknown" "$(err)" "whether its baseline is clean is unknown"
 
 # settling reads the same registry. STATESB1's ledger measures implement only
@@ -1020,7 +1048,7 @@ has "... and says whether its baseline is clean is unknown" "$(err)" "whether it
 BRKS="$(commit 2026-11-10T15:30:00Z "fixture: an implement measurement change")"
 REGS="${TMP}/breaks-implement.json"
 breaks "${REGS}" DND-9815 "${BRKS}" '["implement"]'
-sset() { LEAD_TIME_STATE_DIR="${STATESB1}" LEAD_TIME_SERIES_BREAKS="$1" LEAD_TIME_EXPERIMENT_NOW=2026-11-11T00:00:00Z run settling --repo custom --phase implement; }
+sset() { setreg "$1"; LEAD_TIME_STATE_DIR="${STATESB1}" LEAD_TIME_EXPERIMENT_NOW=2026-11-11T00:00:00Z run settling --repo custom --phase implement; }
 eq "settling on implement with the break declared: exit 0" "$(sset "${REGS}")" "0"
 has "... SETTLING, naming the break" "$(out)" "experiment settling: custom implement phase SETTLING"
 has "... the break by ticket" "$(out)" "series break(s) in the window: DND-9815 ${BRKS:0:12}"

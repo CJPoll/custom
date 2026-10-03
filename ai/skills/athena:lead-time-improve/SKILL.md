@@ -159,6 +159,8 @@ experiment it prints `keep`, `revert`, `pending`, `inconclusive` or
   instrumentation too, and judge re-checks a settled keep or an owed revert
   against breaks declared after it. Judge exit 3 naming the series-break
   registry is could not judge: journal it, and record no verdict by hand.
+  When only settled verdicts are left, judge exits 0 and its summary counts
+  them as NOT re-checked for series breaks: journal that too.
 - **pending** is never a gain. Never report it as one.
 
 ### 3. Summarize
@@ -420,8 +422,12 @@ one row: `ticket`, `commit` (the 40-hex SHA as it LANDED on custom's main),
 only after the landing, so the row lands in a follow-up commit: the change's
 report or PR body names the phases, and the admiral that lands it adds the
 row (`athena:merge-boarding` → *The merge bar*, the custom landing). Judge
-then confounds every experiment whose window holds the break, including one
-it already settled keep or owes a revert on. A revert a worse guard drove
+reads the registry AS LANDED on custom's main, never from a working tree,
+so a row in a lane or a branch applies to nothing until it lands (judge
+names it as pending). Never add one to settle an experiment of your own
+run. Once the row lands, judge confounds every experiment whose window
+holds the break, including one it already settled keep or owes a revert
+on. A revert a worse guard drove
 still stands: a guard is read from counters, not the phase. A row whose
 commit is not on main, or that names an unknown phase, makes judge exit 3
 until it is fixed.
