@@ -28,7 +28,8 @@
 #     submodules (fg_push_recurses says what counts). Also refused: a global
 #     option, or a push option, that git's grammar does not have, since the
 #     word after it could be its value (DND-1843; "git's own argv grammar"
-#     below holds the tables every walk here reads). A refusal is exit 3
+#     below holds the tables, and names the walks that read them). A
+#     refusal is exit 3
 #     with a Fix: line.
 #   * fg_refuse_red_main (DND-1482): a push to main is refused while
 #     ai/bin/main-health has recorded origin/main RED, unless it lands a gated
@@ -289,24 +290,35 @@ fg_takes_value() {
 # made it: `push -o -h` read as help, `--attr-source HEAD push` read HEAD as
 # the subcommand, `push --push-o x` read x as the repository and so never
 # judged the default remote, `push --push-o --dry-run … :main` read a dry run.
-# So these walks read argv by git's own tables, measured on git 2.54 (`git -h`,
-# `git push -h`, and real runs), in one place.
+# So the global-option peels and the push walk behind every refusal here
+# (fg_refuse_non_https, the red-main and ungated-main refspec parse, the
+# landing telemetry) read argv by git's own tables, measured on git 2.54
+# (`git -h`, `git push -h`, and real runs), kept in one place.
+# fg_push_recurses keeps its own conservative walk over FG_PUSH_VALUE_OPTS.
+# ai/agent-bin/git, a POSIX sh script, keeps its own copy of the global
+# tables (its step 2); the two are kept equal by hand.
+# Residual: the subtree push and fetch walks in fg_refuse_non_https match
+# value options by exact name only.
 #
 # Global options (git.c handle_options). Value as the next word:
-FG_GLOBAL_VALUE_OPTS="-C -c --git-dir --work-tree --namespace --config-env --attr-source --shallow-file --super-prefix"
-# Switches, and the options that print and exit before any subcommand runs:
-FG_GLOBAL_SWITCHES="-p -P --paginate --no-pager --bare --no-replace-objects --no-lazy-fetch --literal-pathspecs --no-literal-pathspecs --glob-pathspecs --noglob-pathspecs --icase-pathspecs --no-optional-locks --no-advice -v --version -h --help --exec-path --html-path --man-path --info-path"
+FG_GLOBAL_VALUE_OPTS="-C -c --git-dir --work-tree --namespace --config-env --attr-source --shallow-file"
+# Switches:
+FG_GLOBAL_SWITCHES="-p -P --paginate --no-pager --bare --no-replace-objects --no-lazy-fetch --literal-pathspecs --no-literal-pathspecs --glob-pathspecs --noglob-pathspecs --icase-pathspecs --no-optional-locks --no-advice"
+# Options that print and exit: no subcommand after them runs.
+FG_GLOBAL_EXITS="-v --version -h --help --exec-path --html-path --man-path --info-path"
 # Plus the --name=value spellings of --git-dir, --work-tree, --namespace,
 # --config-env, --attr-source, --exec-path and --list-cmds.
-FG_GLOBAL_STICKY="git-dir work-tree namespace config-env attr-source exec-path list-cmds super-prefix"
+FG_GLOBAL_STICKY="git-dir work-tree namespace config-env attr-source exec-path list-cmds"
 
 # fg_global_opt <word> : 0 a global option whose value is the next word; 1 a
-# global option with no separate value; 2 an option git does not have (or a
-# word that is no option). Exact names only: git does not abbreviate these.
+# global option with no separate value; 3 an option that prints and exits, so
+# no subcommand runs; 2 an option git does not have (or a word that is no
+# option). Exact names only: git does not abbreviate these.
 fg_global_opt() {
   local w="$1" o
   for o in $FG_GLOBAL_VALUE_OPTS; do [ "$w" = "$o" ] && return 0; done
   for o in $FG_GLOBAL_SWITCHES; do [ "$w" = "$o" ] && return 1; done
+  for o in $FG_GLOBAL_EXITS; do [ "$w" = "$o" ] && return 3; done
   case "$w" in
     --?*=*) for o in $FG_GLOBAL_STICKY; do [ "${w%%=*}" = "--$o" ] && return 1; done ;;
   esac
@@ -434,7 +446,9 @@ fg_has_submodules() {
 # Sets FG_RESOLVED_URLS (newline-separated) for the dry-run report, and, for a
 # `push`, FG_PUSH_URL (the first URL it pushes to) and FG_PUSH_GLOB (its git
 # global options) for the landing telemetry below, and FG_PUSH_ARGS (the
-# alias-expanded args after `push`) for the red-main refusal.
+# alias-expanded args after `push`, as fg_push_argv reads them: every option
+# in full with its value attached, then `--`, then the repository and
+# refspecs) for the red-main and ungated-main refusals and the telemetry.
 FG_RESOLVED_URLS=""
 FG_PUSH_URL=""
 FG_PUSH_GLOB=()
@@ -461,6 +475,7 @@ fg_refuse_non_https() {
       case "$grc" in
         0) [ $# -ge 2 ] || return 0; glob+=("$1" "$2"); shift 2 ;;
         1) glob+=("$1"); shift ;;
+        3) return 0 ;;   # git prints and exits; no subcommand runs
         # An option git does not have: git refuses it too, but if it took a
         # value, this walk would read that value as the subcommand (DND-1843).
         *) fg_refuse_option "$1" "it is no option git takes before the subcommand (FG_GLOBAL_VALUE_OPTS and FG_GLOBAL_SWITCHES in ai/lib/forge-git-passthrough.sh list them)" ;;
@@ -554,9 +569,11 @@ fg_refuse_non_https() {
     # repository, and --repo names it when there is none. An option value
     # that names a remote or mentions the forge host is checked too.
     local o ov
+    # git uses the last --repo=<r> / --no-repo; every --repo value is checked.
     for o in "${FG_PA_OPTS[@]}"; do
       case "$o" in
         --repo=*) has_repo=1; targets+=("${o#--repo=}") ;;
+        --no-repo) has_repo=0 ;;
         --*=*) ov="${o#*=}"; { is_remote "$ov" || [[ "$ov" == *"$FG_HOST"* ]]; } && targets+=("$ov") ;;
       esac
     done
@@ -728,8 +745,9 @@ fg_push_and_record() {
     while IFS= read -r line; do
       [ "${line#*$'\t'}" = "$ref" ] && after="${line%%$'\t'*}"
     done <<<"$ls"
-    if [[ "$after" =~ ^[0-9a-f]{40}$ ]] && fg_push_sent "$after" "${ref#refs/heads/}" "$@" \
-       && { { [ "$known" -eq 0 ] && fg_push_names_default "${ref#refs/heads/}" "$@"; } || { [ "$known" -eq 1 ] && [ "$after" != "$before" ]; }; }; then
+    # FG_PUSH_ARGS: the push args as fg_push_argv read them (DND-1843).
+    if [[ "$after" =~ ^[0-9a-f]{40}$ ]] && fg_push_sent "$after" "${ref#refs/heads/}" push "${FG_PUSH_ARGS[@]}" \
+       && { { [ "$known" -eq 0 ] && fg_push_names_default "${ref#refs/heads/}" "${FG_PUSH_ARGS[@]}"; } || { [ "$known" -eq 1 ] && [ "$after" != "$before" ]; }; }; then
       fg_record_landing "$before" "$after" "${ref#refs/heads/}" "$t0_at" "$t0_us"
     fi
   fi
@@ -764,7 +782,7 @@ fg_push_sent() {
   done
   [ "$refspecs" -eq 1 ] || cands+=( HEAD )
   for src in "${cands[@]}"; do
-    [ "$(git "${FG_PUSH_GLOB[@]}" rev-parse --verify -q "${src}^{commit}" 2>/dev/null || true)" = "$after" ] && return 0
+    [ "$(git "${FG_PUSH_GLOB[@]}" rev-parse --verify -q --end-of-options "${src}^{commit}" 2>/dev/null || true)" = "$after" ] && return 0
   done
   return 1
 }
@@ -849,8 +867,9 @@ fg_refuse_red_main() {
   fi
   while IFS= read -r src; do
     [ -n "$src" ] || continue
-    sha="$(git "${FG_PUSH_GLOB[@]}" rev-parse --verify -q "${src}^{commit}" 2>/dev/null || true)"
-    # An unresolvable source fails in git itself; nothing lands.
+    sha="$(git "${FG_PUSH_GLOB[@]}" rev-parse --verify -q --end-of-options "${src}^{commit}" 2>/dev/null || true)"
+    # An unresolvable source fails in git itself; nothing lands. A source may
+    # start with `-` (a refspec after `--`), hence --end-of-options (DND-1843).
     [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || continue
     rc=0; mh_may_land "$common" "$sha" || rc=$?
     case "$rc" in
@@ -912,8 +931,9 @@ fg_refuse_ungated_main() {
   done < <(git "${FG_PUSH_GLOB[@]}" remote 2>/dev/null || true)
   while IFS= read -r src; do
     [ -n "$src" ] || continue
-    sha="$(git "${FG_PUSH_GLOB[@]}" rev-parse --verify -q "${src}^{commit}" 2>/dev/null || true)"
-    # An unresolvable source fails in git itself; nothing lands.
+    sha="$(git "${FG_PUSH_GLOB[@]}" rev-parse --verify -q --end-of-options "${src}^{commit}" 2>/dev/null || true)"
+    # An unresolvable source fails in git itself; nothing lands. A source may
+    # start with `-` (a refspec after `--`), hence --end-of-options (DND-1843).
     [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || continue
     decl_at="${landed:-$sha}"
     rc=0

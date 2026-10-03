@@ -271,7 +271,7 @@ while :; do
   # Global options, git's grammar (git.c handle_options).
   while [ $# -gt 0 ]; do
     case "$1" in
-      -C | --git-dir | --work-tree | --namespace | --super-prefix | --attr-source | --shallow-file | -c | --config-env)
+      -C | --git-dir | --work-tree | --namespace | --attr-source | --shallow-file | -c | --config-env)
         [ $# -ge 2 ] || break
         case "$1" in -c | --config-env) check_tamper_key "${2%%=*}" ;; esac
         sq "$1"; globals="$globals $SQ"; sq "$2"; globals="$globals $SQ"; shift 2 ;;
@@ -279,7 +279,7 @@ while :; do
         _v=${1#--config-env=}
         check_tamper_key "${_v%%=*}"
         sq "$1"; globals="$globals $SQ"; shift ;;
-      --git-dir=* | --work-tree=* | --namespace=* | --super-prefix=* | --exec-path=* | \
+      --git-dir=* | --work-tree=* | --namespace=* | --exec-path=* | \
       --list-cmds=* | --attr-source=* | \
       -p | -P | --paginate | --no-pager | --bare | --no-replace-objects | --no-lazy-fetch | \
       --literal-pathspecs | --no-literal-pathspecs | --glob-pathspecs | --noglob-pathspecs | \
@@ -294,8 +294,8 @@ while :; do
     -v | --version | -h | --help | --exec-path | --html-path | --man-path | --info-path) sub=; break ;;
     # An option git does not take before the subcommand (DND-1843). If it
     # took a value, a push behind it would never be judged here: refuse.
-    -*) refuse "git $1 …: $1 is no global option this wrapper knows (git 2.54's grammar), so whether a push follows it is unknown" \
-          "Fix: drop $1 or move it after the subcommand; to push to a forge, use ~/dev/custom/ai/bin/gh-athena git push … or ~/dev/custom/ai/bin/glab-athena git push …." ;;
+    -*) refuse "git $1 …: $1 is no global option this wrapper knows (git 2.54's grammar), or it is missing its value, so whether a push follows it is unknown" \
+          "Fix: drop $1, give it its value, or move it after the subcommand; to push to a forge, use ~/dev/custom/ai/bin/gh-athena git push … or ~/dev/custom/ai/bin/glab-athena git push …." ;;
   esac
   sub=$1
   shift

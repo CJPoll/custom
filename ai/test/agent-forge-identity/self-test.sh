@@ -285,6 +285,10 @@ run "${R}" git --shallow-file "${TMP}/no-shallow" push origin HEAD
 refused "K10. git --shallow-file <file> push" git gh-athena 'REAL-GIT'
 run "${R}" git --no-literal-pathspecs push origin HEAD
 refused "K11. git --no-literal-pathspecs push (a global switch git accepts)" git gh-athena 'REAL-GIT'
+repo 'ssh://git@github.com/synth-owner/synth-repo.git'
+run "${R}" git push --repo="${TMP}/nowhere.git" --no-repo
+refused "K18. push --repo=<local> --no-repo: git uses the default remote (ssh github), which is judged" git gh-athena 'REAL-GIT'
+repo "${SYNTH_GH}"
 run "${R}" git --synth-unknown-opt push origin HEAD
 refused "K12. an unknown global option before push is refused (deny by default)" git gh-athena 'REAL-GIT'
 run "${R}" git push --help

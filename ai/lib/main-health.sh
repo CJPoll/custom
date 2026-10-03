@@ -121,54 +121,62 @@ mh_may_land() {
 # mh_push_main_sources <default-branch> <checked-out-branch or ""> <push args...>
 # : print, one per line, the source of every refspec whose destination is the
 # default branch. <push args> are what follows `push`, alias-expanded (the
-# passthrough's FG_PUSH_ARGS). Pure: it runs nothing.
+# passthrough's FG_PUSH_ARGS: fg_push_argv's reading, every option in full
+# with its value attached, then `--`, then the words). Pure: it runs nothing.
 #   --all / --branches / --mirror -> refs/heads/<default>
 #   <src>:<default>, <src>:refs/heads/<default> -> <src>
 #   <default>                     -> <default>
 #   refs/heads/*:refs/heads/*     -> refs/heads/<default> (a wildcard maps it)
 #   HEAD (no colon), or no refspec at all -> HEAD, when on <default>
 # Nothing is printed for a --dry-run / -n push or a -d / --delete push (each
-# lands nothing), nor for a delete refspec (`:main`).
+# lands nothing; the last of --dry-run / --no-dry-run, and of --delete /
+# --no-delete, wins, as in git), nor for a delete refspec (`:main`).
 # Residual, said out loud: refspecs that come from config (remote.<r>.push,
 # push.default=upstream from a branch tracking main) are not read: with no
 # refspec this reads "on <default>" as "pushes <default>". `git subtree push`
 # is not covered. Every Athena landing spells `<sha>:main` explicitly.
 mh_push_main_sources() {
-  local def="$1" cur="$2" a src dst seen_repo=0 refspecs=0 dry=0 del=0 pre suf mid
+  local def="$1" cur="$2" a src dst seen_repo=0 refspecs=0 dry=0 del=0 pre suf mid end=0
   local -a out=()
   shift 2
   while [ $# -gt 0 ]; do
     a="$1"; shift
-    case "$a" in
-      --dry-run|-n) dry=1 ;;
-      --delete|-d) del=1 ;;
-      --all|--branches|--mirror) out+=( "refs/heads/$def" ) ;;
-      --repo) seen_repo=1; [ $# -gt 0 ] && shift ;;
-      --repo=*) seen_repo=1 ;;
-      -o|--push-option|--receive-pack|--exec) [ $# -gt 0 ] && shift ;;
-      --) ;;
-      -*) ;;
-      *)
-        if [ "$seen_repo" -eq 0 ]; then seen_repo=1; continue; fi
-        refspecs=1
-        a="${a#+}"
-        if [[ "$a" == *:* ]]; then src="${a%%:*}"; dst="${a#*:}"; else src="$a"; dst="$a"; fi
-        if [ "$dst" = HEAD ] && [[ "$a" != *:* ]]; then
-          [ "$cur" = "$def" ] && out+=( HEAD )
-          continue
-        fi
-        if [[ "$dst" == *'*'* ]]; then
-          pre="${dst%%\**}"; suf="${dst#*\*}"
-          case "refs/heads/$def" in
-            "$pre"*"$suf")
-              mid="refs/heads/$def"; mid="${mid#"$pre"}"; mid="${mid%"$suf"}"
-              [ -n "$src" ] && out+=( "${src/\*/$mid}" ) ;;
-          esac
-          continue
-        fi
-        case "$dst" in
-          "$def"|refs/heads/"$def") [ -n "$src" ] && out+=( "$src" ) ;;
-        esac ;;
+    # Options, last one wins (git: `--dry-run --no-dry-run` pushes). After
+    # `--` or --end-of-options every word is the repository or a refspec,
+    # even one that starts with `-` (DND-1843).
+    if [ "$end" = 0 ]; then
+      case "$a" in
+        --dry-run|-n) dry=1; continue ;;
+        --no-dry-run) dry=0; continue ;;
+        --delete|-d) del=1; continue ;;
+        --no-delete) del=0; continue ;;
+        --all|--branches|--mirror) out+=( "refs/heads/$def" ); continue ;;
+        --repo) seen_repo=1; [ $# -gt 0 ] && shift; continue ;;
+        --repo=*) seen_repo=1; continue ;;
+        -o|--push-option|--receive-pack|--exec) [ $# -gt 0 ] && shift; continue ;;
+        --|--end-of-options) end=1; continue ;;
+        -*) continue ;;
+      esac
+    fi
+    if [ "$seen_repo" -eq 0 ]; then seen_repo=1; continue; fi
+    refspecs=1
+    a="${a#+}"
+    if [[ "$a" == *:* ]]; then src="${a%%:*}"; dst="${a#*:}"; else src="$a"; dst="$a"; fi
+    if [ "$dst" = HEAD ] && [[ "$a" != *:* ]]; then
+      [ "$cur" = "$def" ] && out+=( HEAD )
+      continue
+    fi
+    if [[ "$dst" == *'*'* ]]; then
+      pre="${dst%%\**}"; suf="${dst#*\*}"
+      case "refs/heads/$def" in
+        "$pre"*"$suf")
+          mid="refs/heads/$def"; mid="${mid#"$pre"}"; mid="${mid%"$suf"}"
+          [ -n "$src" ] && out+=( "${src/\*/$mid}" ) ;;
+      esac
+      continue
+    fi
+    case "$dst" in
+      "$def"|refs/heads/"$def") [ -n "$src" ] && out+=( "$src" ) ;;
     esac
   done
   { [ "$dry" -eq 1 ] || [ "$del" -eq 1 ]; } && return 0

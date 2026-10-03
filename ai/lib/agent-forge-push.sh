@@ -9,8 +9,9 @@
 # Fix:. The wrapper exits with that status before git runs. `push -h` and
 # `push --help` are not judged when -h or --help is the first push argument;
 # anywhere else it is judged, since there it may be an option's value
-# (DND-1843). Every argv walk here reads git's own option tables, kept once in
-# the passthrough ("git's own argv grammar").
+# (DND-1843). The global-option peel below and the push walk it borrows
+# (fg_refuse_non_https) read git's own option tables, kept once in the
+# passthrough ("git's own argv grammar").
 #
 # WHY. ai/hooks/forge-identity-guard.sh reads the Bash command TEXT. A `git
 # push` inside a script run as `bash <script>` is not in that text, and on

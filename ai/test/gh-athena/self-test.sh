@@ -875,6 +875,22 @@ gated_origin v1843g
 gha "${W}" push --push-option --delete origin HEAD:main
 is_gate_refusal && ok "S37. gated repo: push --push-option --delete origin HEAD:main needs a receipt (--delete is a value)" \
   || bad "S37. gated, delete as a value" "rc=${RC} out='${OUT}' err='${ERR}'"
+# Review round: git applies the LAST of --dry-run / --no-dry-run and of
+# --delete / --no-delete, and reads every word after `--` as a refspec.
+gha "${W}" push --dry-run --no-dry-run origin HEAD:main
+is_gate_refusal && ok "S38. gated repo: --dry-run --no-dry-run pushes, so it needs a receipt" \
+  || bad "S38. negated dry-run" "rc=${RC} out='${OUT}' err='${ERR}'"
+gha "${W}" push -d --no-delete origin HEAD:main
+is_gate_refusal && ok "S39. gated repo: -d --no-delete pushes, so it needs a receipt" \
+  || bad "S39. negated delete" "rc=${RC} out='${OUT}' err='${ERR}'"
+git -C "${W}" update-ref refs/heads/-x HEAD
+gha "${W}" push origin -- -x:main
+is_gate_refusal && ok "S40. gated repo: push origin -- -x:main (a refspec after --) needs a receipt" \
+  || bad "S40. dash refspec after --" "rc=${RC} out='${OUT}' err='${ERR}'"
+R="$(new_repo v1843c 'ssh://git@github.com/o/r.git')"
+gha "${R}" push --repo=https://github.com/o/r.git --no-repo
+is_refusal && ok "S41. push --repo=<https> --no-repo: git pushes to the default remote (ssh://), which is refused" \
+  || bad "S41. --no-repo cancels --repo" "rc=${RC} out='${OUT}' err='${ERR}'"
 
 # DND-1667: no git call may have fallen through past its shim.
 if fsg_verify; then ok "no git call fell through past its shim (DND-1667)"
