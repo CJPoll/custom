@@ -155,3 +155,10 @@ first-round head 58dd556a: `RESULT: 227 passed, 3 failed`:
 R2's "already used" is the post-index-change hook having drained the grant
 before the fetch; R3's `hdr=present` is the helper holding the header. After
 (fg_refuse_pre_transport, https-only probes): `RESULT: 230 passed, 0 failed`.
+
+The critic round found the transport ran whatever absolute path the grant's
+first line named, so a forged pipe could swap git's helper for any program.
+Case X1d was added first. On the review-round head (rebased as 8645ae99) the
+transport ran `/bin/true` from a forged grant and exited 0 (`rc=0 out=`), so
+X1d was red. After (the transport resolves `git --exec-path` itself and runs
+the grant's helper only when the two agree): `RESULT: 231 passed, 0 failed`.

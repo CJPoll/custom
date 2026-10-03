@@ -1579,6 +1579,16 @@ if [ "${RC}" = 0 ] && [ "$(git --git-dir="${X_FORGE}/o/r.git" rev-parse main)" =
   ok "R3. a repository insteadOf to another helper: the push lands; the wrapper's header-carrying probes never reach that helper"
 else bad "R3. probe insteadOf" "$(xdiag)"; fi
 
+# X1d (critic round). A grant whose first line is not git's own
+# git-remote-https is refused: a forged pipe cannot make the transport run a
+# program of its choosing in place of git's helper.
+exec {XFD}< <(printf '%s\n%s\n' /bin/true 'AUTHORIZATION: basic eDp5')
+X1D="$(ATHENA_FG_HOST=github.com ATHENA_FG_CRED_FD="${XFD}" "${TR}" origin https://github.com/o/r.git </dev/null 2>&1)"; X1D_RC=$?
+exec {XFD}<&-
+if [ "${X1D_RC}" = 1 ] && [[ "${X1D}" == *"not git's own git-remote-https"* ]] && [[ "${X1D}" == *"Fix:"* ]]; then
+  ok "X1d. a grant naming another program than git's own git-remote-https: refused, never run"
+else bad "X1d. forged helper path" "rc=${X1D_RC} out='${X1D}'"; fi
+
 # DND-1880. No command under the route sees the bot header in its config.
 OUT="$(cd "${X}/src" && PATH="${XPATH}" "${WRAPPER}" git config --get-all http.https://github.com/.extraheader 2>&1)"; RC=$?
 if [ "${RC}" = 1 ] && [ -z "${OUT}" ]; then ok "DND-1880. \`gh-athena git config --get-all http.https://github.com/.extraheader\` prints no bot header"

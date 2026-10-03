@@ -568,7 +568,10 @@ one.
 `integration-gate` (the script and its `ai/bin` shim), `ai/lib/integration-receipt.sh`,
 `ai/lib/receipt_seal.rb`, `ai/bin/receipt-seal`, the merge and push guards
 (`ai/lib/gh-merge-guard.sh`, `ai/lib/glab-merge-guard.sh`,
-`ai/lib/forge-git-passthrough.sh`), the merge role guard
+`ai/lib/forge-git-passthrough.sh`, and its forge transport,
+`ai/lib/forge-transport/git-remote-athena-forge` and
+`ai/lib/forge-transport/refuse-signing`, the only holder of the bot's
+header, DND-1868), the merge role guard
 (`ai/hooks/merge-role-guard.sh`, `ai/lib/merge_role.rb`,
 `ai/lib/merge_role_io.rb`), the forge identity guards that refuse a forge
 write or push not made as Athena (`ai/hooks/forge-identity-guard.sh`, the agent

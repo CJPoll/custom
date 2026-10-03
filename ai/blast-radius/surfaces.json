@@ -57,6 +57,8 @@
         "ai/lib/merge_role.rb",
         "ai/lib/merge_role_io.rb",
         "ai/lib/forge-git-passthrough.sh",
+        "ai/lib/forge-transport/git-remote-athena-forge",
+        "ai/lib/forge-transport/refuse-signing",
         "ai/hooks/forge-identity-guard.sh",
         "ai/agent-bin/git",
         "ai/lib/agent-forge-push.sh",

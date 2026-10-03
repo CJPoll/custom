@@ -81,8 +81,14 @@ if [ -z "${rh}" ] || [ -z "${header}" ]; then
   refuse "the route's one credential grant for this command was already used: a hook, a driver, a nested git, or a second connection (fetch --all, remote update, a submodule fetch) asked for it after the first connection." \
     "push or fetch from the hook with \`~/dev/custom/ai/bin/gh-athena git …\` (or glab-athena) itself, or run one connection per command: one remote, and each submodule from its own directory."
 fi
-case "${rh}" in /*) ;; *) refuse "the grant's first line is not an absolute path to git's git-remote-https." \
-  "run the command again through the Athena route; do not write to ATHENA_FG_CRED_FD yourself." ;; esac
+# The grant names the helper the route resolved; this program resolves it
+# again from the git that started it, and runs it only when the two agree, so
+# a forged pipe cannot make it run another program with the header. A moved
+# exec-path is refused by the route before git starts (DND-1844).
+own="$(git --exec-path 2>/dev/null || true)"
+[ -n "${own}" ] && [ "${rh}" = "${own}/git-remote-https" ] \
+  || refuse "the grant's first line (${rh}) is not git's own git-remote-https (${own:-<git --exec-path gave nothing>}/git-remote-https)." \
+       "run the command again through the Athena route; do not write to ATHENA_FG_CRED_FD yourself."
 [ -x "${rh}" ] || refuse "git's git-remote-https (${rh}) is not executable." \
   "check that \`git --exec-path\` names git's own exec directory and that it holds git-remote-https, then retry."
 case "${header}" in "AUTHORIZATION: basic "?*) ;; *) refuse "the grant's second line is not an AUTHORIZATION: basic header." \
