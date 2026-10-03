@@ -2138,6 +2138,9 @@ wl_lockpid="$(head -n 1 "$(git -C "$R" rev-parse --absolute-git-dir)/integration
   && ok "wl1 the refused run left no receipt" || bad "wl1 a receipt exists for the head while its holder is still running"
 grep -q 'INTEGRATION OK' <<<"$out" && bad "wl1 the refused run printed INTEGRATION OK" "$out" || ok "wl1 the refused run prints no INTEGRATION OK"
 [ ! -f "${R}/WL_SECOND_RAN" ] && ok "wl1 the refused run did not run its gate" || bad "wl1 the second run was admitted and ran its gate"
+# A forged in-slot marker with no slot really held does not skip the lock.
+out="$( cd "$R" && INTEGRATION_GATE_IN_SLOT=1 ATHENA_TEST_SLOTS=3 "$GATE" --target main --no-fetch --gate "${R}/gp.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 7 ] && [ ! -f "${R}/WL_SECOND_RAN" ] && ok "wl1 a forged INTEGRATION_GATE_IN_SLOT marker still exits 7" || bad "wl1 forged marker: expected exit 7 and no gate run, got $rc" "$out"
 # A different worktree of the same repo is unaffected.
 ( cd "$R" && git worktree add -q "${TMP}/wl-other" -b wl-other >/dev/null 2>&1 \
   && cd "${TMP}/wl-other" && echo o > o.txt && git add o.txt && git commit -qm o )

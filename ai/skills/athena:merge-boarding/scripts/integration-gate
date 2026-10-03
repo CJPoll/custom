@@ -402,6 +402,20 @@ ig_emit_run() {
 }
 trap 'ig_emit_run $?' EXIT
 
+# slot_really_held -- 0 when ATHENA_TEST_SLOT_HELD=<pool>:<n> names a slot
+# lock some process holds: a shared non-blocking flock on a fresh open fails.
+slot_really_held() {
+  local held="${ATHENA_TEST_SLOT_HELD:-}" pool slot lock fd
+  [ -n "$held" ] || return 1
+  pool="${held%:*}"; slot="${held##*:}"
+  [[ "$slot" =~ ^[1-9][0-9]*$ ]] || return 1
+  lock="${pool}/slot-${slot}.lock"
+  [ -e "$lock" ] || return 1
+  { exec {fd}<"$lock"; } 2>/dev/null || return 1
+  if flock -n -s "$fd"; then exec {fd}<&-; return 1; fi
+  exec {fd}<&-
+  return 0
+}
 # --- 0w. one gate per worktree (DND-1878) -----------------------------------
 # Two runs in one worktree share its HEAD, its working tree, its receipt and
 # its rebase, and each tears down what the other is using. So the OUTER run
@@ -410,7 +424,8 @@ trap 'ig_emit_run $?' EXIT
 # lock is exit 7, never a pass, and the refused run touches no receipt. The
 # held flock is the liveness signal; the pid in the lock file is only the name
 # the refusal prints. The run inside the slot (INTEGRATION_GATE_IN_SLOT, with
-# the lock held by its outer run) takes none: the outer holds it for both.
+# the slot really held, as a forged marker alone must not skip it) takes none:
+# the outer holds it for both.
 IG_WT_GITDIR="$(git rev-parse --absolute-git-dir 2>/dev/null)"
 case "$IG_WT_GITDIR" in
   /*) ;;
@@ -434,7 +449,7 @@ elif [ "$IG_WT_RC" -ne 99 ]; then
   echo "${PROG}: flock failed on ${IG_WT_LOCK} (exit ${IG_WT_RC}), so the per-worktree lock could not be taken." >&2
   echo "Fix: install util-linux flock on PATH and make ${IG_WT_GITDIR} writable, then re-run; a gate that cannot take its lock could run beside another in this worktree." >&2
   exit 2
-elif [ "${INTEGRATION_GATE_IN_SLOT:-}" != 1 ]; then
+elif ! { [ "${INTEGRATION_GATE_IN_SLOT:-}" = 1 ] && slot_really_held; }; then
   IG_WT_HOLDER="$(head -n 1 "$IG_WT_LOCK" 2>/dev/null)"
   [[ "$IG_WT_HOLDER" =~ ^[1-9][0-9]*$ ]] || IG_WT_HOLDER="unknown"
   echo "${PROG}: another integration-gate is running in this worktree (holder pid=${IG_WT_HOLDER}); this run did not start and wrote no receipt." >&2
@@ -646,20 +661,6 @@ join_critic() {
 # same test test-slot makes before it re-enters), so neither the marker nor a
 # stale slot variable can move the containment check back before a wait.
 CRITIC_PGID=""; CRITIC_LOG=""; CRITIC_ADOPTED=0; CRITIC_ACTIVE=0; SLOT_TMP=""
-# slot_really_held -- 0 when ATHENA_TEST_SLOT_HELD=<pool>:<n> names a slot
-# lock some process holds: a shared non-blocking flock on a fresh open fails.
-slot_really_held() {
-  local held="${ATHENA_TEST_SLOT_HELD:-}" pool slot lock fd
-  [ -n "$held" ] || return 1
-  pool="${held%:*}"; slot="${held##*:}"
-  [[ "$slot" =~ ^[1-9][0-9]*$ ]] || return 1
-  lock="${pool}/slot-${slot}.lock"
-  [ -e "$lock" ] || return 1
-  { exec {fd}<"$lock"; } 2>/dev/null || return 1
-  if flock -n -s "$fd"; then exec {fd}<&-; return 1; fi
-  exec {fd}<&-
-  return 0
-}
 # gate_slot_weight -- appends --weight to SLOT_ARGS so the outer slot holds
 # what test-slot would weigh the gate itself at (DND-1326): a harness-gate its
 # worker count (--jobs is not passable here, so HARNESS_GATE_JOBS, else its
