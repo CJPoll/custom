@@ -522,7 +522,7 @@ gmg_checkout_for() {
 # receipt can cover it: in a gated repo it is refused.
 gmg_receipt_gate() {
   local shown="$1" owner="$2" repo="$3" base="$4" head="$5" ref_json err rc tip gate why
-  local look="COULD NOT LOOK: $GMG_TOOL cannot tell whether $owner/$repo declares an integration gate"
+  local look="${GMG_LOOK_MARK} $GMG_TOOL cannot tell whether $owner/$repo declares an integration gate"
   if ! gmg_checkout_for "$owner" "$repo"; then
     gmg_refuse "$shown" "$look, because $GMG_WHY. The integration-gate receipt lives in the repo's git common dir, so it can only be read from a checkout" \
       "cd into a checkout or worktree of $owner/$repo (\`git remote -v\` names github.com/$owner/$repo), then $GMG_LAND"
@@ -998,6 +998,11 @@ gmg_content_health() {
 # from the guard's stderr to tell a red tip from the guard's other exit-3
 # refusals (DND-1906), so the guard and the tool share this one constant.
 GMG_RED_MARK="MAIN RED:"
+# GMG_LOOK_MARK opens a COULD NOT LOOK refusal's reason (DND-1907): the guard
+# could not read the base tip's runs, tree or content, or whether the repo
+# declares a gate. The merge tool reads it back like GMG_RED_MARK, so the two
+# share this one constant.
+GMG_LOOK_MARK="COULD NOT LOOK:"
 
 # gmg_line_check <owner> <repo> <base> <tip> <head|""> <gitdir> : the whole
 # stop-the-line judgment, the runs (gmg_tip_health) and the content
@@ -1027,7 +1032,7 @@ $GMG_CONTENT_DUPS"
     return 1
   fi
   if [ "$rr" = 2 ] || [ "$cr" = 2 ]; then
-    GMG_LINE_WHY="COULD NOT LOOK: whether the $base tip $tip is red cannot be told:"
+    GMG_LINE_WHY="${GMG_LOOK_MARK} whether the $base tip $tip is red cannot be told:"
     [ "$rr" = 2 ] && GMG_LINE_WHY+=" $GMG_TIP_WHY."
     [ "$cr" = 2 ] && GMG_LINE_WHY+=" $GMG_CONTENT_WHY."
     return 2

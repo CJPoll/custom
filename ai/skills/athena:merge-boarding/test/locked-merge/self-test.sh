@@ -84,6 +84,9 @@ mode="$(cat "${ST}/merge_mode")"
 # DND-1906: the guard's own re-check finds the tip red (it turned red after
 # the tool's own check): the guard's refusal shape, exit 3, nothing lands.
 [ "${mode}" = redtip ] && { printf 'gh-athena: REFUSING `gh pr merge`: MAIN RED: main tip abc is RED, so the line is stopped (DND-1902).\n  Fix: land only a red-main fix. Never merge around this.\n' >&2; exit 3; }
+# DND-1907: the guard's own re-check cannot read the tip's runs: COULD NOT LOOK
+# (a refusal too, exit 3, nothing lands), worded as the guard words it.
+[ "${mode}" = looktip ] && { printf 'gh-athena: REFUSING `gh pr merge`: COULD NOT LOOK: whether the main tip abc is red cannot be told: gh run list failed.\n  Fix: check gh auth, then re-run.\n' >&2; exit 3; }
 # Any other guard refusal is exit 3 too, but not a red tip.
 [ "${mode}" = guardother ] && { printf 'gh-athena: REFUSING `gh pr merge`: a check is not green.\n  Fix: wait for green.\n' >&2; exit 3; }
 sha=""; prev=""
@@ -538,6 +541,17 @@ grep -q "^Fix: land only a red-main fix: .*the red tip the guard names above" <<
 # b11 another guard refusal (exit 3, not red) keeps exit 4: no other code moves.
 fixture b11; echo guardother > "${ST}/merge_mode"; echo 1 > "${ST}/confirm_rc"
 run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/b11.lock"; expect b11 4; no_teardown b11
+
+# b12 DND-1907 THE MISS: the guard refuses COULD NOT LOOK at the tip. That read
+# as exit 4 after the confirm retries. Now exit 2 (this tool's own COULD NOT
+# LOOK code) at once, the guard's message and Fix: kept, no retries.
+fixture b12; echo looktip > "${ST}/merge_mode"; echo 1 > "${ST}/confirm_rc"
+: > "${ST}/confirm.log"
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/b12.lock"; expect b12 2; no_teardown b12
+names b12 "COULD NOT LOOK: whether the main tip abc is red cannot be told"
+grep -q "^  Fix: check gh auth" <<<"${out}" && ok "b12 the guard's Fix: kept" || bad "b12 guard Fix: lost" "${out}"
+grep -q "^Fix: .*Nothing was merged" <<<"${out}" && ok "b12 own Fix: present" || bad "b12 own Fix: missing" "${out}"
+[ -s "${ST}/confirm.log" ] && bad "b12 confirm-merged was retried" "$(cat "${ST}/confirm.log")" || ok "b12 no confirm retries"
 
 # c14 --help: stdout, exit 0, no side effects.
 hout="$("${TOOL}" --help 2>/dev/null)"; rc=$?

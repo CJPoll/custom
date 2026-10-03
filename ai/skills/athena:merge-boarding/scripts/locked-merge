@@ -98,7 +98,8 @@ path fleets already share) it:
 
 Exit (every non-zero prints a Fix: line):
   0 merged, confirmed, tree matches          (landed)
-  2 usage / prerequisite / non-GitHub remote (nothing landed)
+  2 usage / prerequisite / non-GitHub remote, or COULD NOT LOOK (a read this tool
+    or the merge guard could not make; nothing landed)
   3 stale: PR not open, head moved, CONFLICT with origin/<base>, or a
     SEMANTIC CONFLICT (the merged tree duplicates a migration version) -- merge
     origin/<base> in, resolve, re-gate (nothing landed)
@@ -436,14 +437,20 @@ merge_err="$(mktemp)" || die 2 "COULD NOT LOOK: mktemp failed" "check that \$TMP
 merge_rc=0
 ( cd "${REPO}" && "${AI_BIN}/gh-athena" pr merge "${PR}" --squash --match-head-commit "${HEAD_SHA}" ) 2>"${merge_err}" || merge_rc=$?
 cat "${merge_err}" >&2
-merge_red=""
+merge_red="" merge_look=""
 if [ "${merge_rc}" -ne 0 ] && grep -qF -- "REFUSING" "${merge_err}" && grep -qF -- "${GMG_RED_MARK}" "${merge_err}"; then merge_red=1; fi
+# DND-1907: the guard could not look (tip runs, tree, content, or the gate
+# declaration). Red outranks it, as in the guard. Nothing landed either.
+if [ -z "${merge_red}" ] && [ "${merge_rc}" -ne 0 ] && grep -qF -- "REFUSING" "${merge_err}" && grep -qF -- "${GMG_LOOK_MARK}" "${merge_err}"; then merge_look=1; fi
 rm -f "${merge_err}"
 # DND-1906: the tip turned red between the check above and the guard's own
 # re-check. The guard refused before any call to the forge, so nothing landed:
 # exit 11 at once, with no confirm retries (they read as exit 4).
 [ -z "${merge_red}" ] || die 11 "${GMG_RED_MARK} the merge guard refused PR ${PR}: ${base} went red after the check above; its message is above" \
   "land only a red-main fix: a head that contains the red tip the guard names above (not ${B}, which this tool read before the tip moved), removes every duplicate it names, and carries its own INTEGRATION OK receipt; re-run integration-gate on it, then re-run locked-merge. Every other PR waits until ${base} is green again. Nothing was merged."
+# DND-1907: exit 2 at once, with no confirm retries (they read as exit 4).
+[ -z "${merge_look}" ] || die 2 "${GMG_LOOK_MARK} the merge guard refused PR ${PR} because it could not look at ${base}; its message is above" \
+  "read the guard's own Fix: above, fix what it could not read (gh auth, the checkout), then re-run locked-merge. Nothing was merged."
 if [ "${merge_rc}" -ne 0 ]; then
   confirm_landed 3 \
     || die 4 "gh-athena pr merge ${PR} refused or failed, and confirm-merged does not show it landed" \
