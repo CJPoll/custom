@@ -1200,6 +1200,12 @@ check 30c-invalid-fix has "$W/30c.err" "Fix:"
 # the real pools refuse.
 out="$(env -u ATHENA_TEST_SLOT_DIR ATHENA_TEST_SLOT_ADOPTER_PID_NS='pid:[4026532999]' XDG_STATE_HOME="$W/xdg30c" "$BIN" --status 2>&1)"
 check 30c-real-pool-warns eval '[[ "$out" == *"WARN ignoring ATHENA_TEST_SLOT_ADOPTER_PID_NS"* ]]'
+# A valid value on a test pool is accepted, and a live caller that is not
+# PID 1 still runs: the seam only names an adopter, never refuses a parent.
+newpool p30c2 1
+ATHENA_TEST_SLOT_ADOPTER_PID_NS="$(readlink /proc/self/ns/pid)" timeout "$EXIT_CAP_S" "$BIN" --label P30c2 -- touch "$W/30c2.ran" 2>"$W/30c2.err"; rc=$?
+check 30c-valid-rc eq "$rc" 0
+check 30c-valid-ran present "$W/30c2.ran"
 
 # ------------------------------------------------- parent death (DND-925)
 # A queued test-slot whose caller died used to keep its queue place (the

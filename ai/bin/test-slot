@@ -336,9 +336,10 @@
 #     container, whose init is a legitimate parent there), the adopter is
 #     indistinguishable from a live caller at startup, so the run proceeds.
 #     A caller that dies LATER is caught in both, since the parent changes.
-#     The self-test proves the pid-namespace start end to end by declaring
-#     its own namespace's PID 1 an adopter (ATHENA_TEST_SLOT_ADOPTER_PID_NS,
-#     a test-pool seam, DND-1438); the real pools never read it.
+#     The self-test proves the refusal path inside a pid namespace by
+#     declaring its own namespace's PID 1 an adopter
+#     (ATHENA_TEST_SLOT_ADOPTER_PID_NS, a test-pool seam, DND-1438). The
+#     residual itself stands: the real pools never read the seam.
 #   * A caller that deliberately detaches a QUEUED run (`nohup test-slot ...
 #     &` and then exits) now loses it. Give the run a parent that waits, e.g.
 #     `setsid bash -c 'test-slot -- CMD; exit $?' &`.
@@ -1009,7 +1010,8 @@ seam_count() {
 
 # resolve_pool — sets POOL_ROOT (the cpu pool dir), POOL (the dir of pool
 # POOL_KIND), N (its budget in units), N_BASIS, DEFAULT_WEIGHT, NPROC and
-# HEARTBEAT_S and PARENT_CHECK_S from the defaults and the seams.
+# HEARTBEAT_S, PARENT_CHECK_S and ADOPTER_PID_NS from the defaults and the
+# seams.
 resolve_pool() {
   local def seam v
   def=$(canon "$(default_pool_dir)")
@@ -1017,6 +1019,7 @@ resolve_pool() {
   read_nproc
   HEARTBEAT_S=$DEFAULT_HEARTBEAT_S
   PARENT_CHECK_S=$DEFAULT_PARENT_CHECK_S
+  ADOPTER_PID_NS=""
   seam=${ATHENA_TEST_SLOT_DIR:-}
   if [ -n "$seam" ]; then
     POOL_ROOT=$(canon "$seam")
