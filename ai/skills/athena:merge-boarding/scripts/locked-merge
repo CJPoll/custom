@@ -117,7 +117,9 @@ Exit (every non-zero prints a Fix: line):
   10 LANDED and confirmed, but the worktree stack teardown failed -- do not re-merge
   11 MAIN RED: the base tip has a red run or a duplicated migration version,
      and --head is not a fix (contains the tip, removes every duplicate) --
-     land only a red-main fix; others wait for a green base (nothing landed)
+     land only a red-main fix; others wait for a green base (nothing landed).
+     Also when the tip turns red after this check and the merge guard's own
+     re-check refuses (DND-1906): no confirm retries, the guard's message kept.
 EOF
 }
 
@@ -430,7 +432,19 @@ confirm_landed() {
 # A failed merge call does not mean nothing landed (DND-1324: GitHub answered
 # 502 after the squash landed, and exit 4 said "nothing was merged"). Ask the
 # forge before claiming either; a landing goes on to the same checks below.
-if ! ( cd "${REPO}" && "${AI_BIN}/gh-athena" pr merge "${PR}" --squash --match-head-commit "${HEAD_SHA}" ); then
+merge_err="$(mktemp)" || die 2 "COULD NOT LOOK: mktemp failed" "check that \$TMPDIR is writable; nothing was merged."
+merge_rc=0
+( cd "${REPO}" && "${AI_BIN}/gh-athena" pr merge "${PR}" --squash --match-head-commit "${HEAD_SHA}" ) 2>"${merge_err}" || merge_rc=$?
+cat "${merge_err}" >&2
+merge_red=""
+if [ "${merge_rc}" -ne 0 ] && grep -qF -- "REFUSING" "${merge_err}" && grep -qF -- "${GMG_RED_MARK}" "${merge_err}"; then merge_red=1; fi
+rm -f "${merge_err}"
+# DND-1906: the tip turned red between the check above and the guard's own
+# re-check. The guard refused before any call to the forge, so nothing landed:
+# exit 11 at once, with no confirm retries (they read as exit 4).
+[ -z "${merge_red}" ] || die 11 "${GMG_RED_MARK} the merge guard refused PR ${PR}: ${base} went red after the check above; its message is above" \
+  "$(gmg_line_fix "${GH_OWNER}" "${GH_REPO}" "${base}" "${B}"), then re-run locked-merge. Nothing was merged."
+if [ "${merge_rc}" -ne 0 ]; then
   confirm_landed 3 \
     || die 4 "gh-athena pr merge ${PR} refused or failed, and confirm-merged does not show it landed" \
          "read the wrapper's own Fix: above (checks not green, conflict). If it was a forge error (5xx, timeout), check the PR on the forge before re-running."

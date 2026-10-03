@@ -994,6 +994,11 @@ gmg_content_health() {
   GMG_CONTENT_STATE="FIX"; return 0
 }
 
+# GMG_RED_MARK opens a red-tip refusal's reason. The merge tool reads it back
+# from the guard's stderr to tell a red tip from the guard's other exit-3
+# refusals (DND-1906), so the guard and the tool share this one constant.
+GMG_RED_MARK="MAIN RED:"
+
 # gmg_line_check <owner> <repo> <base> <tip> <head|""> <gitdir> : the whole
 # stop-the-line judgment, the runs (gmg_tip_health) and the content
 # (gmg_content_health). Never exits. Returns 0 (GMG_LINE_NOTE says why the
@@ -1005,7 +1010,7 @@ gmg_line_check() {
   if gmg_tip_health "$owner" "$repo" "$tip" "$head" "$gitdir"; then rr=0; else rr=$?; fi
   if gmg_content_health "$owner" "$repo" "$tip" "$head" "$gitdir"; then cr=0; else cr=$?; fi
   if [ "$rr" = 1 ] || [ "$cr" = 1 ]; then
-    GMG_LINE_WHY="MAIN RED: $base tip $tip is RED, so the line is stopped (DND-1902)."
+    GMG_LINE_WHY="${GMG_RED_MARK} $base tip $tip is RED, so the line is stopped (DND-1902)."
     [ "$rr" = 1 ] && GMG_LINE_WHY+=" Red run(s):
 $GMG_TIP_RUNS${GMG_TIP_OLD:+
   superseded red runs, not judged:

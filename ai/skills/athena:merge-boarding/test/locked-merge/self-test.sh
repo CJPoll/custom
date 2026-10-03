@@ -81,6 +81,11 @@ cat > "${STUBS}/gh-athena" <<'EOF'
 echo "$*" >> "${ST}/merge.log"
 mode="$(cat "${ST}/merge_mode")"
 [ "${mode}" = refuse ] && { echo "refused: checks not green" >&2; exit 1; }
+# DND-1906: the guard's own re-check finds the tip red (it turned red after
+# the tool's own check): the guard's refusal shape, exit 3, nothing lands.
+[ "${mode}" = redtip ] && { printf 'gh-athena: REFUSING `gh pr merge`: MAIN RED: main tip abc is RED, so the line is stopped (DND-1902).\n  Fix: land only a red-main fix. Never merge around this.\n' >&2; exit 3; }
+# Any other guard refusal is exit 3 too, but not a red tip.
+[ "${mode}" = guardother ] && { printf 'gh-athena: REFUSING `gh pr merge`: a check is not green.\n  Fix: wait for green.\n' >&2; exit 3; }
 sha=""; prev=""
 for a in "$@"; do [ "${prev}" = "--match-head-commit" ] && sha="${a}"; prev="${a}"; done
 G="git --git-dir=${BARE}"
@@ -515,6 +520,23 @@ names b8 "SEMANTIC CONFLICT"; names b8 "${GSM} version 20261003120000: 202610031
 gs_fixture b9
 run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/b9.lock"; expect b9 2; no_merge b9
 names b9 "COULD NOT LOOK"; names b9 "matches no directory"
+
+# b10 DND-1906 THE MISS: the tip turns red between the tool's own check and the
+# guard's re-check. The guard refuses (exit 3, MAIN RED); that read as exit 4
+# after the confirm retries. Now exit 11, the guard's message kept, no retries.
+fixture b10; echo redtip > "${ST}/merge_mode"; echo 1 > "${ST}/confirm_rc"
+cat > "${STUBS}/confirm-merged" <<'EOF2'
+#!/usr/bin/env bash
+echo called >> "${ST}/confirm.log"
+exit "$(cat "${ST}/confirm_rc")"
+EOF2
+: > "${ST}/confirm.log"
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/b10.lock"; expect b10 11; no_teardown b10
+names b10 "MAIN RED: main tip abc is RED"
+[ -s "${ST}/confirm.log" ] && bad "b10 confirm-merged was retried" "$(cat "${ST}/confirm.log")" || ok "b10 no confirm retries"
+# b11 another guard refusal (exit 3, not red) keeps exit 4: no other code moves.
+fixture b11; echo guardother > "${ST}/merge_mode"; echo 1 > "${ST}/confirm_rc"
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/b11.lock"; expect b11 4; no_teardown b11
 
 # c14 --help: stdout, exit 0, no side effects.
 hout="$("${TOOL}" --help 2>/dev/null)"; rc=$?
