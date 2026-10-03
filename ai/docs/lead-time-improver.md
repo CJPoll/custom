@@ -591,6 +591,19 @@ p90 over the last K comparable landings), and a status.
   gains a `held` field, and judge's tally counts held on its own. No threshold or
   guard moved, and nothing becomes keep.
 
+  **Later (2026-10-03, DND-1577):** `revert_deletes_tests` read paths, so a case
+  added inside a tool's own inline `--self-test` (the tool is no test path;
+  about 50 tracked tools carry one) was not held. `record` now also stores
+  `revert_inline_tests` (or `_na`): the non-test paths whose added lines fall
+  inside an inline self-test block. The block rule is
+  `FirstParty.inline_self_test_lines`: a block opens at a non-comment line
+  holding `--self-test` (the token `harness-gate`'s coverage check uses,
+  now `FirstParty::INLINE_SELF_TEST_RE`) or defining a self-test function,
+  and takes the deeper-indented lines after it plus the closing line.
+  `hold` reads both lists; a record without the field is computed on the
+  fly like the others. Residual: a line at column 0 inside a block (a
+  heredoc body) ends it early, so the lines after it are not seen.
+
   **Later (2026-10-01, DND-1634):** a test layout with no test word
   (`features/`, `__mocks__/`, `fixtures/`) read as "no tests", silently.
   `record` now also stores `revert_unclassified` (or `_na`): the added

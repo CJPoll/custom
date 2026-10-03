@@ -126,7 +126,8 @@ experiment it prints `keep`, `revert`, `pending`, `inconclusive` or
 - **REVERT HELD**: judge found that the commit added test lines (a `test/`
   path or a `*.self-test.sh`, or any common layout: `tests/`, `spec/`,
   `__tests__/`, `*_test.*`, `*.spec.*`; the `FirstParty.test_file_any_layout?`
-  rule, DND-1630), or could
+  rule, DND-1630; or lines inside a tool's own inline `--self-test` block,
+  DND-1577), or could
   not look. A plain `git revert` would delete them, so it is never the
   action. The status is still `revert`. Either land a partial revert that
   keeps every test addition and its fixture fix, or decline it as above

@@ -762,6 +762,40 @@ module LeadTimeExperiment
     { "revert_deletes_tests" => test_additions(src.items) }
   end
 
+  # ── inline self-test additions (DND-1577) ───────────────────────────────
+  # A tool carries its own suite in its body (`--self-test`), and that body is
+  # no test path, so numstat alone reads a case added there as source. The
+  # files to read are the non-test paths a commit added lines to; whether an
+  # added line sits in a self-test block is FirstParty.inline_self_test_lines'.
+  def inline_candidates(entries)
+    entries.select { |added, _, path| added&.positive? && !FirstParty.test_file_any_layout?(path) }
+           .map(&:last).uniq.sort
+  end
+
+  # readings: {path => Source.ok([[added line numbers, text]])}. The record
+  # fields: revert_inline_tests (the paths, possibly []), or
+  # revert_inline_tests_na with the reason when a reading could not look.
+  # Never [] for unknown.
+  def inline_fields(readings)
+    readings.sort.each do |path, src|
+      return { "revert_inline_tests_na" => "#{path}: #{src.reason}" } if src.could_not_look?
+    end
+    hits = readings.select do |_, src|
+      added, text = src.items.first
+      (Array(added) & FirstParty.inline_self_test_lines(text)).any?
+    end
+    { "revert_inline_tests" => hits.keys.sort }
+  end
+
+# The inline fields for one commit: from its numstat Source, reading each
+# candidate file through the block (path -> Source, XG.file_additions).
+# numstat could not look: _na with that reason, so nothing reads as none.
+def inline_fields_from(numstat_src)
+  return { "revert_inline_tests_na" => numstat_src.reason } if numstat_src.could_not_look?
+
+  inline_fields(inline_candidates(numstat_src.items).to_h { |path| [path, yield(path)] })
+end
+
   # ── unclassified additions (DND-1634) ───────────────────────────────────
   # Observability only: these fields never reach `hold`, so they hold
   # nothing and move no guard. An added path is a TEST when
@@ -811,6 +845,15 @@ module LeadTimeExperiment
     tests = fields["revert_deletes_tests"]
     return { "could_not_look" => "the record carries no revert_deletes_tests list" } unless tests.is_a?(Array)
 
+    # DND-1577: a case added inside a tool's own --self-test is a test too.
+    # `fields` without the inline keys is read as having none; scripts/experiment
+    # always supplies them (it reads the commit for a record that lacks them).
+    inline_na = fields["revert_inline_tests_na"]
+    return { "could_not_look" => inline_na.to_s } if inline_na
+
+    inline = fields["revert_inline_tests"]
+    tests += inline if inline.is_a?(Array)
+    tests = tests.uniq.sort
     tests.empty? ? nil : { "tests" => tests }
   end
 

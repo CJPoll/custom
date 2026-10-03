@@ -688,6 +688,94 @@ check("hold: revert with neither field is held (could not look), never read as [
   X.hold("revert", {})&.key?("could_not_look")
 end
 
+# ── inline self-test additions (DND-1577) ────────────────────────────────
+BASH_TOOL = <<~SH
+  #!/usr/bin/env bash
+  mode="${1:-run}"
+  if [ "${mode}" = "--self-test" ]; then
+    echo "case one"
+    echo "case two"
+    exit 0
+  fi
+  echo "do the work"
+SH
+
+RUBY_TOOL = <<~RB
+  def run_self_test
+    ok = true
+    ok &&= 1 + 1 == 2
+    ok
+  end
+
+  def run_check
+    :real
+  end
+
+  exit(ARGV.include?("--self-test") ? run_self_test : run_check)
+RB
+
+check("inline_self_test_lines: a bash if-block takes its body and the fi, not the code after") do
+  FirstParty.inline_self_test_lines(BASH_TOOL) == [3, 4, 5, 6, 7]
+end
+
+check("inline_self_test_lines: a ruby self-test function takes its body and end (and the dispatch line), not run_check") do
+  FirstParty.inline_self_test_lines(RUBY_TOOL) == [1, 2, 3, 4, 5, 11]
+end
+
+check("inline_self_test_lines: a tool with no self-test has none") do
+  FirstParty.inline_self_test_lines("echo hi\nif true; then\n  echo x\nfi\n").empty?
+end
+
+check("inline_self_test_lines: a comment naming --self-test opens nothing") do
+  FirstParty.inline_self_test_lines("# run --self-test\n  echo x\n").empty?
+end
+
+check("inline_self_test_lines: --self-test-case is not the marker (harness-gate's token rule)") do
+  FirstParty.inline_self_test_lines("if x = --self-test-case; then\n  echo a\nfi\n").empty?
+end
+
+check("inline_candidates: non-test paths that gained lines; not tests, deletions or binaries") do
+  entries = [[2, 0, "ai/bin/t"], [0, 3, "ai/bin/gone"], [nil, nil, "img.png"], [4, 0, "a/test/x.sh"], [1, 1, "ai/bin/t"]]
+  X.inline_candidates(entries) == ["ai/bin/t"]
+end
+
+def reading(added, text) = LeadTimePhases::Source.ok([[added, text]])
+
+check("inline_fields: an added line inside the self-test block lists the tool") do
+  X.inline_fields({ "ai/bin/t" => reading([5], BASH_TOOL) }) == { "revert_inline_tests" => ["ai/bin/t"] }
+end
+
+check("inline_fields: an added line outside the block (the non-test line) lists nothing") do
+  X.inline_fields({ "ai/bin/t" => reading([8], BASH_TOOL) }) == { "revert_inline_tests" => [] }
+end
+
+check("inline_fields: a reading that could not look is _na naming the path, never []") do
+  f = X.inline_fields({ "ai/bin/t" => LeadTimePhases::Source.could_not_look("git show failed") })
+  f == { "revert_inline_tests_na" => "ai/bin/t: git show failed" }
+end
+
+check("inline_fields_from: numstat could not look is _na with that reason") do
+  X.inline_fields_from(LeadTimePhases::Source.could_not_look("no repo")) { raise "never read" } ==
+    { "revert_inline_tests_na" => "no repo" }
+end
+
+check("hold: an inline self-test addition holds the revert, merged with the test paths") do
+  X.hold("revert", { "revert_deletes_tests" => ["a/test/t.sh"], "revert_inline_tests" => ["ai/bin/t"] }) ==
+    { "tests" => ["a/test/t.sh", "ai/bin/t"] } &&
+    X.hold("revert", { "revert_deletes_tests" => [], "revert_inline_tests" => ["ai/bin/t"] }) == { "tests" => ["ai/bin/t"] }
+end
+
+check("hold: an inline _na holds (fail closed); an empty inline list holds nothing") do
+  X.hold("revert", { "revert_deletes_tests" => [], "revert_inline_tests_na" => "x" }) == { "could_not_look" => "x" } &&
+    X.hold("revert", { "revert_deletes_tests" => [], "revert_inline_tests" => [] }).nil?
+end
+
+check("added_line_numbers: -U0 hunks name the added lines; a pure deletion names none") do
+  patch = "@@ -1,2 +1,3 @@\n+a\n@@ -9 +10 @@\n+b\n@@ -20,2 +22,0 @@\n-c\n"
+  require_relative "../lib/experiment_git"
+  LeadTimeExperimentGit.added_line_numbers(patch) == [1, 2, 3, 10]
+end
+
 check("hold: pending, keep, inconclusive and reverted are never held") do
   tests = { "revert_deletes_tests" => ["a/test/t.sh"] }
   %w[pending keep inconclusive reverted].all? { |s| X.hold(s, tests).nil? }

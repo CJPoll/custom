@@ -134,6 +134,40 @@ module LeadTimeExperimentGit
     Source.could_not_look("git could not run (#{e.message})")
   end
 
+  # One file of a commit, for the inline self-test read (DND-1577):
+  # Source.ok([[added line numbers in the commit's version, that version's
+  # text]]). The numbers are against the first parent's diff with no context,
+  # so they name exactly the added lines; the text is the file as the commit
+  # left it. Which of those lines sit in a self-test block is the domain's
+  # (LeadTimeExperiment.inline_fields). Either read failing is could not look.
+  def file_additions(repo, sha, path)
+    return Source.could_not_look("#{repo} is not on this machine") unless File.directory?(repo)
+
+    patch, err, st = Open3.capture3(LeadTimeConfigIO::GIT_ENV_UNSET, "git", "-C", repo, "show", "-U0", "--no-renames", "--format=",
+                                    "--diff-merges=first-parent", "#{sha}^{commit}", "--", path)
+    return Source.could_not_look("git show #{sha.to_s[0, 12]} -- #{path} in #{repo} failed (#{err.strip.lines.first.to_s.strip})") unless st.success?
+
+    text, err, st = Open3.capture3(LeadTimeConfigIO::GIT_ENV_UNSET, "git", "-C", repo, "show", "#{sha}^{commit}:#{path}")
+    return Source.could_not_look("git show #{sha.to_s[0, 12]}:#{path} in #{repo} failed (#{err.strip.lines.first.to_s.strip})") unless st.success?
+
+    Source.ok([[added_line_numbers(patch), text.dup.force_encoding(Encoding::UTF_8).scrub]])
+  rescue SystemCallError => e
+    Source.could_not_look("git could not run (#{e.message})")
+  end
+
+  # The new-file line numbers of a `-U0` patch's added lines: each hunk
+  # header `@@ -a,b +c,d @@` adds c..c+d-1 (d defaults to 1; 0 adds none).
+  def added_line_numbers(patch)
+    patch.to_s.each_line.flat_map do |l|
+      m = l.match(/\A@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/)
+      next [] unless m
+
+      start = Integer(m[1], 10)
+      len = m[2] ? Integer(m[2], 10) : 1
+      (start...(start + len)).to_a
+    end
+  end
+
   def numstat_entry(entry)
     added, deleted, path = entry.split("\t", 3)
     [count(added), count(deleted), path.to_s]

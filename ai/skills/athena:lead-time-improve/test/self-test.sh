@@ -545,6 +545,49 @@ lacks "a record from before DND-1634 has no field" "$(cat "${STATE12}/experiment
 eq "judge it: exit 0" "$(LEAD_TIME_STATE_DIR="${STATE12}" LEAD_TIME_EXPERIMENT_NOW=2026-08-16T12:00:00Z run judge --repo custom)" "0"
 has "... the field is computed on the fly" "$(out)" "unclassified additions in features/x.feature"
 
+# ── inline self-test: a case added inside a tool's own --self-test (DND-1577) ──
+echo "== inline self-test"
+# Dated early July, so no other fixture's window holds its trailer.
+mkdir -p "${REPO}/ai/bin"
+printf '%s\n' '#!/usr/bin/env bash' 'set -eu' 'mode="${1:-run}"' 'if [ "${mode}" = "--self-test" ]; then' \
+  '  echo "case one"' '  echo "case two"' '  exit 0' 'fi' 'echo "do the work"' >"${REPO}/ai/bin/itool"
+"${G[@]}" add -A && GIT_COMMITTER_DATE=2026-07-05T10:00:00Z GIT_AUTHOR_DATE=2026-07-05T10:00:00Z "${G[@]}" commit -q -m "fixture: a tool with an inline self-test"
+printf '%s\n' '#!/usr/bin/env bash' 'set -eu' 'mode="${1:-run}"' 'if [ "${mode}" = "--self-test" ]; then' \
+  '  echo "case one"' '  echo "case two"' '  echo "case three"' '  exit 0' 'fi' 'echo "do the work"' >"${REPO}/ai/bin/itool"
+TINL="$(commit_files 2026-07-05T11:00:00Z "fixture: a fix that adds a self-test case inside the tool" "$(tr "custom verify phase")")"
+printf '%s\n' '#!/usr/bin/env bash' 'set -eu' 'mode="${1:-run}"' 'if [ "${mode}" = "--self-test" ]; then' \
+  '  echo "case one"' '  echo "case two"' '  echo "case three"' '  exit 0' 'fi' 'echo "do the real work"' >"${REPO}/ai/bin/itool"
+TNON="$(commit_files 2026-06-05T11:01:00Z "fixture: a change to the tool's non-test line" "$(tr "custom verify phase")")"
+STATE13="${TMP}/state13"
+mkdir -p "${STATE13}"
+/usr/bin/ruby "${HERE}/make_ledger.rb" "${STATE13}/ledger.jsonl" "${TINL}" 700 2026-07-05T00:00:00Z
+s13() { LEAD_TIME_STATE_DIR="${STATE13}" LEAD_TIME_EXPERIMENT_NOW=2026-07-06T12:00:00Z "$@"; }
+IID="custom:verify:${TINL:0:12}"
+eq "record a change adding a case inside a tool's --self-test: exit 0" "$(s13 rec verify phase "${TINL}" change)" "0"
+has "regression: the record output names the tool as a test addition" "$(out)" "a plain revert would delete test additions in ai/bin/itool"
+has "... the record row lists it" "$(recrow "${STATE13}/experiments.jsonl" "${IID}")" '"revert_inline_tests":["ai/bin/itool"]'
+eq "judge: exit 0" "$(s13 run judge --repo custom)" "0"
+has "regression: a revert of a commit that added a self-test case reads REVERT HELD" "$(out)" "${IID} REVERT HELD kind=change"
+has "... naming the tool" "$(out)" "reverting ${TINL:0:12} deletes test additions in ai/bin/itool"
+STATE14="${TMP}/state14"
+mkdir -p "${STATE14}"
+/usr/bin/ruby "${HERE}/make_ledger.rb" "${STATE14}/ledger.jsonl" "${TNON}" 700 2026-06-05T00:00:00Z
+s14() { LEAD_TIME_STATE_DIR="${STATE14}" LEAD_TIME_EXPERIMENT_NOW=2026-06-06T12:00:00Z "$@"; }
+NID="custom:verify:${TNON:0:12}"
+eq "record a change to the same tool's non-test line only: exit 0" "$(s14 rec verify phase "${TNON}" change)" "0"
+lacks "... its record output names no test addition" "$(out)" "would delete test additions"
+has "... its record row lists none" "$(recrow "${STATE14}/experiments.jsonl" "${NID}")" '"revert_inline_tests":[]'
+eq "judge it: exit 0" "$(s14 run judge --repo custom)" "0"
+has "the miss: a non-test edit of the same tool is a plain REVERT" "$(out)" "${NID} REVERT kind=change"
+lacks "... never REVERT HELD" "$(out)" "REVERT HELD"
+STATE15="${TMP}/state15"
+mkdir -p "${STATE15}"
+cp "${STATE13}/ledger.jsonl" "${STATE15}/"
+recrow "${STATE13}/experiments.jsonl" "${IID}" | sed 's/,"revert_inline_tests":\[[^]]*\]//' >"${STATE15}/experiments.jsonl"
+lacks "a record from before DND-1577 has no field" "$(cat "${STATE15}/experiments.jsonl")" "revert_inline_tests"
+eq "judge it: exit 0" "$(LEAD_TIME_STATE_DIR="${STATE15}" LEAD_TIME_EXPERIMENT_NOW=2026-07-06T12:00:00Z run judge --repo custom)" "0"
+has "... the field is computed on the fly: REVERT HELD" "$(out)" "${IID} REVERT HELD kind=change"
+
 # ── cross-repo: a custom change measured on gen_saas (DND-1528) ─────────────
 echo "== cross-repo"
 XGS="${TMP}/xr/gen_saas"
