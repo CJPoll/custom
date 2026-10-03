@@ -234,6 +234,8 @@ api_method() {
       }
       if (x == "-q" || x == "--jq" || x == "-t" || x == "--template" || x == "-p" || x == "--preview" || x == "--cache" || x == "--output" || x == "-H" || x == "--header" || x == "-f" || x == "-F" || x == "--field" || x == "--raw-field" || x == "--form" || x == "--input" || x == "-R" || x == "--repo" || x == "--hostname") { i++; continue }
     }
+    # A quoted "-X PATCH" is one word whose method value has a leading space.
+    sub(/^[ ]+/, "", m)
     sub(/[^A-Za-z].*/, "", m)
     print toupper(m)
   }'

@@ -274,6 +274,14 @@ run "$(bash_json "gh api -X GET repos/o/r/git/refs/heads/x --jq '.a -XPATCH'")"
 check "4e19. -X GET + quoted --jq '.a -XPATCH' stays denied (lexical reading)" deny
 run "$(bash_json "gh api repos/o/r/git/refs/heads/x -X 'PATCH' --jq 'a'")"
 check_text "4e20. a quoted method word is still the method" 'creates or moves a ref'
+run "$(bash_json 'gh api repos/o/r/git/refs/heads/x "-X PATCH"')"
+check_text "4e21. a whole quoted -X PATCH word is still the method (denied before the tokenizer too)" 'creates or moves a ref'
+run "$(bash_json "gh api repos/o/r/git/refs/heads/x -X PATCH -f 'c d -XGET'")"
+check_text "4e22. -X PATCH then a quoted field holding -XGET" 'creates or moves a ref'
+run "$(bash_json 'gh api repos/o/r/git/refs/heads/x -f "c d -XGET')"
+check "4e23. an unterminated quote holding -XGET is still denied (a field, so a POST)" deny
+run "$(bash_json "gh api -X PATCH repos/o/r/git/refs/heads/x -f '' --jq 'a b -XGET'")"
+check_text "4e24. an empty quoted word is a word" 'creates or moves a ref'
 
 run "$(bash_json 'gh api -X DELETE repos/o/r/contents/lib/a.ex -f message=x -f sha=abc')"
 check "4f. bare gh api DELETE contents/<path>" deny
