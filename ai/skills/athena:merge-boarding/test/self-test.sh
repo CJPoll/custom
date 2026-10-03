@@ -1878,6 +1878,49 @@ done
 # fixture branch cannot edit). No declared gate is copied (harness-gate would
 # run for real), so each case passes a stub --gate.
 DND1796_REPO="$(cd "${ROOT}/../../.." && pwd)"
+# unhold_chain_manifest <src> <dst> -- the fixture manifest: the landed one with the
+# receipt chain unheld, so a branch that edits the gate can LAND in a mechanics case.
+# The chain is not copied here (DND-1848; the copied name regex of DND-1807 missed every
+# chain file added later). The manifest's unconditional owner-approval-policy surface
+# holds the chain beside the classifier and the owner verifiers. This list names what the
+# fixture KEEPS held (the classifier, its manifest, the owner verifiers, and the merge-role,
+# forge-identity, forge-auth, private-overlay and harness-gate neighbours the cases do not
+# edit); every other pattern of that surface, so any chain file added later, is unheld.
+FIXTURE_KEEP_HELD='**/athena/owner_approvals/action_class.ex
+**/athena/owner_approvals/action_class_test.exs
+ai/blast-radius/**
+ai/bin/blast-radius
+ai/lib/owner_click.rb
+ai/lib/owner_turn.rb
+ai/config/main-content-checks.json
+ai/hooks/merge-role-guard.sh
+ai/lib/merge_role.rb
+ai/lib/merge_role_io.rb
+ai/lib/forge-transport/git-remote-athena-forge
+ai/lib/forge-transport/refuse-signing
+ai/lib/forge-http-pin.sh
+ai/hooks/forge-identity-guard.sh
+ai/agent-bin/git
+ai/lib/agent-forge-push.sh
+ai/agent-bin/gh
+ai/agent-bin/glab
+ai/lib/agent-forge-cli.sh
+ai/lib/forge-write-class.awk
+ai/agent-env/session-env.sh
+ai/hooks/forge-auth-guard.sh
+ai/lib/private_overlay_resolver.rb
+ai/lib/private_overlay.rb
+ai/bin/harness-gate
+ai/lib/first_party.rb
+ai/lib/harness_tools.rb
+ai/lib/landed.rb
+ai/lib/reap_tags.rb
+ai/lib/scratch_home_sentinel.rb'
+unhold_chain_manifest() {
+  jq --arg keep "$FIXTURE_KEEP_HELD" '($keep | split("\n")) as $k
+    | .surfaces |= map(if .class == "owner-approval-policy" and (has("content") | not)
+        then .patterns |= map(select(. as $p | $k | index($p))) else . end)' "$1" > "$2"
+}
 landed_layout() {
   mkdir -p "$1/ai/skills/athena:merge-boarding/scripts" "$1/ai/bin" "$1/ai/blast-radius"
   cp "$GATE" "$1/ai/skills/athena:merge-boarding/scripts/integration-gate"
@@ -1885,7 +1928,7 @@ landed_layout() {
   # The mechanics cases below edit the gate and its libs and expect a LANDING, so
   # their manifest leaves the receipt chain unheld (DND-1807 holds it for real;
   # lb10 runs the real manifest). The owner verifiers and the rest stay held.
-  jq -f "${TMP}/lb-unhold-chain.jq" "${DND1796_REPO}/ai/blast-radius/surfaces.json" > "$1/ai/blast-radius/surfaces.json"
+  unhold_chain_manifest "${DND1796_REPO}/ai/blast-radius/surfaces.json" "$1/ai/blast-radius/surfaces.json"
   for b in integration-gate blast-radius test-slot critic-review receipt-seal; do cp "${DND1796_REPO}/ai/bin/${b}" "$1/ai/bin/${b}"; done
   ( cd "$1" && git init -q -b main . && git add -A && git commit -qm layout \
     && printf '/g.sh\n/GATE_RAN\n' >> .git/info/exclude )
@@ -1894,7 +1937,6 @@ landed_layout() {
 landed_branch() { ( cd "$1" && git worktree add -q -b "$(basename "$2")" "$2" ); stub_gate_green "$2/GATE_RAN" "$2/g.sh"; }
 LBG=ai/skills/athena:merge-boarding/scripts/integration-gate
 printf '.surfaces |= map(select(.class != "owner-approval-policy"))\n' > "${TMP}/lb-narrow.jq"
-printf '.surfaces |= map(.patterns |= (if . == null then . else map(select((test("integration-gate|integration-receipt|receipt_seal|receipt-seal|merge-guard|forge-git-passthrough|gh-athena|glab-athena|locked-merge|main-health|forge-api-scan|forge-cli-isolation|critic-review|critic_carry|critic_verdict_stores")) | not)) end))\n' > "${TMP}/lb-unhold-chain.jq"
 
 # lb1: a branch that narrows the manifest (drops the held owner-approval-policy
 # surface) and so touches a file that surface holds. The landed manifest holds
@@ -2043,6 +2085,26 @@ out="$( cd "$W" && "${W}/${LBG}" --target main --no-fetch --gate "${W}/g.sh" 2>&
 grep -q 'INTEGRATION OK' <<<"$out" && bad "lb10 printed INTEGRATION OK" "$out" || ok "lb10 no INTEGRATION OK"
 [ ! -e "$(git -C "$W" rev-parse --path-format=absolute --git-common-dir)/integration-receipts/$(git -C "$W" rev-parse HEAD).json" ] \
   && ok "lb10 no receipt for the HOT head" || bad "lb10 a receipt was written for a HOT head"
+
+# lb11 (DND-1848): the fixture's unheld set is derived from the manifest, not copied. A
+# chain entry added to the manifest is unheld without editing this file.
+SYN="ai/lib/synthetic-chain-entry-dnd1848.sh"
+jq --arg p "$SYN" '(.surfaces | map(.class == "owner-approval-policy" and (has("content") | not)) | index(true)) as $i | .surfaces[$i].patterns += [$p]' \
+  "${DND1796_REPO}/ai/blast-radius/surfaces.json" > "${TMP}/lb11-synthetic.json"
+unhold_chain_manifest "${TMP}/lb11-synthetic.json" "${TMP}/lb11-fixture.json"
+jq -e --arg p "$SYN" '[.surfaces[].patterns[]?] | index($p) | not' "${TMP}/lb11-fixture.json" >/dev/null \
+  && ok "lb11 a chain entry added to the manifest is unheld in the fixture" \
+  || bad "lb11 the fixture kept a synthetic chain entry held: its strip list is a copy, not derived from the manifest"
+unhold_chain_manifest "${DND1796_REPO}/ai/blast-radius/surfaces.json" "${TMP}/lb11-real.json"
+jq -e '[.surfaces[].patterns[]?] | (index("ai/bin/blast-radius") != null) and (index("ai/lib/owner_click.rb") != null)' "${TMP}/lb11-real.json" >/dev/null \
+  && ok "lb11 the classifier and owner verifiers stay held in the fixture" || bad "lb11 the fixture unheld the classifier or an owner verifier"
+jq -e '[.surfaces[].patterns[]?] | index("ai/lib/integration-receipt.sh") | not' "${TMP}/lb11-real.json" >/dev/null \
+  && ok "lb11 a real chain file is unheld in the fixture" || bad "lb11 the fixture kept a real chain file held"
+
+jq -e --arg keep "$FIXTURE_KEEP_HELD" '($keep | split("\n")) as $k | [.surfaces[].patterns[]?] as $all | $k | all(. as $e | $all | index($e))' \
+  "${DND1796_REPO}/ai/blast-radius/surfaces.json" >/dev/null \
+  && ok "lb11 every kept-held entry is still a pattern of the manifest" \
+  || bad "lb11 FIXTURE_KEEP_HELD names a pattern the manifest no longer holds. Fix: drop or rename the stale entry in FIXTURE_KEEP_HELD in this file."
 
 # ---------------------------------------------------------------- summary
 printf '\nintegration-gate self-test: %d passed, %d failed\n' "$PASS" "$FAIL"
