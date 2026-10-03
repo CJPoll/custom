@@ -2145,7 +2145,8 @@ wait "$WL_FIRST"; wl_rc=$?
   && ok "wl3 the holder's receipt stands" || bad "wl3 the holder's receipt is missing"
 out="$( cd "$R" && ATHENA_TEST_SLOTS=3 "$GATE" --target main --no-fetch --gate "${R}/gp.sh" 2>&1 )"; rc=$?
 [ "$rc" -eq 0 ] && [ -f "${R}/WL_SECOND_RAN" ] && ok "wl4 the lock is released when the holder exits" || bad "wl4 a later run was refused, rc=$rc" "$out"
-"$GATE" --help 2>&1 | grep -q '^ *7 .*worktree' && ok "wl5 --help documents exit 7" || bad "wl5 --help does not document exit 7"
+wl_help="$("$GATE" --help 2>&1)"
+grep -q '^ *7 .*worktree' <<<"$wl_help" && ok "wl5 --help documents exit 7" || bad "wl5 --help does not document exit 7"
 
 # ---------------------------------------------------------------- summary
 printf '\nintegration-gate self-test: %d passed, %d failed\n' "$PASS" "$FAIL"
