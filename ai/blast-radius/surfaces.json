@@ -338,6 +338,7 @@
       "ai/bin/confirm-merged": "reports whether a merge landed, after the fact; it accepts or refuses nothing (DND-1807 keeps it COLD)",
       "ai/bin/forge-preflight": "a health probe of the Athena wrapper before a write; the identity guards refuse a non-Athena write whatever it says",
       "ai/bin/push-actor-check": "reads the forge's record of a push after it happened; it refuses nothing",
+      "ai/bin/forge-identity": "a read-only report of which bot each checkout resolves to (DND-1936); glab-athena, held, makes every identity decision itself",
       "scripts/wt-lib/merge.sh": "wt's local merge and rebase of stacked branches; it accepts nothing on a forge, and the push that would land its result is judged by the held push guards (the agent PATH git wrapper, forge-git-passthrough.sh)",
       "scripts/wt-lib/push.sh": "picks the route wt pushes by (the owner's git, or the Athena wrapper under WT_AGENT_PUSH); the agent PATH git wrapper and forge identity guard, both held, refuse an agent push that does not run as Athena",
       "ai/hooks/harness-event.sh": "a retired PostToolUse telemetry hook (DND-1487); no deny path",

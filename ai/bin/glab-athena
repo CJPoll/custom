@@ -41,6 +41,33 @@
 # ATHENA_FORGE_IDENTITIES_FILE / ATHENA_PRIVATE_ROOT name fixture map halves.
 set -eu
 
+# `glab-athena --help` (alone) answers the wrapper's own help on stdout and does
+# nothing else: no identity, no token, no glab. Any other argv, `mr --help`
+# included, is forwarded to glab as before.
+if [ "$#" = 1 ] && { [ "$1" = --help ] || [ "$1" = -h ]; }; then
+	cat <<'EOF'
+glab-athena -- run glab as the Athena GitLab bot of the project's namespace
+
+Usage:
+  glab-athena <glab args...>        glab, as the bot for the project's (host,
+                                    top-level namespace): from -R/--repo, an
+                                    `api projects/<ns>%2F<p>/...` endpoint, or
+                                    the checkout's origin
+  glab-athena git <git args...>     git for ONE command, as the bot of the
+                                    forge URL it reaches, over HTTPS only
+  glab-athena refresh [-R <ns>/<p>] renew that bot's token (OWNER-run only)
+  glab-athena --help                this text (stdout, exit 0, nothing else)
+
+The bot map: ai/config/forge-identities.json plus the private overlay's
+gitlab .identities (ai/lib/forge-identity.sh). A namespace with no bot, a key
+this cannot read (an id, a graphql query, an ambiguous remote) or an empty
+token is refused with a Fix:. ~/dev/custom/ai/bin/forge-identity check lists
+what each checkout resolves to. For glab's own help, run plain `glab --help`
+(a read). Skill: athena:gitlab.
+EOF
+	exit 0
+fi
+
 GA_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 FID_LIB="$GA_DIR/../lib/forge-identity.sh"
 [ -r "$FID_LIB" ] || {

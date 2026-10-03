@@ -104,7 +104,6 @@ TXT
 # being exempt).
 EXEMPT = {
   "ai/bin/gh-athena"         => "passthrough wrapper: exec's gh \"$@\"; forwarding argv IS its contract, so --help means gh's own --help",
-  "ai/bin/glab-athena"       => "passthrough wrapper: exec's glab \"$@\"; forwarding argv IS its contract",
   "ai/bin/notion-athena-mcp" => "passthrough wrapper: exec's the Notion MCP server; forwarding argv IS its contract",
 }.freeze
 

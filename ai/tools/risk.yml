@@ -82,6 +82,9 @@ tools:
   critic-review:           { class: readOnly, reason: review }
   contention-census:       { class: readOnly, reason: census }
   forge-preflight:         { class: readOnly, reason: probe }
+  # forge-identity (DND-1936) reads the identity map, the overlay and each
+  # checkout's git config; it never reads a token and writes nothing.
+  forge-identity:          { class: readOnly, reason: probe }
   # pool-headroom (DND-864) reads docker info/network/ps, git, and gh/glab
   # merged-PR lists. It removes nothing, even when it names what to reclaim.
   pool-headroom:           { class: readOnly, reason: probe }

@@ -162,6 +162,13 @@ bodies. Tests use synthetic values (`UFAKE00001`).
   `notion-athena-mcp`) is exempt, named with a reason in the check's `EXEMPT`
   table.
 
+  **Later (2026-10-03, DND-1936):** the exempt wrappers were `gh-athena`,
+  `glab-athena` and `notion-athena-mcp`. `glab-athena` left the table: once it
+  resolved its bot from the project's namespace, `glab-athena --help` outside a
+  checkout refused instead of answering, so it now answers `--help` (alone)
+  with its own text and is probed like any tool. `glab-athena <cmd> --help`
+  still forwards to glab.
+
 ### Testing
 - Test scripts in isolation before committing
 - Verify completions work correctly
