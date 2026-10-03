@@ -249,7 +249,11 @@ module LeadTimeExperiment
       return "check_walls n/a: #{row['check_walls_na']}" if row["check_walls_na"]
       return "row predates check_walls" unless row.key?("check_walls")
 
-      head = (row["gated_head"] || row["landed_commit"]).to_s[0, 8]
+      # No gated head: no head-keyed lookup ran, so name that, never the
+      # landed commit (DND-1759).
+      return "check #{check_label} was not looked up: no gated head known for this row" unless row["gated_head"]
+
+      head = row["gated_head"].to_s[0, 8]
       walls = row["check_walls"]
       return "check #{check_label} has no numeric wall on #{head}" if walls.is_a?(Hash) && walls.key?(check_label)
 

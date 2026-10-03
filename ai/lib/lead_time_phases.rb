@@ -157,11 +157,32 @@ module LeadTimePhases
          "tail_end" => row["end_kind"]&.to_s, "lead_na_reason" => row["unmeasured_reason"] }, nil]
     end
 
-    def unit_desc(landing) = landing["ticket"] || "head #{head_desc(landing)}"
+    NO_HEAD_UNIT = "an unticketed landing with no gated head known"
 
-    # The sha a head-keyed lookup used: the gated head, else (none known) the
-    # landed commit, which is what the row is named by.
-    def head_desc(landing) = Util.short(landing["gated_head"] || landing["landed_commit"])
+    # What a reason names as the unit a lookup searched for: the ticket, else
+    # the gated head, else (none known) that fact. Never the landed commit,
+    # which no head-keyed lookup used (DND-1759).
+    def unit_desc(landing)
+      landing["ticket"] || (landing["gated_head"] ? "head #{head_desc(landing)}" : NO_HEAD_UNIT)
+    end
+
+    # How a row names itself where no lookup is involved (an origin summary).
+    def identity_desc(landing)
+      landing["ticket"] || "head #{Util.short(landing['gated_head'] || landing['landed_commit'])}"
+    end
+
+    # The head a head-keyed lookup used, or that there was none. A lookup keyed
+    # on a head that does not exist was never run, so it must not read as a
+    # miss on some other commit (the forge's landed commit).
+    def head_desc(landing) = landing["gated_head"] ? Util.short(landing["gated_head"]) : "no gated head known"
+
+    # "no <what> on <head>", or, with no gated head, that the lookup could not
+    # be keyed: "looked and found nothing" differs from "could not look".
+    def head_miss(landing, what, prep: "for")
+      return "no #{what} #{prep} #{head_desc(landing)}" if landing["gated_head"]
+
+      "no #{what} looked up: no gated head known for #{landing['ticket'] || 'an unticketed landing'}"
+    end
 
     # The key Match.for_gated searched by: the head for a push landing, else
     # (a merge landing) the unit (DND-1511). A push landing PushJoin could
@@ -558,8 +579,8 @@ module LeadTimePhases
       looked << "critic verdicts: could not look (#{verdicts.reason})" if verdicts.could_not_look?
       return looked.join("; ") unless looked.empty?
 
-      "no critic PASS for #{Landing.unit_desc(landing)} (no critic.round, no verdict receipt on " \
-        "#{Landing.head_desc(landing)})"
+      "no critic PASS for #{Landing.unit_desc(landing)} (no critic.round, " \
+        "#{Landing.head_miss(landing, 'verdict receipt', prep: 'on')})"
     end
 
     # The last successful integration_gate.run on the landed head, or nil.
@@ -573,8 +594,7 @@ module LeadTimePhases
     # on the landed head (run: last_ok_run's), else the receipt's recorded_at
     # as the end only.
     def integrate(landing, events, receipt, run = last_ok_run(landing, events))
-      sha = Landing.head_desc(landing)
-      # sha names the head-keyed receipt; gated names the key the run lookup used.
+      # gated names the key the run lookup used.
       gated = Landing.gated_desc(landing)
       rec = receipt.items.first && Util.time(receipt.items.first["recorded_at"])
       if run
@@ -587,7 +607,7 @@ module LeadTimePhases
       no_run = telemetry_miss(events, "no integration_gate.run on #{gated}")
       return [missing("#{no_run} (the receipt gives the end only)"), found(rec, "integration receipt")] if rec
 
-      rec_why = receipt.could_not_look? ? "receipt: could not look (#{receipt.reason})" : "no integration receipt for #{sha}"
+      rec_why = receipt.could_not_look? ? "receipt: could not look (#{receipt.reason})" : Landing.head_miss(landing, "integration receipt")
       [missing(no_run), missing("#{no_run}; #{rec_why}")]
     end
 
@@ -820,9 +840,8 @@ module LeadTimePhases
       walls, source = check_walls(landing, events, timings)
       return { "check_walls" => walls, "top_checks" => top(walls), "top_checks_source" => source } if walls
 
-      sha = Landing.head_desc(landing)
       tel = Anchors.telemetry_miss(events, "no harness_gate.check on #{Landing.gated_desc(landing)}")
-      tim = timings.could_not_look? ? "timings: could not look (#{timings.reason})" : "no timings rows for #{sha}"
+      tim = timings.could_not_look? ? "timings: could not look (#{timings.reason})" : Landing.head_miss(landing, "timings rows")
       why = "#{tel}; #{tim}"
       { "top_checks" => nil, "top_checks_na" => why, "check_walls_na" => why }
     end
@@ -1336,7 +1355,7 @@ module LeadTimePhases
       reasons = unknown.map { |r| generic(unknown_reason(r), r) }.tally
                        .sort_by { |r, n| [-n, r] }.first(TOP_REASONS).map { |r, n| { "reason" => r, "count" => n } }
       { "local" => rows.count { |r| r["origin"] == Origin::LOCAL }, "foreign" => foreign.size,
-        "foreign_units" => foreign.map { |r| Landing.unit_desc(r) }, "unknown" => unknown.size,
+        "foreign_units" => foreign.map { |r| Landing.identity_desc(r) }, "unknown" => unknown.size,
         "unknown_reasons" => reasons, "judged" => rows.size - unknown.size }
     end
 

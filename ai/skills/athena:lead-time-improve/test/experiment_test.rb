@@ -383,6 +383,12 @@ check("Metric: a label present with no numeric wall says so, not that it did not
   check_metric.na_reason(crow(1, { WAIT => nil }).merge("gated_head" => "c" * 40)) == "check #{WAIT} has no numeric wall on cccccccc"
 end
 
+check("Metric: a row with no gated head says so, never names its landed commit (DND-1759)") do
+  r = crow(1, { "other" => 9.0 }).merge("gated_head" => nil, "landed_commit" => "d" * 40)
+  why = check_metric.na_reason(r)
+  why.include?("no gated head known") && !why.include?("dddddddd")
+end
+
 check("sides: an empty before-set names the latest unmeasured improve landing, never a watch row") do
   rows = [crow(-2, nil), crow(-1, { WAIT => 1.0 }).merge("mode" => "watch", "check_walls" => {})] +
          (1..10).map { |i| crow(i, { WAIT => 5.0 }) }

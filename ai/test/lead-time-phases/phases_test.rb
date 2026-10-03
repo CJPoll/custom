@@ -427,6 +427,32 @@ unt_nohead = unt_sq.merge("gated_head" => nil, "gated_head_na" => "no head")
 ph_un = L::Phases.compute(anchors(unt_nohead, S.ok(FULL.map { |e| e.merge("unit" => "some-branch", "head" => nil) })))
 check("G6 no gated head never matches an event with no head") { ph_un["integrate"]["s"].nil? }
 
+# DND-1759: a merge landing with no gated head names the missing head in every
+# head-keyed reason, never the forge's landed commit (OTHER), which no lookup used.
+LANDED8 = OTHER[0, 8]
+nh_tick = landing(commit: OTHER).merge("landed_via" => "merge", "gated_head" => nil, "gated_head_na" => "no head")
+ph_nht = L::Phases.compute(anchors(nh_tick, S.ok([])))
+{ "unticketed" => ph_un, "ticketed" => ph_nht }.each do |label, ph|
+  rs = %w[queue integrate merge].map { |c| ph[c]["na_reason"].to_s }
+  check("N1 #{label}: no head-keyed reason names the landed commit") { rs.none? { |r| r.include?(LANDED8) } }
+  # A ticketed run lookup is keyed by the unit, so only its receipt/verdict reasons are head-keyed.
+  head_keyed = label == "ticketed" ? [rs[0], rs[2]] : rs
+  check("N1 #{label}: each head-keyed reason says no gated head is known") do
+    head_keyed.all? { |r| r.include?("no gated head known") }
+  end
+end
+nh_check = L::Counters.check_fields(nh_tick, S.ok([]), S.empty("none"))
+check("N2 check_fields names no landed commit when no head is known") do
+  !nh_check["top_checks_na"].include?(LANDED8) && nh_check["top_checks_na"].include?("no gated head known")
+end
+nh_critic = L::Anchors.critic_miss(unt_nohead, S.ok([]), NO_VERDICTS)
+check("N3 critic_miss names no landed commit when no head is known") do
+  !nh_critic.include?(LANDED8) && nh_critic.include?("no gated head known")
+end
+check("N4 a head known still names the head in a miss") do
+  L::Anchors.critic_miss(landing, S.ok([]), NO_VERDICTS).include?(HEAD[0, 8])
+end
+
 LOCAL_ORIGIN = L::Origin.local("fixture")
 base_sq = L::Ledger.improve_row(repo: "custom", landing: sq, anchors: anchors(sq, S.ok(FULL)), counters: {},
                                 telemetry_status: :ok, ingested_at: t("2026-10-01T06:00:00Z"), origin: LOCAL_ORIGIN)
