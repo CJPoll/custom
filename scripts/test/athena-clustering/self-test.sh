@@ -1141,6 +1141,34 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+case_ 'athena-clustering-run.sh — the main checkout comes from scripts/lib/main-checkout.sh (DND-1722)'
+
+c="$(new_case)"
+mkdir -p "$c/plain-dir"
+rc="$(run_runner "$c" CLUSTERING_REPO="$c/plain-dir")"
+if [ "$rc" = 2 ] && grep -q 'not inside a git checkout' "$c/runner.err" && grep -q 'Fix:' "$c/runner.err" \
+   && [ ! -e "$c/plain-dir/ai-artifacts" ] && [ "$(invoked "$c")" = 0 ]; then
+  ok "a non-git directory exits 2 naming the cause, with Fix:, no state and no session"
+else
+  bad "non-git directory" "rc=$rc err=$(cat "$c/runner.err")"
+fi
+for mode in tick dry; do
+  c="$(new_case)"
+  git init -q --separate-git-dir "$c/sep-gitdir" "$c/sep-work"
+  if [ "$mode" = dry ]; then
+    rc="$(run_runner "$c" CLUSTERING_REPO="$c/sep-work" -- --dry-run)"
+  else
+    rc="$(run_runner "$c" CLUSTERING_REPO="$c/sep-work")"
+  fi
+  if [ "$rc" = 2 ] && grep -q 'not <checkout>/.git' "$c/runner.err" && grep -q 'Fix:' "$c/runner.err" \
+     && [ ! -e "$c/ai-artifacts" ] && [ "$(invoked "$c")" = 0 ]; then
+    ok "a --separate-git-dir repo ($mode): exit 2 naming the cause, no state beside its git dir, no session"
+  else
+    bad "separate git dir ($mode)" "rc=$rc err=$(cat "$c/runner.err") state=$(find "$c" -maxdepth 2 -name ai-artifacts 2>&1)"
+  fi
+done
+
+# ---------------------------------------------------------------------------
 case_ 'athena-clustering-run.sh — a missing scripts/lib file is recorded, counted, alerted (DND-1603)'
 
 # sx_runner <case> [<lib file to omit>...] — a copy of the runner beside its
@@ -1170,6 +1198,22 @@ if [ "$rc" = 0 ] && [ "$(invoked "$c")" = 1 ]; then
 else
   bad "control copy" "rc=$rc err=$(cat "$c/runner.err")"
 fi
+
+# DND-1722: main-checkout.sh resolves where the records go, so with it missing,
+# or loading without defining main_checkout, there is no record to write: exit
+# 2 with Fix:, for the tick and for --dry-run, and no session.
+for fault in missing empty; do
+  c="$(new_case)"
+  RUNNER="$(sx_runner "$c" main-checkout.sh)"
+  [ "$fault" = empty ] && : >"$c/sx/scripts/lib/main-checkout.sh"
+  rc="$(run_runner "$c")"; rcd="$(run_runner "$c" -- --dry-run)"
+  if [ "$rc" = 2 ] && [ "$rcd" = 2 ] && grep -q 'scripts/lib/main-checkout.sh' "$c/runner.err" && grep -q 'Fix:' "$c/runner.err" \
+     && [ "$(invoked "$c")" = 0 ] && [ ! -e "$(sd "$c")" ]; then
+    ok "main-checkout.sh $fault: the tick and --dry-run exit 2 naming it, with Fix:, no state, no session"
+  else
+    bad "main-checkout.sh $fault" "rc=$rc dry=$rcd err=$(cat "$c/runner.err")"
+  fi
+done
 
 for lib in mcp-preflight.sh dbus-env.sh; do
   c="$(new_case)"

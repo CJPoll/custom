@@ -339,6 +339,34 @@ else
   bad "not a checkout" "rc=$rc err=$(cat "$c/runner.err")"
 fi
 
+# DND-1722: the runner resolves the main checkout through scripts/lib/main-checkout.sh,
+# so a non-git directory and a --separate-git-dir repo are each refused, naming the cause.
+c="$(new_case)"
+mkdir -p "$c/plain-dir"
+rc="$(run_runner "$c" LEADTIME_REPO="$c/plain-dir")"
+if [ "$rc" = 2 ] && grep -q 'not inside a git checkout' "$c/runner.err" && grep -q 'Fix:' "$c/runner.err"; then
+  ok "a non-git directory is refused, naming the cause (not inside a git checkout)"
+else
+  bad "not a checkout, cause" "rc=$rc err=$(cat "$c/runner.err")"
+fi
+c="$(new_case)"
+git init -q --separate-git-dir "$c/sep-gitdir" "$c/sep-work"
+rc="$(run_runner "$c" LEADTIME_REPO="$c/sep-work")"
+if [ "$rc" = 2 ] && grep -q 'not <checkout>/.git' "$c/runner.err" && grep -q 'Fix:' "$c/runner.err" \
+   && [ ! -e "$c/ai-artifacts" ] && [ "$(invoked "$c")" = 0 ]; then
+  ok "a --separate-git-dir repo exits 2 naming the cause, and writes no state beside its git dir"
+else
+  bad "separate git dir" "rc=$rc err=$(cat "$c/runner.err") state=$(find "$c" -maxdepth 2 -name ai-artifacts 2>&1)"
+fi
+c="$(new_case)"
+git init -q --separate-git-dir "$c/sep-gitdir" "$c/sep-work"
+rc="$(run_runner "$c" LEADTIME_REPO="$c/sep-work" -- --dry-run)"
+if [ "$rc" = 2 ] && grep -q 'not <checkout>/.git' "$c/runner.err" && [ ! -e "$c/ai-artifacts" ]; then
+  ok "--dry-run refuses a --separate-git-dir repo too (the resolver runs before it)"
+else
+  bad "separate git dir, dry-run" "rc=$rc err=$(cat "$c/runner.err")"
+fi
+
 # ---------------------------------------------------------------------------------
 case_ '4. the single-run lock'
 
@@ -1459,6 +1487,22 @@ if [ "$rc" = 0 ] && [ "$(invoked "$c")" = 1 ]; then
 else
   bad "control copy" "rc=$rc err=$(cat "$c/runner.err")"
 fi
+
+# DND-1722: main-checkout.sh resolves where the records go, so with it missing,
+# or loading without defining main_checkout, there is no record to write: exit
+# 2 with Fix:, for the tick and for --dry-run, and no session.
+for fault in missing empty; do
+  c="$(new_case)"
+  RUNNER="$(sx_runner "$c" main-checkout.sh)"
+  [ "$fault" = empty ] && : >"$c/sx/scripts/lib/main-checkout.sh"
+  rc="$(run_runner "$c")"; rcd="$(run_runner "$c" -- --dry-run)"
+  if [ "$rc" = 2 ] && [ "$rcd" = 2 ] && grep -q 'scripts/lib/main-checkout.sh' "$c/runner.err" && grep -q 'Fix:' "$c/runner.err" \
+     && [ "$(invoked "$c")" = 0 ] && [ ! -e "$(sd "$c")" ]; then
+    ok "main-checkout.sh $fault: the tick and --dry-run exit 2 naming it, with Fix:, no state, no session"
+  else
+    bad "main-checkout.sh $fault" "rc=$rc dry=$rcd err=$(cat "$c/runner.err")"
+  fi
+done
 
 for lib in mcp-preflight.sh dbus-env.sh lead-time-repos.sh lane-own-commits.sh; do
   c="$(new_case)"

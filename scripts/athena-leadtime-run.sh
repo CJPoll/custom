@@ -260,18 +260,24 @@ case "${NOW}" in
     exit 64 ;;
 esac
 
-# The main checkout, through git's common dir, so state is one place whichever
-# tree the script runs from. Never a relative path.
-common="$(git -C "${REPO}" rev-parse --git-common-dir 2>/dev/null || true)"
-case "${common}" in ''|/*) ;; *) common="${REPO}/${common}" ;; esac
-GIT_COMMON=""
-[ -n "${common}" ] && GIT_COMMON="$(cd -- "${common}" 2>/dev/null && pwd -P || true)"
-if [ -z "${GIT_COMMON}" ]; then
-  echo "${ME}: ${REPO} is not a git checkout, so there is no main checkout to anchor state to." >&2
-  echo "  Fix: point LEADTIME_REPO at a checkout of ~/dev/custom, or run the script from one." >&2
+# The main checkout, through scripts/lib/main-checkout.sh (DND-1722), so state
+# is one place whichever tree the script runs from. A non-git directory and a
+# --separate-git-dir repo are refused there, naming the cause, never answered
+# with a directory that is not the main checkout. The lib loads before
+# --dry-run, so a green dry run means it loads. A missing lib cannot reach the
+# precondition path: with no main checkout there is nowhere to write a record.
+MAIN_CHECKOUT_LIB="${SCRIPT_DIR}/lib/main-checkout.sh"
+# shellcheck source=scripts/lib/main-checkout.sh
+if ! { [ -r "${MAIN_CHECKOUT_LIB}" ] && . "${MAIN_CHECKOUT_LIB}" && declare -F main_checkout >/dev/null; }; then
+  echo "${ME}: ${MAIN_CHECKOUT_LIB} is missing, unreadable, or does not define main_checkout, so the main checkout cannot be resolved." >&2
+  echo "  Fix: restore scripts/lib/main-checkout.sh in this checkout (git checkout -- scripts/lib), or fast-forward it to main." >&2
   exit 2
 fi
-MAIN_CHECKOUT="$(dirname -- "${GIT_COMMON}")"
+if ! main_checkout "${REPO}" "${ME}"; then
+  echo "  Fix: or point LEADTIME_REPO at a checkout of ~/dev/custom whose git dir is its own .git." >&2
+  exit 2
+fi
+GIT_COMMON="${MAIN_CHECKOUT}/.git"
 
 STATE_DIR="${MAIN_CHECKOUT}/ai-artifacts/lead-time"
 LOG_DIR="${STATE_DIR}/runs"

@@ -267,6 +267,59 @@ else
   bad "unusable state dir" "rc=${rc} err=$(cat "${T}/err")"
 fi
 
+# --- the default state dir comes from scripts/lib/main-checkout.sh (DND-1722) -------------
+# fx_tool <dir> — a copy of the tool beside its libs in <dir>, a fixture checkout.
+fx_tool() {
+  mkdir -p "$1/ai/bin" "$1/ai/lib" "$1/scripts/lib"
+  cp -- "${AI_DIR}/bin/slack-roots-tick" "$1/ai/bin/"
+  cp -- "${AI_DIR}/lib/harness-alert-send.sh" "$1/ai/lib/"
+  cp -- "${AI_DIR}/../scripts/lib/main-checkout.sh" "$1/scripts/lib/"
+}
+fx_run() { # <dir> -> sets rc; the default state dir (no --state-dir)
+  "$1/ai/bin/slack-roots-tick" --tick d1 >"${T}/out" 2>"${T}/err"; rc=$?
+}
+git init -q -b main "${T}/fx-main" >&2
+fx_tool "${T}/fx-main"
+fx_run "${T}/fx-main"
+if [ "${rc}" = 0 ] && [ -f "${T}/fx-main/ai-artifacts/slack-roots/runs/d1.propose" ]; then
+  ok "a main checkout's default state dir is <checkout>/ai-artifacts/slack-roots"
+else
+  bad "default state dir" "rc=${rc} err=$(cat "${T}/err")"
+fi
+git -C "${T}/fx-main" -c user.email=t@example.invalid -c user.name=t -c commit.gpgsign=false commit -q --allow-empty -m seed >&2
+git -C "${T}/fx-main" worktree add -q "${T}/fx-wt" >&2
+fx_tool "${T}/fx-wt"
+fx_run "${T}/fx-wt"
+if [ "${rc}" = 0 ] && [ -f "${T}/fx-main/ai-artifacts/slack-roots/runs/d1.propose" ] && [ ! -e "${T}/fx-wt/ai-artifacts" ]; then
+  ok "from a linked worktree the default state dir is still the MAIN checkout's"
+else
+  bad "worktree default state dir" "rc=${rc} err=$(cat "${T}/err")"
+fi
+git init -q -b main --separate-git-dir "${T}/fx-sep-gitdir" "${T}/fx-sep" >&2
+fx_tool "${T}/fx-sep"
+fx_run "${T}/fx-sep"
+if [ "${rc}" = 3 ] && grep -q 'not <checkout>/.git' "${T}/err" && grep -q 'Fix:' "${T}/err" \
+   && [ ! -e "${T}/fx-sep/ai-artifacts" ] && [ ! -e "${T}/ai-artifacts" ]; then
+  ok "a --separate-git-dir repo is exit 3 naming the cause with a Fix:, and writes no state"
+else
+  bad "separate git dir" "rc=${rc} err=$(cat "${T}/err")"
+fi
+mkdir -p "${T}/fx-nogit"
+fx_tool "${T}/fx-nogit"
+GIT_CEILING_DIRECTORIES="${T}" fx_run "${T}/fx-nogit"
+if [ "${rc}" = 3 ] && grep -q 'not inside a git checkout' "${T}/err" && grep -q 'Fix:' "${T}/err" && [ ! -e "${T}/fx-nogit/ai-artifacts" ]; then
+  ok "a tool outside any git checkout is exit 3 naming the cause with a Fix:, and writes no state"
+else
+  bad "non-git tool dir" "rc=${rc} err=$(cat "${T}/err")"
+fi
+rm -f "${T}/fx-main/scripts/lib/main-checkout.sh"
+fx_run "${T}/fx-main"
+if [ "${rc}" = 2 ] && grep -q 'main-checkout.sh' "${T}/err" && grep -q 'Fix:' "${T}/err"; then
+  ok "a missing main-checkout.sh is exit 2 naming the file, with a Fix:"
+else
+  bad "missing lib" "rc=${rc} err=$(cat "${T}/err")"
+fi
+
 # --- a missing judgment-label is a recorded failure, never a quiet skip --------------------
 SLACK_ROOTS_JUDGMENT_LABEL="${T}/no-such-judgment-label" run n1
 if [ "${RC}" = 1 ] && grep -q '^failed: exit=127 .*not executable' "$(rec n1)"; then

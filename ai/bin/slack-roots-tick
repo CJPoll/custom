@@ -112,12 +112,15 @@ case "${ALERT_AFTER}" in ''|*[!0-9]*|0) die 2 "--alert-after must be a positive 
 
 # ---- resolve the keys; a key that cannot be computed is an error ------------
 if [ -z "${STATE}" ]; then
-  common="$(git -C "${TOOL_REPO}" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
-    || die 3 "cannot resolve the main checkout of ${TOOL_REPO} for the default state dir" "pass --state-dir <dir>, or run the tool from a git checkout of ~/dev/custom."
-  case "${common}" in
-    /*/.git) STATE="$(dirname "${common}")/ai-artifacts/slack-roots" ;;
-    *) die 3 "the git common dir '${common}' is not <checkout>/.git, so the default state dir is unknown" "pass --state-dir <dir>." ;;
-  esac
+  # The one shell resolver (DND-1722), never a copy of its rules. A non-git
+  # tool dir and a --separate-git-dir repo are refused there, naming the cause.
+  MAIN_CHECKOUT_LIB="${TOOL_REPO}/scripts/lib/main-checkout.sh"
+  # shellcheck source=../../scripts/lib/main-checkout.sh
+  { [ -r "${MAIN_CHECKOUT_LIB}" ] && . "${MAIN_CHECKOUT_LIB}" && declare -F main_checkout >/dev/null; } \
+    || die 2 "cannot load ${MAIN_CHECKOUT_LIB}, so the default state dir is unknown" "run slack-roots-tick from a full ~/dev/custom checkout (scripts/lib beside ai/), or pass --state-dir <dir>."
+  main_checkout "${TOOL_REPO}" slack-roots-tick \
+    || die 3 "cannot resolve the main checkout of ${TOOL_REPO} for the default state dir (the cause is above)" "pass --state-dir <dir>, or run the tool from a main checkout of ~/dev/custom."
+  STATE="${MAIN_CHECKOUT}/ai-artifacts/slack-roots"
 fi
 [ -n "${TICK}" ] || TICK="$(date -u +%Y-%m-%dT%H%M%SZ)"
 case "${TICK}" in
