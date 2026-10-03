@@ -929,7 +929,9 @@ and pronoun-guard; nothing detected it. The durable fix:
 
   The same PATH carries forge identity (DND-1803): the git wrapper refuses a
   push to github.com or gitlab.com not made through `gh-athena git` /
-  `glab-athena git` (`ai/lib/agent-forge-push.sh`), and the `gh` / `glab`
+  `glab-athena git`, and every other remote-ref writer to them (send-pack,
+  subtree push, …) along with a `git-<name>` program on PATH and a subcommand
+  git does not know (DND-1881; `ai/lib/agent-forge-push.sh`), and the `gh` / `glab`
   wrappers refuse a forge write not made through `gh-athena` / `glab-athena`
   (`ai/lib/agent-forge-cli.sh`), wherever the command came from, a script
   included. `forge-identity-guard.sh` stays the earlier, lexical layer. The

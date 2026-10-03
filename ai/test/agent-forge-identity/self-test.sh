@@ -101,6 +101,19 @@ while [ $# -gt 0 ]; do
   break
 done
 sub="${1:-}"
+# DND-1881: with SHIM_FORGE_BARE=<dir>, an argv that names a synthetic forge
+# repository is recorded, and the URL is mapped to that LOCAL bare repository
+# before the real git runs (send-pack applies no insteadOf; an alias reaches
+# this stand-in under its own name). Pushes keep the push case below, and the
+# wrapper's own URL probes (ls-remote --get-url, remote get-url, config) are
+# never mapped: they must see the forge URL the command names.
+if [ -n "${SHIM_FORGE_BARE:-}" ] && [[ " push ls-remote remote config " != *" ${sub} "* ]]; then
+  hit=0
+  for i in "${!args[@]}"; do
+    case "${args[$i]}" in *synth-owner/synth-repo*|*synth-group/synth-repo*) args[$i]="${SHIM_FORGE_BARE}"; hit=1 ;; esac
+  done
+  [ "${hit}" = 1 ] && printf 'REAL-GIT %s\n' "$*" >> "${LOG}"
+fi
 case "${sub}" in
   push)
     hdr=none; i=0
@@ -116,6 +129,13 @@ case "${sub}" in
     printf 'REAL-GIT %s\n' "${args[*]}" >> "${LOG}"; exit 0 ;;
   ls-remote)
     case " ${args[*]} " in *" --get-url "*) ;; *) printf 'REAL-GIT %s\n' "${args[*]}" >> "${LOG}"; exit 0 ;; esac ;;
+  # DND-1881: the remote-ref writers other than push are recorded. http-push
+  # and a remote-<name> helper are faked (they speak HTTP); send-pack and
+  # subtree run for real, so a local remote moves (subtree's inner push from
+  # git's exec-path reaches fb.git through the fixture repo's own insteadOf).
+  send-pack|http-push|remote-*|subtree)
+    grep -qxF "REAL-GIT $*" "${LOG}" 2>/dev/null || printf 'REAL-GIT %s\n' "$*" >> "${LOG}"
+    case "${sub}" in http-push|remote-*) exit 0 ;; esac ;;
 esac
 exec "${REAL_G}" "${args[@]}"
 EOF
@@ -304,6 +324,150 @@ run "${R}" gh pr create -- --help
 refused "K16. gh pr create -- --help: after --, --help is an argument" gh 'gh-athena pr create' 'REAL-GH'
 run "${R}" gh pr create --help
 passed "K17. gh pr create --help is help: a read" 'REAL-GH pr create --help'
+
+echo
+echo "--- DND-1881: a remote-ref writer other than push, to a forge: REFUSED ---"
+# Each form below wrote a remote ref past this wrapper, which judged only
+# `push`. The forge URLs are synthetic; the writes that run for real land in a
+# LOCAL bare repository (fb.git): the git stand-in maps send-pack's forge URL
+# to it, and each writer repo's own insteadOf maps it for git's own transport
+# (subtree's inner push, an autocorrected push). A refusal must leave fb.git's
+# main where it was and the writer must never reach git.
+FB="${TMP}/fb.git"
+"${REAL_G}" init -q --bare "${FB}"
+SYN_GH="${SYNTH_GH}"
+SYN_GL='https://gitlab.com/synth-group/synth-repo.git'
+SYN_SSH='git@github.com:synth-owner/synth-repo.git'
+# fbstate : every ref of fb.git and its commit, one line.
+fbstate() { "${REAL_G}" -C "${FB}" for-each-ref --format='%(refname)=%(objectname:short)' | tr '\n' ' '; }
+# writer_repo <origin-url> : repo() plus a lib/ subtree and insteadOf entries
+# that send every synthetic forge URL to fb.git.
+writer_repo() {
+  repo "$1"
+  mkdir -p "${R}/lib" && printf 'x\n' > "${R}/lib/f" && "${REAL_G}" -C "${R}" add lib \
+    && "${REAL_G}" -C "${R}" commit -q -m lib || { echo "FAIL: writer repo ${K}"; exit 1; }
+  for u in "${SYN_GH}" "${SYN_GL}" "${SYN_SSH}"; do "${REAL_G}" -C "${R}" config --add "url.${FB}.insteadOf" "${u}"; done
+}
+# A git-<name> program on PATH that is not git's own: it pushes to $1.
+PBIN="${TMP}/pathprog"; mkdir -p "${PBIN}"
+printf '#!/bin/sh\nprintf "PATHPROG %%s\\n" "$*" >> "%s"\nexec git push "$1" HEAD:refs/heads/main\n' "${LOG}" > "${PBIN}/git-synthpush"
+chmod +x "${PBIN}/git-synthpush"
+# wrun <dir> <cmd...> : run() with the PATH program's directory on PATH and
+# the stand-in mapping forge URLs to fb.git; records fb.git's main before.
+wrun() {
+  local d="$1"; shift
+  # A new commit each run, so a push of HEAD always moves a ref.
+  "${REAL_G}" -C "${d}" commit -q --allow-empty -m w || { echo "FAIL: commit in ${d}"; exit 1; }
+  FB_BEFORE="$(fbstate)"
+  : > "${LOG}"
+  OUT="$(cd "${d}" && export PATH="${APATH}:${PBIN}" SHIM_FORGE_BARE="${FB}" && timeout 60 "$@" 2>&1 </dev/null)"; RC=$?
+  CALLS="$(cat "${LOG}")"
+}
+# wrefused <label> <route text> : exit 1, the wrapper's REFUSED line with a
+# Fix: and <route text>, nothing reached git or ran, no ref of fb.git moved.
+wrefused() {
+  if [ "${RC}" = 1 ] && [[ "${OUT}" == *"git (agent wrapper): REFUSED"* ]] && [[ "${OUT}" == *"Fix:"* ]] \
+    && [[ "${OUT}" == *"$2"* ]] && [[ "${CALLS}" != *"REAL-GIT"* ]] && [[ "${CALLS}" != *"PATHPROG"* ]] \
+    && [ "$(fbstate)" = "${FB_BEFORE}" ]; then ok "$1"
+  else bad "$1" "rc=${RC} fb.git [$(fbstate)] (was [${FB_BEFORE}]) calls=[${CALLS}] out=$(printf '%s' "${OUT}" | head -c 400)"; fi
+}
+# wpassed <label> <recorded-pattern> [moves] : exit 0, no refusal, the call
+# reached git (an empty pattern: an alias reaches the stand-in by its own
+# name); with `moves`, a ref of fb.git moved.
+wpassed() {
+  if [ "${RC}" = 0 ] && [[ "${OUT}" != *"REFUSED"* ]] && [[ "${CALLS}" == *"$2"* ]] \
+    && { [ "${3:-}" != moves ] || [ "$(fbstate)" != "${FB_BEFORE}" ]; }; then ok "$1"
+  else bad "$1" "rc=${RC} fb.git [$(fbstate)] (was [${FB_BEFORE}]) calls=[${CALLS}] out=$(printf '%s' "${OUT}" | head -c 400)"; fi
+}
+writer_repo "${SYN_GH}"
+WR="${R}"
+wrun "${WR}" git send-pack "${SYN_GH}" HEAD:refs/heads/main
+wrefused "X1. send-pack <github https URL> HEAD:main" 'gh-athena git push'
+wrun "${WR}" git send-pack "${SYN_SSH}" HEAD:refs/heads/main
+wrefused "X2. send-pack <github SSH-form URL>" 'gh-athena git push'
+wrun "${WR}" git send-pack "${SYN_GL}" HEAD:refs/heads/main
+wrefused "X3. send-pack <gitlab URL>: the Fix names glab-athena" 'glab-athena git push'
+wrun "${WR}" git -c alias.sp=send-pack sp "${SYN_GH}" HEAD:refs/heads/main
+wrefused "X4. alias sp = send-pack" 'gh-athena git push'
+chain=(); for i in 1 2 3 4 5 6 7 8 9 10; do chain+=(-c "alias.a${i}=a$((i + 1))"); done
+wrun "${WR}" git "${chain[@]}" -c alias.a11=send-pack a1 "${SYN_GH}" HEAD:refs/heads/main
+wrefused "X5. an alias chain 11 deep (ending in send-pack) is read no further: refused" 'alias chain'
+wrun "${WR}" git http-push "${SYN_GH}" main
+wrefused "X6. http-push <github URL>" 'gh-athena git push'
+wrun "${WR}" git remote-https synthname "${SYN_GH}"
+wrefused "X7. remote-https <name> <github URL> (a transport helper called directly)" 'gh-athena git push'
+wrun "${WR}" git subtree push -P lib "${SYN_GH}" synth-x9
+wrefused "X9. subtree push -P lib <github URL> <branch>" 'subtree split'
+wrun "${WR}" git -c alias.subtree=status subtree push -P lib "${SYN_GH}" synth-x11
+wrefused "X11. an alias named subtree: git runs git-subtree, never the alias" 'subtree split'
+wrun "${WR}" git synthpush "${FB}"
+wrefused "X12. a git-<name> program on PATH (it pushes from git's exec-path)" 'git-synthpush'
+wrun "${WR}" git -c alias.synthpush=status synthpush "${FB}"
+wrefused "X13. a PATH program shadowed by an alias: git runs the program" 'git-synthpush'
+wrun "${WR}" git -c help.autocorrect=immediate pusj "${SYN_GH}" HEAD:refs/heads/main
+wrefused "X14. an unknown subcommand under help.autocorrect (pusj would run push)" 'git help -a'
+wrun "${WR}" git synthnosuchcmd
+wrefused "X15. an unknown subcommand with no alias" 'git help -a'
+wrun "${WR}" git send-pack --receive-pack='git receive-pack' "${FB}" HEAD:refs/heads/main
+wrefused "X16. send-pack --receive-pack=<cmd> to a local path (git runs the command; DND-1844)" 'receive-pack'
+wrun "${WR}" git remote-fd 0 1
+wrefused "X17. remote-fd: its descriptors can reach any host, so it is refused (accepted false refusal)" 'gh-athena git push'
+wrun "${WR}" git remote-ext origin 'ssh -o x git@github.com %S synth-owner/synth-repo.git'
+wrefused "X18. remote-ext runs its argument as a command" 'remote-ext'
+# A repository whose remotes really reach the forge (no insteadOf to fb.git):
+# a remote NAME is judged by the URLs git resolves for it.
+writer_repo "${SYN_GH}"
+FR="${R}"
+"${REAL_G}" -C "${FR}" config --unset-all "url.${FB}.insteadOf"
+"${REAL_G}" -C "${FR}" remote add gl "${SYN_GL}"
+"${REAL_G}" -C "${FR}" remote add lp "${FB}"
+"${REAL_G}" -C "${FR}" config remote.lp.pushurl "${SYN_GH}"
+"${REAL_G}" -C "${FR}" remote add lf "${SYN_GH}"
+"${REAL_G}" -C "${FR}" config remote.lf.pushurl "${FB}"
+wrun "${FR}" git remote-https origin
+wrefused "X8. remote-https origin, origin on github.com" 'gh-athena git push'
+wrun "${FR}" git subtree -P lib push origin synth-x10
+wrefused "X10. subtree -P lib push origin <branch> (the other word order; origin on github.com)" 'subtree split'
+wrun "${FR}" git subtree push --prefix=lib gl synth-x19
+wrefused "X19. subtree push --prefix=lib <remote on gitlab.com>" 'glab-athena git push'
+wrun "${FR}" git subtree push -P lib lp synth-x20
+wrefused "X20. subtree push to a local remote whose pushurl is github.com" 'subtree split'
+wrun "${FR}" git remote-https lf
+wrefused "X21. remote-https on a remote whose URL is github.com and pushurl local (a helper reads the URL)" 'gh-athena git push'
+
+echo
+echo "--- DND-1881: the same writers to a non-forge remote, and the Fix's own forms, still work ---"
+writer_repo "${FB}"
+NR="${R}"
+wrun "${NR}" git send-pack --force "${FB}" HEAD:refs/heads/main
+wpassed "N1. send-pack to a local bare remote lands" 'REAL-GIT send-pack' moves
+"${REAL_G}" -C "${NR}" commit -q --allow-empty -m n2
+wrun "${NR}" git subtree push -P lib "${FB}" synth-subtree
+if [ "${RC}" = 0 ] && [[ "${OUT}" != *"REFUSED"* ]] && "${REAL_G}" -C "${FB}" rev-parse -q --verify refs/heads/synth-subtree >/dev/null; then
+  ok "N2. subtree push to a local bare remote lands"
+else bad "N2. subtree push to a local remote" "rc=${RC} out=$(printf '%s' "${OUT}" | head -c 400)"; fi
+wrun "${NR}" git http-push 'https://synth-host.invalid/synth.git' main
+wpassed "N3. http-push to a host that is no forge reaches git" 'REAL-GIT http-push'
+wrun "${NR}" git subtree split -P lib -b synth-split
+wpassed "N4. subtree split (no push) passes" 'REAL-GIT subtree split'
+wrun "${NR}" git -c alias.ss='subtree split' ss -P lib -b synth-split2
+wpassed "N5. an alias to subtree split passes" ''
+wrun "${NR}" git -c alias.st2=status st2 --short
+if [ "${RC}" = 0 ] && [[ "${OUT}" != *"REFUSED"* ]]; then ok "N6. an alias to a builtin passes"
+else bad "N6. alias to a builtin" "rc=${RC} out=$(printf '%s' "${OUT}" | head -c 400)"; fi
+"${REAL_G}" -C "${NR}" commit -q --allow-empty -m n7
+wrun "${NR}" env SHIM_REAL_PUSH=1 git-synthpush "${FB}"
+wpassed "N7. the Fix: a PATH program run by its own name pushes through this wrapper, to a local remote it lands" 'PATHPROG' moves
+repo "${SYN_GH}"
+wrun "${R}" git-synthpush "${SYN_GH}"
+if [ "${RC}" = 1 ] && [[ "${OUT}" == *"a plain git push to github.com"* ]] && [[ "${CALLS}" != *"REAL-GIT"* ]]; then
+  ok "N8. the Fix: a PATH program run by its own name has its forge push judged (refused here)"
+else bad "N8. PATH program run by name, forge push judged" "rc=${RC} calls=[${CALLS}] out=$(printf '%s' "${OUT}" | head -c 400)"; fi
+wrun "${WR}" git subtree push -P lib origin synth-n10
+wpassed "N10. subtree push to a remote spelled github.com that the repo's insteadOf sends to a local path lands (git's own resolution is judged)" 'REAL-GIT subtree push' moves
+wrun "${NR}" git -c alias.b1=b2 -c alias.b2=b3 -c alias.b3=b4 -c alias.b4=b5 -c alias.b5=b6 -c alias.b6=b7 \
+  -c alias.b7=b8 -c alias.b8=b9 -c alias.b9=b10 -c alias.b10=send-pack b1 "${FB}" HEAD:refs/heads/main
+wpassed "N9. an alias chain 10 deep is read to its end (send-pack to a local remote lands)" '' moves
 
 echo
 echo "--- the Athena routes still work (against the fixtures) ---"

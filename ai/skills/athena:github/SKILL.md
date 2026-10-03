@@ -134,7 +134,10 @@ gitlab.com remote (or one it cannot resolve) before it runs, with a `Fix:`
 naming this form (DND-577). It reads only the command text, so the agent PATH
 `git` wrapper refuses the push again in the process, a script included
 (DND-1803; `ai/lib/agent-forge-push.sh`): a push to github.com or gitlab.com
-runs only with this route's credential isolation. The agent PATH `gh` and
+runs only with this route's credential isolation. Every other remote-ref
+writer to them (send-pack, http-push, `remote-<name>`, subtree push) is
+refused there, as are a `git-<name>` program on PATH and a
+subcommand git does not know (DND-1881). The agent PATH `gh` and
 `glab` wrappers refuse a plain forge write the same way
 (`ai/lib/agent-forge-cli.sh`); reads pass. Both layers need the agent env
 active (`check-hooks-registered` ACTIVE), and neither is a sandbox: each

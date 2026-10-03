@@ -10,7 +10,8 @@
 # the tool shell). The owner's terminal never sets ATHENA_AGENT_BIN. This directory
 # holds this file and the forge-identity gh and glab wrappers (DND-1803), each
 # meant to shadow its real command; anything else here would shadow one by
-# accident. Pushes are judged for forge identity too: see "forge identity" below.
+# accident. Pushes, and every other remote-ref writer, are judged for forge
+# identity too: see steps 3b and 4b.
 #
 # WHY A WRAPPER, AND WHY IT IS NOT THE STASH ENFORCEMENT. The enforcement is the
 # reference-transaction hook ai/git-hooks/agent-stash-guard.sh, which runs
@@ -45,11 +46,22 @@
 #   3. Aliases are resolved by ASKING git: `<real git> <same global options>
 #      config --get alias.<name>`, in the same cwd and env git will use, so -c
 #      alias.*, --config-env, GIT_CONFIG_* and include files all count. Chains
-#      are followed to depth 10 with loop detection. A builtin name never looks
-#      one up (git ignores an alias that shadows a builtin). rc 1 means not an
-#      alias; any other failure prints `could not resolve alias ... not checked`
-#      and passes through (DND-802: a failed read never reads as an empty one).
-#      A `!` alias is refused only when its body names stash.
+#      are followed to depth 10 with loop detection; a chain deeper than that
+#      is refused (DND-1881). A builtin name never looks one up (git ignores an
+#      alias that shadows a builtin), and neither does any other command git
+#      runs before an alias (3b). rc 1 means no alias, and with no command of
+#      that name either it is refused (DND-1881): under help.autocorrect git
+#      runs the closest command instead (`pusj` runs push). Any other failure
+#      prints `could not resolve alias ... not checked` and passes through
+#      (DND-802: a failed read never reads as an empty one). A `!` alias is
+#      refused only when its body names stash.
+#   3b. A name that is not a builtin is first put to the forge-identity check
+#      (ai/lib/agent-forge-push.sh, DND-1881), because git runs its own
+#      commands and a git-<name> program on PATH before an alias of that name.
+#      git's own command (from `git --list-cmds`): judged there, then run. A
+#      git-<name> program on PATH that is not git's own: refused, since every
+#      git it runs comes from git's exec-path, past this wrapper. Neither: the
+#      name is read as an alias (step 3).
 #   4. Refused (exit 1, one stderr line ending in a Fix:):
 #      D1 stash with no verb, an option first, or any verb but list/show/create
 #         (-h/--help alone are allowed);
@@ -61,13 +73,18 @@
 #         that disables either or names one of them twice.
 #   4b. push: judged for forge identity by ai/lib/agent-forge-push.sh (DND-1803;
 #      the "forge identity" block below), which refuses with a Fix:. For a
-#      push this wrapper IS the process-layer enforcement.
+#      push this wrapper IS the process-layer enforcement. Every other
+#      remote-ref writer (send-pack, http-push, a remote-<name> transport
+#      helper, subtree push) is refused by the same check when its target is
+#      github.com or gitlab.com, whatever its credential (DND-1881); send-pack
+#      is judged here, the rest in step 3b.
 #   5. Everything else: exec the real git with argv unchanged.
 #
 # RESIDUAL (accepted by the owner, Q2, 2026-09-27). Bypassed by: absolute-path
 # git (/usr/bin/git), `command -p git`, `env PATH=... git`, the inner git of a
-# `!` alias (git prepends its exec-path to the child's PATH), a non-git library,
-# a typo resolved by help.autocorrect. For push/pop/apply/store/clear and
+# `!` alias (git prepends its exec-path to the child's PATH), a non-git library.
+# (A typo resolved by help.autocorrect was one until DND-1881 refused a name
+# git does not know.) For push/pop/apply/store/clear and
 # update-ref the hook still refuses all of these. For drop and reflog
 # delete|expire nothing does: the entry stays a dangling commit until
 # gc.pruneExpire (default two weeks), recoverable by the owner.
@@ -78,9 +95,11 @@
 
 # COST. The common path (a builtin subcommand, no alias) forks nothing before it
 # execs git: identity is `test -ef`, quoting and case-folding are parameter
-# expansion and glob patterns. Only a non-builtin subcommand pays for one
-# `git config --get` (and an awk split when it is an alias). A push pays for a
-# bash run of ai/lib/agent-forge-push.sh and its local `git config` reads.
+# expansion and glob patterns. A non-builtin subcommand, an alias included,
+# pays for a bash run of ai/lib/agent-forge-push.sh per name (two `git
+# --list-cmds` reads, about 10 ms in all), then, when it is no command of
+# git's, one `git config --get` (and an awk split when it is an alias). A push
+# or send-pack pays for that bash run and its local `git config` reads.
 
 set -f
 
@@ -245,6 +264,22 @@ is_builtin() {
   return 1
 }
 
+# forge_check <subcommand> <args...>: run the forge-identity check,
+# ai/lib/agent-forge-push.sh beside this wrapper's own directory, on the global
+# options seen so far, the subcommand and its args; return its status. A push
+# to github.com or gitlab.com is refused unless it carries the credential
+# isolation of the Athena route (`gh-athena git` / `glab-athena git`, DND-1803);
+# every other remote-ref writer to them is refused (DND-1881). The rules, the
+# marker and the residuals are that file's header. Exit 10 from it means git
+# runs no command of that name.
+forge_check() {
+  _afp=$(readlink -f "$self" 2>/dev/null) || _afp=$self
+  _afp="${_afp%/*}/../lib/agent-forge-push.sh"
+  [ -r "$_afp" ] || refuse "git $1: the forge-identity check $_afp cannot be read, so whether this command writes to a forge as the machine owner is unknown" \
+    "Fix: restore ai/lib/agent-forge-push.sh in the checkout that holds this wrapper; to push to a forge meanwhile, use ~/dev/custom/ai/bin/gh-athena git push ... or ~/dev/custom/ai/bin/glab-athena git push ...."
+  eval "ATHENA_REAL_GIT=\"\$real\" bash \"\$_afp\" $globals \"\$@\""
+}
+
 names_stash_ref() {
   case "$1" in
     stash | refs/stash | stash@\{*\} | refs/stash@\{*\}) return 0 ;;
@@ -300,17 +335,31 @@ while :; do
   sub=$1
   shift
   is_builtin "$sub" && break
+  # Not a builtin. git runs its own commands, and a git-<name> program on
+  # PATH, before an alias of that name (DND-1867), so ask the forge-identity
+  # check which this is (step 3b, DND-1881): 0 it is git's own command and its
+  # argv may run; 10 git runs no command of that name, so it is read as an
+  # alias below; anything else is its refusal, already printed.
+  _frc=0
+  forge_check "$sub" "$@" || _frc=$?
+  case "$_frc" in
+    0) break ;;
+    10) ;;
+    *) exit "$_frc" ;;
+  esac
   depth=$((depth + 1))
   if [ "$depth" -gt 10 ]; then
-    printf 'git (agent wrapper): alias chain for %s is deeper than 10; not checked\n' "$sub" >&2
-    sub=
-    break
+    refuse "git $sub: an alias chain more than 10 aliases deep, which this wrapper does not read to its end, so whether a stash write, a push or another remote-ref writer is at its end is unknown (DND-1881)" \
+      "Fix: run the command the chain names directly, \`git <the expanded command>\`."
   fi
   case "$aliases_seen" in *" $sub "*) sub=; break ;; esac
   aliases_seen="$aliases_seen$sub "
   value=$(eval "\"\$real\" $globals config --get \"alias.\$sub\"" 2>/dev/null)
   rc=$?
-  [ "$rc" -eq 1 ] && break
+  # No command and no alias: under help.autocorrect git runs the closest
+  # command in its place (`pusj` runs push), which nothing here judged.
+  [ "$rc" -eq 1 ] && refuse "git $sub: '$sub' is no command git knows and no alias. Under help.autocorrect git runs the closest command in its place (\`pusj\` runs push), which this wrapper never judged (DND-1881)" \
+    "Fix: spell the subcommand as git names it (\`git help -a\` lists them)."
   if [ "$rc" -ne 0 ]; then
     printf 'git (agent wrapper): could not resolve alias %s (rc=%s); not checked\n' "$sub" "$rc" >&2
     sub=
@@ -334,19 +383,13 @@ while :; do
   words="$expanded$rest"
 done
 
-# ---- forge identity (DND-1803) ----------------------------------------------
-# A push is judged by ai/lib/agent-forge-push.sh, beside this wrapper's own
-# directory: a push to github.com or gitlab.com is refused unless it carries the
-# credential isolation of the Athena route (`gh-athena git` / `glab-athena git`),
-# so a push in a script cannot go out as the machine owner. The rule, its
-# marker and its residuals are that file's header. Only a push pays for it.
-if [ "$sub" = push ]; then
-  _afp=$(readlink -f "$self" 2>/dev/null) || _afp=$self
-  _afp="${_afp%/*}/../lib/agent-forge-push.sh"
-  [ -r "$_afp" ] || refuse "git push: the forge-identity check $_afp cannot be read, so whether this push goes out as the machine owner is unknown" \
-    "Fix: restore ai/lib/agent-forge-push.sh in the checkout that holds this wrapper; to push to a forge meanwhile, use ~/dev/custom/ai/bin/gh-athena git push ... or ~/dev/custom/ai/bin/glab-athena git push ...."
-  eval "ATHENA_REAL_GIT=\"\$real\" bash \"\$_afp\" $globals push \"\$@\"" || exit $?
-fi
+# ---- forge identity (DND-1803, DND-1881) ------------------------------------
+# push and send-pack are builtins, so the walk above never asked about them:
+# judge them here. Every other subcommand that writes a remote ref is not a
+# builtin and was judged in the walk (forge_check, step 3b).
+case "$sub" in
+  push | send-pack) forge_check "$sub" "$@" || exit $? ;;
+esac
 
 # $sub is the resolved subcommand; "$@" holds its arguments.
 case "$sub" in

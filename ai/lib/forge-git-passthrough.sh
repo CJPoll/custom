@@ -644,6 +644,10 @@ fg_exec_path_moved() {
 # ls-remote, archive --remote and upload-pack (read side); receive-pack and
 # update-ref, which write only a repository on this machine. Each other
 # subcommand of git's is a local or read-side command, by its manual.
+# The agent PATH git wrapper's forge-identity check, ai/lib/agent-forge-push.sh,
+# reads the same lists, fg_cmd_known, fg_writes_remote_ref and
+# fg_runs_command, in its own words: there a writer is refused when it reaches
+# the forge, whatever its credential (DND-1881).
 # Residual: the command lists are read once, with the global options before
 # the first subcommand; an alias that adds `-C <dir>` with a relative PATH
 # entry could reach a git-<name> in <dir> that the lists did not see.

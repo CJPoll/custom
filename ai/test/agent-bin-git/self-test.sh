@@ -71,6 +71,9 @@ EOF
 WBIN="${TMP}/agent-bin"
 mkdir -p "${WBIN}"
 cp "${WRAPPER_SRC}" "${WBIN}/git"; chmod +x "${WBIN}/git"
+# Its forge-identity check, ai/lib/agent-forge-push.sh, sits beside it as in
+# the checkout: every subcommand that is not a builtin asks it first (DND-1881).
+ln -s "${ROOT}/ai/lib" "${TMP}/lib"
 # DND-1667: every git this suite puts on PATH is proven executable before use
 # (ai/lib/forge-stub-guard.sh). The wrapper's own PATH layouts are what this
 # suite tests, so no guard goes inside them: the wrapper searches PATH after
@@ -226,10 +229,20 @@ if [ "${AGENT_BIN_GIT_OFF:-}" = 1 ]; then
 else
   fresh
   printf '[alias\n\tbroken\n' > "${TMP}/bad-gitconfig"
-  out="$( (export PATH="${APATH}" GIT_CONFIG_GLOBAL="${TMP}/bad-gitconfig"; git xyz) 2>&1)"
-  if [[ "${out}" == *"could not resolve alias xyz"*"not checked"* ]]; then
-    ok "FT1. an unreadable alias config prints the not-checked line (DND-802), then git decides"
-  else bad "FT1. unreadable alias config is named" "out=${out}"; fi
+  # DND-1881: a name that is not a builtin is first looked up in git's command
+  # lists, which an unreadable config makes unreadable too: refused, COULD NOT
+  # LOOK, with a Fix: (it used to print DND-802's not-checked line and run).
+  out="$( (export PATH="${APATH}" GIT_CONFIG_GLOBAL="${TMP}/bad-gitconfig"; git xyz) 2>&1)"; rc=$?
+  if [ "${rc}" -ne 0 ] && [[ "${out}" == *"COULD NOT LOOK"*"Fix:"* ]]; then
+    ok "FT1. an unreadable config refuses a non-builtin, COULD NOT LOOK, never reads as no alias"
+  else bad "FT1. unreadable config is named and refused" "rc=${rc} out=${out}"; fi
+  # DND-1881: with no forge-identity check beside it, a subcommand that is not
+  # a builtin (an alias here) is refused, never run unjudged.
+  mkdir -p "${TMP}/nolib/bin"; cp "${WBIN}/git" "${TMP}/nolib/bin/git"; fsg_require_stubs "${TMP}/nolib/bin" git
+  out="$(PATH="${TMP}/nolib/bin:${GDIR}" timeout 10 git st 2>&1)"; rc=$?
+  if [ "${rc}" -eq 1 ] && [[ "${out}" == *"REFUSED git st: the forge-identity check"*"Fix:"* ]]; then
+    ok "FT13. no forge-identity check beside the wrapper: an alias is refused with a Fix:"
+  else bad "FT13. missing forge-identity check fails closed" "rc=${rc} out=$(printf '%s' "${out}" | head -c 300)"; fi
   out="$(PATH="${WBIN}" "${WBIN}/git" status 2>&1)"; rc=$?
   if [ "${rc}" -eq 127 ] && [[ "${out}" == *"no real git on PATH"*"Fix:"* ]]; then
     ok "FT2. no real git on PATH: exit 127 with a Fix:"
