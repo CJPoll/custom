@@ -166,6 +166,7 @@ scripts/lib/main-checkout.sh	guard
 scripts/lib/mcp-preflight.sh	library	sourced by the lead-time and clustering runners and installers; prints nothing and returns the why and Fix texts (MCP_PF_WHY, MCP_PF_FIX) that each caller prints with Fix:
 scripts/lib/proc-env-scan.awk	guard	
 scripts/lib/shipwright-stale-dirt.sh	library	sourced by athena-shipwright-run.sh; each function that reads git (sd_dirty_paths, sd_measure, sd_display_paths) returns non-zero when git fails, and the runner prints the Fix: for it
+scripts/lib/lane-own-commits.sh	library	sourced by athena-leadtime-run.sh and athena-shipwright-run.sh; lane_own_commits returns non-zero (1, 2 or 3) when git cannot answer, and each runner prints the Fix: for it
 scripts/wt-lib/close.sh	library	sourced by scripts/wt; worktree/stack operations whose failures are git/tool errors for the action requested, not guard denials
 scripts/wt-lib/common.sh	library	sourced by scripts/wt; worktree/stack operations whose failures are git/tool errors for the action requested, not guard denials
 scripts/wt-lib/create.sh	library	sourced by scripts/wt; worktree/stack operations whose failures are git/tool errors for the action requested, not guard denials

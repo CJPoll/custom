@@ -545,6 +545,20 @@ load_dbus_lib() {
   [ -z "${LIB_REASON}" ] || DBUS_LIB_WHY="${DBUS_LIB} ${LIB_REASON}, so D-Bus autolaunch cannot be suppressed"
 }
 
+# load_own_lib — the check of scripts/lib/lane-own-commits.sh, the one own-commit
+# test the shipwright runner shares (DND-1507, DND-1541). Same shape as
+# load_dbus_lib: sets OWN_LIB_WHY to the fault, or "" when the lib is usable.
+OWN_LIB="${SCRIPT_DIR}/lib/lane-own-commits.sh"
+OWN_LIB_FNS="lane_own_commits"
+OWN_LIB_FIX="$(lib_fix "${OWN_LIB}")"
+OWN_LIB_WHY=""
+load_own_lib() {
+  # shellcheck disable=SC2086 # one word per function name
+  check_lib "${OWN_LIB}" ${OWN_LIB_FNS}
+  OWN_LIB_WHY=""
+  [ -z "${LIB_REASON}" ] || OWN_LIB_WHY="${OWN_LIB} ${LIB_REASON}, so the run's own commits cannot be told from a sync"
+}
+
 # --dry-run checks what the tick's preconditions (6) check, in the same order,
 # so a rendered brief means a tick can start (DND-1571).
 if [ "${DRY}" -eq 1 ]; then
@@ -557,6 +571,8 @@ if [ "${DRY}" -eq 1 ]; then
   [ "${RES_RC}" -eq 0 ] || dry_refuse "$(res_why)" "$(res_fix)"
   load_dbus_lib
   [ -z "${DBUS_LIB_WHY}" ] || dry_refuse "${DBUS_LIB_WHY}" "${DBUS_LIB_FIX}"
+  load_own_lib
+  [ -z "${OWN_LIB_WHY}" ] || dry_refuse "${OWN_LIB_WHY}" "${OWN_LIB_FIX}"
   run_mcp_preflight || dry_refuse "${MCP_PF_WHY%.}" "${MCP_PF_FIX}"
   build_brief
   printf '%s\n' "${BRIEF}"
@@ -955,6 +971,11 @@ fi
 if [ -n "${DBUS_LIB_WHY}" ]; then
   precondition_fail "${DBUS_LIB_WHY}; no session." "${DBUS_LIB_FIX}"
 fi
+# The own-commit library, loaded here so the teardown can call it (DND-1541).
+load_own_lib
+if [ -n "${OWN_LIB_WHY}" ]; then
+  precondition_fail "${OWN_LIB_WHY}; no session." "${OWN_LIB_FIX}"
+fi
 # The MCP servers, through the one preflight --dry-run and the installer share
 # (scripts/lib/mcp-preflight.sh, DND-1571).
 if ! run_mcp_preflight; then
@@ -1192,46 +1213,6 @@ landed_rc() {
 }
 tip="$(git -C "${LANE}" rev-parse HEAD 2>/dev/null || true)"
 
-# own_commits — print the run's own commits still on the lane, newest first.
-# A lane that moved off BASE is not evidence of its own work: a sync down
-# (athena:shipwright-lane) fast-forwards or rebases it onto other fleets'
-# commits. A commit is the run's own when the lane's HEAD reflog records it
-# being MADE there (a commit, cherry-pick, revert, rebase pick, am, or a merge
-# that made a commit) and it is still in BASE..tip. A sync, reset or checkout
-# only moves HEAD, so it never credits a commit. A lookup that cannot be done
-# returns non-zero (1: no readable HEAD reflog; 2: it does not start at BASE;
-# 3: rev-list failed), so nothing is credited and it never reads as "no own
-# commits" (a failed lookup is not an empty one).
-# The sequencer's step label is the stable part of a rebase entry; the action
-# before it is the caller's argv ("rebase", "pull -q --rebase https://... main"),
-# which may itself hold a colon. A cherry-pick --ff that only moved HEAD
-# ("cherry-pick: fast-forward") made nothing (OWN_MOVED_ONLY).
-OWN_MADE='^(commit|cherry-pick|revert|am)( \([a-z]+\))?: |^(rebase|pull)( [^(]*)? \((pick|reword|edit|squash|fixup|continue|merge)\): |: Merge made by '
-OWN_MOVED_ONLY=': fast-forward$'
-own_commits() {
-  local reflog first made log_path range
-  # With no HEAD reflog git silently shows the branch's reflog instead, which
-  # records a rebase only as its finish and so would under-credit: require the
-  # file itself.
-  log_path="$(git -C "${LANE}" rev-parse --git-path logs/HEAD 2>/dev/null)" || return 1
-  case "${log_path}" in /*) ;; *) log_path="${LANE}/${log_path}" ;; esac
-  [ -s "${log_path}" ] || return 1
-  reflog="$(git -C "${LANE}" reflog show --format='%H %gs' HEAD -- 2>/dev/null)" || return 1
-  [ -n "${reflog}" ] || return 1
-  first="$(printf '%s\n' "${reflog}" | tail -n1 | cut -d' ' -f1)"
-  [ "${first}" = "${BASE}" ] || return 2
-  made="$(printf '%s\n' "${reflog}" | while read -r sha gs; do
-            if grep -q -E -- "${OWN_MADE}" <<<"${gs}" && ! grep -q -E -- "${OWN_MOVED_ONLY}" <<<"${gs}"; then
-              printf '%s\n' "${sha}"
-            fi
-          done | sort -u)"
-  [ -n "${made}" ] || return 0
-  # Capture the range first: a failed rev-list must not read as "no own commits".
-  range="$(git -C "${LANE}" rev-list --topo-order "${BASE}..${tip}" 2>/dev/null)" || return 3
-  [ -n "${range}" ] || return 0
-  printf '%s\n' "${range}" | grep -F -x -f <(printf '%s\n' "${made}") || true
-}
-
 # Fast-forward the main checkout only to the run's newest own commit that is on
 # origin/main, so the live harness advances to landed
 # work and never to unreviewed work, and the run never ff's to (or claims)
@@ -1240,7 +1221,7 @@ OWN_LANDED="0"
 FF="none (the run made no commits of its own)"
 own=""
 own_rc=0
-if [ -n "${tip}" ]; then own="$(own_commits)" || own_rc=$?; else own_rc=4; fi
+if [ -n "${tip}" ]; then own="$(lane_own_commits "${LANE}" "${BASE}" "${tip}")" || own_rc=$?; else own_rc=4; fi
 if [ "${own_rc}" -ne 0 ]; then
   catch_up="Any work the run landed is on origin/main: 'git -C ${MAIN_CHECKOUT} merge --ff-only origin/main' picks it up."
   case "${own_rc}" in

@@ -386,6 +386,7 @@ __wrapper_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd -P)"
 RUNNER_LIBS=(
   "dbus-env.sh:athena_dbus_env_setup"
   "shipwright-stale-dirt.sh:sd_measure sd_state_get sd_next_streak sd_display_paths"
+  "lane-own-commits.sh:lane_own_commits"
 )
 LIB_FAULTS=""
 LIB_FIX="see what changed first (git -C ${MAIN_CHECKOUT} status -- scripts/lib), then restore the named file(s) (git checkout -- scripts/lib discards uncommitted edits there), restore read permission on an unreadable one (chmod u+r <file>), or fast-forward this checkout to main when the runner is newer than its libs."
@@ -1224,7 +1225,7 @@ fi
 # --- 7. teardown: publish on success, then always remove the lane ------------
 #
 # On a successful session, publish: refresh origin/main and fast-forward the
-# main checkout to the lane tip so the machine's live harness advances. --ff-only
+# main checkout to the run's own newest landed commit (DND-1541) so the machine's live harness advances. --ff-only
 # is the whole safety story — it can only move the pointer forward to a commit
 # that already contains main's history, it never creates or rewrites a commit,
 # and git refuses it outright rather than overwrite a locally-modified file. A
@@ -1235,40 +1236,105 @@ fi
 # branch) leaves the main checkout alone, so the live harness never runs
 # unreviewed code and local main never diverges from origin/main.
 tip="$(git -C "${WORKTREE}" rev-parse HEAD 2>/dev/null || true)"
-publish_tip=0
-if [ "${status}" -eq 0 ] && [ -n "${tip}" ] && [ "${tip}" != "${BASE_COMMIT}" ]; then
-  publish_tip=1
-  if has_origin; then
-    git -C "${MAIN_CHECKOUT}" fetch --quiet origin main >>"${log}" 2>&1 || true
-    if ! commit_reachable "${tip}"; then
-      publish_tip=0
-      if commit_published "${tip}"; then
-        echo "athena-shipwright: run ${ts} published ${tip} for review; it is not landed on origin/main, so ${MAIN_CHECKOUT} was left where it is." >&2
-      fi
+
+# The run's OWN commits (DND-1541). A lane that moved off BASE is not evidence of
+# its own work: a sync down (athena:shipwright-lane) moves it onto other fleets'
+# commits too, and crediting those fast-forwarded the main checkout on their
+# behalf. The lane's HEAD reflog says what the run made
+# (scripts/lib/lane-own-commits.sh, shared with the lead-time runner, DND-1507).
+# A lookup that cannot be answered is UNKNOWN: nothing is credited, and it never
+# reads as "the run made none". The publish target below is the run's newest OWN
+# landed commit, never the lane tip.
+own=""
+own_rc=0
+if [ -z "${tip}" ]; then
+  own_rc=4
+elif [ "${tip}" != "${BASE_COMMIT}" ]; then
+  own="$(lane_own_commits "${WORKTREE}" "${BASE_COMMIT}" "${tip}")" || own_rc=$?
+fi
+case "${own_rc}" in
+  0) own_why="" ;;
+  1) own_why="the lane's HEAD reflog is missing or unreadable"
+     own_fix="check core.logAllRefUpdates is not false for ${MAIN_CHECKOUT} ('git -C ${MAIN_CHECKOUT} config core.logAllRefUpdates')." ;;
+  2) own_why="the lane's HEAD reflog does not start at BASE ${BASE_COMMIT}"
+     own_fix="the reflog was rewritten or expired during the run (git reflog expire, gc), or the lane was not created by this runner; read ${log}." ;;
+  3) own_why="git rev-list ${BASE_COMMIT}..${tip} failed in the lane"
+     own_fix="read ${log} and check the lane repository is intact ('git -C ${MAIN_CHECKOUT} fsck')." ;;
+  *) own_why="the lane's HEAD could not be resolved"
+     own_fix="the lane ${WORKTREE} was removed or broken during the run; read ${log}." ;;
+esac
+# own_known: the run's own commits are known (possibly none). own_any: it made some.
+own_known=0; [ "${own_rc}" -ne 0 ] || own_known=1
+own_any=0; [ -z "${own}" ] || own_any=1
+OWN_LANDED="0"
+own_tip=""
+own_newest=""
+if [ "${own_known}" -eq 0 ]; then
+  OWN_LANDED="UNKNOWN (${own_why})"
+  echo "athena-shipwright: run ${ts}: ${own_why}, so the run's own commits cannot be told from a sync; nothing past BASE was credited." >&2
+  echo "  Fix: ${own_fix} Any work the run landed is on origin/main: 'git -C ${MAIN_CHECKOUT} merge --ff-only origin/main' picks it up." >&2
+fi
+if [ "${status}" -eq 0 ] && [ "${own_any}" -eq 1 ] && has_origin; then
+  git -C "${MAIN_CHECKOUT}" fetch --quiet origin main >>"${log}" 2>&1 || true
+fi
+publish_to=""
+if [ "${own_any}" -eq 1 ]; then
+  landed_n=0
+  for oc in ${own}; do   # newest first (topo order)
+    [ -n "${own_newest}" ] || own_newest="${oc}"
+    if commit_reachable "${oc}"; then
+      landed_n=$(( landed_n + 1 )); [ -n "${own_tip}" ] || own_tip="${oc}"
+    fi
+  done
+  OWN_LANDED="${landed_n}"
+  if [ "${status}" -eq 0 ]; then
+    if ! has_origin; then
+      publish_to="${own_newest}"   # no origin: the main checkout's branch is the landing target
+    elif [ -n "${own_tip}" ]; then
+      publish_to="${own_tip}"
+    elif commit_published "${own_newest}"; then
+      echo "athena-shipwright: run ${ts} published ${own_newest} for review; it is not landed on origin/main, so ${MAIN_CHECKOUT} was left where it is." >&2
     fi
   fi
 fi
-# A run that committed nothing still publishes its base. The base is the
+# A run with no commit of its own still publishes its base. The base is the
 # origin/main fetched at tick start, so it is landed by definition and DND-1008
-# holds. Without this, work another actor landed (an admiral on another
+# holds; it is the run's base, never the newer origin/main a mid-run sync saw.
+# Without this, work another actor landed (an admiral on another
 # machine, a hand-spawned PR) reached this machine only when a shipwright run
 # happened to commit. Measured 2026-10-01 on the laptop: the main checkout sat
 # 31 commits behind origin/main, so its live runner had no main-health backstop
 # (DND-1482) at all. Only `main` is moved: a main checkout a human left on
 # another branch is not this tick's to touch. Already current: nothing to do.
-if [ "${publish_tip}" -eq 0 ] && [ -n "${tip}" ] && [ "${tip}" = "${BASE_COMMIT}" ] \
+if [ -z "${publish_to}" ] && [ -n "${tip}" ] && [ "${own_any}" -eq 0 ] \
    && [ "${base_desc}" = "origin/main" ] && has_origin \
    && [ "$(git -C "${MAIN_CHECKOUT}" symbolic-ref --short HEAD 2>/dev/null)" = "main" ] \
    && [ "$(git -C "${MAIN_CHECKOUT}" rev-parse HEAD 2>/dev/null)" != "${BASE_COMMIT}" ] \
    && commit_reachable "${BASE_COMMIT}"; then
-  publish_tip=1
+  publish_to="${BASE_COMMIT}"
 fi
-if [ "${publish_tip}" -eq 1 ]; then
-  if ! git -C "${MAIN_CHECKOUT}" merge --ff-only "${tip}" >>"${log}" 2>&1; then
-    echo "athena-shipwright: run ${ts} landed, but ${MAIN_CHECKOUT} could not be fast-forwarded to ${tip}." >&2
-    echo "  Fix: the run's commits are already pushed (if the session pushed), so nothing is lost — but this machine's live harness (~/.claude/skills and ~/.claude/hooks resolve into ${MAIN_CHECKOUT}) stays on the older code until it catches up. Run 'git -C ${MAIN_CHECKOUT} merge --ff-only ${tip}' once the blocker is cleared; git's reason is at the end of ${log}. Usual causes: a locally-modified file the fast-forward would overwrite, or main having diverging commits — do NOT force either." >&2
+if [ -n "${publish_to}" ]; then
+  if ! git -C "${MAIN_CHECKOUT}" merge --ff-only "${publish_to}" >>"${log}" 2>&1; then
+    echo "athena-shipwright: run ${ts} landed, but ${MAIN_CHECKOUT} could not be fast-forwarded to ${publish_to}." >&2
+    echo "  Fix: the run's commits are already pushed (if the session pushed), so nothing is lost — but this machine's live harness (~/.claude/skills and ~/.claude/hooks resolve into ${MAIN_CHECKOUT}) stays on the older code until it catches up. Run 'git -C ${MAIN_CHECKOUT} merge --ff-only ${publish_to}' once the blocker is cleared; git's reason is at the end of ${log}. Usual causes: a locally-modified file the fast-forward would overwrite, or main having diverging commits — do NOT force either." >&2
   fi
 fi
+
+# The run record (DND-1541): what the run itself landed, and how far origin/main
+# moved during it, whoever moved it. The second is never the first. A fetch that
+# failed leaves origin/main stale, and the record says so.
+main_note=""
+if has_origin; then
+  git -C "${MAIN_CHECKOUT}" fetch --quiet origin main >>"${log}" 2>&1 || main_note=" (the teardown fetch failed; origin/main may be stale)"
+fi
+main_after="$(git -C "${MAIN_CHECKOUT}" rev-parse --verify --quiet refs/remotes/origin/main 2>/dev/null || true)"
+if has_origin && [ "${base_desc}" = "origin/main" ] && [ -n "${main_after}" ]; then
+  main_moved="origin/main ${BASE_COMMIT}..${main_after} commits=$(git -C "${MAIN_CHECKOUT}" rev-list --count "${BASE_COMMIT}..${main_after}" 2>/dev/null || echo '?')${main_note}"
+else
+  main_moved="not measured (the lane was not based on origin/main)"
+fi
+echo "athena-shipwright: run ${ts} own_landed=${OWN_LANDED} main_moved=${main_moved}" >&2
+echo "athena-shipwright: run ${ts} own_landed=${OWN_LANDED} main_moved=${main_moved}" >>"${log}" 2>/dev/null || true
 
 # Classify before removal: does the lane hold commits that never landed on
 # main/origin/main? If so it is stranded — an unsuccessful outcome even if the
@@ -1336,7 +1402,7 @@ rm -f "${LANE_LOCK}" "${LANE_META}"
 blocked=0
 unreported=0
 block_sig=""
-if [ ! -e "${RECEIPT}" ] && [ "${tip}" = "${BASE_COMMIT}" ]; then
+if [ ! -e "${RECEIPT}" ] && [ "${own_known}" -eq 1 ] && [ "${own_any}" -eq 0 ]; then
   unreported=1
   block_sig="$(classify_block "${log}" "${session_bytes}" "${pre_bytes}")"
   if [ "${status}" -eq 0 ] || [ -n "${block_sig}" ]; then

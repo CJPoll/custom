@@ -1460,7 +1460,7 @@ else
   bad "control copy" "rc=$rc err=$(cat "$c/runner.err")"
 fi
 
-for lib in mcp-preflight.sh dbus-env.sh lead-time-repos.sh; do
+for lib in mcp-preflight.sh dbus-env.sh lead-time-repos.sh lane-own-commits.sh; do
   c="$(new_case)"
   RUNNER="$(sx_runner "$c" "$lib")"
   r1="$(run_runner "$c" LEADTIME_FAIL_ESCALATE=2)"
@@ -1483,7 +1483,7 @@ for lib in mcp-preflight.sh dbus-env.sh lead-time-repos.sh; do
   fi
 done
 
-for lib in mcp-preflight.sh dbus-env.sh lead-time-repos.sh; do
+for lib in mcp-preflight.sh dbus-env.sh lead-time-repos.sh lane-own-commits.sh; do
   c="$(new_case)"
   RUNNER="$(sx_runner "$c" "$lib")"
   rc="$(run_runner "$c" -- --dry-run)"

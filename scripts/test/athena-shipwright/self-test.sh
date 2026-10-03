@@ -1135,6 +1135,68 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+case_ 'athena-shipwright-run.sh — only the run'"'"'s OWN commits are credited (DND-1541)'
+
+# A session syncs its lane down (athena:shipwright-lane), so the lane tip can
+# move past BASE onto commits other fleets landed. "tip != BASE" then credited
+# the run with them and fast-forwarded the main checkout to them. The run's own
+# commits are the ones its lane's HEAD reflog records it making (DND-1507, the
+# lead-time runner's fix; scripts/lib/lane-own-commits.sh).
+# The session's second actor: a clone of the fixture origin that lands a commit
+# DURING the session, then the lane syncs onto it.
+mid_run_clone() { # <repo> ; the other actor's clone, made before the run
+  git clone -q "$(aux "$1")/origin.git" "$(aux "$1")/other-clone" >&2
+}
+LAND_MID_RUN='oc="$d/other-clone"; git -C "$oc" -c user.email=t@example.invalid -c user.name=Other -c commit.gpgsign=false commit --allow-empty -qm "landed mid-run"; git -C "$oc" push -q origin HEAD:main'
+
+# No own commit: the lane syncs onto a newer origin/main and commits nothing.
+r="$(new_repo)"; a="$(aux "$r")"; with_origin "$r"; mid_run_clone "$r"
+stub_claude_probe "$a/stub-claude" 0 "${LAND_MID_RUN}; git pull -q --ff-only origin main"
+before="$(git -C "$r" rev-parse HEAD)"
+rc="$(run_runner "$r")"
+if [ "$rc" -eq 0 ] && [ "$(git -C "$r" rev-parse HEAD)" = "$before" ] \
+   && [ "$(git -C "$a/origin.git" rev-parse main)" != "$before" ]; then
+  ok "a lane synced onto a newer origin/main with no commit of its own does not fast-forward the main checkout to other fleets' commits"
+else
+  bad "a sync is not own work" "rc=$rc main-moved-to=$(git -C "$r" log -1 --format=%s) err=$(cat "$a/runner.err")"
+fi
+if grep -q 'own_landed=0' "$a/runner.err" && grep -q 'main_moved=' "$a/runner.err" \
+   && [ "$(cat "$r/ai-artifacts/shipwright/consecutive-failures" 2>/dev/null || echo 0)" = "0" ]; then
+  ok "the run record says own_landed=0 and names main_moved=, and the tick is not a failure"
+else
+  bad "own_landed=0 recorded" "err=$(cat "$a/runner.err")"
+fi
+
+# An own commit, rebased onto the newer main and pushed: credited, and the main
+# checkout follows to it.
+r="$(new_repo)"; a="$(aux "$r")"; with_origin "$r"; mid_run_clone "$r"
+stub_claude_probe "$a/stub-claude" 0 "git commit --allow-empty -qm 'own work'; ${LAND_MID_RUN}; git pull -q --rebase origin main; git push -q origin HEAD:refs/heads/main"
+rc="$(run_runner "$r")"
+if [ "$rc" -eq 0 ] && [ "$(git -C "$r" log -1 --format=%s)" = "own work" ] \
+   && [ "$(git -C "$r" rev-parse HEAD)" = "$(git -C "$a/origin.git" rev-parse main)" ]; then
+  ok "an own commit rebased onto a newer main and landed is credited: the main checkout follows to it"
+else
+  bad "own landed commit credited" "rc=$rc head=$(git -C "$r" log -1 --format=%s) err=$(cat "$a/runner.err")"
+fi
+if grep -q 'own_landed=1' "$a/runner.err"; then
+  ok "and the record says own_landed=1"
+else
+  bad "own_landed=1 recorded" "err=$(cat "$a/runner.err")"
+fi
+
+# A lookup that cannot be answered is UNKNOWN, never "the run made nothing".
+r="$(new_repo)"; a="$(aux "$r")"; with_origin "$r"
+stub_claude_probe "$a/stub-claude" 0 'git commit --allow-empty -qm "own work"; git push -q origin HEAD:refs/heads/main; rm -f "$(git rev-parse --git-path logs/HEAD)"'
+before="$(git -C "$r" rev-parse HEAD)"
+rc="$(run_runner "$r")"
+if [ "$rc" -eq 0 ] && [ "$(git -C "$r" rev-parse HEAD)" = "$before" ] \
+   && grep -q 'own_landed=UNKNOWN' "$a/runner.err" && grep -q 'Fix:' "$a/runner.err"; then
+  ok "a lane whose HEAD reflog is gone reads own_landed=UNKNOWN with a Fix:, and credits nothing"
+else
+  bad "unreadable reflog is UNKNOWN" "rc=$rc head=$(git -C "$r" log -1 --format=%s) err=$(cat "$a/runner.err")"
+fi
+
+# ---------------------------------------------------------------------------
 case_ 'athena-shipwright-run.sh — the wedge counter escalates on FAILURES (what the old skip counter missed)'
 
 # The headline superset: a session that RUNS and FAILS on a clean tree is
