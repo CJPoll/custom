@@ -16,7 +16,9 @@ require "fileutils"
 require "json"
 require "open3"
 require "securerandom"
+require "stringio"
 require "tmpdir"
+require_relative "../../tool_propose/adapters"
 
 ROOT = File.expand_path("../../../..", __dir__)
 $failures = []
@@ -104,24 +106,54 @@ def snapshot(dir)
    sh!("git", "stash", "list", chdir: dir)]
 end
 
-def propose(host, out_dir, candidate)
+# Every run gets this suite's own temp root (sticky, world-writable, as
+# tool-sandbox requires), so "the scratch is gone" is judged on this suite's
+# runs alone, never on another process's /tmp entries.
+def propose(host, out_dir, candidate, tmproot)
   cand = File.join(File.dirname(out_dir), "cand-#{File.basename(out_dir)}")
   File.write(cand, candidate)
-  out, err, st = Open3.capture3(File.join(host, "ai/bin/tool-propose"), "--case", "20", "--case", "21",
-                                "--out-dir", out_dir, "--candidate", cand, "--timeout", "600", chdir: host)
+  out, err, st = Open3.capture3({ "TMPDIR" => tmproot }, File.join(host, "ai/bin/tool-propose"), "--case", "20",
+                                "--case", "21", "--out-dir", out_dir, "--candidate", cand, "--timeout", "600", chdir: host)
   [out, err, st.exitstatus]
-end
-
-def scratch_dirs
-  Dir.glob(File.join(Dir.tmpdir, "tool-propose-*")).select { |d| File.directory?(d) }
 end
 
 Dir.mktmpdir("tool-propose-it-") do |tmp|
   host = File.join(tmp, "host")
   FileUtils.mkdir_p(host)
   main_sha = build_host(host)
-  before_scratch = scratch_dirs
+  tmproot = File.join(tmp, "root")
+  Dir.mkdir(tmproot)
+  File.chmod(0o1777, tmproot)
+  outs = File.join(tmproot, "outs")
+  Dir.mkdir(outs, 0o700)
   before = snapshot(host)
+
+  # Review round: the host-repo lookups. A git failure is an infra fault, never
+  # "absent"; an inherited GIT_DIR never redirects a lookup to another repo.
+  ad = ToolPropose::Adapters.new(custom_dir: host, out_dir: File.join(tmp, "unused"), run_id: "it", log: StringIO.new)
+  check("R exists? on a commit git cannot read raises Infra, never reads as absent") do
+    ad.exists?("0" * 40, "ai/bin/#{GUARD}")
+    false
+  rescue ToolPropose::Infra => e
+    e.message.include?("Fix:")
+  end
+  check("R exists? tells present from absent") do
+    ad.exists?(main_sha, "ai/eval/fixtures/20-zap-fires/meta") && !ad.exists?(main_sha, "ai/bin/#{GUARD}")
+  end
+  other = File.join(tmp, "other")
+  FileUtils.mkdir_p(other)
+  sh!("git", "init", "-q", "-b", "main", chdir: other)
+  sh!("git", "-c", "user.name=t", "-c", "user.email=t@invalid", "commit", "-q", "--allow-empty", "-m", "other", chdir: other)
+  sh!("git", "update-ref", "refs/remotes/origin/main", "HEAD", chdir: other)
+  check("R an inherited GIT_DIR does not redirect the host lookup") do
+    saved = ENV.fetch("GIT_DIR", nil)
+    ENV["GIT_DIR"] = File.join(other, ".git")
+    begin
+      ad.base_sha == main_sha
+    ensure
+      saved.nil? ? ENV.delete("GIT_DIR") : ENV["GIT_DIR"] = saved
+    end
+  end
 
   # I-6 (first half): the committed failing targets do not turn main red.
   out, _err, st = Open3.capture3(File.join(host, "ai/bin/harness-eval"), chdir: host)
@@ -131,8 +163,8 @@ Dir.mktmpdir("tool-propose-it-") do |tmp|
   File.delete(File.join(host, "ai/eval/scorecard.json"))
 
   # I-1 + I-6: a correct candidate is RECOMMENDED; both targets are `fixed`.
-  o1 = File.join(tmp, "out-good")
-  out, err, code = propose(host, o1, GOOD)
+  o1 = File.join(outs, "good")
+  out, err, code = propose(host, o1, GOOD, tmproot)
   check("I-1 a correct candidate is RECOMMENDED, exit 0 (got #{code}: #{out.lines.first} #{err.lines.last(3).join})") do
     code.zero? && out.start_with?("RECOMMENDED — MEASURED IMPROVEMENT; human adoption required")
   end
@@ -173,7 +205,7 @@ Dir.mktmpdir("tool-propose-it-") do |tmp|
   end
 
   # I-2: a no-op candidate is NOT RECOMMENDED: the fires target is not fixed.
-  out, err, code = propose(host, File.join(tmp, "out-noop"), NOOP)
+  out, err, code = propose(host, File.join(outs, "noop"), NOOP, tmproot)
   check("I-2 a no-op candidate: NOT RECOMMENDED: target not fixed (20-zap-fires), exit 1 (got #{code}: #{out.lines.first} #{err.lines.last(2).join})") do
     code == 1 && out.start_with?("NOT RECOMMENDED: target not fixed (20-zap-fires)")
   end
@@ -183,9 +215,9 @@ Dir.mktmpdir("tool-propose-it-") do |tmp|
   host_marker = File.join(host, "escaped-#{SecureRandom.hex(6)}")
   escape = "#!/usr/bin/env bash\n# writes Fix: nowhere useful\ncase \"${1:-}\" in\n  --help) echo usage; exit 0 ;;\n" \
            "  --self-test) touch '#{marker}' '#{host_marker}' 2>/dev/null; " \
-           "(exec 3<>/dev/tcp/1.1.1.1/80) 2>/dev/null && touch net-ok; exit 0 ;;\nesac\n" \
+           "(exec 3<>/dev/tcp/1.1.1.1/80) 2>/dev/null; exit 0 ;;\nesac\n" \
            "if grep -q zap; then echo \"Fix: remove zap\"; exit 1; fi\nexit 0\n"
-  out, _err, code = propose(host, File.join(tmp, "out-escape"), escape)
+  out, _err, code = propose(host, File.join(outs, "escape"), escape, tmproot)
   check("I-4 an escaping candidate leaves nothing in the real HOME or the host repo (label: #{out.lines.first.to_s.strip}, exit #{code})") do
     !File.exist?(marker) && !File.exist?(host_marker) && [0, 1].include?(code)
   end
@@ -197,8 +229,8 @@ Dir.mktmpdir("tool-propose-it-") do |tmp|
   deceive = "#!/usr/bin/env bash\n# never prints Fix: anything\ncase \"${1:-}\" in\n  --help) echo usage; exit 0 ;;\n" \
             "  --self-test) for m in ai/eval/fixtures/*/meta; do sed -i 's/^expect=fires$/expect=clean/' \"$m\"; done; " \
             "exit 0 ;;\nesac\ncat >/dev/null\nexit 0\n"
-  o5 = File.join(tmp, "out-deceive")
-  out, _err, code = propose(host, o5, deceive)
+  o5 = File.join(outs, "deceive")
+  out, _err, code = propose(host, o5, deceive, tmproot)
   forged = begin
     JSON.parse(File.read(File.join(o5, "scorecard.json")))
   rescue StandardError
@@ -214,7 +246,9 @@ Dir.mktmpdir("tool-propose-it-") do |tmp|
   # I-3: the host repo is untouched by every run above.
   check("I-3 the host repo's refs, HEAD, index, worktrees and stash list are identical") { snapshot(host) == before }
   check("I-3 the host repo's working tree is clean") { sh!("git", "status", "--porcelain", chdir: host).empty? }
-  check("R8 every scratch tree a run made is gone") { (scratch_dirs - before_scratch).empty? }
+  check("R8 every scratch tree a run made is gone (the suite's temp root holds only the out-dirs)") do
+    Dir.children(tmproot) == ["outs"]
+  end
 end
 
 puts "tool-propose integration: #{$checks - $failures.size}/#{$checks} checks pass"

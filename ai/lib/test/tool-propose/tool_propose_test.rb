@@ -161,6 +161,13 @@ check("D-C9 prompt carries the tool name, inputs, expects, args, regression, con
     .all? { |needle| pr.include?(needle) }
 end
 
+check("D-C9 a non-ASCII arg beside a binary non-ASCII input builds a UTF-8 prompt (review round)") do
+  cases = [{ name: "20-x", regression: "r".b, expect: "fires", args: ["é"], input: "café\n".b },
+           { name: "21-y", regression: "r".b, expect: "clean", args: [], input: "ok \xff\n".b }]
+  pr = C.prompt(guard: "foo-check", cases: cases)
+  pr.valid_encoding? && pr.include?("café") && pr.include?("é")
+end
+
 RISK = "default: destructive\ntools:\n  block-optimize: { class: idempotent, reason: propose }\n"
 check("risk entry is appended, destructive/generated, and parses") do
   r = C.risk_text(RISK, "foo-check")
@@ -330,6 +337,21 @@ end
 check("keep with a regression listed anyway -> regression, never RECOMMENDED") do
   label?(decide(json: json(regressed: %w[he:05-x])), "NOT RECOMMENDED: regression", 1)
 end
+check("keep with gate_ok not true -> UNMEASURED, never RECOMMENDED (review round)") do
+  j = json
+  j["gate_ok"] = false
+  label?(decide(json: j), "NOT RECOMMENDED: UNMEASURED", 1)
+end
+check("keep that also reports unmeasured -> UNMEASURED (review round)") do
+  label?(decide(json: json(unmeasured: { "side" => "variant" })), "NOT RECOMMENDED: UNMEASURED", 1)
+end
+check("every refusal label carries a Fix:; RECOMMENDED none (review round)") do
+  L.fix_for(L::RECOMMENDED).nil? &&
+    ["REJECTED: target: x", "REJECTED: candidate: x", "NOT RECOMMENDED: UNMEASURED (x)", "NOT RECOMMENDED: gate red (x)",
+     "NOT RECOMMENDED: regression (x)", "NOT RECOMMENDED: target not fixed (x)"].all? { |l| L.fix_for(l).to_s.size > 20 } &&
+    ToolPropose::Proposal.render(label: decide(json: json(fixed: [])), targets: TARGETS, guard: "g", run_id: "r",
+                                 cand_sha: nil, base_sha: SHA, scorecard: nil, isolated: nil).include?("Fix: ")
+end
 check("an unknown verdict -> UNMEASURED") { label?(decide(json: json(verdict: "adopt")), "NOT RECOMMENDED: UNMEASURED", 1) }
 check("no targets is never RECOMMENDED") { label?(decide(targets: [], isolated: {}), "NOT RECOMMENDED: UNMEASURED", 1) }
 
@@ -346,7 +368,7 @@ end
 O = ToolPropose::OutDir
 def odf(**over)
   { given: "/tmp/tp/out", realpath: "/tmp/tp/out", exists: false, directory: false, empty: false, symlink: false,
-    git_ancestor: nil, roots: ["/tmp", "/home/u/.local/state/athena/tool-propose"],
+    private: true, git_ancestor: nil, roots: ["/tmp", "/home/u/.local/state/athena/tool-propose"],
     denied: ["/home/u/.claude", "/home/u/dev"] }.merge(over)
 end
 check("R7 a new dir beneath the temp root is usable") { O.problem(odf).nil? }
@@ -365,7 +387,9 @@ end
   "under ~/dev" => [odf(given: "/home/u/dev/custom/x", realpath: "/home/u/dev/custom/x"), %r{/home/u/dev}],
   "elsewhere in HOME" => [odf(given: "/home/u/x", realpath: "/home/u/x"), /not beneath/],
   "the temp root itself" => [odf(given: "/tmp", realpath: "/tmp", exists: true, directory: true, empty: true), /not beneath/],
-  "an unresolvable parent" => [odf(realpath: nil), /parent/]
+  "an unresolvable parent" => [odf(realpath: nil), /parent/],
+  "someone else's or world-writable" => [odf(exists: true, directory: true, empty: true, private: false), /not yours alone/],
+  "with no ownership fact" => [odf(exists: true, directory: true, empty: true, private: nil), /not yours alone/]
 }.each do |what, (facts, pattern)|
   check("M-6 out-dir #{what} is refused") { O.problem(facts).to_s.match?(pattern) }
 end

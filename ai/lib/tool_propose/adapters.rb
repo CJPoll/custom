@@ -71,8 +71,11 @@ module ToolPropose
       "--disallowedTools", *PROPOSER_DISALLOWED
     ].freeze
     HOST_GIT = %w[rev-parse ls-tree cat-file].freeze
-    SCRATCH_GIT = %w[hash-object read-tree update-index write-tree commit-tree diff rev-parse].freeze
-    GIT_DENIED_ARGS = %w[--textconv --filters --ext-diff --exec-path --upload-pack --receive-pack].freeze
+    SCRATCH_GIT = %w[hash-object read-tree update-index write-tree commit-tree diff].freeze
+    GIT_DENIED_ARGS = %w[--textconv --filters --ext-diff --upload-pack --receive-pack].freeze
+    # Each stream is kept to its first and last half of this many bytes: a
+    # candidate printing without end must not exhaust host memory.
+    STREAM_CAP = 1024 * 1024
     SHA_RE = /\A[0-9a-f]{40}\z/
     LABEL_RE = /\Atool-propose [A-Za-z0-9._:-]{1,80}\z/
     TIMEOUT_RANGE = (1..7200).freeze
@@ -109,7 +112,7 @@ module ToolPropose
       path = rest[1]
       sub = rest[2]
       args = rest.drop(3)
-      return false if args.any? { |a| GIT_DENIED_ARGS.include?(a) || a.start_with?("--exec-path") }
+      return false if args.any? { |a| GIT_DENIED_ARGS.include?(a) }
 
       if path == ctx.custom_dir
         HOST_GIT.include?(sub)
@@ -174,6 +177,35 @@ module ToolPropose
       sandbox_run?(args.drop(6), ctx)
     end
 
+    # The caller's GIT_* variables, unset for every git this tool runs: an
+    # inherited GIT_DIR or GIT_OBJECT_DIRECTORY would otherwise point `git -C
+    # <clone>` at another repository's object store.
+    def git_env(env, base_env = ENV)
+      cleared = base_env.keys.select { |k| k.start_with?("GIT_") }.to_h { |k| [k, nil] }
+      cleared.merge(env || {})
+    end
+
+    # Read a stream to EOF, keeping its first and last STREAM_CAP/2 bytes.
+    def bounded_read(io)
+      half = STREAM_CAP / 2
+      head = +""
+      tail = +""
+      dropped = 0
+      while (chunk = io.read(65_536))
+        room = half - head.bytesize
+        if room.positive?
+          head << chunk.byteslice(0, room)
+          chunk = chunk.byteslice(room..) || ""
+        end
+        tail << chunk
+        next if tail.bytesize <= half
+
+        dropped += tail.bytesize - half
+        tail = tail.byteslice(-half, half)
+      end
+      dropped.zero? ? head + tail : "#{head}\n[tool-propose: #{dropped} bytes dropped]\n#{tail}"
+    end
+
     # The ONE execution primitive. -> [stdout, stderr, exit] (128+N when
     # signalled). An exception while waiting (a signal to tool-propose) TERMs
     # the child first, so a tool-sandbox run is stopped, not orphaned.
@@ -185,9 +217,10 @@ module ToolPropose
               "host git on a clone a sandbox has touched, or run the candidate outside tool-sandbox."
       end
       opts = { chdir: chdir }.compact
+      env = git_env(env) if argv[0] == "git"
       Open3.popen3(*(env ? [env, *argv] : argv), **opts) do |stdin, stdout, stderr, wait|
         begin
-          readers = [stdout, stderr].map { |io| Thread.new { io.read } }
+          readers = [stdout, stderr].map { |io| Thread.new { bounded_read(io) } }
           begin
             stdin.write(stdin_data)
           rescue Errno::EPIPE
@@ -245,14 +278,25 @@ module ToolPropose
                    "`git fetch origin` there; tool-propose measures against origin/main only."
     end
 
+    # The fixture directory names at sha. A missing ai/eval/fixtures is []; a
+    # git failure is an infra fault, never read as "no fixtures".
     def fixture_names(sha)
-      out, _err, code = run(["git", "-C", @ctx.custom_dir, "ls-tree", "--name-only", "-d", "#{sha}:#{FIXTURES}"])
-      code.zero? ? out.lines.map(&:strip).reject(&:empty?) : []
+      return [] unless exists?(sha, FIXTURES)
+
+      out, err, code = run(["git", "-C", @ctx.custom_dir, "ls-tree", "--name-only", "-d", "#{sha}:#{FIXTURES}"])
+      raise Infra, "git ls-tree #{sha}:#{FIXTURES} failed: #{err.strip}. Fix: check the repository." unless code.zero?
+
+      out.lines.map(&:strip).reject(&:empty?)
     end
 
+    # Whether sha has path. `ls-tree <sha> -- <path>` exits 0 either way and
+    # prints the entry only when it exists, so "absent" (empty output) and
+    # "could not look" (a non-zero exit, an infra fault) never read the same.
     def exists?(sha, path)
-      _o, _e, code = run(["git", "-C", @ctx.custom_dir, "cat-file", "-e", "#{sha}:#{path}"])
-      code.zero?
+      out, err, code = run(["git", "-C", @ctx.custom_dir, "ls-tree", "-z", sha, "--", path])
+      raise Infra, "git ls-tree #{sha} -- #{path} failed: #{err.strip}. Fix: check the repository." unless code.zero?
+
+      out.split("\0").any? { |entry| entry.split("\t", 2)[1] == path }
     end
 
     # The bytes of sha:path, or nil when the sha has no such blob.
@@ -289,18 +333,24 @@ module ToolPropose
     end
 
     # ---- scratch -------------------------------------------------------------
+    # A scratch tree that outlives its removal is named, never read as removed:
+    # an infra fault when nothing else failed, a loud warning when something did
+    # (raising then would hide the first error).
     def with_scratch
       @ctx.scratch = File.realpath(Dir.mktmpdir("tool-propose-"))
       yield
     ensure
       if @ctx.scratch
-        Scratch.remove(@ctx.scratch)
+        root = @ctx.scratch
         @ctx.scratch = nil
-      end
-    end
+        unless Scratch.remove(root)
+          msg = "the scratch tree #{root} could not be removed. Fix: remove it by hand (`chmod -R u+rwx` then " \
+                "`rm -rf` that exact path); no host process may run inside it."
+          raise Infra, msg if $!.nil?
 
-    def scratch_removed?(path)
-      !File.exist?(path) && !File.symlink?(path)
+          @log.puts "tool-propose: #{msg}"
+        end
+      end
     end
 
     # tool-sandbox --prepare-clone DEST at sha. -> DEST/repo
@@ -454,13 +504,22 @@ module ToolPropose
                parent && File.join(parent, File.basename(given))
              end
       state = env["XDG_STATE_HOME"].to_s.start_with?("/") ? env["XDG_STATE_HOME"] : File.join(home, ".local/state")
+      dir = st&.directory? || false
       {
-        given: given, realpath: real, exists: !st.nil?, symlink: st&.symlink? || false,
-        directory: st&.directory? || false, empty: st&.directory? ? Dir.empty?(given) : false,
+        given: given, realpath: real, exists: !st.nil?, symlink: st&.symlink? || false, directory: dir,
+        empty: dir ? empty?(given) : false,
+        private: st.nil? || (st.uid == Process.uid && (st.mode & 0o022).zero?),
         git_ancestor: real && git_ancestor(real),
         roots: [safe_realpath(Dir.tmpdir), canonical(File.join(state, "athena/tool-propose"))].compact,
         denied: [canonical(File.join(home, ".claude")), canonical(File.join(home, "dev"))].compact
       }
+    end
+
+    # A directory we cannot list is not "empty".
+    def empty?(dir)
+      Dir.empty?(dir)
+    rescue SystemCallError
+      false
     end
 
     # The path itself or its first ancestor holding a .git entry.
@@ -490,9 +549,11 @@ module ToolPropose
   module Scratch
     module_function
 
+    # -> whether root is gone afterwards (rm_rf swallows its own errors).
     def remove(root)
       make_removable(root)
       FileUtils.rm_rf(root)
+      !File.exist?(root) && !File.symlink?(root)
     end
 
     def make_removable(dir)

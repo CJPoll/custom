@@ -1,13 +1,15 @@
 # frozen_string_literal: true
 
 require "json"
+require_relative "candidate"
 
 # ToolPropose::Label -- the pure decision of ai/bin/tool-propose (DND-176):
 # from variant-eval's JSON, the sandbox exit, the baseline gate and the
 # isolated per-target re-check, exactly one label. RECOMMENDED needs ALL of:
 #   - the sandboxed variant-eval exited 0 or 1 and wrote a JSON for exactly this
 #     candidate and base (schema variant-eval/proposal@1, corpus deterministic);
-#   - verdict keep, regressions == [] (an Array, never null);
+#   - verdict keep, gate_ok true, unmeasured null, regressions == [] (an
+#     Array, never null);
 #   - every target case under deterministic.fixed and none under new (D-L15);
 #   - every target re-checked in its own fresh sandbox, classified by the host,
 #     with a verdict equal to its expect (R2-3).
@@ -111,6 +113,8 @@ module ToolPropose
     def measured(doc, targets, isolated)
       det = doc["deterministic"]
       regs = doc["regressions"]
+      return unmeasured("a #{doc['verdict']} verdict with gate_ok not true") unless doc["gate_ok"] == true
+      return unmeasured("a #{doc['verdict']} verdict that also reports unmeasured") unless doc["unmeasured"].nil?
       return unmeasured("regressions is not a list") unless regs.is_a?(Array)
       unless det.is_a?(Hash) && %w[regressed fixed new].all? { |k| det[k].is_a?(Array) }
         return unmeasured("the deterministic block is malformed")
@@ -134,6 +138,31 @@ module ToolPropose
       return result("#{NOT}: target not fixed (isolated re-check: #{wrong.join(', ')})", 1) unless wrong.empty?
 
       result(RECOMMENDED, 0)
+    end
+
+    FIXES = {
+      "REJECTED: target" => "commit the target fixtures on origin/main first (bin-stdin, one new tool name, >=1 " \
+                            "expect=fires and >=1 expect=clean case) and pass each with --case.",
+      "REJECTED: candidate" => "supply a candidate that meets the contract in ai/docs/tool-propose.md (one fenced " \
+                               "block, an allowed shebang, --help, --self-test and Fix:, at most 40 KiB); " \
+                               "rejected-candidate.txt holds what was refused.",
+      "#{NOT}: UNMEASURED" => "the measurement did not complete. Read scorecard.txt and the stderr above, check that " \
+                              "`ai/bin/tool-sandbox --self-test` passes and that harness-gate is green inside " \
+                              "tool-sandbox at origin/main, then re-run.",
+      "#{NOT}: gate red" => "the candidate turns harness-gate red; read scorecard.txt for the failing checks and " \
+                            "change the tool.",
+      "#{NOT}: regression" => "the candidate breaks a case that passes at origin/main; change the tool so every " \
+                              "listed case passes again.",
+      "#{NOT}: target not fixed" => "the tool does not give each target its expected verdict, alone in a fresh " \
+                                    "sandbox with stdlib only; change the tool."
+    }.freeze
+
+    # The Fix: for a label, or nil for RECOMMENDED. Every refusal names one.
+    def fix_for(label)
+      return nil if label == RECOMMENDED
+
+      FIXES.find { |prefix, _| label.to_s.start_with?(prefix) }&.last ||
+        "read proposal.md and the stderr above; this label has no specific fix."
     end
 
     # harness-eval's bin-stdin rule, applied by the host to one isolated run.
@@ -169,6 +198,7 @@ module ToolPropose
       out = +"# tool-propose proposal\n\n"
       out << "**#{label[:label]}**\n\n"
       recommended = label[:label] == Label::RECOMMENDED
+      out << "Fix: #{Label.fix_for(label[:label])}\n\n" unless recommended
       out << "#{Label::MEASURED_NOTE}\n\n" if recommended
       out << "- tool: `ai/bin/#{guard || '?'}`\n- run: `#{run_id}`\n- base (origin/main): `#{base_sha || '?'}`\n"
       out << "- candidate commit (in a discarded clone, on no ref): `#{cand_sha || 'not built'}`\n"
@@ -187,5 +217,3 @@ module ToolPropose
     end
   end
 end
-
-require_relative "candidate"

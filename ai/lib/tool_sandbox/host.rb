@@ -198,7 +198,10 @@ module ToolSandbox
     # swapped in after validation, and capped.
     def read_stdin(real)
       File.open(real, File::RDONLY | File::NOFOLLOW) do |f|
-        raise Errno::EINVAL, "#{real} is not a regular file" unless f.stat.file?
+        st = f.stat # the opened file itself, re-checked: no swap between validation and open
+        unless st.file? && st.uid == Process.uid && st.nlink == 1 && st.size <= Policy::STDIN_MAX_BYTES
+          raise Errno::EINVAL, "#{real} changed after validation (not a single-link regular file of ours within the cap)"
+        end
 
         f.read(Policy::STDIN_MAX_BYTES + 1).to_s.b.tap do |data|
           raise Errno::EFBIG, real if data.bytesize > Policy::STDIN_MAX_BYTES

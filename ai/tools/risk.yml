@@ -244,7 +244,9 @@ tools:
   # its --out-dir and scratch clones under the temp root that it removes, and
   # an unreachable candidate commit inside them. Its capture allowlist denies
   # every ref move, push, forge CLI and --update-baseline, and the candidate
-  # runs only inside tool-sandbox. One model call without --candidate.
+  # runs only inside tool-sandbox. One model call without --candidate. The
+  # class is tool-propose's own effect; the tool-sandbox child it runs keeps its
+  # own class (destructive/executes) for whoever calls it directly.
   tool-propose:            { class: idempotent, reason: propose }
   # main-health (DND-1482) runs the landed tree's harness gate in a lane under
   # test-slot, writes its own state under the git common dir, and on a RED main

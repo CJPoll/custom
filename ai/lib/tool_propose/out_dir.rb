@@ -15,6 +15,7 @@ module ToolPropose
     #   given        the --out-dir argument
     #   realpath     its realpath, or (when absent) its parent's realpath + basename; nil if unresolvable
     #   exists / directory / empty / symlink (the leaf)
+    #   private      true when absent, or owned by us with no group/world write bit
     #   git_ancestor the first ancestor (or itself) holding a .git entry, or nil
     #   roots        the allowed roots, as realpaths ([tmp root, state root])
     #   denied       realpaths it must not be under ([~/.claude, ~/dev])
@@ -24,6 +25,10 @@ module ToolPropose
       return "--out-dir #{given} is a symlink" if facts[:symlink]
       return "--out-dir #{given} exists and is not a directory" if facts[:exists] && !facts[:directory]
       return "--out-dir #{given} exists and is not empty (it must be new or empty)" if facts[:exists] && !facts[:empty]
+      unless facts[:private] == true
+        return "--out-dir #{given} is not yours alone (another owner, or group/world writable); another user " \
+               "could plant a symlink in it"
+      end
 
       real = facts[:realpath]
       return "--out-dir #{given}: its parent does not exist or cannot be resolved" unless real.to_s.start_with?("/")

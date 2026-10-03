@@ -156,6 +156,13 @@ module ToolPropose
       [:ok, nil]
     end
 
+    # Fixture bytes arrive as binary and args as UTF-8; the prompt is UTF-8
+    # text, with any invalid byte shown as U+FFFD (the measurement uses the
+    # raw bytes).
+    def utf8(text)
+      text.to_s.dup.force_encoding(Encoding::UTF_8).scrub("�")
+    end
+
     # The proposer prompt: the tool name, its contract, and every target case.
     def prompt(guard:, cases:)
       out = +<<~TXT
@@ -177,11 +184,12 @@ module ToolPropose
         These cases define the behaviour (each input is shown between the markers):
       TXT
       cases.each do |c|
-        out << "\n## #{c[:name]}\n"
-        out << "regression: #{c[:regression]}\n"
+        input = utf8(c[:input])
+        out << "\n## #{utf8(c[:name])}\n"
+        out << "regression: #{utf8(c[:regression])}\n"
         out << "expect: #{c[:expect]} (#{c[:expect] == 'fires' ? 'exit 1 with a Fix: line' : 'exit 0'})\n"
-        out << "args: #{c[:args].empty? ? '(none)' : c[:args].inspect}\n"
-        out << "-----BEGIN INPUT-----\n#{c[:input]}#{c[:input].end_with?("\n") ? '' : "\n"}-----END INPUT-----\n"
+        out << "args: #{c[:args].empty? ? '(none)' : utf8(c[:args].inspect)}\n"
+        out << "-----BEGIN INPUT-----\n#{input}#{input.end_with?("\n") ? '' : "\n"}-----END INPUT-----\n"
       end
       out << "\nReply with exactly one fenced code block holding the whole tool, and nothing else in a fence.\n"
       out

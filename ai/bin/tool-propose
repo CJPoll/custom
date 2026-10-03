@@ -69,6 +69,19 @@ module Manager
 
   module_function
 
+  # The out-dir, checked before anything else (PRD R7), from ONE set of facts,
+  # and created 0700 when absent. -> [realpath, nil] or [nil, reason]
+  def out_dir(given)
+    facts = TP::OutDirFacts.gather(given)
+    why = TP::OutDir.problem(facts)
+    return [nil, why] if why
+
+    Dir.mkdir(facts[:realpath], 0o700) unless facts[:exists]
+    [facts[:realpath], nil]
+  rescue SystemCallError => e
+    [nil, "--out-dir #{given} could not be created: #{e.message}"]
+  end
+
   # opts: cases:, candidate: (path or nil), timeout:, run_id:
   # out: where the label is printed. -> exit code
   def run(opts, io, out: $stdout)
@@ -83,6 +96,8 @@ module Manager
                              cand_sha: st[:cand], base_sha: st[:base], scorecard: st[:scorecard], isolated: st[:isolated])
     io.write_out("proposal.md", md) # last: a failed write raises Infra before any label is printed
     out.puts label[:label]
+    fix = TP::Label.fix_for(label[:label])
+    out.puts "  Fix: #{fix}" if fix
     out.puts "  proposal: #{File.join(opts[:out_dir].to_s, 'proposal.md')}" if opts[:out_dir]
     label[:exit]
   end
@@ -179,9 +194,9 @@ module Manager
     txt = io.read_out("scorecard.txt")
     io.write_out("scorecard.json", raw) if raw
     io.write_out("scorecard.txt", txt) if txt
-    st[:scorecard] = txt || raw
+    st[:scorecard] = !(txt || raw).nil?
 
-    json = raw.nil? ? nil : raw
+    json = raw
     args = { json: json, cand_sha: cand, base_sha: base, targets: st[:targets], sandbox_exit: code,
              baseline_gate: nil, isolated: nil }
     first = TP::Label.decide(**args)
@@ -308,14 +323,12 @@ def main(argv)
   return usage_error(reason) if reason
   return self_test if opts[:self_test]
 
+  out_dir, why = Manager.out_dir(opts[:out_dir])
+  return usage_error(why) if why
   if opts[:candidate] && !(File.file?(opts[:candidate]) && File.readable?(opts[:candidate]))
     return usage_error("--candidate #{opts[:candidate]} is not a readable file")
   end
-  why = TP::OutDir.problem(TP::OutDirFacts.gather(opts[:out_dir]))
-  return usage_error(why) if why
 
-  out_dir = TP::OutDirFacts.gather(opts[:out_dir])[:realpath]
-  Dir.mkdir(out_dir, 0o700) unless File.directory?(out_dir)
   opts = opts.merge(out_dir: out_dir, run_id: run_id)
   Manager.run(opts, TP::Adapters.new(custom_dir: CUSTOM_DIR, out_dir: out_dir, run_id: opts[:run_id]))
 rescue TP::MutationAttempt, TP::Infra => e
@@ -781,6 +794,21 @@ def containment_checks(check)
     check.("C-4 a full fake run never runs the candidate (marker absent)", !File.exist?(marker))
     check.("C-4 the candidate only reaches the commit as data", f.blobs_written.include?("ai/bin/foo-check"))
   end
+
+  # Review round: inherited GIT_* variables never reach a git this tool runs.
+  ge = TP::Exec.git_env({ "GIT_INDEX_FILE" => "/tmp/tp-x/i" }, { "GIT_DIR" => "/h/.git", "GIT_OBJECT_DIRECTORY" => "/o",
+                                                                "GIT_CONFIG_PARAMETERS" => "x", "PATH" => "/usr/bin" })
+  check.("R git_env unsets every inherited GIT_* and keeps ours (got #{ge.inspect})",
+         ge == { "GIT_DIR" => nil, "GIT_OBJECT_DIRECTORY" => nil, "GIT_CONFIG_PARAMETERS" => nil,
+                 "GIT_INDEX_FILE" => "/tmp/tp-x/i" })
+
+  # Review round: a child's output is bounded on the host (head + tail kept).
+  big = "Fix: start\n" + ("x" * (3 * TP::Exec::STREAM_CAP)) + "\nFix: end\n"
+  kept = TP::Exec.bounded_read(StringIO.new(big))
+  check.("R bounded_read keeps at most STREAM_CAP plus a marker (got #{kept.bytesize})",
+         kept.bytesize < TP::Exec::STREAM_CAP + 200 && kept.start_with?("Fix: start") && kept.end_with?("Fix: end\n") &&
+           kept.include?("bytes dropped"))
+  check.("R bounded_read returns small output unchanged", TP::Exec.bounded_read(StringIO.new("a\nb\n")) == "a\nb\n")
 
   # The proposer argv (S1).
   pa = TP::Exec::PROPOSER_ARGV

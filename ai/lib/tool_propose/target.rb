@@ -12,7 +12,8 @@ require "json"
 # Pure: no IO, no git. The adapter reads the fixture list, each meta and input
 # at the sha, and whether ai/bin/<guard> exists there, and passes the facts in.
 # Results are [:ok, value] or [:error, reason]; the manager prints the reason
-# as `REJECTED: target: <reason>` with a Fix:.
+# as `REJECTED: target: <reason>` and the Fix: line ToolPropose::Label.fix_for
+# names.
 module ToolPropose
   module Target
     # harness-eval's own patterns (ai/bin/harness-eval, DND-1427); the domain
@@ -23,7 +24,6 @@ module ToolPropose
     CASE_RE = /\A[A-Za-z0-9][A-Za-z0-9._-]*\z/
     EXPECTS = %w[fires clean].freeze
     MODE = "bin-stdin"
-    SELF_TEST_DIR = "ai/test/tool-propose"
 
     module_function
 
@@ -90,7 +90,7 @@ module ToolPropose
         return [:error, "no existence facts were gathered for ai/bin/#{guard}; cannot tell it is new"]
       end
       if existing[:bin] || existing[:self_test]
-        return [:error, "ai/bin/#{guard} (or #{SELF_TEST_DIR}/#{guard}) already exists at the sha; new tools only, " \
+        return [:error, "ai/bin/#{guard} (or its tool-propose self-test) already exists at the sha; new tools only, " \
                         "tool-propose never replaces a tool"]
       end
 

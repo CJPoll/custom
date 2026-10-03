@@ -28,7 +28,7 @@ ai/bin/tool-propose --case 20 --case 21 --out-dir /tmp/tp-zap --candidate ./my-t
   least one `expect=fires` and one `expect=clean` case. The pair defeats a
   no-op tool (it cannot fire) and an always-deny tool (it cannot stay clean).
 - The targets land on origin/main **first**, as a normal PR, and they fail
-  there: the tool does not exist yet, so each scores `error`. A committed
+  there: the tool is absent at that sha, so each scores `error`. A committed
   failing target does not turn main red, because harness-eval with
   `baseline.json` present fails only on a regression. The candidate never adds
   or edits a fixture, so it can never author the test it is scored against.
@@ -38,7 +38,9 @@ ai/bin/tool-propose --case 20 --case 21 --out-dir /tmp/tp-zap --candidate ./my-t
   proposer. It takes the identical checks and measurement.
 - `--out-dir DIR`: absolute, new or empty, beneath the temp root or
   `$XDG_STATE_HOME/athena/tool-propose/`; in no git work tree; not under
-  `~/.claude` or `~/dev`. It is checked before anything else runs.
+  `~/.claude` or `~/dev`. An existing one must be yours with no group or world
+  write bit, so no other user can plant a symlink in it. A new one is created
+  0700. It is checked before anything else runs.
 - `--timeout SECS`: the sandboxed measurement's wall limit (default 3600, max 7200).
 
 ## The candidate
@@ -83,7 +85,7 @@ A built commit that changes any other path, or any path under `ai/eval/`, is
 2. The candidate commit is built in A with plumbing on a temp index
    (`read-tree`, `hash-object -w`, `update-index --cacheinfo`, `write-tree`,
    `commit-tree`). No ref names it and A's HEAD and working tree do not move.
-   `proposal.diff` is read from A now.
+   `proposal.diff` is read from A at this step.
 3. A is marked used. From here no host process runs in or on A: sandboxed code
    could plant a hook or `core.fsmonitor` there for host git to run.
 4. Under a `test-slot` cpu slot, tool-sandbox runs origin/main's
@@ -96,7 +98,9 @@ A built commit that changes any other path, or any path under `ai/eval/`, is
    (`tool-sandbox --stdin`). The host classifies the exit by harness-eval's
    bin-stdin rule.
 7. The scratch tree is removed on every path, including an exception, SIGINT
-   and SIGTERM. Removal never follows a symlink.
+   and SIGTERM. Removal never follows a symlink. A tree still present after
+   removal is named: an exit-3 fault when nothing else failed, a warning when
+   something did.
 
 ## What it writes
 
@@ -105,7 +109,7 @@ A built commit that changes any other path, or any path under `ai/eval/`, is
 | `proposal.md` | always, last | the label, the targets and their isolated verdicts, the adoption sentence when RECOMMENDED |
 | `proposal.diff` | the commit was built | `git diff --binary <sha> <cand>`; `git apply`-able in a human's worktree |
 | `candidate/` | the commit was built | the four files as built, as data (mode 0644) |
-| `scorecard.json`, `scorecard.txt` | variant-eval wrote them | variant-eval's JSON and text, copied only when readable as above |
+| `scorecard.json`, `scorecard.txt` | variant-eval wrote them | variant-eval's JSON and text, copied only when readable as *The measurement* step 4 says |
 | `rejected-candidate.txt` | a candidate was rejected | the raw candidate text (untrusted) |
 
 Every file is written atomically. The label is printed only after
@@ -125,6 +129,9 @@ Exactly one, from `ToolPropose::Label.decide`.
 | `NOT RECOMMENDED: target not fixed (<cases>)` | a target is under `new`, not under `fixed`, or fails its isolated re-check | 1 |
 | `RECOMMENDED — MEASURED IMPROVEMENT; human adoption required` | verdict `keep`, `regressions == []`, every target under `fixed` and none under `new`, and every isolated re-check equal to its `expect` | 0 |
 
+Every label but RECOMMENDED is followed by a `Fix:` line, on stdout and in
+`proposal.md`.
+
 A usage error, including a refused `--out-dir`, exits 2 and names the flag. An
 infrastructure fault (a failed clone, a failed out-dir write, a refused exec)
 exits 3 with `Fix:` and never prints a RECOMMENDED line. No exit code alone
@@ -138,7 +145,12 @@ only; plumbing on an unused scratch clone only; `tool-sandbox` with exactly the
 three sandboxed runs; `test-slot` around one of them; and `claude` only with the
 proposer argv. Push, merge, commit, ref moves, fetch, every forge CLI, a shell,
 `curl` and `--update-baseline` are refused. `--self-test` asserts each refusal
-and lexes the sources to prove `capture` is the one exec site.
+and lexes its sources to assert that no other known spawn primitive
+(`system`, `spawn`, `exec`, the other `Open3` calls, backticks) appears. A
+spawn form outside that list, such as `IO.read("|cmd")`, is not caught by the
+lex; review covers it. Every git it runs gets the caller's `GIT_*` variables
+unset, so an inherited `GIT_DIR` cannot point it at another repository, and
+each child stream is kept to its first and last 512 KiB on the host.
 
 The adoption gate, per state (the epic's Architecture & Engineering page, *The
 adoption gate*):
@@ -155,7 +167,7 @@ adoption gate*):
 the instruction produces an ordinary agent-authored PR, which an admiral may
 merge on the normal bar. The provenance line makes the origin visible to the
 critic and a reviewer, but a diff can remove it, so it is a signal, not a gate.
-A mechanical merge hold would change the approval rules, which is Cody's
+A mechanical merge hold changes the approval rules, which is Cody's
 (`~/.claude/CLAUDE.md` → *Owner approval policy*, item 6); it is open question
 Q1 on the epic, and no hold exists.
 
