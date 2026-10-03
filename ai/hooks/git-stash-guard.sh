@@ -22,8 +22,7 @@
 #
 # WHAT IS DENIED: `git stash` with any verb other than the three read-only ones
 # below, including bare `git stash` and option-first forms (`git stash -u`,
-# `git stash -- f`), which are an implicit push. A literal word git refuses
-# as a stash verb is not a verb (see PRECISION (DND-1095 D1)). Also the
+# `git stash -- f`), which are an implicit push. Also the
 # plumbing that rewrites the same list without the stash subcommand (see
 # plumb() in the awk block): `reflog delete|expire|drop` naming the stash
 # ref in ANY spelling

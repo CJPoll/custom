@@ -756,7 +756,7 @@ check "AC8. autocorrect on in the repo config, a typo of stash" deny
 git -C "$OWNER" config --unset help.autocorrect
 
 echo "== D1: false positives that drop no coverage (DND-1095 D1) =="
-# Three read-only shapes the guard denied, each fixed without relying on the
+# Read-only shapes the guard denied, each fixed without relying on the
 # DND-775 git layer. Each fix has paired cases proving the real stash writes
 # near it still deny. The snapshot adds the owner's real self-referential
 # `grep` alias, a `git` alias naming itself, and a global alias `GRD=pop`.
