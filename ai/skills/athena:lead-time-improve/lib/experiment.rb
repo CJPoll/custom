@@ -767,9 +767,15 @@ module LeadTimeExperiment
   # no test path, so numstat alone reads a case added there as source. The
   # files to read are the non-test paths a commit added lines to; whether an
   # added line sits in a self-test block is FirstParty.inline_self_test_lines'.
+  # Prose and data files are no tools: harness docs mention `--self-test` on
+  # lines that would open a block, so they are not read. Every other file is
+  # (over-reading only holds a revert).
+  NON_TOOL_EXTENSIONS = %w[.md .markdown .txt .rst .json .yml .yaml .toml .html .csv .tsv .lock].freeze
+
   def inline_candidates(entries)
-    entries.select { |added, _, path| added&.positive? && !FirstParty.test_file_any_layout?(path) }
-           .map(&:last).uniq.sort
+    entries.select do |added, _, path|
+      added&.positive? && !FirstParty.test_file_any_layout?(path) && !NON_TOOL_EXTENSIONS.include?(File.extname(path).downcase)
+    end.map(&:last).uniq.sort
   end
 
   # readings: {path => Source.ok([[added line numbers, text]])}. The record

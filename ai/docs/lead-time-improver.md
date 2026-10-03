@@ -600,6 +600,8 @@ p90 over the last K comparable landings), and a status.
   holding `--self-test` (the token `harness-gate`'s coverage check uses,
   now `FirstParty::INLINE_SELF_TEST_RE`) or defining a self-test function,
   and takes the deeper-indented lines after it plus the closing line.
+  Prose and data files (`.md`, `.json`, `.yml` and the like) are never read:
+  docs mention `--self-test` on lines that would open a block.
   `hold` reads both lists; a record without the field is computed on the
   fly like the others. Residual: a line at column 0 inside a block (a
   heredoc body) ends it early, so the lines after it are not seen.

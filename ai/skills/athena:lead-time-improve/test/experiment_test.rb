@@ -765,6 +765,11 @@ check("inline_candidates: non-test paths that gained lines; not tests, deletions
   X.inline_candidates(entries) == ["ai/bin/t"]
 end
 
+check("inline_candidates: a markdown or data file that mentions --self-test is no tool, never read") do
+  entries = [[2, 0, "ai/docs/x.md"], [1, 0, "ai/skills/s/SKILL.md"], [1, 0, "cfg/a.JSON"], [1, 0, "ai/bin/t"]]
+  X.inline_candidates(entries) == ["ai/bin/t"]
+end
+
 def reading(added, text) = LeadTimePhases::Source.ok([[added, text]])
 
 check("inline_fields: an added line inside the self-test block lists the tool") do

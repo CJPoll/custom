@@ -76,7 +76,7 @@ HELP = <<~TXT
            on main (after any rebase); it is refused when git does not show
            it on the repo's main. It also stores the test paths the commit
            added lines to (revert_deletes_tests), or why git could not
-           tell, the tools whose inline --self-test block gained lines
+           tell, the tools whose inline self-test block gained lines
            (revert_inline_tests, DND-1577; or _na), and the added paths
            it could classify as neither source nor test (revert_unclassified, DND-1634: a test-like layout
            with no test word, such as features/, __mocks__/, fixtures/
@@ -135,7 +135,7 @@ HELP = <<~TXT
            until main carries the revert; judge then records `reverted`.
            A revert of a commit that added test lines (a test/, tests/, spec/
            or __tests__/ path, a *_test.*, *.spec.* or *.self-test.sh file;
-           DND-1630; or lines inside a tool's inline --self-test block,
+           DND-1630; or lines inside a tool's own inline self-test block,
            DND-1577), or one where git could not tell, prints
            REVERT HELD instead (DND-1549): a plain git revert would delete
            the tests, so the Fix names a partial revert (which keeps git's
