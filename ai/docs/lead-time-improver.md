@@ -148,6 +148,13 @@ Lead time is the owner's definition: captain dispatch (the ticket's
    `post-merge.yml`. The normative description is
    `ai/bin/lead-time-phases --help`.
 
+   **Later (2026-10-03, DND-1615):** the same rule holds for `lead`. A lead
+   with no post-merge run ended at the landing while one with a run ended at
+   the deploy, so a CI window's lead median mixed two definitions. Where
+   post-merge CI holds (declared or inferred), a landing with no run now has
+   an n/a lead carrying the tail's reason. No-CI repos and `code` are
+   unchanged.
+
    **Later (2026-10-02, DND-1501):** the table above is the standalone-PASS
    flow. In custom the captain's verify step is `integration-gate
    --with-critic`, so the PASS is judged inside the run, none stands before
