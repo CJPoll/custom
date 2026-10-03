@@ -415,7 +415,7 @@ has "the table prints the mismatch warning" "${OUT}" "idle_workflow none, but 2 
 has "... with its Fix:" "${OUT}" "Fix: set the repo's idle_workflow to its post-merge workflow file"
 CONFIG="${GS_CONFIG}"
 run "${TEL_EMPTY}" --summary --repo gen_saas
-lacks "no declaration: no mismatch warning" "${OUT}" "idle_workflow none, but"
+lacks "a declared workflow file: no mismatch warning" "${OUT}" "idle_workflow none, but"
 CONFIG="${CONFIG_SAVE}"; STATE="${STATE_SAVE}"
 
 echo "== ingest + summary: landings worked on another machine are foreign (DND-1531)"

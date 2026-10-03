@@ -204,8 +204,8 @@ landing whose post-merge run never concluded, which no emitter fixes. When
 and run the choice rule on the largest phase by `phases.<p>.sum_s` instead. In custom,
 with no post-merge CI, `tail` is never a candidate.
 
-Whether a repo has post-merge CI comes from its `idle_workflow`, else the
-window (`tail_ci`, DND-1614; `ai/bin/lead-time-phases --help`). A
+Whether a repo has post-merge CI comes from its `idle_workflow` (an improve repo always declares it,
+DND-1927), else, for a watch repo, the window (`tail_ci`, DND-1614; `ai/bin/lead-time-phases --help`). A
 `tail_ci.mismatch` means a repo declaring `"none"` has landings with a
 post-merge run: its tails stay measured, and the run files a ticket to fix
 that repo's lead-time config entry.
@@ -214,8 +214,9 @@ that repo's lead-time config entry.
 landing with no post-merge run in a CI repo (DND-1924), so a before/after on
 `lead` never mixes landing-ended and deploy-ended leads in one set. Rows
 ingested before DND-1924 keep their old `lead_s`: a before-set that reaches
-back to them mixes the two definitions until they age out of the window. A watch repo with no `idle_workflow` infers CI
-per ingested batch; an improve repo must declare it (the resolver refuses it otherwise, DND-1927). Watch-mode rows are not adjusted.
+back to them mixes the two definitions until they age out of the window. A watch repo with no `idle_workflow`
+infers CI per ingested batch; an improve repo must declare it (the resolver
+refuses it otherwise, DND-1927). Watch-mode rows are not adjusted.
 
 **Later (2026-10-01, DND-1533):** this read "The product-side action for a
 `product` lever is not set by this step (DND-1533, DND-1542). Until it is,

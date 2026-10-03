@@ -44,7 +44,7 @@ module LeadTimeConfig
   # idle_workflow (DND-1540): the post-merge workflow FILE a product-repo
   # landing passes to locked-merge --require-idle-workflow, or "none".
   IDLE_WORKFLOW_RE = /\A(none|[A-Za-z0-9][A-Za-z0-9_.-]*\.ya?ml)\z/.freeze
-  SCHEMA_HINT = "repos: [{name, path, mode improve|watch, optional product_epic, optional idle_workflow}], window, improvement_epic"
+  SCHEMA_HINT = "repos: [{name, path, mode improve|watch, optional product_epic, idle_workflow (required for improve)}], window, improvement_epic"
 
   # A refusal: message plus the Fix: line the caller prints.
   class Error < StandardError

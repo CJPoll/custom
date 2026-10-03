@@ -59,8 +59,8 @@ HELP = <<~TXT
   tail is measured; absent, the summary infers it from the window.
   An "improve" repo MUST declare idle_workflow (DND-1927): inference per
   ingested batch can write two lead definitions into one ledger, so an
-  improve entry without it (after the override inherits the tracked
-  default's) is refused by name, with a Fix: naming the key. A "watch" repo
+  improve entry without it (checked after the override inherits the
+  tracked default's keys) is refused by name, with a Fix: naming the key. A "watch" repo
   may omit it.
 
   Presence: a configured path that does not exist is SKIPPED, named with its

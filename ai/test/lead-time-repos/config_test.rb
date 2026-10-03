@@ -173,7 +173,7 @@ check("S6 an improve repo that does not declare idle_workflow is refused by name
   e = raised { parse(doc([repo("a", "improve")])) }
   e && e.message.include?("\"a\"") && e.message.include?("improve") && e.message.include?("idle_workflow") && e.fix.include?("idle_workflow")
 end
-check("S6 a watch repo without idle_workflow still resolves") { parse(doc([repo("a", "watch")])).repos.first.idle_workflow.nil? }
+check("S7 a watch repo without idle_workflow still resolves") { parse(doc([repo("a", "watch")])).repos.first.idle_workflow.nil? }
 
 seed = C.parse(File.read(File.expand_path("../../config/lead-time-repos.json", __dir__)), home: "/home/u", path: "seed")
 check("S4 the tracked default parses unchanged") { seed.repos.map { |r| [r.name, r.mode] } == [%w[custom improve], %w[gen_saas watch], %w[walt_ui watch]] }

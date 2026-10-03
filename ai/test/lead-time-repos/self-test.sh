@@ -119,12 +119,18 @@ eq "inherits_from names the tracked default" "$(jq_r 'j["inherits_from"]')" "${R
 eq "a repo the override drops does not come back" "$(jq_r 'j["repos"].map { |r| r["name"] }.join(",")')" "custom,gen_saas"
 run --
 has "the table names the inherited field and where it came from" "${OUT}" "idle_workflow=none (tracked default)"
-GOOD_ENV="$(cfg envonly.json "{\"repos\":[{\"name\":\"gen_saas\",\"path\":\"~/dev/gen_saas\",\"mode\":\"improve\",\"idle_workflow\":\"none\"}],\"window\":20,\"improvement_epic\":\"e\"}")"
+GOOD_ENV="$(cfg envonly.json "{\"repos\":[{\"name\":\"custom\",\"path\":\"~/dev/custom\",\"mode\":\"watch\"}],\"window\":20,\"improvement_epic\":\"e\"}")"
 run ATHENA_LEADTIME_CONFIG="${GOOD_ENV}" -- --json
-eq "ATHENA_LEADTIME_CONFIG stays authoritative: nothing inherited" "$(jq_r '[j["repos"][0]["idle_workflow"].inspect, j["repos"][0]["inherited"].size, j["inherits_from"].inspect].join(",")')" "\"none\",0,nil"
+eq "ATHENA_LEADTIME_CONFIG stays authoritative: nothing inherited" "$(jq_r '[j["repos"][0]["idle_workflow"].inspect, j["repos"][0]["inherited"].size, j["inherits_from"].inspect].join(",")')" "nil,0,nil"
 rm -f "${OVR}"
 run -- --json
 eq "no override: inherits_from is null" "$(jq_r 'j["inherits_from"].inspect')" "nil"
+
+NOIDLE_ENV="$(cfg noidle.json "{\"repos\":[{\"name\":\"custom\",\"path\":\"~/dev/custom\",\"mode\":\"improve\"}],\"window\":20,\"improvement_epic\":\"e\"}")"
+run ATHENA_LEADTIME_CONFIG="${NOIDLE_ENV}" -- --json
+eq "ATHENA_LEADTIME_CONFIG: an improve repo with no idle_workflow is refused, nothing inherited (DND-1927): exit 2" "${CODE}" "2"
+has "... naming the repo and the key" "${ERR}" 'repo "custom" is mode improve and declares no idle_workflow'
+has "... with Fix:" "${ERR}" "Fix: add"
 
 echo "== override refused (exit 2, Fix:), never read as no override"
 refused() { # DESC EXPECT-IN-ERR
