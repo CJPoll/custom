@@ -56,7 +56,8 @@
 # expansion after an unknown option (`git --new-opt v $X`). Also denied:
 #   * a command word built by expansion followed by `stash` or a stash alias
 #     (`$GIT stash`, `$GIT sp`, `${GIT:-git} stash`, `$(command -v git) stash`,
-#     a backtick form);
+#     a backtick form, or a substitution joined into the word, `./g$(:)it
+#     stash`; see JOINED SUBSTITUTIONS);
 #   * `git <expanded subcommand>` (`git $SUB`, a glob `git st?sh`, a brace
 #     `git {stash,pop}`): its value is unknowable here, and so is a glob or
 #     brace in the stash verb (`git stash l?st`);
@@ -225,11 +226,12 @@
 # `./g$(:)it stash pop` and `$(echo ./g)it stash pop` run git. The
 # tokenizer splits such a word at the substitution, and before DND-1897
 # only a literal `stash` right after its closing paren was read. zseg's
-# joining scan now marks every zsh word that holds an unquoted
-# substitution ("exp"), group or not, and analyze judges it in command
-# position like `$GIT`: an expanded command word whose arguments are the
-# words after the whole zsh word, read past a redirection or a line
-# continuation. So it denies a stash write, a stash alias, stash plumbing,
+# joining scan marks every zsh word that holds an unquoted
+# substitution and no group ("exp"; a word that also holds a group stays
+# with zwcat, which reads it as may be git), and analyze judges it in
+# command position like `$GIT`: an expanded command word whose arguments
+# are the words after the whole zsh word, read past a redirection of any
+# form (`>|f`, a quoted target) or a line continuation. So it denies a stash write, a stash alias, stash plumbing,
 # or (when the command points git at a config the hook does not read) a
 # non-builtin subcommand, and allows `./g$(:)it status`. A separator after
 # the word ends its arguments. An argument that opens with a paren or a
@@ -238,7 +240,12 @@
 # is no command. A `${...}` expansion never split the word, so the
 # expansion rule already judged it. Accepted false positive, as for `$X`:
 # a quoted payload re-read as a command whose expanded word (`- $(date)`)
-# is followed by prose, under a config the hook does not read (`cd $S`).
+# is followed by prose, under a config the hook does not read (`cd $S`),
+# and a path built by substitution under one (`cd "$W" && $(git rev-parse
+# --show-toplevel)/bin/x list`, like `"$(pwd)"/bin/x list`). Not caught:
+# a git-stash command word built by substitution (`.../git-st$(:)ash
+# pop`), as for `$X pop`; and a `)` inside the substitution that closes
+# no paren (a `case` pattern) ends it early.
 #
 # HERE-STRINGS (DND-1859): a here-string (`<<<word`) is a redirection, so
 # its word is no argument, but it is the text the command reads on stdin.
@@ -864,17 +871,20 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
         if (a > n) continue
         gp = substr(text, SE[g] + 1, WS[a] - SE[g] - 1)
         # DND-1897: a word built by a joined substitution ("exp") keeps its
-        # arguments past a redirection or a line continuation, as the
-        # tokenizer reads them (`./g$(:)it 2>/dev/null stash pop`): its
-        # rule denies only on a stash write, so an unread argument would
-        # be a miss. A separator ends the command (ZA 0). So does an
-        # argument that opens with a paren or a backtick: a subcommand
+        # arguments past a redirection (any form, quoted target included)
+        # or a line continuation, as the tokenizer reads them
+        # (`./g$(:)it >|f stash pop`): its rule denies only on a stash
+        # write, so an unread argument would be a miss. The command start
+        # the tokenizer set (SB) decides: a separator ends the command (ZA
+        # 0). A word right after the closing `)` of the substitution
+        # carries a command start the shell does not make, so a blank-only
+        # gap is read too. A paren or a backtick also sets a command start,
+        # so an argument that opens with one is not read: a subcommand
         # built by substitution after an expanded command word is the
         # `$G $S` class under NOT CATCHABLE, and prose such as `- $(date)
         # (note)` in a quoted payload is no command.
         if (!SH[g]) {
-          gsub(/\\\n|[0-9]*(&>|>&|<&)/, "", gp)
-          if (gp !~ /[;&|\n()`]/) { ZA[k] = a; ZB[k] = a; while (ZB[k] < n && !SB[ZB[k] + 1]) ZB[k]++ }
+          if (!SB[a] || gp ~ /^[ \t]*$/) { ZA[k] = a; ZB[k] = a; while (ZB[k] < n && !SB[ZB[k] + 1]) ZB[k]++ }
           continue
         }
         if (gp ~ /[<>]/ || gp ~ /^[ \t]*(\\\n[ \t]*)+$/) { ZA[k] = -1; continue }

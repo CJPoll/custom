@@ -1019,13 +1019,18 @@ The canary reads usage under LC_ALL=C. After: `RESULT: 429 passed, 0 failed`.
   the committed files were never edited.
 - **Fail-first:** section CS written first. Against the unfixed hook
   (`7c8f2075`), the first cases gave `RESULT: 609 passed, 12 failed`; the
-  final suite gives `RESULT: 611 passed, 14 failed`: every deny case in
-  section CS, and no other case. After: `RESULT: 625 passed, 0 failed`.
+  final suite gives `RESULT: 612 passed, 18 failed`: every deny case in
+  section CS, and no other case. After: `RESULT: 630 passed, 0 failed`.
+- **Review round (first cut `7f45deb2`):** CS22-CS26 added first. Against
+  `7f45deb2`: `RESULT: 626 passed, 4 failed` (CS22-CS25). The first cut
+  tested the gap text by regex; the fix reads the command start the
+  tokenizer set.
 
 | id | Mutation | Observed failure |
 |---|---|---|
-| S-1897-1 | a joined substitution word gets no "exp" verdict | CS1-CS12, CS19, CS20 |
-| S-1897-2 | `&>`/`>&`/`<&` and line continuations not stripped before the separator test | CS19, CS20 |
+| S-1897-1 | a joined substitution word gets no "exp" verdict | CS1-CS12, CS19, CS20, CS22-CS25 |
+| S-1897-2 | a blank-only gap after a closing `)` not read as arguments | CS5 |
 | S-1897-3 | the word judged as a literal git head, not an expanded one | CS21 |
-| S-1897-4 | a separator after the word does not end its arguments | CS17 |
-| S-1897-5 | the arguments after the zsh word are never read | CS1-CS12, CS19, CS20 |
+| S-1897-4 | a command start after the word does not end its arguments | CS17, CS26 |
+| S-1897-5 | the arguments after the zsh word are never read | CS1-CS12, CS19, CS20, CS22-CS25 |
+| S-1897-6 | the first cut's gap regex in place of the command start | CS22-CS25 |

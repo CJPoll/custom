@@ -1534,6 +1534,18 @@ d2 "CS20. a line continuation before the stash write" deny <<'EOF'
 ./g$(:)it \
  stash pop
 EOF
+d2 "CS22. a clobber redirection before the stash write (review floor)" deny <<'EOF'
+./g$(:)it >|f stash pop
+EOF
+d2 "CS23. a redirection target quoting a separator (review floor)" deny <<'EOF'
+./g$(:)it >'a;b' stash pop
+EOF
+d2 "CS24. a redirection target quoting a paren (review floor)" deny <<'EOF'
+./g$(:)it 2>"x(1)" stash pop
+EOF
+d2 "CS25. a here-string quoting a separator (review floor)" deny <<'EOF'
+./g$(:)it <<<'x;y' stash pop
+EOF
 # Precision: these pass before and after. A joined substitution with a
 # read-only verb, or an argument that is no stash write, stays allowed.
 d2 "CS13. a joined substitution with stash list" allow <<'EOF'
@@ -1556,6 +1568,9 @@ $(git rev-parse --show-toplevel)/bin/tool "$ARG"
 EOF
 d2 "CS18. a dated log line whose prose opens with a paren" allow <<'EOF'
 echo "- $(date -u +%H:%MZ) (a1b2c3, after handoff) captain returned DONE" >> log.md
+EOF
+d2 "CS26. a paren-opened prose argument under an unread config (review floor)" allow <<'EOF'
+cd "$S" && git -C "$S" status && echo "- $(date -u +%H:%MZ) (handoff) captain returned" >> log.md
 EOF
 
 echo "== F: fail-open =="
