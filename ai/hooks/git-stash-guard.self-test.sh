@@ -1355,7 +1355,7 @@ EOF
 echo "== HS: here-string text fed to a program that runs it (DND-1859) =="
 # A here-string (`<<<`) is a redirection, so its word was dropped unread.
 # Each deny case ran a fake git's `stash pop` under zsh 5.9 in a scratch
-# dir and was ALLOWED before DND-1859. Its text is now read like a
+# dir and was ALLOWED before DND-1859. Its text is read like a
 # heredoc body when the program it feeds runs it: a shell, eval, make,
 # xargs or parallel (and an unknowable consumer). The allow cases pin
 # the false-positive bound: text fed to a program that only reads it.
@@ -1449,6 +1449,40 @@ IFS=$'\x1f' read -r a b <<<$'n\x1fm'
 EOF
 d2 "HS29. xargs git inside a brace group" deny <<'EOF'
 { xargs ./git <<<'stash pop'; }
+EOF
+# Review floor (adr-reviewer): expanded text appended for xargs is git
+# with an expanded subcommand; tcsh is a shell too.
+d2 "HS30. xargs git with an expanded here-string" deny <<'EOF'
+xargs ./git <<<"$X"
+EOF
+d2 "HS31. tcsh runs a here-string script" deny <<'EOF'
+tcsh <<<'./git stash pop'
+EOF
+# Review floor (code-reviewer): each ran a fake git's stash pop under zsh
+# and was allowed by the first cut.
+d2 "HS32. a here-string word starting with -" deny <<'EOF'
+xargs ./git <<<-c\ a=b\ stash\ pop
+EOF
+d2 "HS33. a reader piping the here-string into sh" deny <<'EOF'
+cat <<<'./git stash pop' | sh
+EOF
+d2 "HS34. a reader piping the here-string into xargs git" deny <<'EOF'
+cat <<<'stash pop' | xargs ./git
+EOF
+d2 "HS35. a here-string on fd 3, run by a later command" deny <<'EOF'
+exec 3<<<'./git stash pop'; sh <&3
+EOF
+d2 "HS36. coproc runs a shell" deny <<'EOF'
+coproc sh <<<'./git stash pop'
+EOF
+d2 "HS37. taskset with a hex mask" deny <<'EOF'
+taskset 0x3 sh <<<'./git stash pop'
+EOF
+d2 "HS38. flock with a lock file" deny <<'EOF'
+flock /tmp/l sh <<<'./git stash pop'
+EOF
+d2 "HS39. a reader piped into another reader" allow <<'EOF'
+grep x <<<'git stash pop' | wc -l
 EOF
 
 echo "== F: fail-open =="
