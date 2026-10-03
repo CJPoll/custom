@@ -1287,7 +1287,10 @@ checkout's working tree, with a `Fix:` naming the worktree to use:
   (`unresolved`) are allowed with a log line and no warning. A wrapper
   (`env`, `timeout`, `sudo`, …; the header lists them) is parsed from its full
   option table. An option missing from that table, or an `env -S` string that
-  does not split, is logged `unparsed` and also warned about visibly.
+  does not split, is logged `unparsed` and also warned about visibly. The
+  table is `ai/lib/wrapper-opts.tsv`, shared with `git-stash-guard.sh`; when
+  it cannot be loaded, the rest of the command is still checked, and the
+  commands behind wrappers are logged `unchecked` and warned about visibly.
 - **It is not a sandbox.** It models the forms agents type. A write shape it
   does not model passes with no log line; the hook's header gives examples
   (an interpreter, a heredoc fed to a shell, `xargs`, `eval`, a variable not

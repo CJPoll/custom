@@ -336,6 +336,13 @@ OUT="$(printf '%s' "$(payload a1 Bash "$(jq -n -c --arg c "timeout 5 rm -f ${MAI
 expect "no wrapper option table -> allow, exit 0" allow
 case "${OUT}" in *systemMessage*"wrapper option table"*"Fix:"*) ok "a missing wrapper option table carries a visible warning with Fix:" ;; *) bad "a missing wrapper option table carries a visible warning with Fix:" "${OUT}" ;; esac
 grep -q 'wrapper option table' "${LOG}" && ok "a missing wrapper option table is logged" || bad "a missing wrapper option table is logged" "$(cat "${LOG}")"
+OUT="$(printf '%s' "$(payload a1 Bash "$(jq -n -c --arg c "rm -f ${MAIN}/a.txt" '{command: $c}')")" | CLAUDE_CODE_SESSION_ATTENDED=0 CLAUDE_PROJECT_DIR="${MAIN}" "${NOTAB}/hooks/worktree-escape-guard.sh" 2>/dev/null)"; RC=$?
+expect "no wrapper option table -> an unwrapped write is still denied (review floor)" deny
+mkdir -p "${NOTAB}/lib"; printf 'env\tshort\ti\n' > "${NOTAB}/lib/wrapper-opts.tsv"
+: > "${LOG}"
+OUT="$(printf '%s' "$(payload a1 Bash "$(jq -n -c --arg c "timeout 5 rm -f ${MAIN}/a.txt" '{command: $c}')")" | CLAUDE_CODE_SESSION_ATTENDED=0 CLAUDE_PROJECT_DIR="${MAIN}" "${NOTAB}/hooks/worktree-escape-guard.sh" 2>/dev/null)"; RC=$?
+expect "a malformed wrapper option table -> allow, exit 0" allow
+case "${OUT}" in *systemMessage*"wrapper option table"*"line 1 is malformed"*"Fix:"*) ok "a malformed wrapper option table names the line, with Fix:" ;; *) bad "a malformed wrapper option table names the line, with Fix:" "${OUT}" ;; esac
 rm -rf "${NOTAB}"
 bash_sub "unparseable command (unclosed quote) with a write -> allow" allow "echo 'oops > ${MAIN}/a.txt"
 grep -q 'unparsed' "${LOG}" && ok "unparseable command is logged" || bad "unparseable command is logged" "$(cat "${LOG}")"

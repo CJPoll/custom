@@ -353,10 +353,9 @@
 #
 # WRAPPER OPTIONS (DND-1898): a literal wrapper in command position (by
 # its last path component, so `/usr/bin/env` counts) passes command
-# position past its own options and operands to the word it runs. Before
-# DND-1898 only the word right after the wrapper kept it, so `env -i
-# ./g?t stash pop`, `timeout 5 ./g?t ...`, `nice -n 5 ./(x|g)it ...` and
-# `sudo -u root ./g?t ...` ran uncaught. The options come from
+# position past its own options and operands to the word it runs
+# (`env -i ./g?t stash pop`, `timeout 5 ./g?t ...`, `nice -n 5 ./(x|g)it
+# ...` and `sudo -u root ./g?t ...` are judged). The options come from
 # ai/lib/wrapper-opts.tsv, the table ai/hooks/worktree-escape-guard.sh
 # also reads (env, timeout, nice, stdbuf, time, command, exec, builtin,
 # nohup, sudo, doas, test-slot; short, clustered, attached, long, `--x=v`
@@ -367,14 +366,18 @@
 # unshare, unbuffer, coproc; flock, chrt and taskset take one operand)
 # have every option unknown. What the table does not settle is read the
 # way git_verdict reads an unknown git option, as one that may take a
-# value: an unknown option, an option that stops parsing (env -S), or a
-# word built by expansion in an option slot (`env $OPTS ./g?t`) keeps
-# command position on the next word too. A table that cannot be read, or
+# value: an unknown option, an option that stops parsing (env -S), a word
+# built by expansion in the option or command slot (`env $OPTS ./g?t`),
+# and a value or operand built by expansion or glob, which may be no word
+# or several (`env -u $X Y ./g?t`), each keep command position on one more
+# word. Those pending words are counted, and come before the wrapper's
+# operands (`flock -w 5 -E 3 /tmp/l ./g?t`). A table that cannot be read, or
 # a malformed one, is an evaluation fault (see AN EVALUATION FAULT IS NOT
 # "NOTHING FOUND"), never "no wrappers". Accepted false positive: a word
-# in a wrapper option's value slot is judged as a command word too, so a
-# stash alias or a glob git word there followed by a stash write is
-# denied. Not caught: a wrapper not named here (`watch`,
+# in a wrapper option's value slot, or a pending word that is really the
+# command's first argument, is judged as a command word too, so a stash
+# alias or a glob git word there followed by a stash write is denied
+# (`xargs -n1 basename g?t stash pop`). Not caught: a wrapper not named here (`watch`,
 # `nsenter`, a script), whose options still end command position.
 #
 # ZSH: the Bash tool runs zsh, so zsh-only word rewrites count too: EQUALS
@@ -1800,8 +1803,9 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   # operands before the command; WSAME[b] a wrapper sharing another table.
   # A table that cannot be read, has a malformed row, or names no env
   # wrapper exits 3: a fault, never "no wrappers".
-  function wload(f,    l, a, nf, rc) {
+  function wload(f,    l, a, nf, rc, ln) {
     while ((rc = (getline l < f)) > 0) {
+      ln++
       if (l ~ /^#/ || l ~ /^[ \t]*$/) continue
       nf = split(l, a, "\t")
       if (a[2] == "short" && nf == 5 && a[5] ~ /^(value|switch|opt)$/) WSH[a[1], a[3]] = a[5]
@@ -1810,15 +1814,19 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       else if (a[2] == "numeric" && nf == 2) WNU[a[1]] = 1
       else if (a[2] == "operands" && nf == 3 && a[3] ~ /^[0-9]+$/) WOP[a[1]] = a[3] + 0
       else if (a[2] == "same" && nf == 3) WSAME[a[1]] = a[3]
-      else exit 3
+      else wbad("its line " ln " is malformed")
       WTAB[a[1]] = 1
     }
-    if (rc < 0) exit 3
+    if (rc < 0) wbad("it cannot be read")
     close(f)
-    if (!("env" in WTAB)) exit 3
-    for (l in WSAME) if (!(WSAME[l] in WTAB)) exit 3
+    if (!("env" in WTAB)) wbad("it has no env rows")
+    for (l in WSAME) if (!(WSAME[l] in WTAB)) wbad(l " is the same as " WSAME[l] ", which has no rows")
   }
-  # wwalk(W, k, e, b, WCP, ZP) (DND-1898): word k is wrapper b in command
+  # wbad(why): the table is unusable. The marker line names why for the
+  # fault text (see the AWK_RC check below the evaluator), and exit 3 makes
+  # it a fault.
+  function wbad(why) { print "WOPTS-BAD\t" why; exit 3 }
+  # wwalk(W, k, e, b, WCP, ZP, SC, n) (DND-1898): word k is wrapper b in command
   # position, and e ends its simple command. Marks in WCP every later word
   # that may be the command b runs, so it keeps command position past b'"'"'s
   # options: the walk skips each option from the table (a value option
@@ -1828,44 +1836,73 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   # denials. What the table does not settle keeps command position on the
   # word after it as well (the git_verdict rule for an unknown git option):
   # an option b'"'"'s table lacks, any option of a wrapper with no table
-  # (xargs, setsid, flock, ...), an option that stops parsing (env -S), and
-  # a word built by expansion (`env $OPTS ./g?t`), which may be options.
-  function wwalk(W, k, e, b, WCP, ZP,    tb, j, t, pend, ops, extra, done, i, c, nm, hits, hn) {
+  # (xargs, setsid, flock, ...), an option that stops parsing (env -S), a
+  # word built by expansion in the option or command slot (`env $OPTS
+  # ./g?t`), and a value or operand built by expansion or glob, which may
+  # be no word or several. extra counts those pending words; they are
+  # spent before b'"'"'s operands.
+  function wwalk(W, k, e, b, WCP, ZP, SC, n,    tb, j, t, pend, ops, extra, done, i, c, nm, hits, hn, xw, u, m) {
     tb = (b in WSAME) ? WSAME[b] : b
     ops = (tb in WOP) ? WOP[tb] : 0
     pend = 0; extra = 0; done = 0
-    for (j = k + 1; j <= e; j++) {
+    j = k + 1
+    while (1) {
+    for (; j <= e; j++) {
       WCP[j] = 1
       t = W[j]; gsub(/\001/, "", t)
-      if (pend > 0) { pend--; continue }
+      # A word built by expansion or glob may be no word or several (an
+      # empty `$X`, an array, a glob matching many), so wherever it stands
+      # (an option, a value, an operand) one more word may be pending.
+      xw = (W[j] ~ /[$`\001\003]/)
+      if (pend > 0) { pend--; extra += xw; continue }
       if (!done && t == "--") { done = 1; continue }
       if (!done && t ~ /^-./) {
-        if (!(tb in WTAB) || t ~ /[$`\003]/) { extra = 1; continue }
+        if (!(tb in WTAB) || xw) { extra++; continue }
         if ((tb in WNU) && t ~ /^--?[0-9]+$/) continue
         if (t ~ /^--/) {
           nm = t; sub(/=.*/, "", nm)
           hits = 0; hn = ""
           if ((tb, nm) in WLO) { hits = 1; hn = nm }
           else for (i = 1; i <= WLC[tb]; i++) if (index(WLL[tb, i], nm) == 1) { hits++; hn = WLL[tb, i] }
-          if (hits != 1) { extra = 1; continue }
+          if (hits != 1) { extra++; continue }
           if (WLO[tb, hn] == "value" && t !~ /=/) pend = 1
-          if ((tb, WLK[tb, hn]) in WST) extra = 1
+          if ((tb, WLK[tb, hn]) in WST) extra++
           continue
         }
+        u = 0
         for (i = 2; i <= length(t); i++) {
           c = substr(t, i, 1)
-          if (!((tb, c) in WSH)) { extra = 1; continue }
+          if (!((tb, c) in WSH)) { u = 1; continue }
           if (WSH[tb, c] == "switch") continue
           if (WSH[tb, c] == "value" && i == length(t)) pend = 1
-          if ((tb, c) in WST) extra = 1
+          if ((tb, c) in WST) u = 1
           break
         }
+        extra += u
         continue
       }
-      if (ops > 0) { ops--; continue }
-      if (extra > 0) { extra--; continue }
-      if (W[j] ~ /[$`\003]/) { extra = 1; continue }
+      # An unknown option'"'"'s possible value comes before b'"'"'s operands
+      # (`flock -w 5 -E 3 /tmp/l cmd`), and each one may be either.
+      if (extra > 0) { extra--; extra += xw; continue }
+      if (ops > 0) { ops--; extra += xw; continue }
+      # The command slot: an expansion may be empty, so the next word may
+      # be the command. A glob here is the command itself (its matches
+      # after the first are its arguments).
+      if (W[j] ~ /[$`\003]/) { extra++; continue }
       break
+    }
+    # The simple command ended with a value, an operand or a pending word
+    # still owed: a `$(...)` or backtick substitution stands there
+    # (`sudo -u $(id -un) root ./g?t`), which the tokenizer split off, and
+    # the wrapper'"'"'s words resume after it (SC). The substitution takes
+    # that slot and may be no word or several, so one more word is pending.
+    if (j <= e || !(pend > 0 || ops > 0 || extra > 0)) break
+    for (m = e + 1; m <= n && !SC[m]; m++) ;
+    if (m > n) break
+    if (pend > 0) pend--; else if (extra > 0) extra--; else ops--
+    extra++
+    for (e = m; e < n && !SB[e + 1]; e++) ;
+    j = m
     }
     # The simple command ended with the command still to come: a zsh word
     # that opens with its group paren (`timeout 5 (x|g)it`) starts the next
@@ -2025,7 +2062,7 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       for (e = k; e < n && !SB[e + 1]; e++) ;
       # DND-1898: a literal wrapper in command position (env, timeout, sudo,
       # a path to one) passes command position past its options (wwalk).
-      if (cp && !asgw && W[k] !~ /[\001\003$`]/) { wb = W[k]; sub(/^.*\//, "", wb); if (wb in WWR) wwalk(W, k, e, wb, WCP, ZP) }
+      if (cp && !asgw && W[k] !~ /[\001\003$`]/) { wb = W[k]; sub(/^.*\//, "", wb); if (wb in WWR) wwalk(W, k, e, wb, WCP, ZP, SC, n) }
       # A shell alias in command position: read its value, followed by the
       # rest of this simple command, as a command of its own. The name is
       # looked up without glob marks: an alias named `gs?` expands before
@@ -2250,6 +2287,10 @@ AWK_RC=$?
 # EVALUATION FAULT IS NOT "NOTHING FOUND" in the header).
 if [ "$AWK_RC" -ne 0 ]; then
   FAULT="its awk evaluator exited $AWK_RC"
+  # A wrapper option table it could not use names itself (wbad).
+  case "$VERDICT" in
+    WOPTS-BAD*) FAULT="the wrapper option table ai/lib/wrapper-opts.tsv is unusable ($(printf '%s' "$VERDICT" | cut -f2)); restore it from git" ;;
+  esac
   fault_verdict
 fi
 

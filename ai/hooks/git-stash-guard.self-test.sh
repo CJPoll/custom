@@ -1815,6 +1815,35 @@ EOF
 d2 "WO29a. a paren-opened group git word after env -i (self-review)" deny <<'EOF'
 env -i (x|g)it stash pop
 EOF
+# Review floor: an unknown option's value before an operand, and a value
+# or operand built by expansion or glob, which may be no word or several.
+d2 "WO46. two unknown options before flock's lock file (review floor)" deny <<'EOF'
+flock -w 5 -E 3 /tmp/l ./g?t stash pop
+EOF
+d2 "WO47. two unknown options before chrt's priority (review floor)" deny <<'EOF'
+chrt -T 1 -P 2 99 ./g?t stash pop
+EOF
+d2 "WO48. an expansion in a value slot, which may be empty (review floor)" deny <<'EOF'
+env -u $X Y ./g?t stash pop
+EOF
+d2 "WO49. an expansion in timeout's operand slot (review floor)" deny <<'EOF'
+timeout $D 5 ./g?t stash pop
+EOF
+d2 "WO50. a substitution in a value slot (review floor)" deny <<'EOF'
+sudo -u $(true) root ./g?t stash pop
+EOF
+d2 "WO50a. a backtick substitution in timeout's operand slot" deny <<'EOF'
+timeout `echo 5` ./g?t stash pop
+EOF
+d2 "WO50b. a substitution in sudo's value slot, a builtin" allow <<'EOF'
+sudo -u $(id -un) ./g?t status
+EOF
+d2 "WO51. a glob in a value slot (review floor)" deny <<'EOF'
+env -u /tmp/a* Y ./g?t stash pop
+EOF
+d2 "WO52. an expansion after an unknown option (review floor)" deny <<'EOF'
+xargs -n $N Y ./g?t stash pop
+EOF
 d2 "WO29b. a paren-opened group word after timeout's DURATION, a builtin" allow <<'EOF'
 timeout 5 (x|g)it status
 EOF
@@ -1939,7 +1968,11 @@ fi
 OUT=$(json "$WT" 'timeout 5 ./g?t stash pop' | sh "$TMP/badtab/hooks/git-stash-guard.sh" 2>/dev/null); STATUS=$?
 fault_check "F16. a malformed wrapper option table fails closed on a stash write" deny
 OUT=$(json "$WT" 'git status' | sh "$TMP/badtab/hooks/git-stash-guard.sh" 2>/dev/null); STATUS=$?
-fault_check "F17. a malformed wrapper option table allows a non-stash command with a notice" allow
+if is_fault_allow && printf '%s' "$OUT" | grep -q 'wrapper option table ai/lib/wrapper-opts.tsv is unusable (its line 1 is malformed)'; then
+  record "F17. a malformed wrapper option table allows a non-stash command, naming the table and the line" PASS
+else
+  record "F17. a malformed wrapper option table allows a non-stash command, naming the table and the line" FAIL
+fi
 # F13: the hook work dir is removed on every exit path (deny, allow, fault).
 mkdir -p "$TMP/hooktmp"
 for _c in 'git stash pop' 'git status' 'ls'; do

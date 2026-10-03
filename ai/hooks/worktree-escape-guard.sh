@@ -57,7 +57,8 @@
 # (recursively), cd/pushd/popd, git `--output`/`-o` files, and these
 # wrappers, each with its whole option table in ai/lib/wrapper-opts.tsv
 # (shared with ai/hooks/git-stash-guard.sh since DND-1898; a table that
-# cannot be loaded leaves a Bash call unchecked, loudly): env, timeout,
+# cannot be loaded leaves the commands behind wrappers unchecked, warned
+# about loudly and logged `unchecked`, and the rest checked): env, timeout,
 # nice, stdbuf, time, command, exec, builtin, nohup, sudo, sudoedit, doas,
 # test-slot. Their value-taking options (short, clustered, attached, long,
 # `--long=v`, unique long prefixes) are skipped with their values; `env -C` /
@@ -496,8 +497,8 @@ ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # Keys are the short letter where one exists. GNU long options may be
 # abbreviated to any unique prefix, so an abbreviation resolves too.
 # A table that cannot be read, has a malformed row, or names no wrapper
-# raises: main reports it as a crash (allowed loudly, logged `crashed`),
-# never as "no wrappers".
+# raises: main checks the Bash call with no wrappers and warns loudly that a
+# command behind a wrapper was not checked, with Fix: (logged `unchecked`).
 TAKES = {"value": True, "switch": False, "opt": "opt"}
 
 def load_wrapper_opts(path):
@@ -941,9 +942,13 @@ def main():
                 try:
                     WRAPPER_OPTS.update(load_wrapper_opts(sys.argv[1] if len(sys.argv) > 1 else ""))
                 except (OSError, ValueError) as e:
-                    allow_warn("the wrapper option table could not be loaded (%s), so this call was NOT checked "
-                               "for a main-checkout write. Fix: restore ai/lib/wrapper-opts.tsv beside ai/hooks "
-                               "(its header gives the row format)." % str(e)[:200])
+                    # Keep checking with no wrappers: a plain write still
+                    # denies, and the warning says a wrapped one was not seen.
+                    msg = ("the wrapper option table could not be loaded (%s), so a command behind a wrapper "
+                           "(env, timeout, sudo, ...) was NOT checked for a main-checkout write. Fix: restore "
+                           "ai/lib/wrapper-opts.tsv beside ai/hooks (its header gives the row format)." % str(e)[:200])
+                    log("unchecked", msg)
+                    WARNINGS.append(msg)
                 check_bash(ti["command"], data, act)
     except Unresolved as e:
         allow_warn("%s -- so this call was NOT checked for a main-checkout write. "

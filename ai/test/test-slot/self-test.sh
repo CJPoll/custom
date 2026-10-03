@@ -1566,7 +1566,7 @@ if git -C "$REPO44" rev-parse --git-dir >/dev/null 2>&1; then
     fi
   done
   callers44="$(git -C "$REPO44" grep -l -e 'test-slot.*--exclusive' -- . ':!ai/bin/test-slot' ':!ai/test/test-slot' \
-    ':!ai/test/strict-argv-cli/self-test.sh' ':!ai/hooks/worktree-escape-guard.sh' ':!*.md' 2>"$W/44.err")"
+    ':!ai/test/strict-argv-cli/self-test.sh' ':!ai/lib/wrapper-opts.tsv' ':!*.md' 2>"$W/44.err")"
   rc44=$?
   # git grep: 0 = a caller found, 1 = none; anything else could not look.
   case $rc44 in

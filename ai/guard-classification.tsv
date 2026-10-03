@@ -35,7 +35,7 @@ ai/agent-bin/gh	guard
 ai/agent-bin/glab	guard
 ai/lib/agent-forge-cli.sh	guard
 ai/lib/agent-forge-push.sh	guard
-ai/lib/wrapper-opts.tsv	library	the command-wrapper option table (DND-1898), data read by ai/hooks/git-stash-guard.sh and ai/hooks/worktree-escape-guard.sh; each reader reports an unreadable or malformed table with Fix:
+ai/lib/wrapper-opts.tsv	library	the command-wrapper option table (DND-1898), data read by ai/hooks/git-stash-guard.sh and ai/hooks/worktree-escape-guard.sh; an unreadable or malformed table is git-stash-guard's evaluation fault naming the table (its fault_verdict carries Fix:) and worktree-escape-guard's loud unchecked allow with Fix:
 ai/lib/forge-write-class.awk	library	the forge-write classifier (DND-1179, shared since DND-1803), awk functions loaded by ai/hooks/forge-identity-guard.sh and ai/lib/agent-forge-cli.sh; it prints a verdict line and each caller composes the deny or refusal that carries Fix:
 
 # --- Sourced libraries. guard = the library holds refusal text that must keep its Fix:.

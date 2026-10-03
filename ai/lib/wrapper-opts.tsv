@@ -6,8 +6,9 @@
 #     word the wrapper runs keeps command position.
 # An option that takes a value must be listed as one, or its value is read as
 # the command word (worktree-escape-guard critic round 13: `env -u X git ...`
-# ran "X"). Each reader treats an option NOT listed here conservatively and
-# says so in its own header.
+# ran "X"). An option NOT listed here is handled as each reader's header
+# says: worktree-escape-guard reads it as a switch and warns loudly;
+# git-stash-guard keeps command position on the word after it too.
 #
 # Rows are TAB-separated. Blank lines and lines starting with # are ignored.
 #   <wrapper> short   <letter> <key> <takes>   a short option, -<letter>
