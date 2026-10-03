@@ -22,6 +22,7 @@ require "json"
 require "open3"
 require "tempfile"
 require_relative "../../../lib/strict_argv"
+require_relative "../../../lib/lead_time_config_io"
 require_relative "../lib/unmeasurable"
 require_relative "../lib/unmeasurable_store"
 require_relative "../lib/unmeasurable_manager"
@@ -168,7 +169,7 @@ def state_dir(env)
   dir = env["LEAD_TIME_STATE_DIR"].to_s
   return dir unless dir.empty?
 
-  out, st = Open3.capture2e("git", "-C", CHECKOUT, "rev-parse", "--path-format=absolute", "--git-common-dir")
+  out, st = Open3.capture2e(LeadTimeConfigIO::GIT_ENV_UNSET, "git", "-C", CHECKOUT, "rev-parse", "--path-format=absolute", "--git-common-dir")
   raise Refusal.new(1, "cannot resolve the state dir: git rev-parse failed in #{CHECKOUT}", "set LEAD_TIME_STATE_DIR, or run from a checkout of ~/dev/custom") unless st.success?
 
   File.join(File.dirname(out.strip), "ai-artifacts", "lead-time")

@@ -60,6 +60,11 @@ if /usr/bin/ruby "${HERE}/experiment_test.rb" >"${TMP}/lib.out" 2>&1; then
 else
   bad "experiment_test.rb" "$(cat "${TMP}/lib.out")"
 fi
+if /usr/bin/ruby "${HERE}/experiment_git_test.rb" >"${TMP}/git.out" 2>&1; then
+  ok "experiment_git_test.rb: $(tail -1 "${TMP}/git.out")"
+else
+  bad "experiment_git_test.rb" "$(cat "${TMP}/git.out")"
+fi
 
 # ── the unmeasurable-phase escalation (DND-1806) ────────────────────────────
 # Domain, store and manager against fake ports; then scripts/unmeasurable end

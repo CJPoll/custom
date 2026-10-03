@@ -17,6 +17,7 @@ require "open3"
 require "tmpdir"
 require_relative "lead_time_phases"
 require_relative "lead_time_config"
+require_relative "lead_time_config_io"
 require_relative "critic_verdict_stores"
 require_relative "athena_telemetry"
 
@@ -174,7 +175,7 @@ module LeadTimePhasesIO
 
     # The repo's git common dir, absolute. -> [path, nil] or [nil, reason]
     def common_dir(repo)
-      out, err, st = Open3.capture3("git", "-C", repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
+      out, err, st = Open3.capture3(LeadTimeConfigIO::GIT_ENV_UNSET, "git", "-C", repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
       return [out.strip, nil] if st.success? && out.strip.start_with?("/")
 
       [nil, "git rev-parse --git-common-dir in #{repo} failed (#{err.strip.lines.first.to_s.strip})"]
@@ -230,7 +231,7 @@ module LeadTimePhasesIO
       return Source.could_not_look("no git common dir") unless common
       return Source.could_not_look("#{LIB} is missing") unless File.file?(LIB)
 
-      out, err, st = Open3.capture3("bash", "-c", SCRIPT, "ir-push-covered", LIB, common, landed, before.to_s)
+      out, err, st = Open3.capture3(LeadTimeConfigIO::GIT_ENV_UNSET, "bash", "-c", SCRIPT, "ir-push-covered", LIB, common, landed, before.to_s)
       return Source.could_not_look("could not load #{LIB} (#{err.strip.lines.first.to_s.strip})") if st.exitstatus == 9
 
       rc, cover, heads, why = out.split("\n", 4).map(&:to_s)
@@ -375,7 +376,7 @@ module LeadTimePhasesIO
     def run(bin, repo, since, env)
       Dir.mktmpdir("lead-time-phases-") do |tmp|
         meta_file = File.join(tmp, "meta.json")
-        out, err, st = Open3.capture3(env, bin, "--repo", repo, "--since", since, "--json", "--meta", meta_file)
+        out, err, st = Open3.capture3(LeadTimeConfigIO::GIT_ENV_UNSET.merge(env), bin, "--repo", repo, "--since", since, "--json", "--meta", meta_file)
         meta = File.exist?(meta_file) ? (JSON.parse(File.read(meta_file)) rescue :malformed) : nil
         rows = out.strip.empty? ? nil : (JSON.parse(out) rescue :malformed)
         Result.new(code: st.exitstatus, signal: st.termsig, rows: rows, meta: meta, stderr: err)
@@ -391,12 +392,12 @@ module LeadTimePhasesIO
 
     def count(repo, since, until_t)
       ref = %w[origin/main main].find do |r|
-        _, _, st = Open3.capture3("git", "-C", repo, "rev-parse", "--verify", "-q", "#{r}^{commit}")
+        _, _, st = Open3.capture3(LeadTimeConfigIO::GIT_ENV_UNSET, "git", "-C", repo, "rev-parse", "--verify", "-q", "#{r}^{commit}")
         st.success?
       end
       return Source.could_not_look("neither origin/main nor main resolves in #{repo}") unless ref
 
-      out, err, st = Open3.capture3("git", "-C", repo, "log", "--first-parent", "--format=%s",
+      out, err, st = Open3.capture3(LeadTimeConfigIO::GIT_ENV_UNSET, "git", "-C", repo, "log", "--first-parent", "--format=%s",
                                     "--since=#{since}", "--until=#{until_t}", ref)
       return Source.could_not_look("git log in #{repo} failed (#{err.strip.lines.first.to_s.strip})") unless st.success?
 

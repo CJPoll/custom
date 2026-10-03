@@ -8,6 +8,7 @@
 
 require "open3"
 require_relative "../../../lib/lead_time_phases"
+require_relative "../../../lib/lead_time_config_io"
 require_relative "experiment"
 
 module LeadTimeExperimentGit
@@ -22,7 +23,7 @@ module LeadTimeExperimentGit
     return [nil, "#{repo} is not on this machine"] unless File.directory?(repo)
 
     ref = %w[origin/main main].find do |r|
-      _, _, st = Open3.capture3("git", "-C", repo, "rev-parse", "--verify", "-q", "#{r}^{commit}")
+      _, _, st = Open3.capture3(LeadTimeConfigIO::GIT_ENV_UNSET, "git", "-C", repo, "rev-parse", "--verify", "-q", "#{r}^{commit}")
       st.success?
     end
     ref ? [ref, nil] : [nil, "neither origin/main nor main resolves in #{repo}"]
@@ -35,10 +36,10 @@ module LeadTimeExperimentGit
     ref, why = main_ref(repo)
     return Source.could_not_look(why) unless ref
 
-    _, _, known = Open3.capture3("git", "-C", repo, "cat-file", "-e", "#{sha}^{commit}")
+    _, _, known = Open3.capture3(LeadTimeConfigIO::GIT_ENV_UNSET, "git", "-C", repo, "cat-file", "-e", "#{sha}^{commit}")
     return Source.ok([false]) unless known.success? # an object this clone has never seen
 
-    _, err, st = Open3.capture3("git", "-C", repo, "merge-base", "--is-ancestor", sha, ref)
+    _, err, st = Open3.capture3(LeadTimeConfigIO::GIT_ENV_UNSET, "git", "-C", repo, "merge-base", "--is-ancestor", sha, ref)
     return Source.ok([true]) if st.success?
     return Source.ok([false]) if st.exitstatus == 1
 
@@ -52,7 +53,7 @@ module LeadTimeExperimentGit
     ref, why = main_ref(repo)
     return Source.could_not_look(why) unless ref
 
-    out, err, st = Open3.capture3("git", "-C", repo, "log", "--first-parent", "--format=%s#{FS}%b#{SEP}",
+    out, err, st = Open3.capture3(LeadTimeConfigIO::GIT_ENV_UNSET, "git", "-C", repo, "log", "--first-parent", "--format=%s#{FS}%b#{SEP}",
                                   "--since=#{since}", "--until=#{until_t}", ref)
     return Source.could_not_look("git log in #{repo} failed (#{err.strip.lines.first.to_s.strip})") unless st.success?
 
@@ -81,11 +82,11 @@ module LeadTimeExperimentGit
     ref, why = main_ref(repo)
     return Source.could_not_look(why) unless ref
 
-    line, err, st = Open3.capture3("git", "-C", repo, "log", "--first-parent", "--format=%H %ct", ref)
+    line, err, st = Open3.capture3(LeadTimeConfigIO::GIT_ENV_UNSET, "git", "-C", repo, "log", "--first-parent", "--format=%H %ct", ref)
     return Source.could_not_look("git log --first-parent in #{repo} failed (#{err.strip.lines.first.to_s.strip})") unless st.success?
 
     first_parent = line.lines.map(&:split).select { |c, t| c && t&.match?(/\A\d+\z/) }.map { |c, t| [c, Time.at(Integer(t, 10)).utc] }
-    desc, err, st = Open3.capture3("git", "-C", repo, "rev-list", "--ancestry-path", "#{sha}..#{ref}")
+    desc, err, st = Open3.capture3(LeadTimeConfigIO::GIT_ENV_UNSET, "git", "-C", repo, "rev-list", "--ancestry-path", "#{sha}..#{ref}")
     return Source.could_not_look("git rev-list --ancestry-path in #{repo} failed (#{err.strip.lines.first.to_s.strip})") unless st.success?
 
     hit = LeadTimeExperiment.landing_point(first_parent, desc.split, sha)
@@ -100,10 +101,10 @@ module LeadTimeExperimentGit
   def contains?(repo, sha, tip)
     return Source.could_not_look("#{repo} is not on this machine") unless File.directory?(repo)
 
-    _, _, known = Open3.capture3("git", "-C", repo, "cat-file", "-e", "#{tip}^{commit}")
+    _, _, known = Open3.capture3(LeadTimeConfigIO::GIT_ENV_UNSET, "git", "-C", repo, "cat-file", "-e", "#{tip}^{commit}")
     return Source.could_not_look("#{tip.to_s[0, 12]} is not in #{repo} (fetch it)") unless known.success?
 
-    _, err, st = Open3.capture3("git", "-C", repo, "merge-base", "--is-ancestor", sha, tip)
+    _, err, st = Open3.capture3(LeadTimeConfigIO::GIT_ENV_UNSET, "git", "-C", repo, "merge-base", "--is-ancestor", sha, tip)
     return Source.ok([true]) if st.success?
     return Source.ok([false]) if st.exitstatus == 1
 
@@ -120,7 +121,7 @@ module LeadTimeExperimentGit
   def numstat(repo, sha)
     return Source.could_not_look("#{repo} is not on this machine") unless File.directory?(repo)
 
-    out, err, st = Open3.capture3("git", "-C", repo, "show", "--numstat", "-z", "--no-renames", "--format=",
+    out, err, st = Open3.capture3(LeadTimeConfigIO::GIT_ENV_UNSET, "git", "-C", repo, "show", "--numstat", "-z", "--no-renames", "--format=",
                                   "--diff-merges=first-parent", "#{sha}^{commit}")
     return Source.could_not_look("git show #{sha.to_s[0, 12]} in #{repo} failed (#{err.strip.lines.first.to_s.strip})") unless st.success?
 
@@ -145,7 +146,7 @@ module LeadTimeExperimentGit
   def message(repo, sha)
     return Source.could_not_look("#{repo} is not on this machine") unless File.directory?(repo)
 
-    out, err, st = Open3.capture3("git", "-C", repo, "log", "-1", "--format=%B", "#{sha}^{commit}")
+    out, err, st = Open3.capture3(LeadTimeConfigIO::GIT_ENV_UNSET, "git", "-C", repo, "log", "-1", "--format=%B", "#{sha}^{commit}")
     return Source.could_not_look("git log #{sha.to_s[0, 12]} in #{repo} failed (#{err.strip.lines.first.to_s.strip})") unless st.success?
 
     Source.ok([out])
@@ -165,7 +166,7 @@ module LeadTimeExperimentGit
     ref, why = main_ref(repo)
     return Source.could_not_look(why) unless ref
 
-    out, err, st = Open3.capture3("git", "-C", repo, "log", "--format=%H#{FS}%ct#{FS}%B#{SEP}", "--since=#{since}", ref)
+    out, err, st = Open3.capture3(LeadTimeConfigIO::GIT_ENV_UNSET, "git", "-C", repo, "log", "--format=%H#{FS}%ct#{FS}%B#{SEP}", "--since=#{since}", ref)
     return Source.could_not_look("git log in #{repo} failed (#{err.strip.lines.first.to_s.strip})") unless st.success?
 
     commits = out.split(SEP).map { |c| c.sub(/\A\n+/, "") }.reject(&:empty?).map { |c| c.split(FS, 3) }
@@ -185,10 +186,10 @@ module LeadTimeExperimentGit
     ref, why = main_ref(repo)
     return Source.could_not_look(why) unless ref
 
-    _, _, there = Open3.capture3("git", "-C", repo, "cat-file", "-e", "#{ref}:#{path}")
+    _, _, there = Open3.capture3(LeadTimeConfigIO::GIT_ENV_UNSET, "git", "-C", repo, "cat-file", "-e", "#{ref}:#{path}")
     return Source.could_not_look("#{ref} in #{repo} carries no #{path} (not landed)") unless there.success?
 
-    out, err, st = Open3.capture3("git", "-C", repo, "show", "#{ref}:#{path}")
+    out, err, st = Open3.capture3(LeadTimeConfigIO::GIT_ENV_UNSET, "git", "-C", repo, "show", "#{ref}:#{path}")
     return Source.could_not_look("git show #{ref}:#{path} in #{repo} failed (#{err.strip.lines.first.to_s.strip})") unless st.success?
 
     Source.ok([out, ref])
@@ -201,7 +202,7 @@ module LeadTimeExperimentGit
     ref, why = main_ref(repo)
     return Source.could_not_look(why) unless ref
 
-    out, err, st = Open3.capture3("git", "-C", repo, "log", "--first-parent", "--format=%b#{SEP}", "-F",
+    out, err, st = Open3.capture3(LeadTimeConfigIO::GIT_ENV_UNSET, "git", "-C", repo, "log", "--first-parent", "--format=%b#{SEP}", "-F",
                                   "--grep=This reverts commit #{sha}", ref)
     return Source.could_not_look("git log in #{repo} failed (#{err.strip.lines.first.to_s.strip})") unless st.success?
 
