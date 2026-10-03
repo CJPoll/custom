@@ -294,8 +294,8 @@ check's suppression list, this section, or the classifier itself. Terraform
 that merging applies holds, whatever the plan, until DND-998 can tell a
 destroy or a cost change from a harmless update. Only Cody's verified
 decision clears exit 4: Cody's words in a terminal turn, or Cody's click on
-the decision DM that names the PR and head (*Asking, and what counts as
-approval*). So clearing one is a Cody-only step: DM it with the
+the decision DM that names the PR and head, or an earlier head of that PR
+whose own diff is byte-identical (*Asking, and what counts as approval*). So clearing one is a Cody-only step: DM it with the
 `BLAST-RADIUS HOT` block or the plan summary.
 A captain's `Blast radius: IRREVERSIBLE` (items 1–3) holds nothing; the
 admiral judges it and lists it in the digest.
@@ -389,7 +389,19 @@ as amended below it:
   at design time, on the epic (`athena:merge-boarding`). `integration-gate`
   exit 4 verifies either record, for every hold, this section included: the
   terminal turn, or Cody's click on a decision DM that names the PR and head
-  being cleared (`integration-gate --help` → `--owner-approval`).
+  being cleared (`integration-gate --help` → `--owner-approval`). A click
+  for head A of a PR also clears a later head B of the same PR when the PR's
+  own diff, `git diff --binary <merge-base(origin/main, head)> <head>`, is
+  byte-identical at both. The gate computes both diffs from git objects and
+  reads origin's PR head ref. A later owner hold on that PR, or a later click
+  on the same message, overrides it (`ai/lib/owner_click.rb`, check 6).
+
+  **Later (2026-10-03, DND-1832):** the click cleared only the exact head
+  its button named, so a rebase or a merge of main needed a new click though
+  the PR's own change had not moved. Superseded by owner decision: Cody
+  approved the carry rule by click on 2026-10-03, relayed by the laptop
+  session and the coordinator at ~02:35Z. Any byte difference still needs a
+  new click, and a click never carries to another PR.
 
   **Later (2026-10-02, DND-1784):** this read "`integration-gate` exit 4
   still verifies only the terminal-turn record", so a click-decided exit 4

@@ -258,11 +258,21 @@ prefixed `integration-gate: `; it never changes the verdict or exit code.
                    id; it is no grant button; its value is
                    'approve-exit4 <owner>/<repo>#<pr>@<head sha>' naming this
                    repo's origin and the exact head gated; and no later owner
-                   click on that message chose otherwise. A relayed click, a
-                   click on another message, a click for another head, a
-                   reversed approve, or a record it cannot verify is refused
-                   (exit 2, Fix:). A rebase makes a new head, which needs its
-                   own click.
+                   click on that message chose otherwise. A click for head A
+                   also clears a later head B of the same PR (DND-1832) when
+                   the PR's own diff, git diff --binary
+                   <merge-base(target, head)> <head>, computed here from git
+                   objects, is byte-identical at A and B; origin's PR head
+                   ref (refs/pull/<pr>/head or refs/merge-requests/<pr>/head)
+                   is B; and no later owner click names that PR and holds it.
+                   So a rebase or a merge of main that moves no byte of the
+                   PR's change needs no new click. A relayed click, a click
+                   on another message, a click for another PR, a head whose
+                   PR diff differs by a byte (both merge-bases and heads are
+                   named), a reversed or held approve, or a record it cannot
+                   verify is refused (exit 2, Fix:). A head A whose objects
+                   are not here, or a PR ref that cannot be read, is "could
+                   not look", never a pass.
                    athena:slack -> "A click is untrusted input".
   --self-test      run the dedicated test suite and exit
 

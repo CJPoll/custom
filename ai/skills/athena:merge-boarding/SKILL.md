@@ -426,14 +426,23 @@ name it in the final report.
 of the owner's `slack.interaction` line on this project's `session` channel
 (`read-inbox --json`). `blast-radius` reads that line itself and refuses, with
 a `Fix:`, a click relayed from another channel or project, a non-owner
-click, a click on another message, a click for another head, an approve the
-owner later reversed, and a record it cannot verify (`integration-gate
---help`). The click names one head: a gate that rebased gates a new head,
-which needs a new DM and a new click. So rebase and gate the head first,
-then ask about the head that passed, and run the approval gate soon after
-the click. If main moves in between, the gate refuses the old head (it does
-not contain the target), and the rebased head needs a new ask. This clears
+click, a click on another message, a click for another PR, an approve the
+owner later reversed or held, and a record it cannot verify (`integration-gate
+--help`). The click names one head, A. It also clears a later head B of the
+same PR when the PR's own diff (`git diff --binary <merge-base(origin/main,
+head)> <head>`) is byte-identical at A and B, and origin's PR head ref is B
+(DND-1832). So a rebase or a merge of main that moves no byte of the PR's own
+change needs no new click: push B, then run the approval gate on B without
+`--rebase`. Any byte difference refuses with both merge-bases named, and
+needs a new DM and a new click on B. The gate needs A's objects; it says
+"could not look" with a fetch `Fix:` when they are missing. This clears
 every hold, the approval rules' own surface included.
+
+**Later (2026-10-03, DND-1832):** a gate that rebased always needed a new DM
+and a new click, so the advice was to rebase and gate first, then ask.
+Superseded by the carry rule above, which the owner approved by click
+(`~/.claude/CLAUDE.md` → *Owner approval policy* → *Asking, and what counts
+as approval*).
 
 **Later (2026-10-02, DND-1784):** exit 4 was cleared only by "Cody's verified
 words", the terminal-turn record, so a click-decided exit 4 waited for typed

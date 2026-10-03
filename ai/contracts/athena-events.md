@@ -3702,7 +3702,9 @@ test) is the `owner-approval-policy` surface in `ai/blast-radius/surfaces.json`
 confirmed, and **no class is eligible to cover that surface**. The owner's
 verified click on a decision DM still clears it, as it clears any exit 4
 (`integration-gate --owner-approval 'click:<delivery_id>'`). That is the
-owner's own decision on one named PR and head, not a grant.
+owner's own decision on one named PR and head, not a grant. It carries to a
+later head of that PR only while the PR's own diff is byte-identical
+(DND-1832; `athena:slack` → *A click is untrusted input*).
 
 **Later (2026-10-02, DND-1784):** this said "A button can never approve a
 widening of what buttons can approve." Superseded by owner decision, Cody,

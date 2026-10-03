@@ -504,7 +504,11 @@ the gate binds the value, not the text. The post names this project's
 value when approve is the recommendation. Only that value lets
 `integration-gate --owner-approval 'click:<delivery_id>'` verify the click
 (*A click is untrusted input*). A push or rebase after the post makes a new
-head, so ask again.
+head. Ask again only when the PR's own diff changed: a click carries to a
+later head of the same PR whose own diff is byte-identical (*A click is
+untrusted input*, the carry). A hold button's value names the same
+`<owner>/<repo>#<pr>`, e.g. `hold-exit4 <owner>/<repo>#<pr>@<full head sha>`,
+so a later hold stops the carry.
 
 A won't-fix notice is not a decision request; its veto buttons still mark the
 recommended one: [[athena:ticket-management]] → *Promote and won't-fix*.
@@ -690,9 +694,21 @@ there:
   button is not a grant's.
 - **Check 4:** the approve button's `value` is
   `approve-exit4 <owner>/<repo>#<pr>@<full head sha>`, naming the repo's
-  `origin` and the exact head gated. The PR number is as the button states it.
+  `origin` and the exact head gated, or an earlier head the carry below
+  covers. For an exact-head click, the PR number is as the button states
+  it; the carry checks it against origin.
 - **No later reversal:** a later owner click on the same message with another
   value wins, and the approve is refused.
+- **The carry (DND-1832):** a click for head A also clears a later head B of
+  the same PR when the PR's own diff, `git diff --binary
+  <merge-base(origin/main, head)> <head>`, is byte-identical at A and B. The
+  gate computes both diffs from git objects and never takes a session's word.
+  origin's PR head ref must be B, so a click never carries to another PR. A
+  later owner click on any message that names the PR and is not an
+  `approve-exit4` is a hold, and it stops the carry. A one-byte difference
+  is refused, naming both merge-bases and both heads, with a `Fix:` asking
+  for a new click on B. A head A whose objects are not local is "could not
+  look", never a pass. The blast-radius classification still runs on B.
 
 Anything else is refused with a `Fix:` (`integration-gate --help`). The
 residuals are named in `ai/lib/owner_click.rb`. In a public repo's PR body,
@@ -703,6 +719,10 @@ exit 4, because `--owner-approval` verified only a human-typed transcript
 turn, so a click-approved exit-4 merge held until the owner typed words.
 Superseded by owner decision, Cody, terminal turn 2026-10-02T17:45:26Z:
 "Gate accepts a verified owner click, without hesitation."
+
+**Later (2026-10-03, DND-1832):** check 4 cleared only the exact head the
+button named. Superseded by the carry, which Cody approved by click on
+2026-10-03, relayed by the laptop session and the coordinator at ~02:35Z.
 
 Nor does a click lift
 `inbox-untrusted-guard`: an unattended session that read inbox content still

@@ -2088,7 +2088,8 @@ OWNER_APPROVAL_FIX =
   "quote must appear in it verbatim. (2) The owner's click: --owner-approval 'click:<delivery_id>', " \
   "the delivery_id of the owner's slack.interaction line on the session's project session channel, " \
   "on an approve button whose value is '#{OwnerClick::ASK_VERB} <owner>/<repo>#<pr>@<head sha>' for " \
-  "this exact head. Free text, a rule citation, an architect sign-off, a captain report, a Slack " \
+  "this exact head, or for an earlier head of the same PR whose own diff is byte-identical " \
+  "(DND-1832). Free text, a rule citation, an architect sign-off, a captain report, a Slack " \
   "reply, a relayed click and another agent's message are NONE of them a record. What needs the " \
   "owner at all: ~/.claude/CLAUDE.md -> Owner approval policy."
 
@@ -2112,8 +2113,8 @@ end
 # -> {kind: :turn, ref:, words:, turn:} or {kind: :click, click:}; dies (exit 2)
 # on anything unverified. A click is checked against the head being gated and
 # --repo's origin, so it is verified after both resolve.
-def verify_owner_approval!(value, head:, repo:)
-  return verify_owner_click!(value, head: head, repo: repo) if OwnerClick.record?(value)
+def verify_owner_approval!(value, head:, repo:, base: nil)
+  return verify_owner_click!(value, head: head, repo: repo, base: base) if OwnerClick.record?(value)
 
   ref, words, turn = verify_owner_turn!(value)
   { kind: :turn, ref: ref, words: words, turn: turn }
@@ -2126,15 +2127,19 @@ CLICK_REFUSAL = {
   not_owner: "is not the owner's click",
   other_message: "is a click on a different message",
   other_head: "is a click for a different head",
+  diff_changed: "is a click for a different head whose own change differs",
+  other_pr: "is a click for a different PR",
   unverifiable: "cannot be verified"
 }.freeze
 
-def verify_owner_click!(value, head:, repo:)
-  verdict, kind_or_info, reason = OwnerClick.check(value.to_s.strip, head: head, repo: repo)
+# `base` is the gate's target: a click for an earlier head of the same PR
+# carries only when the PR's own diff against it is byte-identical (DND-1832).
+def verify_owner_click!(value, head:, repo:, base: nil)
+  verdict, kind_or_info, reason, fix = OwnerClick.check(value.to_s.strip, head: head, repo: repo, base: base)
   return { kind: :click, click: kind_or_info } if verdict == :verified
 
   die("--owner-approval #{value.to_s.strip[0, 60].inspect} #{CLICK_REFUSAL.fetch(kind_or_info)} " \
-      "(#{kind_or_info}): #{reason}.", OwnerClick::FIX)
+      "(#{kind_or_info}): #{reason}.", fix || OwnerClick::FIX)
 end
 
 # -> [ref, words, owner_turn_text]; dies (exit 2) on anything unverified.
@@ -2238,7 +2243,7 @@ def run(argv)
     return run_grant(grant_class, repo, base, head, manifest)
   end
 
-  approval = owner_approval && verify_owner_approval!(owner_approval, head: head, repo: repo)
+  approval = owner_approval && verify_owner_approval!(owner_approval, head: head, repo: repo, base: base)
 
   surfaces, pattern_count = load_manifest(manifest)
   files = changed_files(repo, base, head)
@@ -2293,11 +2298,19 @@ def run(argv)
       c = approval[:click]
       # Ids and the button value only: no Slack channel or user id, which a
       # public repo's PR body must not carry.
+      carried = c[:carried_to] ? " carried-from:#{c[:sha]}" : ""
       puts "BLAST-RADIUS HOT-OWNER-APPROVED #{short(head)} (OWNER-APPROVED: click:#{c[:delivery_id]} " \
-           "actor:owner #{c[:action_id]}=#{c[:value]})#{gate_note}"
+           "actor:owner #{c[:action_id]}=#{c[:value]}#{carried})#{gate_note}"
       puts "  owner-click (verified): the owner's slack.interaction on #{c[:where]};"
-      puts "    it approves #{c[:slug]} at #{c[:sha]}, the head gated here " \
-           "(PR ##{c[:pr]} as the button states it)."
+      if c[:carried_to]
+        puts "    it approves #{c[:slug]} PR ##{c[:pr]} at #{c[:sha]}, carried from #{c[:sha]} to #{c[:carried_to]} " \
+             "(DND-1832): the PR's own diff is byte-identical (sha256 #{c[:diff_sha256]}) at " \
+             "#{c[:mb_from]}..#{c[:sha]} and #{c[:mb_to]}..#{c[:carried_to]}, origin's PR ##{c[:pr]} head is " \
+             "#{c[:carried_to]} (#{c[:pr_ref]}), and no later owner click holds it."
+      else
+        puts "    it approves #{c[:slug]} at #{c[:sha]}, the head gated here " \
+             "(PR ##{c[:pr]} as the button states it)."
+      end
     else
       puts "BLAST-RADIUS HOT-OWNER-APPROVED #{short(head)} (OWNER-APPROVED: #{approval[:ref]} " \
            "quote:#{approval[:words]})#{gate_note}"
@@ -3534,7 +3547,16 @@ def self_test
       "channels" => { "session" => { "kind" => "log", "path" => "proj-session.jsonl", "producer" => "platform" },
                       "slack" => { "kind" => "log", "path" => "proj-slack.jsonl", "producer" => "slack" } }
     }))
-    click_env = fx_env.merge("ATHENA_INBOX_ROOT" => inbox, "ATHENA_PRIVATE_ROOT" => overlay, "CLAUDE_PROJECT_DIR" => ck)
+    # A click carried to a later head reads origin's PR head ref (DND-1832).
+    # Every case runs git's ssh transport through this stand-in, which serves
+    # `ssh_root`, so no case can reach a real forge.
+    ssh_root = File.join(tmp, "ssh-root")
+    FileUtils.mkdir_p(ssh_root)
+    fake_ssh = File.join(tmp, "fake-ssh")
+    File.write(fake_ssh, "#!/bin/sh\nfor a in \"$@\"; do last=$a; done\ncd \"$FAKE_SSH_ROOT\" || exit 1\nexec sh -c \"$last\"\n")
+    File.chmod(0o755, fake_ssh)
+    click_env = fx_env.merge("ATHENA_INBOX_ROOT" => inbox, "ATHENA_PRIVATE_ROOT" => overlay, "CLAUDE_PROJECT_DIR" => ck,
+                             "GIT_SSH_COMMAND" => fake_ssh, "GIT_SSH_VARIANT" => "simple", "FAKE_SSH_ROOT" => ssh_root)
     did = ->(n) { format("dddddddd-0000-4000-8000-%012d", n) }
     click_line = lambda do |n, value: OwnerClick.ask_value("example/widgets", 42, chd), user: "UFAKE00001",
                               is_owner: true, kind: "slack.interaction", extra: {}|
@@ -3679,6 +3701,114 @@ def self_test
                code.zero? && out.include?("[owner-approval-policy]") && out.include?("HOT-OWNER-APPROVED") &&
                  out.include?("approves example/widgets at #{ph}") && out.include?("PR #7 as the button states it"),
                "exit=#{code} out=#{out} err=#{err}")
+    # 13f. A click carries to a later head of the SAME PR whose own diff is
+    # byte-identical (DND-1832; the owner approved the rule by click, relayed
+    # 2026-10-03). The PR's own diff is `git diff --binary
+    # <merge-base(base, head)> <head>`, computed here from git objects for
+    # both heads. Fixture: main at m0, head A (ca) adds main.tf, main moves to
+    # m1; B is A rebased onto m1, A with m1 merged in, or a one-byte change.
+    cc = File.join(tmp, "carry")
+    cgit = ->(*a) { system("git", "-C", cc, *a, out: File::NULL, err: File::NULL) }
+    crev = ->(r) { `git -C #{cc} rev-parse #{r}`.strip }
+    cm0, ca = mkrepo.call(cc, config: origin_cfg, seed: ->(r) { wf.call(r, "post-merge.yml", deploy_wf) }) do |r|
+      File.write(File.join(r, "main.tf"), "x\n")
+    end
+    cgit.call("reset", "-q", "--hard", cm0)
+    File.write(File.join(cc, "other.txt"), "main moved\n")
+    cgit.call("add", "-A")
+    cgit.call("commit", "-qm", "main moves")
+    cm1 = crev.call("HEAD")
+    cgit.call("checkout", "-q", "-b", "pr-rebased", cm1)
+    cgit.call("cherry-pick", ca)
+    b_rebase = crev.call("HEAD")
+    cgit.call("checkout", "-q", "-b", "pr-merged", ca)
+    cgit.call("merge", "-q", "--no-edit", cm1)
+    b_merge = crev.call("HEAD")
+    cgit.call("checkout", "-q", "-b", "pr-byte", cm1)
+    File.write(File.join(cc, "main.tf"), "y\n")
+    cgit.call("add", "-A")
+    cgit.call("commit", "-qm", "one byte")
+    b_byte = crev.call("HEAD")
+    cgit.call("checkout", "-q", "main")
+    absent = "ab" * 20
+    bare = File.join(ssh_root, "example", "widgets.git")
+    FileUtils.mkdir_p(File.dirname(bare))
+    system("git", "init", "-q", "--bare", bare, out: File::NULL, err: File::NULL)
+    # origin's PR head refs: #42 -> the rebase, #45 -> the merge, #46 -> the
+    # one-byte change, #43 -> another head, #44 and #47 -> the rebase. #49 has none.
+    cgit.call("push", "-q", bare, "#{b_rebase}:refs/pull/42/head", "#{b_merge}:refs/pull/45/head",
+              "#{b_byte}:refs/pull/46/head", "#{b_byte}:refs/pull/43/head", "#{b_rebase}:refs/pull/44/head",
+              "#{b_rebase}:refs/pull/47/head")
+    approve = ->(pr, sha = ca) { OwnerClick.ask_value("example/widgets", pr, sha) }
+    File.open(File.join(inbox, "proj-session.jsonl"), "a") do |f|
+      [click_line.call(30, value: approve.call(42)),
+       click_line.call(35, value: approve.call(45)),
+       click_line.call(36, value: approve.call(46)),
+       click_line.call(34, value: approve.call(43)),
+       click_line.call(32, value: approve.call(44)),
+       # A later owner hold on ANOTHER message naming #44 overrides the carry.
+       click_line.call(33, value: "hold-exit4 example/widgets#44@#{b_rebase}"),
+       # A later hold naming #420 is another PR: it never reverses #42.
+       click_line.call(38, value: "hold-exit4 example/widgets#420@#{b_rebase}"),
+       click_line.call(37, value: approve.call(47, absent)),
+       click_line.call(39, value: approve.call(49))].each { |j| f.puts(JSON.dump(j)) }
+    end
+    carry = lambda do |head, n, env: click_env|
+      run_br.call(["--base", cm1, "--head", head, "--repo", cc, "--owner-approval", "click:#{did.call(n)}",
+                   "--gate-ran", "ai/bin/harness-gate"], env: env)
+    end
+    [["after a rebase onto a moved main", b_rebase, 30, 42],
+     ["after a merge of main into the PR", b_merge, 35, 45]].each do |label, head, n, pr|
+      out, err, code = carry.call(head, n)
+      check.call("carry: a click for head A clears head B #{label} when the PR's own diff is byte-identical " \
+                 "(exit 0, CARRIED, B's HOT block still printed)",
+                 code.zero? && out.include?("BLAST-RADIUS HOT #{head[0, 7]}") && out.include?("main.tf") &&
+                   out.include?("HOT-OWNER-APPROVED #{head[0, 7]}") && out.include?("carried from #{ca} to #{head}") &&
+                   out.include?("byte-identical") && out.include?("origin's PR ##{pr} head is #{head}"),
+                 "exit=#{code} out=#{out} err=#{err}")
+    end
+    out, err, code = carry.call(b_byte, 36)
+    check.call("carry: a one-byte change in the PR's own diff refuses (exit 2), naming both merge-bases and " \
+               "both heads, with a Fix: asking for a new click on head B",
+               code == 2 && err.include?("different head") && err.include?(cm0) && err.include?(cm1) &&
+                 err.include?(ca) && err.include?(b_byte) && err.include?("Fix:") &&
+                 err.include?("new click") && err.include?(approve.call(46, b_byte)) &&
+                 !out.include?("HOT-OWNER-APPROVED"), "exit=#{code} out=#{out} err=#{err}")
+    out, err, code = carry.call(b_rebase, 32)
+    check.call("carry: a later owner hold on another message naming the same PR overrides the carry (exit 2)",
+               code == 2 && err.include?("reversed by a later owner click") && err.include?("Fix:") &&
+                 !out.include?("HOT-OWNER-APPROVED"), "exit=#{code} out=#{out} err=#{err}")
+    out, err, code = carry.call(b_rebase, 34)
+    check.call("carry: a click for a different PR never matches (exit 2), even with a byte-identical diff",
+               code == 2 && err.include?("different PR") && err.include?("#43") && err.include?(b_byte) &&
+                 err.include?("Fix:") && !out.include?("HOT-OWNER-APPROVED"), "exit=#{code} out=#{out} err=#{err}")
+    out, err, code = carry.call(b_rebase, 37)
+    check.call("carry: a head A whose objects are not here is COULD NOT LOOK (exit 2, a fetch Fix:), never a " \
+               "mismatch and never a pass",
+               code == 2 && err.include?("could not look") && err.include?(absent) &&
+                 err.include?("git fetch origin #{absent}") && !err.include?("differs") &&
+                 !out.include?("HOT-OWNER-APPROVED"), "exit=#{code} out=#{out} err=#{err}")
+    out, err, code = carry.call(b_rebase, 39)
+    check.call("carry: a PR with no head ref on origin is COULD NOT LOOK (exit 2, Fix:)",
+               code == 2 && err.include?("could not look") && err.include?("refs/pull/49/head") &&
+                 err.include?("Fix:") && !out.include?("HOT-OWNER-APPROVED"), "exit=#{code} out=#{out} err=#{err}")
+    out, err, code = carry.call(b_rebase, 30, env: click_env.merge("FAKE_SSH_ROOT" => File.join(tmp, "no-forge")))
+    check.call("carry: an origin that cannot be read is COULD NOT LOOK (exit 2, Fix:), never a pass",
+               code == 2 && err.include?("could not look") && err.include?("ls-remote") && err.include?("Fix:") &&
+                 !out.include?("HOT-OWNER-APPROVED"), "exit=#{code} out=#{out} err=#{err}")
+    out, err, code = run_br.call(["--base", cm1, "--head", ca, "--repo", cc, "--owner-approval", "click:#{did.call(30)}"],
+                                 env: click_env)
+    check.call("carry: the click on head A itself still clears A with no carry",
+               code.zero? && out.include?("HOT-OWNER-APPROVED #{ca[0, 7]}") && !out.include?("carried from"),
+               "exit=#{code} out=#{out} err=#{err}")
+    # Pure: what counts as a later click naming the PR.
+    [["hold-exit4 example/widgets#44@#{b_rebase}", true], ["hold example/widgets#44", true],
+     ["hold-exit4 example/widgets#440@#{b_rebase}", false], ["hold-exit4 example/other#44", false],
+     ["hold-exit4 Example/Widgets#44", true], ["hold-exit4 sub/example/widgets#44", false]].each do |value, want|
+      got = OwnerClick.names_pr?(value, "example/widgets", 44)
+      check.call("OwnerClick.names_pr?(#{value[0, 40].inspect}, example/widgets, 44) -> #{want}", got == want, got.inspect)
+    end
+
     # Pure: the repo slug of each remote URL form, and the miss.
     [["git@github.com:example/widgets.git", "example/widgets"], ["https://github.com/example/widgets", "example/widgets"],
      ["ssh://git@gitlab.example.com/group/sub/proj.git", "group/sub/proj"], ["", nil], ["/srv/repos/widgets", nil]].each do |url, want|

@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "digest"
 require "json"
 require "open3"
 require_relative "private_overlay_resolver"
@@ -33,12 +34,34 @@ require_relative "private_overlay_resolver"
 #      value `approve-exit4 <owner>/<repo>#<pr>@<40-hex head sha>`. The repo
 #      must be --repo's `origin` and the sha the head being gated. Any other
 #      value is a click on a different message; another sha is a click for a
-#      different head. The PR number is as the button states it: only the
-#      repo and the head are checked.
+#      different head, which only check 6 can clear. For the exact head, the
+#      PR number is as the button states it: only the repo and the head are
+#      checked.
 #   5. No later owner click on the same message chose otherwise. A hold or
 #      reject after the approve is the owner's last word, and it wins. A
 #      rival click that cannot be ordered refuses. The check is per
 #      message: a hold on a different DM does not reverse this one.
+#   6. The carry (DND-1832). The owner approved this rule by click, relayed
+#      by the laptop and the coordinator on 2026-10-03. A click that passes
+#      1-5 for head A of PR X also clears a later head B when ALL of these
+#      hold, and it is refused otherwise:
+#      - A's objects are in --repo. If they are not, that is COULD NOT LOOK
+#        with a fetch Fix:, never a mismatch and never a pass.
+#      - The PR's own diff is byte-identical at both heads. That diff is
+#        `git diff --binary <merge-base(base, head)> <head>`, where base is
+#        the gate's target (origin/main). The gate computes both diffs from
+#        git objects and never takes a session's word that they match. A
+#        rebase and a merge of main both keep it identical. A one-byte
+#        difference refuses, naming both merge-bases and both heads, with a
+#        Fix: asking for a new click on head B.
+#      - origin's PR head ref for X (`refs/pull/X/head` on GitHub,
+#        `refs/merge-requests/X/head` on GitLab) is B, read with `git
+#        ls-remote`. A different PR never matches. A ref that is missing or
+#        cannot be read is COULD NOT LOOK.
+#      - No owner click after the approve, on any message, names X and is
+#        not an exit-4 approve. Such a click is a later hold, and it wins.
+#        A later click on the same message is check 5.
+#      The blast-radius classification still runs on B's own diff.
 #
 # Every refusal names what it looked at (the files, how many lines, clicks and
 # unparsable lines it read) and carries a Fix:, so "no such click" never
@@ -55,6 +78,10 @@ require_relative "private_overlay_resolver"
 #     text the owner read, so the poster is trusted to render the same PR and
 #     head. athena:slack -> "Asking the owner for a decision" therefore puts
 #     the value string verbatim in the visible text.
+#   - The carry reads origin's PR head ref over git's own transport. The same
+#     user can redirect that transport (GIT_SSH_COMMAND, url.*.insteadOf) to
+#     a forge it controls, as it can forge the inbox line itself. The diff
+#     equality does not depend on origin: it is read from local objects.
 module OwnerClick
   PREFIX = "click:"
   RECORD_RE = /\Aclick:(\h{8}-\h{4}-\h{4}-\h{4}-\h{12})\z/.freeze
@@ -76,8 +103,10 @@ module OwnerClick
         "that string also in the visible text (athena:slack -> \"Asking the owner for a " \
         "decision\"). Then pass the delivered line's id from a session of the same project: " \
         "--owner-approval 'click:<delivery_id>'. A click relayed from another channel or " \
-        "project, a click on another message, a click for another head, and an approve the " \
-        "owner later reversed never count. A click that rotated out of the inbox needs a " \
+        "project, a click on another message, a click for another PR, a click for an " \
+        "earlier head whose PR diff (git diff --binary <merge-base> <head>) is not " \
+        "byte-identical to this head's, and an approve the owner later reversed or held " \
+        "never count. A click that rotated out of the inbox needs a " \
         "new ask. Or pass the owner's terminal-turn record instead: " \
         "--owner-approval 'session:<session-uuid>/<message-uuid> quote:<words>'."
 
@@ -131,9 +160,9 @@ module OwnerClick
 
   # PURE. Judge the lines carrying one delivery id against the gate's head.
   # `clicks` is every slack.interaction line read, for check 5.
-  # -> [:verified, info] | [:refused, kind, reason]. kind is one of
-  # :not_found, :relayed, :not_owner, :other_message, :other_head,
-  # :superseded, :unverifiable.
+  # -> [:verified, info] | [:carry, info] (every check but the head passed;
+  # check 6 decides) | [:refused, kind, reason]. kind is one of :not_found,
+  # :relayed, :not_owner, :other_message, :superseded, :unverifiable.
   def judge(lines, delivery_id:, owner_id:, head:, slug:, where:, clicks: [])
     if lines.empty?
       return [:refused, :not_found,
@@ -189,12 +218,6 @@ module OwnerClick
               "click #{delivery_id} approves #{ask[:slug]}##{ask[:pr]}, a PR in another repo than this " \
               "one (#{slug || 'origin unknown'})"]
     end
-    unless ask[:sha] == head
-      return [:refused, :other_head,
-              "click #{delivery_id} approves #{ask[:slug]}##{ask[:pr]} at head #{ask[:sha]}, not the head " \
-              "being gated (#{head}). A push or a rebase makes a new head, and it needs its own click"]
-    end
-
     rivals = clicks.select do |c|
       owner_click?(c, owner_id) && c["channel"] == line["channel"] && c["ts"] == line["ts"] &&
         c["value"] != line["value"]
@@ -214,12 +237,127 @@ module OwnerClick
               "#{delivery_id}: the later click is the owner's decision, and it is not this approval"]
     end
 
-    [:verified, { delivery_id: delivery_id, action_id: line["action_id"], value: line["value"],
-                  slug: ask[:slug], pr: ask[:pr], sha: ask[:sha], where: where }]
+    info = { delivery_id: delivery_id, action_id: line["action_id"], value: line["value"],
+             slug: ask[:slug], pr: ask[:pr], sha: ask[:sha], where: where, at: at }
+    # Another head: only the carry (check 6) can clear it, and the caller
+    # gathers its facts from git.
+    return [:carry, info] unless ask[:sha] == head
+
+    [:verified, info]
   end
 
-  # EFFECTS. -> [:verified, info] | [:refused, kind, reason]
-  def check(record, head:, repo:, env: ENV)
+  # A click's value names PR <slug>#<pr>: the slug (case-insensitive) is not
+  # the tail of a longer path, and the number is not the head of a longer one.
+  def names_pr?(value, slug, pr)
+    return false unless value.is_a?(String)
+
+    Regexp.new("(?<![A-Za-z0-9_./-])#{Regexp.escape(slug)}##{Integer(pr)}(?![0-9])", Regexp::IGNORECASE)
+          .match?(value)
+  end
+
+  # PURE. A later owner click, on any message, that names the approved PR and
+  # is not an exit-4 approve: a hold, and the owner's last word on that PR.
+  # -> nil, or [:refused, kind, reason].
+  def later_hold(info, clicks, owner_id)
+    named = clicks.select do |c|
+      owner_click?(c, owner_id) && c["delivery_id"] != info[:delivery_id] &&
+        parse_ask_value(c["value"]).nil? && names_pr?(c["value"], info[:slug], info[:pr])
+    end
+    undated = named.find { |c| action_time(c["action_ts"]).nil? }
+    if undated
+      return [:refused, :unverifiable,
+              "an owner click naming #{info[:slug]}##{info[:pr]} (#{undated['action_id'].inspect}) has an " \
+              "action_ts that cannot be ordered, so whether it held the PR after click #{info[:delivery_id]} " \
+              "could not be told"]
+    end
+    later = named.find { |c| (action_time(c["action_ts"]) <=> info[:at]) == 1 }
+    return nil unless later
+
+    [:refused, :superseded,
+     "the owner clicked #{later['action_id'].inspect} (#{later['value'].to_s[0, 120].inspect}), naming " \
+     "#{info[:slug]}##{info[:pr]}, after click #{info[:delivery_id]}: that later hold is the owner's decision, " \
+     "so the approve of #{info[:sha]} does not carry"]
+  end
+
+  def new_click_fix(info, head)
+    "ask the owner for a new click on head B: post the decision DM (athena:slack -> \"Asking the owner for " \
+      "a decision\") with an approve button whose value is '#{ask_value(info[:slug], info[:pr], head)}', that " \
+      "string also in the visible text, then pass the delivered line's id: --owner-approval " \
+      "'click:<delivery_id>'. A click carries to a later head only while the PR's own diff is " \
+      "byte-identical and origin's PR head ref is that head (DND-1832)."
+  end
+
+  # PURE. Judge the carry's local facts: A present, both merge-bases, both
+  # diffs. facts: {present: bool, error: String|nil, mb_from:, mb_to:,
+  # diff_from: bytes, diff_to: bytes}. -> nil (identical) or a refusal with
+  # its own Fix as the 4th element.
+  def judge_carry_diff(info, head, base, facts, repo: ".")
+    a = info[:sha]
+    unless facts[:present]
+      return [:refused, :unverifiable,
+              "head A #{a}, which click #{info[:delivery_id]} approves, is not in this repository's objects, so " \
+              "the PR's own diff at A could not look and nothing about head B #{head} is decided",
+              "fetch head A into #{repo} (`git fetch origin #{a}` there), then re-run. If origin no longer has it, " \
+              "#{new_click_fix(info, head)}"]
+    end
+    if facts[:error]
+      return [:refused, :unverifiable,
+              "the PR's own diffs could not look: #{facts[:error]}", new_click_fix(info, head)]
+    end
+    return nil if facts[:diff_from] == facts[:diff_to]
+
+    [:refused, :diff_changed,
+     "click #{info[:delivery_id]} approves #{info[:slug]}##{info[:pr]} at head A #{a}, not the head being gated, " \
+     "B #{head}. The PR's own diff differs: `git diff --binary #{facts[:mb_from]} #{a}` (merge-base of A with " \
+     "base #{base}; #{facts[:diff_from].bytesize} bytes, sha256 #{digest(facts[:diff_from])}) against `git diff " \
+     "--binary #{facts[:mb_to]} #{head}` (merge-base of B; #{facts[:diff_to].bytesize} bytes, sha256 " \
+     "#{digest(facts[:diff_to])}). A click carries only to a byte-identical change",
+     new_click_fix(info, head)]
+  end
+
+  # PURE. Judge origin's PR head ref for the approved PR against head B.
+  # refs: {state: :found, shas: {ref => sha}} | {state: :none} |
+  # {state: :error, detail: String}. -> nil (B is the PR's head) or a refusal.
+  def judge_pr_ref(info, head, refs, repo: ".")
+    pr = info[:pr]
+    names = pr_refs(pr).join(" ")
+    case refs[:state]
+    when :error
+      [:refused, :unverifiable,
+       "origin's head ref for PR ##{pr} could not look: `git ls-remote origin #{names}` failed (#{refs[:detail]})",
+       "make origin readable from this checkout (`git -C #{repo} ls-remote origin #{names}` must succeed), then " \
+       "re-run. Or #{new_click_fix(info, head)}"]
+    when :none
+      [:refused, :unverifiable,
+       "origin's head ref for PR ##{pr} could not look: origin has none of #{names}, so whether head B #{head} " \
+       "is PR ##{pr}'s head cannot be told",
+       "check PR ##{pr} is open on origin and head B is pushed to it, then re-run integration-gate without " \
+       "--rebase. Or #{new_click_fix(info, head)}"]
+    else
+      other = refs[:shas].reject { |_, sha| sha == head }
+      return nil if other.empty?
+
+      [:refused, :other_pr,
+       "click #{info[:delivery_id]} approves #{info[:slug]}##{pr}, and origin's head for PR ##{pr} is " \
+       "#{other.map { |ref, sha| "#{sha} (#{ref})" }.join(', ')}, not head B #{head}: B is not that PR's head, " \
+       "and a click never carries to another PR",
+       "if B belongs to PR ##{pr}, push it there and re-run integration-gate without --rebase. Otherwise " \
+       "#{new_click_fix(info, head)}"]
+    end
+  end
+
+  def pr_refs(pr)
+    ["refs/pull/#{pr}/head", "refs/merge-requests/#{pr}/head"]
+  end
+
+  def digest(bytes)
+    Digest::SHA256.hexdigest(bytes.to_s)
+  end
+
+  # EFFECTS. -> [:verified, info] | [:refused, kind, reason] |
+  # [:refused, kind, reason, fix] (a refusal with its own Fix:). `base` is the
+  # gate's target (origin/main); without it no click carries to another head.
+  def check(record, head:, repo:, base: nil, env: ENV)
     did = parse_record(record)
     return [:refused, :unverifiable, "#{record.to_s[0, 80].inspect} is not click:<delivery_id uuid>"] unless did
 
@@ -242,9 +380,90 @@ module OwnerClick
 
     lines, clicks, scanned, unparsed = read_lines(files, did)
     where = "#{files.join(' + ')} (#{scanned} lines, #{clicks.size} clicks, #{unparsed} unparsable read)"
-    judge(lines, delivery_id: did, owner_id: owner.value, head: head, slug: slug, where: where, clicks: clicks)
+    verdict = judge(lines, delivery_id: did, owner_id: owner.value, head: head, slug: slug, where: where,
+                    clicks: clicks)
+    return verdict unless verdict.first == :carry
+
+    carry(verdict[1], head: head, base: base, repo: repo, clicks: clicks, owner_id: owner.value)
   rescue SystemCallError => e
     [:refused, :unverifiable, "cannot read the inbox: #{e.message}"]
+  end
+
+  # EFFECTS. Check 6: decide whether a click for head A clears head B.
+  # Local facts first, so a changed diff never reaches the network.
+  def carry(info, head:, base:, repo:, clicks:, owner_id:)
+    unless base
+      return [:refused, :other_head,
+              "click #{info[:delivery_id]} approves #{info[:slug]}##{info[:pr]} at head #{info[:sha]}, not the head " \
+              "being gated (#{head}), and no base was given to compare the PR's own diffs against",
+              new_click_fix(info, head)]
+    end
+
+    facts = carry_facts(repo, base, info[:sha], head)
+    refusal = judge_carry_diff(info, head, base, facts, repo: repo)
+    return refusal if refusal
+
+    refusal = later_hold(info, clicks, owner_id)
+    return refusal if refusal
+
+    refs = origin_pr_head(repo, info[:pr])
+    refusal = judge_pr_ref(info, head, refs, repo: repo)
+    return refusal if refusal
+
+    [:verified, info.merge(carried_to: head, mb_from: facts[:mb_from], mb_to: facts[:mb_to],
+                           diff_sha256: digest(facts[:diff_to]), pr_ref: refs[:shas].keys.join(", "))]
+  end
+
+  # EFFECTS. -> {present:, error:, mb_from:, mb_to:, diff_from:, diff_to:}.
+  def carry_facts(repo, base, from, to)
+    _, _, st = Open3.capture3("git", "-C", repo, "cat-file", "-e", "#{from}^{commit}")
+    return { present: false } unless st.success?
+
+    mb_from, d_from, why = pr_diff(repo, base, from)
+    return { present: true, error: why } if why
+
+    mb_to, d_to, why = pr_diff(repo, base, to)
+    return { present: true, error: why } if why
+
+    { present: true, error: nil, mb_from: mb_from, mb_to: mb_to, diff_from: d_from, diff_to: d_to }
+  end
+
+  # The PR's own diff at `head`: `git diff --binary <merge-base(base, head)>
+  # <head>`. The flags pin what config could vary (an external diff driver,
+  # textconv, color, rename detection, a relative diff), so the bytes depend
+  # on git objects alone. -> [merge_base, bytes, nil] or [nil, nil, why].
+  def pr_diff(repo, base, head)
+    out, err, st = Open3.capture3("git", "-C", repo, "merge-base", base, head)
+    mb = out.strip
+    unless st.success? && /\A[0-9a-f]{40}\z/.match?(mb)
+      return [nil, nil, "`git merge-base #{base} #{head}` found no merge-base (exit #{st.exitstatus}: " \
+                        "#{err.lines.first.to_s.strip})"]
+    end
+
+    out, err, st = Open3.capture3("git", "-C", repo, "diff", "--binary", "--no-ext-diff", "--no-textconv",
+                                  "--no-color", "--no-renames", "--no-relative", mb, head, binmode: true)
+    return [nil, nil, "`git diff --binary #{mb} #{head}` failed (exit #{st.exitstatus}: #{err.lines.first.to_s.strip})"] unless st.success?
+
+    [mb, out, nil]
+  end
+
+  # EFFECTS. origin's head ref for PR `pr`, read with `git ls-remote`.
+  # -> {state: :found, shas: {ref => sha}} | {state: :none} |
+  # {state: :error, detail:}.
+  def origin_pr_head(repo, pr)
+    out, err, st = Open3.capture3({ "GIT_TERMINAL_PROMPT" => "0" }, "timeout", "120", "git", "-C", repo,
+                                  "ls-remote", "origin", *pr_refs(pr))
+    unless st.success?
+      return { state: :error, detail: "exit #{st.exitstatus}: #{err.lines.first.to_s.strip}" }
+    end
+
+    shas = out.lines.filter_map do |l|
+      sha, ref = l.strip.split("\t", 2)
+      [ref, sha] if ref && /\A[0-9a-f]{40}\z/.match?(sha.to_s) && pr_refs(pr).include?(ref)
+    end.to_h
+    shas.empty? ? { state: :none } : { state: :found, shas: shas }
+  rescue SystemCallError => e
+    { state: :error, detail: "cannot run git ls-remote: #{e.message}" }
   end
 
   def origin_slug(repo)
