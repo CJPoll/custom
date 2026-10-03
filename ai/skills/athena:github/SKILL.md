@@ -112,11 +112,12 @@ submodule through the route, or with plain git when it reaches no forge. It
 refuses every command that writes a remote ref other than `git push`
 (`send-pack`, `http-push`, a `remote-<name>` helper, `subtree push`), since
 only a push is judged for a red or ungated main: push with `gh-athena git
-push` (for a subtree, `git subtree split` first). It refuses a subcommand git
-does not know too, because `help.autocorrect` would run another one (DND-1867). It
-does **not** see an `~/.ssh/config` Host alias for github.com, a command git
-runs from config or a hook, `clone --recurse-submodules`, git-lfs, or other
-subcommands; the
+push` (for a subtree, `git subtree split` first). It also refuses a
+`git-<name>` program on PATH that is not git's own (run it with plain git),
+and a subcommand git does not know, because `help.autocorrect` would run
+another one (DND-1867). It does **not** see an `~/.ssh/config` Host alias for
+github.com, a command git runs from config or a hook, `clone
+--recurse-submodules`, or git-lfs transfers inside a push; the
 header of `ai/lib/forge-git-passthrough.sh` (shared with `glab-athena git`)
 lists these. Handle a refusal by the rule in the next section.
 

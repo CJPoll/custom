@@ -61,9 +61,8 @@
 # process git starts itself (a `!` alias, git-subtree, send-pack, `rebase -x`,
 # `submodule foreach`, `bisect run`, a git hook), which runs with git's
 # exec-path first on PATH, where a real `git` sits (the Athena route refuses
-# most of these forms, DND-1844, but this wrapper judges only `push`); a
-# non-git client (libgit2,
-# an HTTP call); and a forge host no URL spells as github.com or gitlab.com
+# most of these forms, DND-1844, DND-1867, but this wrapper judges only
+# `push`); a non-git client (libgit2, an HTTP call); and a forge host no URL spells as github.com or gitlab.com
 # (an ~/.ssh/config Host alias such as `myalias:owner/repo`, an IP literal).
 # The passthrough's own resolution residuals (its header) apply too.
 # A known false refusal: a push the forge CLI runs on a routed call
@@ -196,7 +195,7 @@ for host in github.com gitlab.com; do
   rc=0; afp_reaches "$host" || rc=$?
   case "$rc" in
     0) ;;
-    3) afp_refuse "this git push${AFP_URL:+ to $(afp_shown "$AFP_URL")}: the Athena route's resolver refuses it, for one of these reasons: it would reach $host over SSH or another non-HTTPS transport, so it can go out with the machine owner's SSH key, not Athena's (DND-1803); it recurses into submodules, or carries an option or alias the check cannot read by git's grammar, so where it goes is unknown (DND-1841, DND-1843); or it makes git run a command itself (--receive-pack, --exec, an ext:: address, --exec-path=<dir>, a GIT_EXEC_PATH that is not git's own), which runs past every check (DND-1844)." \
+    3) afp_refuse "this git push${AFP_URL:+ to $(afp_shown "$AFP_URL")}: the Athena route's resolver refuses it, for one of these reasons: it would reach $host over SSH or another non-HTTPS transport, so it can go out with the machine owner's SSH key, not Athena's (DND-1803); it recurses into submodules, or carries an option or alias the check cannot read by git's grammar, so where it goes is unknown (DND-1841, DND-1843); or it makes git run a command itself (--receive-pack, --exec, an ext:: address, --exec-path=<dir>, a GIT_EXEC_PATH that is not git's own), which runs past every check (DND-1844); or it could not list git's commands (git --list-cmds, DND-1867)." \
          "$(afp_fix "$host") Point the remote at https://$host/<owner>/<repo>.git (or git@$host:<owner>/<repo>.git, which the route rewrites), push each submodule separately, spell every option in full as \`git push -h\` lists it, drop --receive-pack, --exec and --exec-path, and unset a GIT_EXEC_PATH you set. The route's own refusal names the reason: run the same push through it to see it." ;;
     *) afp_refuse "this git push: its remote could not be resolved (exit $rc), so whether it goes to $host as the machine owner is unknown (DND-1803)." \
          "run it again from inside the repository with a configured remote; to push to a forge, $(afp_fix "$host")" ;;

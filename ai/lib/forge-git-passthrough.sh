@@ -37,9 +37,10 @@
 #     that writes a remote ref other than `git push` (send-pack, http-push,
 #     a remote-<name> transport helper, subtree push), since only a push is
 #     judged for its remote, recursion, a red main and the gate; a
-#     subcommand git does not know, which help.autocorrect may turn into
-#     one; and an alias chain more than 10 deep (DND-1867; "Remote-ref
-#     writers other than push" below). A refusal is exit 3 with a Fix: line.
+#     git-<name> program on PATH that is not git's own; a subcommand git
+#     does not know, which help.autocorrect may turn into one; and an alias
+#     chain more than 10 deep (DND-1867; "Remote-ref writers other than
+#     push" below). A refusal is exit 3 with a Fix: line.
 #   * fg_refuse_red_main (DND-1482): a push to main is refused while
 #     ai/bin/main-health has recorded origin/main RED, unless it lands a gated
 #     fix. Also exit 3 with a Fix: line. See "Red-main refusal" below.
@@ -51,10 +52,9 @@
 # Residual (NOT checked; each still runs): an ~/.ssh/config Host alias for the
 # forge host (`myalias:owner/repo`); `clone
 # --recurse-submodules` (the submodule URLs are unknown until the clone lands);
-# git-lfs transfers; third-party `git-<name>` subcommands on PATH, which may
-# write a remote ref; any other subcommand of git's not named above (each
-# shown unable to write a remote ref, "Remote-ref writers other than push"
-# says how); a command git runs from config, the environment or a hook
+# git-lfs transfers from a push (a git-lfs on PATH is refused when called
+# directly, like any git-<name> that is not git's own); a command git runs
+# from config, the environment or a hook
 # ("Commands git runs itself" names them); a push whose recursion comes
 # from config, in a repository where
 # only the pushed commit (not the index, .gitmodules or config) records a
@@ -152,11 +152,11 @@ EOF
   exit 3
 }
 
-# fg_refuse_unchecked <subcommand> <why> [<how to turn recursion off>]
+# fg_refuse_unchecked <subcommand> <why>
 fg_refuse_unchecked() {
   cat >&2 <<EOF
 $FG_TOOL: REFUSING \`git $1\`: $2, so it could reach $FG_HOST as $FG_OWNER unchecked.
-  Fix: ${3:-push with --no-recurse-submodules (or drop the --recurse-submodules / push.recurseSubmodules / submodule.recurse that turns it on)}, and push each submodule separately from its own directory through \`~/dev/custom/ai/bin/$FG_TOOL git -C <submodule> push …\`. $FG_ESCALATE
+  Fix: push with --no-recurse-submodules (or drop the --recurse-submodules / push.recurseSubmodules / submodule.recurse that turns it on), and push each submodule separately from its own directory through \`~/dev/custom/ai/bin/$FG_TOOL git -C <submodule> push …\`. $FG_ESCALATE
 EOF
   exit 3
 }
@@ -411,7 +411,8 @@ fg_push_long() {
 #     every helper (git-remote-https included) from there;
 #   * a shell alias (`!...`): fg_refuse_shell_alias, above.
 # These subcommands are taken as written, never alias-expanded: git ignores
-# an alias named for one of its own commands (`alias.bisect=status`).
+# an alias named for one of its own commands (`alias.bisect=status`), and so
+# does the alias walk (fg_cmd_known, DND-1867).
 # Conservative, so a parse slip can only over-refuse: a word that may be an
 # option's value still counts (`submodule add <url> foreach` is refused).
 # Residual (NOT checked; each still runs): a command named in config, from
@@ -623,43 +624,77 @@ fg_exec_path_moved() {
 #     itself" first;
 #   * subtree push, in either word order (`subtree -P x push`): its inner
 #     `git push` of a split git-subtree computes runs from git's exec-path.
-# And a subcommand git does not know (fg_cmd_known): under help.autocorrect,
-# from -c or any config file, git runs the closest command instead
-# (`pusj` runs push), and nothing here judged that one.
-# Read on the alias-expanded argv; a command name git runs itself is never
-# alias-expanded, since git runs its own commands and any git-<name> on PATH
-# before an alias of that name (`alias.http-push=status` still runs
-# http-push). Measured, for both, on git 2.54.
+# And, read where the subcommand is taken (fg_cmd_known), so an alias cannot
+# carry one past it:
+#   * a git-<name> program on PATH that is not one of git's own commands
+#     (`git --list-cmds=others`, minus `main`): it runs any code with this
+#     route's bot header in its environment, so a push it makes is judged by
+#     nothing (on this machine, git-rekt in git-custom/ pushes with -f);
+#   * a subcommand git does not know, no command and no alias: under
+#     help.autocorrect, from -c or any config file, git runs the closest
+#     command instead (`pusj` runs push), and nothing here judged that one;
+#   * an alias chain more than 10 deep, read no further.
+# A name git runs is never alias-expanded: git runs its own commands and a
+# git-<name> on PATH before an alias of that name (`alias.http-push=status`
+# still runs http-push). Measured, for each, on git 2.54.
+# Conservative, so a parse slip can only over-refuse: any word `push` after
+# `subtree` counts, so `subtree split -P push` and a branch named push in
+# `subtree pull` are refused too (accepted false refusals).
 # Shown unable to write a remote ref, so not refused here: fetch-pack,
-# ls-remote, archive --remote, upload-pack and the other read-side commands;
-# receive-pack and update-ref, which write only a repository on this machine.
-# Residual: a third-party git-<name> on PATH (git-lfs among them), the
-# header's "third-party subcommands".
-FG_KNOWN_CMDS=""
+# ls-remote, archive --remote and upload-pack (read side); receive-pack and
+# update-ref, which write only a repository on this machine. Each other
+# subcommand of git's is a local or read-side command, by its manual.
+# Residual: the command lists are read once, with the global options before
+# the first subcommand; an alias that adds `-C <dir>` with a relative PATH
+# entry could reach a git-<name> in <dir> that the lists did not see.
+FG_OWN_CMDS=""
+FG_PATH_CMDS=""
 
-# fg_cmd_known <name> : 0 when git runs <name> as one of its own commands or
-# a git-<name> on PATH, before any alias. The list is read once, from the git
-# this route execs; a list that cannot be read refuses (COULD NOT LOOK),
-# never reads as "every command is unknown" or "every command is known".
-fg_cmd_known() {
-  if [ -z "$FG_KNOWN_CMDS" ]; then
-    FG_KNOWN_CMDS="$(git --list-cmds=main,others 2>/dev/null || true)"
-    case "$FG_KNOWN_CMDS" in
-      *push*) FG_KNOWN_CMDS=$'\n'"$FG_KNOWN_CMDS"$'\n' ;;
-      *) cat >&2 <<EOF
-$FG_TOOL: REFUSING \`git $1\`: COULD NOT LOOK which commands git has (\`git --list-cmds=main,others\` listed no push), so whether \`$1\` is a command or a typo git may autocorrect into one is unknown.
-  Fix: check that \`git --list-cmds=main,others\` lists git's commands in this shell, then retry. $FG_ESCALATE
+# fg_cmd_list <kind> : print git's --list-cmds=<kind> one name per line,
+# wrapped in newlines; exit 3 with COULD NOT LOOK when git cannot list them.
+# A failed listing never reads as "no commands" (every name unknown) or as an
+# empty PATH list (every git-<name> allowed).
+fg_cmd_list() {
+  local out rc=0
+  out="$(G --list-cmds="$1" 2>/dev/null)" || rc=$?
+  if [ "$rc" != 0 ] || { [ "$1" = main ] && [[ $'\n'"$out"$'\n' != *$'\n'push$'\n'* ]]; }; then
+    cat >&2 <<EOF
+$FG_TOOL: REFUSING this git command: COULD NOT LOOK which commands git has (\`git --list-cmds=$1\` exited $rc${out:+ and listed no push}), so whether the subcommand is git's own, a program on PATH, or a typo git may autocorrect into another command is unknown.
+  Fix: check that \`git --list-cmds=$1\` lists git's commands in this shell (the git on PATH, its exec-path), then retry. $FG_ESCALATE
 EOF
-         exit 3 ;;
-    esac
+    exit 3
   fi
-  [[ "$FG_KNOWN_CMDS" == *$'\n'"$1"$'\n'* ]]
+  printf '\n%s\n' "$out"
 }
 
-# fg_refuse_unknown_cmd <name> : refuse a subcommand git does not know.
+# fg_cmd_known <name> : 0 when <name> is one of git's own commands (builtin or
+# in its exec-path), which git runs before any alias. Refuses a git-<name> on
+# PATH that is not git's own (fg_refuse_path_cmd). 1 otherwise: an alias, or
+# a name git does not know.
+fg_cmd_known() {
+  if [ -z "$FG_OWN_CMDS" ]; then
+    FG_OWN_CMDS="$(fg_cmd_list main)" || exit 3
+    FG_PATH_CMDS="$(fg_cmd_list others)" || exit 3
+  fi
+  [[ "$FG_OWN_CMDS" == *$'\n'"$1"$'\n'* ]] && return 0
+  [[ "$FG_PATH_CMDS" == *$'\n'"$1"$'\n'* ]] && fg_refuse_path_cmd "$1"
+  return 1
+}
+
+# fg_refuse_path_cmd <name> : refuse a git-<name> program that is not git's.
+fg_refuse_path_cmd() {
+  cat >&2 <<EOF
+$FG_TOOL: REFUSING \`git $1\`: git-$1 is a program on PATH, not one of git's own commands. It would run with this route's bot header in its environment, and a push it makes is not checked for its remote, its submodules, a red main or the gate.
+  Fix: run \`git $1\` with plain git, outside the Athena route, and push what it makes with \`~/dev/custom/ai/bin/$FG_TOOL git push <repository> <src>:<dst>\`. $FG_ESCALATE
+EOF
+  exit 3
+}
+
+# fg_refuse_unknown_cmd <name> [<why the alias is unknown>] : refuse a
+# subcommand git does not know.
 fg_refuse_unknown_cmd() {
   cat >&2 <<EOF
-$FG_TOOL: REFUSING \`git $1\`: '$1' is no command git knows and no alias. Under help.autocorrect git runs the closest command in its place (\`pusj\` runs push), and $FG_TOOL never judged that command: a push it makes is not checked for its remote, its submodules, a red main or the gate.
+$FG_TOOL: REFUSING \`git $1\`: '$1' is no command git knows and ${2:-no alias}. Under help.autocorrect git runs the closest command in its place (\`pusj\` runs push), and $FG_TOOL never judged that command: a push it makes is not checked for its remote, its submodules, a red main or the gate.
   Fix: spell the subcommand as git names it (\`git help -a\` lists them). $FG_ESCALATE
 EOF
   exit 3
@@ -807,7 +842,7 @@ fg_refuse_non_https() {
   # options (`alias.p=-c url...pushInsteadOf=... push`; git accepts -c there),
   # so the peel runs again on every expansion. A shell alias (`!...`) can run
   # anything, so it is refused outright rather than guessed at.
-  local grc
+  local grc arc
   while :; do
     while [ $# -gt 0 ]; do
       case "$1" in -*) ;; *) break ;; esac
@@ -829,8 +864,14 @@ fg_refuse_non_https() {
     # An alias chain this deep is not read to its end, so the command it
     # reaches is unknown (DND-1867: past the old cap, it ran unjudged).
     [ "$depth" -lt 10 ] || fg_refuse_alias_depth "$sub"
-    alias_val="$(G config --get "alias.$sub" 2>/dev/null || true)"
+    arc=0; alias_val="$(G config --get "alias.$sub" 2>/dev/null)" || arc=$?
     # No command and no alias: help.autocorrect may run another (DND-1867).
+    # A config that cannot be read is not "no alias".
+    case "$arc" in
+      0) ;;
+      1) fg_refuse_unknown_cmd "$sub" ;;
+      *) fg_refuse_unknown_cmd "$sub" "git config could not read alias.$sub (exit $arc)" ;;
+    esac
     [ -n "$alias_val" ] || fg_refuse_unknown_cmd "$sub"
     case "$alias_val" in
       '!'*) fg_refuse_shell_alias "$sub" "$alias_val" ;;

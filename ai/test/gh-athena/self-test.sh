@@ -1133,6 +1133,41 @@ rc_passed "W20. fetch-pack with no command option (read-only) passes"
 gha "${W}" push -q origin HEAD:refs/heads/topic
 rc_passed "W21. a routed push to a topic branch still passes"
 
+# Review round. W22: a git-<name> program on PATH that is not git's own runs
+# with the bot header in its environment; its own push to main went unjudged.
+gated_origin w22
+PX="${TMP}/w22-path"; mkdir -p "${PX}"
+printf '#!/bin/sh\nexec git push -q origin HEAD:main\n' > "${PX}/git-shipit"; chmod +x "${PX}/git-shipit"
+OUT="$(cd "${W}" && PATH="${PX}:${PATH}" ATHENA_TELEMETRY_DIR="${TMP}/w22-store" "${WRAPPER}" git shipit 2>"${TMP}/err")"; RC=$?
+ERR="$(cat "${TMP}/err")"
+if is_refusal && [[ "${ERR}" == *"program on PATH"* ]] && [ "$(git --git-dir="${O}" rev-parse main)" = "${B}" ]; then
+  ok "W22. a git-<name> on PATH (git shipit, which pushes HEAD:main) -> refused, origin main unmoved"
+else bad "W22. PATH git-<name> refused" "rc=${RC} err='${ERR}' main=$(git --git-dir="${O}" rev-parse main) base=${B}"; fi
+OUT="$(cd "${W}" && PATH="${PX}:${PATH}" GH_ATHENA_GIT_DRY_RUN=1 "${WRAPPER}" git -c alias.si=shipit si 2>"${TMP}/err")"; RC=$?
+ERR="$(cat "${TMP}/err")"
+if is_refusal && [[ "${ERR}" == *"program on PATH"* ]]; then ok "W23. an alias to that program -> refused"
+else bad "W23. alias to PATH program refused" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+
+# W24: an alias chain 11 deep stopped the walk at 10 and ran unjudged.
+CH=(); for i in 0 1 2 3 4 5 6 7 8 9; do CH+=(-c "alias.a${i}=a$((i + 1))"); done
+ghpush "${W}" "${TMP}/w22-store" "${CH[@]}" -c 'alias.a10=push -q origin HEAD:main' a0
+if is_refusal && [[ "${ERR}" == *"more than 10 aliases deep"* ]] && [ "$(git --git-dir="${O}" rev-parse main)" = "${B}" ]; then
+  ok "W24. an 11-deep alias chain ending in push HEAD:main -> refused, origin main unmoved"
+else bad "W24. deep alias chain refused" "rc=${RC} err='${ERR}' main=$(git --git-dir="${O}" rev-parse main) base=${B}"; fi
+CH=(); for i in 0 1 2 3 4 5 6 7 8; do CH+=(-c "alias.a${i}=a$((i + 1))"); done
+gha "${W}" "${CH[@]}" -c 'alias.a9=status' a0
+rc_passed "W25. a 10-deep alias chain ending in status passes"
+
+# W26: a command list git cannot give is COULD NOT LOOK, never "no command".
+SHIM3="${TMP}/shim3"; mkdir -p "${SHIM3}"
+printf '#!/bin/sh\nfor a in "$@"; do case "$a" in --list-cmds=*) exit 1 ;; esac; done\nexec %s "$@"\n' "${REALGIT}" > "${SHIM3}/git"
+chmod +x "${SHIM3}/git"; fsg_require_stubs "${SHIM3}" git
+OUT="$(cd "${W}" && PATH="${SHIM3}:${FSG_DIR}:${PATH}" GH_ATHENA_GIT_DRY_RUN=1 "${WRAPPER}" git status 2>"${TMP}/err")"; RC=$?
+ERR="$(cat "${TMP}/err")"
+if is_refusal && [[ "${ERR}" == *"COULD NOT LOOK"* ]] && [[ "${OUT}" != *"dry-run: exec git"* ]]; then
+  ok "W26. git --list-cmds failing -> refused as COULD NOT LOOK (not read as an empty list)"
+else bad "W26. list-cmds failure refused" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+
 # DND-1667: no git call may have fallen through past its shim.
 if fsg_verify; then ok "no git call fell through past its shim (DND-1667)"
 else bad "no git call fell through past its shim (DND-1667)" "see the forge-stub-guard FAIL above"; fi

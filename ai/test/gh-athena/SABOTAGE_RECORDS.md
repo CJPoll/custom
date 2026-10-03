@@ -71,3 +71,34 @@ After: `RESULT: 76 passed, 0 failed` (re-measured on origin/main 9ea5e2c4 after 
 |---|---|
 | M10 drop the `ir_verify_seal` call in `ir_read_receipt` | 35c, 35d |
 | M11 `ir_verify_seal` returns 0 on a verify exit 1 (unverified read as verified) | 35c, 35d |
+
+## DND-1867: only `git push` writes a remote ref through the route
+
+Before the fix, against the unfixed wrapper at origin/main e1b4840d
+(`GH_ATHENA_UNDER_TEST`), every new case was red, and S4, S23 and S24
+expected the old subtree-push behaviour. The cases that carry the defect,
+each on a local bare origin:
+
+```
+  FAIL  W1. send-pack to main refused
+        rc=0 err='To /tmp/tmp.M88xcbXFpz/w1-origin.git
+  FAIL  W3. -c help.autocorrect=immediate pusj (git runs push) to main: refused
+        rc=0 out='' err='WARNING: You called a Git command named 'pusj', which does not exist.
+  FAIL  W13. remote-https <remote> <url> (a transport helper called directly; it pushes what stdin asks) -> refused
+        rc=0 out='gh-athena: dry-run: env GIT_CONFIG_KEY_0=[http.https://github.com/.extraheader] ...
+  FAIL  W22. PATH git-<name> refused
+        rc=0 err='' main=e37e5b6a... base=e1bb713a...
+  FAIL  W24. deep alias chain refused
+        rc=0 err='git (agent wrapper): alias chain for a10 is deeper than 10; not checked' main=e37e5b6a... base=e1bb713a...
+RESULT: 173 passed, 28 failed
+```
+
+W1-W21 were written first (172 passed, 24 failed with S4, S23, S24); W22-W26
+came from the review round. After: `RESULT: 201 passed, 0 failed`.
+
+| Mutation | Red cases |
+|---|---|
+| M12 drop the `fg_writes_remote_ref` refusal | 13g, S4, S23, S24, W1, W2, W6-W17 |
+| M13 an unknown subcommand with no alias passes (`break`) | W3, W4, W5, W6 |
+| M14 a git-<name> on PATH is not refused | W22, W23 |
+| M15 the alias walk stops at depth 10 instead of refusing | W24 |
