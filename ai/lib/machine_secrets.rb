@@ -37,7 +37,7 @@ module MachineSecrets
   CONTENT_PATTERNS = [
     /sk-ant-[A-Za-z0-9_-]{20,}/, /xoxa-[A-Za-z0-9-]{10,}/, /xoxb-[A-Za-z0-9-]{10,}/, /xoxp-[A-Za-z0-9-]{10,}/,
     /ghp_[A-Za-z0-9]{30,}/, /gho_[A-Za-z0-9]{30,}/, /ghs_[A-Za-z0-9]{30,}/, /ghu_[A-Za-z0-9]{30,}/,
-    /github_pat_[A-Za-z0-9_]{30,}/, /glpat-[A-Za-z0-9_-]{20,}/, /glrt-[A-Za-z0-9_-]{20,}/,/ntn_[A-Za-z0-9]{30,}/,
+    /github_pat_[A-Za-z0-9_]{30,}/, /glpat-[A-Za-z0-9_-]{20,}/, /glrt-[A-Za-z0-9_-]{20,}/, /ntn_[A-Za-z0-9]{30,}/,
     /AKIA[A-Z0-9]{16}(?![A-Za-z0-9])/, /ASIA[A-Z0-9]{16}(?![A-Za-z0-9])/, /re_[A-Za-z0-9]{20,}/
   ].map(&:freeze).freeze
   PEM_RE = /-----BEGIN [A-Z ]*PRIVATE KEY-----/.freeze
