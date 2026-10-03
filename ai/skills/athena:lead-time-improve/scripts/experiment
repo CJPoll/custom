@@ -12,7 +12,8 @@
 #           row only when the verdict changed (re-running is idempotent);
 #           and every owed revert: `reverted` once main carries it; a change
 #           another experiment's Lead-time-experiment trailer on the same
-#           phase confounds is `confounded` (DND-1529)
+#           phase confounds is `confounded` (DND-1529), as is any experiment
+#           whose window holds a declared series break (DND-1810)
 #   list    every experiment and its latest status
 #   decline record that an owed revert will not land because the hard
 #           constraint forbids it (DND-1547); only this verb writes `declined`
@@ -25,7 +26,7 @@
 # <state>/experiments.jsonl.
 #
 # Buckets: FRAMEWORK (argv, output) and MANAGER (Record, Judge, List, Decline,
-# Live, Confound, Settling) here;
+# Live, Confound, Breaks, Settling) here;
 # DOMAIN in ../lib/experiment.rb; SIDE EFFECTS in ../lib/experiment_store.rb,
 # ../lib/experiment_git.rb and ai/lib/lead_time_phases_io.rb (the ledger).
 #
@@ -34,6 +35,9 @@
 #                              a run whose brief names another state dir sets it
 #   ATHENA_LEADTIME_CONFIG     the repo list (see ai/bin/lead-time-repos --help)
 #   LEAD_TIME_EXPERIMENT_NOW   "now", RFC 3339 (tests)
+#   LEAD_TIME_SERIES_BREAKS    the series-break registry (default:
+#                              ai/config/lead-time-series-breaks.json beside
+#                              this tool; DND-1810)
 #
 # Exit: 0 ok; 1 a tool or state error; 2 a usage error or a refusal;
 # 3 could not look (no ledger; git could not say whether a commit is on main;
@@ -102,8 +106,11 @@ HELP = <<~TXT
            When a same-phase trailer already sits inside the record's
            confound window (as judge computes it from the ledger so far),
            record still records and prints one warning line naming it:
-           judge will read the change confounded (DND-1622). A log it
-           cannot read is a warning too; the record stands.
+           judge will read the change confounded (DND-1622). The same
+           warning names a declared series break on the phase inside that
+           window, for instrumentation too (DND-1810). A log or a
+           series-break registry it cannot read is a warning too; the
+           record stands.
            --phase tail (DND-1613): a product change (R's own CI/CD and
            deploy, lever product) judged on tail, landing -> post-merge run,
            with --metric phase only. A landing counts on tail only when
@@ -143,7 +150,8 @@ HELP = <<~TXT
            landing to the after-set's last. Its own commit and a revert of
            it do not count. Instrumentation is exempt both ways, as it is
            from the one-pending-change rule: an na_share trailer confounds
-           nothing, and an instrumentation experiment is never confounded. The line names each
+           nothing, and no trailer confounds an instrumentation experiment
+           (a series break does: see below). The line names each
            other commit; the status is recorded, terminal, and treated as
            inconclusive: never keep, never revert. A log that cannot be
            read is exit 3, never "no confounder"; nothing is written.
@@ -153,6 +161,21 @@ HELP = <<~TXT
            line its revert lands with, and, for a product change (on tail,
            or one that landed in a repo other than the harness repo), that
            it lands as a revert PR in that repo through its own bar.
+           A DECLARED SERIES BREAK confounds too (DND-1810): a landing that
+           changed how a phase is measured, declared in the registry
+           ai/config/lead-time-series-breaks.json (the one place to declare
+           one). One whose phases name the experiment's phase and whose
+           landing (the committer time of its first-parent landing on the
+           harness repo's main) is inside the window makes the verdict
+           CONFOUNDED, naming the break. Instrumentation is NOT exempt: a
+           break changes what n/a means, which is what na_share compares.
+           Judge also re-checks every settled keep and every owed revert
+           not yet on main against the registry, so a break declared after
+           the verdict re-marks it confounded through judge's own append.
+           A registry that cannot be read, is not JSON, is malformed, names
+           an unknown phase, or names a commit that is not on main is exit
+           3 ("could not judge"), never "no break"; nothing is written. The
+           summary names the registry and how many breaks it declares.
            Landings inside the window whose metric is n/a are named with
            their reasons and counts ("excluded N landing(s) ..."), never
            read as 0; record prints the same for its baseline (DND-1613).
@@ -164,7 +187,8 @@ HELP = <<~TXT
            Appends a status row only when the verdict changed, so a re-run
            with the same inputs writes nothing.
   list     Every experiment and its latest status (DECLINED with its
-           constraint and reason; CONFOUNDED with its confounders).
+           constraint and reason; CONFOUNDED with its confounders and
+           series breaks).
   decline  Record that an owed revert will not land because the hard
            constraint (ai/blocks/ops/safety-checks.md) outranks the
            experiment rule. Appends one `declined` status row, which is
@@ -193,7 +217,8 @@ HELP = <<~TXT
            window reaches). One verdict:
              CLEAN     a full before-set and no same-phase trailer in it
              SETTLING  a same-phase trailer (a change or a revert, any
-                       measured repo) sits inside it: names each one, the
+                       measured repo), or a declared series break on the
+                       phase (DND-1810), sits inside it: names each one, the
                        comparable landings after the latest, and "clean
                        after N more comparable landings". A change landed
                        now would read confounded.
@@ -201,10 +226,11 @@ HELP = <<~TXT
                        such a baseline but inconclusive. Any confounder is
                        still named.
            A malformed trailer is named, never counted. --metric na_share
-           is refused (exit 2): instrumentation is never confounded. Exit 0
-           for any verdict; --json prints the verdict as one JSON object.
-           A log or ledger it cannot read is exit 3, never CLEAN. Writes
-           nothing.
+           (an instrumentation change) is checked for series breaks only:
+           a trailer confounds no instrumentation. Exit 0 for any verdict;
+           --json prints the verdict as one JSON object. A log, ledger or
+           series-break registry it cannot read is exit 3, never CLEAN.
+           Writes nothing.
 
   Rules (ai/docs/lead-time-improver.md, Decision 8):
     comparable  same repo, improve-mode rows, one row per landing; the
@@ -220,8 +246,9 @@ HELP = <<~TXT
     revert      median up, or any guard worse
     pending     a side short of K=10, or neither keep nor revert
     inconclusive  still pending 7 days after it was recorded
-    confounded  another experiment's change on the same phase landed
-                inside the window; settled as inconclusive
+    confounded  another experiment's change on the same phase, or a
+                declared series break on it (any kind), landed inside the
+                window; settled as inconclusive
     instrumentation  keep when its phase's n/a share falls; never reverted
                 for a share that did not fall
 
@@ -263,8 +290,8 @@ HELP = <<~TXT
   Exit: 0 ok; 1 tool or state error; 2 usage error or refusal; 3 could not
   look (no ledger: run ai/bin/lead-time-phases --ingest first; git could
   not say whether the commit is on main, or show its message; a log judge
-  or settling reads for confounders could not be read; or the config could
-  not be read);
+  or settling reads for confounders could not be read; the series-break
+  registry could not be judged; or the config could not be read);
   4 the --repo is configured but skipped on this machine (its checkout is
   missing).
 TXT
@@ -506,28 +533,33 @@ module Record
     xtext = X.cross_text(row)
     puts "experiment: recorded #{row['id']} kind=#{row['kind']} metric=#{row['metric']} phase=#{row['phase']} " \
          "#{xtext ? "#{xtext} " : ''}baseline #{describe_baseline(row['baseline'])}#{describe_tests(tests)}"
-    warn_confounded(row, rows, repo, res, now)
+    warn_confounded(row, rows, repo, res, now, env)
     0
   end
 
-  # One warning line when a same-phase trailer already sits inside the
-  # record's confound window, as judge computes it from the ledger so far
-  # (DND-1622): judge will read it confounded. One in the before-set is what
-  # `experiment settling` names before a change lands. The record stands
-  # either way: refusing after the landing only leaves an unrecorded change.
-  # Judge's own split, sides, window and confounders.
-  def warn_confounded(row, rows, repo, res, now)
-    return if row["kind"] == "instrumentation"
-
+  # One warning line when a same-phase trailer, or a declared series break
+  # on the phase (DND-1810), already sits inside the record's confound
+  # window, as judge computes it from the ledger so far (DND-1622): judge
+  # will read it confounded. One in the before-set is what `experiment
+  # settling` names before a change lands. The record stands either way:
+  # refusing after the landing only leaves an unrecorded change. Judge's own
+  # split, sides, window, confounders and breaks. Instrumentation is checked
+  # for breaks only, as judge checks it.
+  def warn_confounded(row, rows, repo, res, now, env)
     split = X.split(row, rows)
     boundary = split ? split[:boundary] : now
     metric = X::Metric.parse(row["metric"], phase: row["phase"])
     exclude = split ? split[:exclude] : [row["commit"]]
     from, to = X.window(X.sides(rows, metric: metric, exclude: exclude, boundary: boundary), boundary)
-    confs = X.confounders(row, Confound.commits(repo, res, from), from: from, to: to)[:confounders]
-    return if confs.empty?
+    breaks, = Breaks.load(env, repo, res)
+    confs = row["kind"] == "instrumentation" ? [] : X.confounders(row, Confound.commits(repo, res, from), from: from, to: to)[:confounders]
+    brks = X.breaks_inside(row, breaks, from: from, to: to)
+    return if confs.empty? && brks.empty?
 
-    warn "experiment: warning: #{row['id']} will read confounded: #{confs.map { |c| X.confounder_text(c) }.join(', ')} " \
+    parts = []
+    parts << confs.map { |c| X.confounder_text(c) }.join(", ") unless confs.empty?
+    parts << "a declared series break on #{row['phase']}: #{brks.map { |b| X.break_text(b) }.join(', ')}" unless brks.empty?
+    warn "experiment: warning: #{row['id']} will read confounded: #{parts.join('; ')} " \
          "inside its window (the before-set's first landing to the after-set's last)"
   rescue StandardError => e
     # The row is already appended: nothing here may change record's exit.
@@ -750,6 +782,65 @@ module Confound
   end
 end
 
+# ── MANAGER: declared series breaks (DND-1810) ───────────────────────────────
+
+# The registry of landings that changed how a phase is measured
+# (ai/config/lead-time-series-breaks.json, the one place a break is
+# declared). Each break's commit must be on the harness repo's main; its
+# time is the committer time of its first-parent landing there, the clock
+# the trailer confound reads. A registry that cannot be read, is not JSON,
+# is malformed, or names a commit that is not on main is "could not judge"
+# (exit 3), never "no break": a wrongly computed key and a registry that
+# declares nothing must not read the same.
+module Breaks
+  module_function
+
+  ENV_KEY = "LEAD_TIME_SERIES_BREAKS"
+  DEFAULT = File.join(AI_DIR, "config", "lead-time-series-breaks.json")
+  FIX = "restore ai/config/lead-time-series-breaks.json from main (git show origin/main:ai/config/lead-time-series-breaks.json), " \
+        "or correct the row it names; #{ENV_KEY} overrides the path. Nothing was judged or written"
+
+  def path(env) = env[ENV_KEY].to_s.empty? ? DEFAULT : env[ENV_KEY].to_s
+
+  # -> [breaks with "at", path]
+  def load(env, repo, res)
+    file = path(env)
+    breaks, why = X.series_breaks(parse(file))
+    refuse(3, "could not judge: the series-break registry #{file} is malformed: #{why}; this is not \"no break\"", FIX) if why
+
+    name, harness = Confound.paths(repo, res).first
+    [breaks.map { |b| b.merge("at" => landed!(file, name, harness, b)) }, file]
+  end
+
+  def parse(file)
+    JSON.parse(File.read(file, encoding: "UTF-8"))
+  rescue SystemCallError => e
+    refuse(3, "could not judge: the series-break registry #{file} cannot be read (#{e.class.name.split('::').last}); " \
+              "this is not \"no break\"", FIX)
+  rescue JSON::ParserError => e
+    refuse(3, "could not judge: the series-break registry #{file} is not JSON (#{e.message.lines.first.to_s.strip[0, 120]})", FIX)
+  end
+
+  # The committer time of the break's first-parent landing on the harness
+  # repo's main, RFC 3339.
+  def landed!(file, name, harness, b)
+    what = "series break #{b['ticket']} #{short(b['commit'])} in #{file}"
+    on = XG.on_main(harness, b["commit"])
+    refuse(3, "could not judge: could not look whether #{what} is on #{name}'s main: #{on.reason}", FIX) if on.could_not_look?
+    unless on.items.first
+      refuse(3, "could not judge: #{what} is not on #{name}'s main (a wrongly computed key: a pre-rebase SHA, a typo, " \
+                "or a main this clone has not fetched)",
+             "set its commit to the SHA as landed (git log origin/main), or fetch main; nothing was judged or written")
+    end
+    src = XG.landed_at(harness, b["commit"])
+    refuse(3, "could not judge: could not look when #{what} landed on #{name}'s main: #{src.reason}", FIX) if src.could_not_look?
+    landing = src.items.first
+    refuse(3, "could not judge: #{what} has no first-parent landing on #{name}'s main", FIX) unless landing
+
+    landing.last.utc.iso8601
+  end
+end
+
 # ── MANAGER: judge ───────────────────────────────────────────────────────────
 
 module Judge
@@ -770,10 +861,15 @@ module Judge
     all = Setup.experiments(Setup.read_store(store))
     mine = all.select { |e| e["repo"] == repo.name }
     shas = all.map { |e| e["commit"] }
+    # Before any write: a registry it cannot read refuses (exit 3).
+    breaks, breaks_path = Breaks.load(env, repo, res)
     # [experiment, verdict, phase context (check metrics only; printed, never judged)]
     pending = mine.select { |e| e["status"] == "pending" }.map { |e| Live.upgrade(e, state, repo, res) }
-    results = pending.map { |e| [e, *verdict(e, rows, repo, shas, now, res)] }
-    results += mine.select { |e| e["status"] == "revert" }.map { |e| [e, owed(e, repo, res), nil] }
+    results = pending.map { |e| [e, *verdict(e, rows, repo, shas, now, res, breaks)] }
+    results += mine.select { |e| e["status"] == "revert" }.map { |e| [e, owed(e, repo, res, rows, breaks), nil] }
+    # A settled keep re-checked for a break declared after it (DND-1810):
+    # listed only when one confounds it.
+    results += mine.select { |e| e["status"] == "keep" }.filter_map { |e| (v = broken(e, rows, breaks)) && [e, v, nil] }
     # + the HELD explanation (DND-1549), nil unless a revert verdict is held
     harness = harness_name
     results = results.map { |e, v, ctx| held(e, v, ctx, repo, res, harness: harness) }
@@ -786,9 +882,23 @@ module Judge
     puts "experiment judge: #{repo.name}: #{results.size} judged (#{tally}); #{appended.size} status row(s) appended; " \
          "#{rows.size} landing(s) in the ledger; #{declined} declined (a revert the hard constraint forbids; not judged); " \
          "#{held_count} held (a revert whose plain git revert would delete test additions, or could not tell); " \
-         "#{judged.count('confounded')} confounded (another experiment's change on the same phase landed inside the window; " \
-         "treated as inconclusive)"
+         "#{judged.count('confounded')} confounded (another experiment's change, or a declared series break, on the same " \
+         "phase landed inside the window; treated as inconclusive); #{breaks.size} series break(s) declared in #{breaks_path}"
     0
+  end
+
+  # A settled verdict (keep, or an owed revert) whose window, recomputed from
+  # the ledger, holds a declared break on its phase: the confounded verdict,
+  # naming the break and what it read. nil when none does, or when its
+  # landing is not in the ledger.
+  def broken(exp, rows, breaks)
+    split = X.split(exp, rows)
+    return nil unless split
+
+    metric = X::Metric.parse(exp["metric"], phase: exp["phase"])
+    from, to = X.window(X.sides(rows, metric: metric, exclude: split[:exclude], boundary: split[:boundary]), split[:boundary])
+    found = X.breaks_inside(exp, breaks, from: from, to: to)
+    found.empty? ? nil : X.confound(X.last_verdict(exp), [], phase: exp["phase"], breaks: found)
   end
 
   # -> [exp, verdict, ctx, why, note]. A revert verdict (fresh or owed) whose
@@ -879,7 +989,7 @@ module Judge
 
   # -> [verdict, context]. context: for a check metric, the phase's own
   # stats over the same two sides, else nil. It is printed, never judged.
-  def verdict(exp, rows, repo, shas, now, res)
+  def verdict(exp, rows, repo, shas, now, res, breaks)
     split = X.split(exp, rows)
     return [unlanded(exp, repo, now), nil] unless split
 
@@ -897,8 +1007,10 @@ module Judge
     # Foreign landings the metric left out (DND-1628): counted, named, never judged.
     fx = X.foreign_excluded(rows, metric: metric, exclude: split[:exclude], from: from, to: to)
     v = v.merge("foreign_excluded" => fx) unless fx.zero?
-    # Instrumentation is never confounded (X.confounders), so its logs are not read.
-    v = X.confound(v, Confound.find(exp, repo, res, from, to), phase: exp["phase"]) unless exp["kind"] == "instrumentation"
+    # Instrumentation is never confounded by a trailer (X.confounders), so
+    # its logs are not read; a declared series break confounds every kind.
+    confs = exp["kind"] == "instrumentation" ? [] : Confound.find(exp, repo, res, from, to)
+    v = X.confound(v, confs, phase: exp["phase"], breaks: X.breaks_inside(exp, breaks, from: from, to: to))
     [v, metric.check? ? X.phase_context(s[:before], s[:after], phase: exp["phase"]) : nil]
   end
 
@@ -914,14 +1026,19 @@ module Judge
   end
 
   # A revert verdict owes a revert until main carries one: the change
-  # repo's main for a cross-repo experiment (DND-1528).
-  def owed(exp, repo, res)
+  # repo's main for a cross-repo experiment (DND-1528). One not yet landed
+  # whose window holds a declared series break (DND-1810) is confounded
+  # instead: the verdict compared two measurements, so it is never acted on.
+  def owed(exp, repo, res, rows, breaks)
     src = in_change_repo(exp, repo, res) { |path| XG.reverted?(path, exp["commit"]) }
     main = X.cross_repo?(exp) ? "#{exp['change_repo']}'s main" : "main"
     last = exp["last"] || {}
     keep = { "before" => last["before"], "after" => last["after"], "guards" => last["guards"] }
     if !src.could_not_look? && src.items.first
       return { "status" => "reverted", "reason" => "#{main} carries a revert of #{short(exp['commit'])}" }.merge(keep)
+    end
+    if (v = broken(exp, rows, breaks))
+      return v
     end
 
     seen = src.could_not_look? ? "could not look for it: #{src.reason}" : "#{main} has no revert of it yet"
@@ -998,8 +1115,10 @@ module List
     xtext = X.cross_text(e)
     confs = e.dig("last", "confounders")
     ctext = confs.is_a?(Array) && !confs.empty? ? " | confounders: #{confs.map { |c| X.confounder_text(c) }.join(', ')}" : ""
+    brks = e.dig("last", "breaks")
+    btext = brks.is_a?(Array) && !brks.empty? ? " | breaks: #{brks.map { |b| X.break_text(b) }.join(', ')}" : ""
     "experiment: #{e['id']} #{e['status'].upcase}#{tag} kind=#{e['kind']} metric=#{e['metric']}#{xtext ? " #{xtext}" : ''} " \
-      "recorded #{e['recorded_at']} | baseline #{base}#{e['last'] ? " | #{e['last']['reason']}#{was}" : ''}#{ctext}"
+      "recorded #{e['recorded_at']} | baseline #{base}#{e['last'] ? " | #{e['last']['reason']}#{was}" : ''}#{ctext}#{btext}"
   end
 end
 
@@ -1062,8 +1181,9 @@ module Settling
     phase = opts["--phase"]
     usage { X.settling_metric(phase, metric) } # before any read
     rows = Setup.ledger_rows(Setup.state_dir(env), repo.name)
+    breaks, = Breaks.load(env, repo, res)
     from, = X.settling_window(rows, phase: phase, metric: metric, now: now)
-    s = X.settling(rows, Confound.commits(repo, res, from), phase: phase, metric: metric, now: now)
+    s = X.settling(rows, Confound.commits(repo, res, from), phase: phase, metric: metric, now: now, breaks: breaks)
     puts opts["--json"] ? JSON.generate({ "repo" => repo.name, "now" => now.utc.iso8601 }.merge(s)) : X.settling_text(repo.name, s)
     0
   end

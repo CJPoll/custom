@@ -92,6 +92,12 @@ HYP="${TMP}/hypothesis.txt"
 printf 'Caching the gate fixture should cut verify by a fifth.\n' >"${HYP}"
 
 export LEAD_TIME_STATE_DIR="${STATE}" ATHENA_LEADTIME_CONFIG="${CONFIG}" LEAD_TIME_EXPERIMENT_NOW="2026-09-21T12:00:00Z"
+# The series-break registry (DND-1810). The tracked one names real custom
+# SHAs this fixture repo does not have, so every case reads an empty one
+# unless it names its own (the *series breaks* section).
+REG0="${TMP}/breaks-none.json"
+printf '%s\n' '{"schema":1,"breaks":[]}' >"${REG0}"
+export LEAD_TIME_SERIES_BREAKS="${REG0}"
 
 run() { "${BIN}" "$@" >"${TMP}/out" 2>"${TMP}/err"; echo $?; }
 out() { cat "${TMP}/out"; }
@@ -734,8 +740,10 @@ eq "no ledger: exit 3" "$(LEAD_TIME_STATE_DIR="${TMP}/no-state" run settling --r
 has "... could not look, with the ingest Fix" "$(err)" "lead-time-phases --ingest"
 eq "settling with no --phase: exit 2" "$(run settling --repo custom)" "2"
 has "... with Fix:" "$(err)" "Fix:"
-eq "settling --metric na_share: exit 2 (instrumentation never waits)" "$(sc1 run settling --repo custom --phase verify --metric na_share)" "2"
-has "... saying why, with Fix:" "$(err)" "never confounded"
+# DND-1810: an instrumentation change is checked for declared series breaks
+# only; the change trailers CO and CN in this window hold no instrumentation.
+eq "settling --metric na_share: exit 0 (breaks only, DND-1810)" "$(sc1 run settling --repo custom --phase verify --metric na_share)" "0"
+has "... CLEAN: a change trailer never holds instrumentation" "$(out)" "experiment settling: custom verify na_share CLEAN"
 eq "settling on a watch repo: exit 2" "$(run settling --repo gen_saas --phase verify)" "2"
 # record's warning reads the same logs; one it cannot read leaves the record
 # standing (exit 0, the row written) and says the baseline is unknown. Here
@@ -885,6 +893,126 @@ eq "an unconfigured repo is a refusal (exit 2), not a skip" "$(LEAD_TIME_STATE_D
 lacks "... and is not called skipped" "$(err)" "skipped on this machine"
 eq "the retired LEAD_TIME_PHASES_CONFIG seam is refused, never ignored" "$(LEAD_TIME_PHASES_CONFIG="${TMP}/gone.json" run judge --repo custom)" "2"
 has "... naming it" "$(err)" "LEAD_TIME_PHASES_CONFIG is retired"
+
+# ── declared series breaks (DND-1810) ───────────────────────────────────────
+# A change to how a phase is measured lands as a declared break: before and
+# after it the ledger measures the phase by different rules. Inside an
+# experiment's window that confounds it, change and instrumentation alike.
+# November: no other fixture commit or ledger lands near it.
+echo "== series breaks"
+BRK="$(commit 2026-11-10T05:30:00Z "fixture: a change to how verify and implement are measured")"
+BRKOLD="$(commit 2026-11-09T00:00:00Z "fixture: an older verify measurement change")"
+SBX="$(commit 2026-11-10T11:00:00Z "fixture: a verify change and an implement instrumentation" "$(tr "custom verify phase" "custom implement na_share")")"
+# breaks FILE TICKET SHA PHASES-JSON [TICKET SHA PHASES-JSON]...
+breaks() {
+  local out="$1" sep="" body=""
+  shift
+  while [ "$#" -ge 3 ]; do
+    body="${body}${sep}{\"ticket\":\"$1\",\"commit\":\"$2\",\"phases\":$3,\"what\":\"fixture: a measurement change\"}"
+    sep=","
+    shift 3
+  done
+  printf '{"schema":1,"breaks":[%s]}\n' "${body}" >"${out}"
+}
+REGV="${TMP}/breaks-verify.json"   # BRK inside the window, on verify and implement
+REGQ="${TMP}/breaks-elsewhere.json" # BRK on queue only; BRKOLD on verify, before the window
+breaks "${REGV}" DND-9810 "${BRK}" '["verify","implement"]'
+breaks "${REGQ}" DND-9811 "${BRK}" '["queue"]' DND-9812 "${BRKOLD}" '["verify"]'
+SBID="custom:verify:${SBX:0:12}"
+SIID="custom:implement:${SBX:0:12}"
+# sb STATE REGISTRY CMD...: one case's state dir and registry, noon after the landing
+sb() { local st="$1" reg="$2"; shift 2; LEAD_TIME_STATE_DIR="${st}" LEAD_TIME_SERIES_BREAKS="${reg}" LEAD_TIME_EXPERIMENT_NOW=2026-11-11T12:00:00Z "$@"; }
+sbrec() { sb "$1" "$2" run record --repo custom --phase "$3" --metric "$4" --commit "${SBX}" --kind "$5" --hypothesis-file "${HYP}"; }
+# Hourly landings on the 10th: before 01:00-10:00, SBX at 11:00, after 12:00-21:00.
+STATESB1="${TMP}/statesb1"
+mkdir -p "${STATESB1}"
+/usr/bin/ruby "${HERE}/make_ledger.rb" "${STATESB1}/ledger.jsonl" "${SBX}" 500 2026-11-10T00:00:00Z
+eq "record a verify change whose window holds a declared break: exit 0" "$(sbrec "${STATESB1}" "${REGV}" verify phase change)" "0"
+has "... record warns that judge will read it confounded, naming the break" "$(err)" \
+  "warning: ${SBID} will read confounded: a declared series break on verify: DND-9810 ${BRK:0:12}"
+eq "record an implement instrumentation in the same window: exit 0" "$(sbrec "${STATESB1}" "${REGV}" implement na_share instrumentation)" "0"
+has "... record warns for instrumentation too" "$(err)" "warning: ${SIID} will read confounded: a declared series break on implement: DND-9810"
+eq "judge: exit 0" "$(sb "${STATESB1}" "${REGV}" run judge --repo custom)" "0"
+has "regression: a change straddling a declared break on its phase: CONFOUNDED" "$(out)" "${SBID} CONFOUNDED kind=change"
+has "... naming the break, its phases and when it landed" "$(out)" \
+  "a declared series break on verify landed inside the window: DND-9810 ${BRK:0:12} (verify/implement, 2026-11-10T05:30:00Z)"
+has "... and what it would have read (never keep)" "$(out)" "unconfounded it read keep"
+has "regression: an instrumentation experiment straddling one: CONFOUNDED" "$(out)" "${SIID} CONFOUNDED kind=instrumentation"
+has "... naming the break on its phase" "$(out)" "a declared series break on implement landed inside the window: DND-9810"
+has "... both counted confounded" "$(out)" "2 confounded"
+has "... the summary names the registry it read and how many breaks it declares" "$(out)" "1 series break(s) declared in ${REGV}"
+has "the status row records the break" "$(grep "\"id\":\"${SBID}\"" "${STATESB1}/experiments.jsonl" | grep '"status":"confounded"')" \
+  "\"breaks\":[{\"ticket\":\"DND-9810\",\"commit\":\"${BRK}\""
+eq "list: exit 0" "$(sb "${STATESB1}" "${REGV}" run list --repo custom)" "0"
+has "list shows the break" "$(out)" "breaks: DND-9810 ${BRK:0:12}"
+
+STATESB2="${TMP}/statesb2"
+mkdir -p "${STATESB2}"
+/usr/bin/ruby "${HERE}/make_ledger.rb" "${STATESB2}/ledger.jsonl" "${SBX}" 500 2026-11-10T00:00:00Z
+sbrec "${STATESB2}" "${REGQ}" verify phase change >/dev/null
+sbrec "${STATESB2}" "${REGQ}" implement na_share instrumentation >/dev/null
+lacks "record warns of no break when none is on its phase inside the window" "$(err)" "will read confounded"
+eq "judge with breaks on another phase and before the window: exit 0" "$(sb "${STATESB2}" "${REGQ}" run judge --repo custom)" "0"
+has "an experiment with no break on its phase inside is unchanged: KEEP" "$(out)" "${SBID} KEEP"
+has "... the instrumentation too" "$(out)" "${SIID} KEEP"
+has "... 0 confounded" "$(out)" "0 confounded"
+has "... and the registry was read, never skipped: 2 breaks declared" "$(out)" "2 series break(s) declared in ${REGQ}"
+eq "the same keeps re-judged once the break is declared (a registry gaining a row): exit 0" "$(sb "${STATESB2}" "${REGV}" run judge --repo custom)" "0"
+has "a settled keep whose window straddles the break becomes CONFOUNDED" "$(out)" "${SBID} CONFOUNDED"
+has "... the instrumentation keep too" "$(out)" "${SIID} CONFOUNDED"
+has "... saying it read keep" "$(out)" "unconfounded it read keep"
+has "... appended through judge's own write, never a hand edit" "$(out)" "2 status row(s) appended"
+eq "... the latest status is confounded" "$(sb "${STATESB2}" "${REGV}" run list --repo custom >/dev/null; grep -c "${SBID} CONFOUNDED" "${TMP}/out")" "1"
+eq "re-judge: exit 0" "$(sb "${STATESB2}" "${REGV}" run judge --repo custom)" "0"
+has "... confounded is terminal: nothing more is appended" "$(out)" "0 status row(s) appended"
+
+STATESB3="${TMP}/statesb3"
+mkdir -p "${STATESB3}"
+/usr/bin/ruby "${HERE}/make_ledger.rb" "${STATESB3}/ledger.jsonl" "${SBX}" 700 2026-11-10T00:00:00Z
+sbrec "${STATESB3}" "${REGQ}" verify phase change >/dev/null
+eq "a verify change that slowed it, no break on verify inside: exit 0" "$(sb "${STATESB3}" "${REGQ}" run judge --repo custom)" "0"
+has "... REVERT" "$(out)" "${SBID} REVERT"
+eq "the owed revert re-judged once the break is declared: exit 0" "$(sb "${STATESB3}" "${REGV}" run judge --repo custom)" "0"
+has "an owed revert whose window straddles the break becomes CONFOUNDED, never acted on" "$(out)" "${SBID} CONFOUNDED"
+has "... saying it read revert" "$(out)" "unconfounded it read revert"
+
+STATESB4="${TMP}/statesb4"
+mkdir -p "${STATESB4}"
+/usr/bin/ruby "${HERE}/make_ledger.rb" "${STATESB4}/ledger.jsonl" "${SBX}" 500 2026-11-10T00:00:00Z
+sbrec "${STATESB4}" "${REGQ}" verify phase change >/dev/null
+eq "a missing registry: judge exits 3" "$(sb "${STATESB4}" "${TMP}/no-such-breaks.json" run judge --repo custom)" "3"
+has "... could not judge, never no break" "$(err)" "could not judge"
+has "... with Fix:" "$(err)" "Fix:"
+eq "... nothing written" "$(statuses "${STATESB4}/experiments.jsonl")" "0"
+printf '{"schema":1,"breaks":[' >"${TMP}/breaks-torn.json"
+eq "a registry that is not JSON: exit 3" "$(sb "${STATESB4}" "${TMP}/breaks-torn.json" run judge --repo custom)" "3"
+has "... saying it cannot be parsed" "$(err)" "is not JSON"
+breaks "${TMP}/breaks-badphase.json" DND-9813 "${BRK}" '["verfy"]'
+eq "a break naming an unknown phase: exit 3" "$(sb "${STATESB4}" "${TMP}/breaks-badphase.json" run judge --repo custom)" "3"
+has "... naming the phase" "$(err)" "unknown phase \"verfy\""
+breaks "${TMP}/breaks-nevermain.json" DND-9814 "${NEVER}" '["verify"]'
+eq "a break whose commit is not on main (a wrongly computed key): exit 3" "$(sb "${STATESB4}" "${TMP}/breaks-nevermain.json" run judge --repo custom)" "3"
+has "... naming the break" "$(err)" "DND-9814"
+eq "... still nothing written" "$(statuses "${STATESB4}/experiments.jsonl")" "0"
+eq "record with a missing registry still records (exit 0)" "$(LEAD_TIME_STATE_DIR="${STATESB4}" LEAD_TIME_SERIES_BREAKS="${TMP}/no-such-breaks.json" LEAD_TIME_EXPERIMENT_NOW=2026-11-11T12:00:00Z run record --repo custom --phase implement --metric na_share --commit "${SBX}" --kind instrumentation --hypothesis-file "${HYP}")" "0"
+has "... and says whether its baseline is clean is unknown" "$(err)" "whether its baseline is clean is unknown"
+
+# settling reads the same registry. STATESB1's ledger measures implement only
+# after SBX (12:00-21:00 on the 10th), so at midnight that is the would-be
+# before-set. BRKS (15:30) sits inside it; no implement change trailer does
+# (SBX's implement trailer is na_share, and at 11:00 it is outside anyway).
+BRKS="$(commit 2026-11-10T15:30:00Z "fixture: an implement measurement change")"
+REGS="${TMP}/breaks-implement.json"
+breaks "${REGS}" DND-9815 "${BRKS}" '["implement"]'
+sset() { LEAD_TIME_STATE_DIR="${STATESB1}" LEAD_TIME_SERIES_BREAKS="$1" LEAD_TIME_EXPERIMENT_NOW=2026-11-11T00:00:00Z run settling --repo custom --phase implement; }
+eq "settling on implement with the break declared: exit 0" "$(sset "${REGS}")" "0"
+has "... SETTLING, naming the break" "$(out)" "experiment settling: custom implement phase SETTLING"
+has "... the break by ticket" "$(out)" "series break(s) in the window: DND-9815 ${BRKS:0:12}"
+has "... and the landings still needed after it (16:00-21:00 follow it)" "$(out)" "6 comparable landing(s) after ${BRKS:0:12}: clean after 4 more"
+eq "settling on implement with no break on it: exit 0" "$(sset "${REGQ}")" "0"
+has "... CLEAN" "$(out)" "experiment settling: custom implement phase CLEAN"
+eq "settling with a missing registry: exit 3, never CLEAN" "$(sset "${TMP}/no-such-breaks.json")" "3"
+has "... could not judge" "$(err)" "could not judge"
 
 echo
 echo "lead-time-improve self-test: ${PASS} passed, ${FAIL} failed"

@@ -350,7 +350,25 @@ Each `improve`-mode run does these steps in order:
    An experiment whose window straddles this landing is not comparable
    across it, and `experiment judge` does not detect that (the same gap as
    DND-1501's `phase_flow` break). Until the judge treats a series break
-   as confounding, judge such an experiment inconclusive by hand. A push
+   as confounding, judge such an experiment inconclusive by hand.
+
+   **Later (2026-10-02, DND-1810):** the judge treats a series break as
+   confounding, so no experiment is judged by hand. Every break is declared
+   in `ai/config/lead-time-series-breaks.json`, the one place to declare
+   one: a row of `ticket`, `commit` (as landed on custom's main), `phases`
+   and `what`. DND-1501 (verify, queue, merge), DND-1809 (integrate,
+   verify, queue, merge) and DND-1819 (verify, implement) are its first
+   rows. A break on an experiment's phase inside its window (the
+   before-set's first landing to the after-set's last) makes the verdict
+   `confounded`, for instrumentation too: the instrumentation exemption
+   says an instrumentation change moves no duration, but a break moves
+   what n/a means, which is what `na_share` compares. Judge re-checks a
+   settled keep and an owed revert, so a row declared after a verdict
+   still confounds it. A registry it cannot read or judge is exit 3,
+   never "no break". How to declare one: `athena:lead-time-improve` →
+   *Declaring a series break*.
+
+   A push
    row ingested from here on carries `gated_head_source` or
    `gated_head_miss`; a push row from before carries neither, which is how
    the two sides are told apart. Measured on a scratch
@@ -619,6 +637,7 @@ runners will share into `scripts/lib/`.
 | What | Where |
 |---|---|
 | Repo list and modes | `ai/config/lead-time-repos.json` |
+| Series breaks (DND-1810) | `ai/config/lead-time-series-breaks.json` |
 | Telemetry schema and rules | `ai/contracts/athena-telemetry.md`, `ai/telemetry/events.json` |
 | Procedure | `ai/skills/athena:lead-time-improve/SKILL.md` |
 | Runner, installer | `scripts/athena-leadtime-run.sh`, `scripts/setup-leadtime-cron` |

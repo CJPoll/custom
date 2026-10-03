@@ -38,7 +38,16 @@
 #     after-set's last), makes the verdict `confounded` (DND-1529): recorded,
 #     terminal, treated as inconclusive. It never becomes keep or revert. The
 #     store is machine-local; the trailer is what another machine can see.
-#     Instrumentation is exempt both ways, as it is from the blocker rule.
+#     Instrumentation is exempt both ways, as it is from the blocker rule;
+#     that exemption covers trailers only (a series break, below, still
+#     confounds it).
+#   * a declared series break (DND-1810): a landing that changed how a phase
+#     is measured, declared in ai/config/lead-time-series-breaks.json. One on
+#     the experiment's phase inside the same window makes the verdict
+#     `confounded` too, for every kind: instrumentation is NOT exempt, since
+#     a break changes what n/a means. Judge also re-checks a settled keep
+#     and an owed revert, so a break declared after the verdict still
+#     confounds it (series_breaks, breaks_inside).
 #   * foreign rows (DND-1628): a landing worked on another machine (origin
 #     foreign, DND-1531) has its five phases null by construction, so a
 #     `phase` or `na_share` comparison leaves it out of both sides, by
@@ -889,7 +898,8 @@ module LeadTimeExperiment
   # It carries the blocker rule's exemption: instrumentation does not move a
   # duration, so an instrumentation trailer (metric na_share, which
   # kind_error ties to instrumentation) confounds nothing, and an
-  # instrumentation experiment is never confounded. Unlike the blocker,
+  # instrumentation experiment is never confounded by a trailer (a declared
+  # series break still confounds it: breaks_inside, DND-1810). Unlike the blocker,
   # which only refuses overlapping PENDING changes, the window reaches back
   # over the whole before-set: a settled predecessor's change, or its revert,
   # that landed inside it confounds too (its baseline straddles that change).
@@ -912,16 +922,97 @@ module LeadTimeExperiment
 
   def confounder_text(c) = "#{c['commit'].to_s[0, 12]} (#{c['repo']} #{c['phase']} #{c['metric']}, #{c['at']})"
 
-  # The verdict once confounders are known: unchanged when there are none,
-  # else `confounded`, naming each other commit and what the verdict would
-  # have been. Never keep, never revert.
-  def confound(v, confounders, phase:)
-    return v if confounders.empty?
+  # ── declared series breaks (DND-1810) ────────────────────────────────────
+  # A landing that changed how a phase is MEASURED (the ledger's rules, not
+  # the work): rows before it and rows after it measure the phase by
+  # different rules, so a window straddling it compares two measurements.
+  # The trailer confound cannot see one (a break is not an experiment and
+  # carries no trailer), and the instrumentation exemption does not cover
+  # one: that exemption says an instrumentation change does not move a
+  # duration, while a break moves what n/a itself means, which is exactly
+  # what na_share compares. So a break confounds every kind.
+  #
+  # The one home is the registry ai/config/lead-time-series-breaks.json:
+  #   {"schema": 1, "breaks": [{"ticket", "commit" (40-hex, as landed on the
+  #    harness repo's main), "phases": [...], "what"}]}
+  # The manager validates it here, checks each commit is on main and adds
+  # "at" (its first-parent landing's committer time). Unreadable or
+  # malformed is could-not-judge, never "no break".
+  BREAKS_SCHEMA = 1
+  BREAK_KEYS = %w[ticket commit phases what].freeze
 
-    reason = "another experiment's change on #{phase} landed inside the window: " \
-             "#{confounders.map { |c| confounder_text(c) }.join(', ')}; treated as inconclusive " \
-             "(unconfounded it read #{v['status']}: #{v['reason']})"
-    v.merge("status" => "confounded", "reason" => reason, "confounders" => confounders)
+  # -> [breaks, nil] or [nil, why]. Each break keeps BREAK_KEYS, in order.
+  def series_breaks(data)
+    return [nil, "the registry is not a JSON object"] unless data.is_a?(Hash)
+    return [nil, "schema #{data['schema'].inspect} is not #{BREAKS_SCHEMA}"] unless data["schema"] == BREAKS_SCHEMA
+    return [nil, "no breaks list"] unless data["breaks"].is_a?(Array)
+
+    out = []
+    data["breaks"].each_with_index do |b, i|
+      why = break_error(b)
+      return [nil, "break #{i + 1}#{b.is_a?(Hash) && b['ticket'].is_a?(String) ? " (#{b['ticket']})" : ''}: #{why}"] if why
+
+      out << b.slice(*BREAK_KEYS)
+    end
+    [out, nil]
+  end
+
+  def break_error(b)
+    return "not an object" unless b.is_a?(Hash)
+    return "ticket is not a non-empty string" unless b["ticket"].is_a?(String) && !b["ticket"].strip.empty?
+    return "commit #{b['commit'].inspect} is not a 40-hex SHA" unless SHA_RE.match?(b["commit"].to_s)
+    return "what is not a non-empty string" unless b["what"].is_a?(String) && !b["what"].strip.empty?
+
+    phases = b["phases"]
+    return "phases is not a non-empty list" unless phases.is_a?(Array) && !phases.empty?
+
+    bad = phases.reject { |p| EXPERIMENT_PHASES.include?(p) }
+    return "unknown phase #{bad.first.inspect} (known: #{EXPERIMENT_PHASES.join(', ')})" unless bad.empty?
+
+    nil
+  end
+
+  # The breaks on the experiment's phase that landed inside [from, to],
+  # edges included, sorted by [at, commit]. The experiment's own commit is
+  # not a break against itself. Every kind, instrumentation included.
+  # breaks: series_breaks' output with "at" (RFC 3339) added.
+  def breaks_inside(exp, breaks, from:, to:)
+    breaks.select { |b| b["phases"].include?(exp["phase"]) && b["commit"] != exp["commit"] }
+          .select { |b| (t = LeadTimePhases::Util.time(b["at"])) && t >= from && t <= to }
+          .sort_by { |b| [b["at"], b["commit"]] }
+  end
+
+  def break_text(b) = "#{b['ticket']} #{b['commit'].to_s[0, 12]} (#{b['phases'].join('/')}, #{b['at']})"
+
+  # The verdict once confounders and breaks are known: unchanged when there
+  # are neither, else `confounded`, naming each other commit and each break
+  # and what the verdict would have been. Never keep, never revert.
+  def confound(v, confounders, phase:, breaks: [])
+    return v if confounders.empty? && breaks.empty?
+
+    parts = []
+    unless confounders.empty?
+      parts << "another experiment's change on #{phase} landed inside the window: " \
+               "#{confounders.map { |c| confounder_text(c) }.join(', ')}"
+    end
+    unless breaks.empty?
+      parts << "a declared series break on #{phase} landed inside the window: #{breaks.map { |b| break_text(b) }.join(', ')}"
+    end
+    reason = "#{parts.join('; ')}; treated as inconclusive (unconfounded it read #{v['status']}: #{v['reason']})"
+    out = v.merge("status" => "confounded", "reason" => reason)
+    out["confounders"] = confounders unless confounders.empty?
+    out["breaks"] = breaks unless breaks.empty?
+    out
+  end
+
+  # Settled verdicts judge re-checks for a break declared after them: a
+  # keep (a gain the loop builds on) and an owed revert (an action not yet
+  # taken). Either whose window straddles a break becomes confounded.
+  RECHECKED = %w[keep revert].freeze
+
+  # The verdict an experiment's last status row carries, as judge wrote it.
+  def last_verdict(exp)
+    (exp["last"] || {}).reject { |k, _| %w[type schema id judged_at].include?(k) }
   end
 
   # ── settling: a clean baseline before a change lands (DND-1622) ──────────
@@ -943,29 +1034,27 @@ module LeadTimeExperiment
   #   SETTLING  a full before-set with a confounder: clean after `needed`
   #             more comparable landings follow the latest one
   #   CLEAN     a full before-set and no confounder
-  # Raises UsageError for an unknown phase or metric, and for na_share: an
-  # instrumentation change is never confounded, so it never waits.
+  # Raises UsageError for an unknown phase or metric. On na_share (an
+  # instrumentation change) trailers confound nothing, so only a declared
+  # series break can make it wait (DND-1810).
+  # breaks: series_breaks' output with "at" added (the manager's), as judge
+  # takes them.
   SETTLING_SHA = "0" * 40
 
-  def settling(rows, commits, phase:, metric:, now:)
+  def settling(rows, commits, phase:, metric:, now:, breaks: [])
     m = settling_metric(phase, metric)
     s = sides(rows, metric: m, exclude: [], boundary: now)
     from, to = window(s, now)
-    # A synthetic change on the phase, landed at now: no commit of its own.
-    probe = { "kind" => "change", "phase" => phase, "commit" => SETTLING_SHA }
+    # A synthetic change (or instrumentation) on the phase, landed at now:
+    # no commit of its own.
+    probe = { "kind" => m.na_share? ? "instrumentation" : "change", "phase" => phase, "commit" => SETTLING_SHA }
     found = confounders(probe, commits, from: from, to: to)
-    settling_result(s, found, from, to, m)
+    settling_result(s, found.merge(breaks: breaks_inside(probe, breaks, from: from, to: to)), from, to, m)
   end
 
-  # The metric settling checks: a change's. Raises UsageError for an unknown
-  # phase or metric, and for na_share.
-  def settling_metric(phase, metric)
-    m = Metric.parse(metric, phase: phase)
-    return m unless m.na_share?
-
-    raise UsageError, "settling checks a change's baseline; an instrumentation change (#{NA_SHARE}) is never " \
-                      "confounded, so it never waits"
-  end
+  # The metric settling checks. Raises UsageError for an unknown phase or
+  # metric.
+  def settling_metric(phase, metric) = Metric.parse(metric, phase: phase)
 
   # [from, to]: the confound window settling reads, which depends on the
   # ledger alone, so a caller knows how far back to read the logs.
@@ -976,17 +1065,20 @@ module LeadTimeExperiment
   def settling_result(sides, found, from, to, metric)
     before = sides[:before]
     confs = found[:confounders]
+    brks = found[:breaks] || []
     n = before ? before.size : 0
-    # confounders returns them sorted by [at, commit], whatever order the
-    # logs gave (newest-first git log, harness repo then measured repo).
-    latest = confs.last
+    # confounders and breaks_inside return theirs sorted by [at, commit],
+    # whatever order the logs gave (newest-first git log, harness repo then
+    # measured repo); the latest of either decides.
+    latest = (confs + brks).max_by { |c| [c["at"], c["commit"]] }
     after_latest = latest ? (before || []).count { |r| at(r) > Time.iso8601(latest["at"]) } : n
+    hit = !(confs.empty? && brks.empty?)
     verdict = if n < K then "SHORT"
-              elsif confs.empty? then "CLEAN"
+              elsif !hit then "CLEAN"
               else "SETTLING"
               end
-    { "verdict" => verdict, "phase" => metric.phase, "metric" => metric.name, "k" => K, "confounded" => !confs.empty?,
-      "confounders" => confs, "latest" => latest, "after_latest" => after_latest,
+    { "verdict" => verdict, "phase" => metric.phase, "metric" => metric.name, "k" => K, "confounded" => hit,
+      "confounders" => confs, "breaks" => brks, "latest" => latest, "after_latest" => after_latest,
       "needed" => latest ? K - after_latest : 0, "short_by" => K - n,
       "before" => before && { "n" => n, "from" => before.first["landed_at"], "to" => before.last["landed_at"] },
       "before_na" => sides[:before_na], "window" => [from.utc.iso8601, to.utc.iso8601],
@@ -999,17 +1091,23 @@ module LeadTimeExperiment
     head = "experiment settling: #{repo} #{s['phase']} #{s['metric']} #{s['verdict']}"
     base = s["before"] ? "before-set n=#{s['before']['n']} of K=#{s['k']} (#{s['before']['from']} .. #{s['before']['to']})" : "no before-set (#{s['before_na']})"
     names = s["confounders"].map { |c| confounder_text(c) }.join(", ")
+    brks = s["breaks"] || []
+    bnames = brks.map { |b| break_text(b) }.join(", ")
+    inside = []
+    inside << "confounder(s) in the window: #{names}" unless s["confounders"].empty?
+    inside << "series break(s) in the window: #{bnames}" unless brks.empty?
     body = case s["verdict"]
-           when "CLEAN" then "#{base}; no same-phase trailer in the window #{s['window'].join(' .. ')}"
+           when "CLEAN"
+             "#{base}; no same-phase trailer and no declared series break on #{s['phase']} in the window " \
+               "#{s['window'].join(' .. ')}"
            when "SETTLING"
-             "#{base}; confounder(s) in the window: #{names}; #{s['after_latest']} comparable landing(s) after " \
-             "#{s['latest']['commit'][0, 12]}: clean after #{s['needed']} more comparable landings"
+             "#{base}; #{inside.join('; ')}; #{s['after_latest']} comparable landing(s) after " \
+               "#{s['latest']['commit'][0, 12]}: clean after #{s['needed']} more comparable landings"
            else
-             conf = if s["confounders"].empty? then ""
-                    else
-                      "; confounder(s) in the window, judge would read confounded: #{names}; clean after " \
-                        "#{s['needed']} more comparable landings"
-                    end
+             short = []
+             short << "confounder(s) in the window, judge would read confounded: #{names}" unless s["confounders"].empty?
+             short << "series break(s) in the window, judge would read confounded: #{bnames}" unless brks.empty?
+             conf = short.empty? ? "" : "; #{short.join('; ')}; clean after #{s['needed']} more comparable landings"
              "#{base}: #{s['short_by']} more comparable landing(s) to reach K; judge cannot settle a short " \
                "baseline but inconclusive#{conf}"
            end

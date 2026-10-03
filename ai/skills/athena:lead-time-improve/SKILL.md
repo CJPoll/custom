@@ -152,9 +152,13 @@ experiment it prints `keep`, `revert`, `pending`, `inconclusive` or
 - **keep, inconclusive:** journal them. An inconclusive experiment no longer
   blocks its phase.
 - **confounded** (DND-1529, *Landing*): another commit's trailer on the
-  same phase landed inside the window. Journal it with the commits it names.
-  It is treated as inconclusive: never keep, never revert, and it no longer
-  blocks its phase.
+  same phase landed inside the window, or a declared series break on the
+  phase did (DND-1810, *Declaring a series break*). Journal it with the
+  commits and breaks it names. It is treated as inconclusive: never keep,
+  never revert, and it no longer blocks its phase. A break confounds
+  instrumentation too, and judge re-checks a settled keep or an owed revert
+  against breaks declared after it. Judge exit 3 naming the series-break
+  registry is could not judge: journal it, and record no verdict by hand.
 - **pending** is never a gain. Never report it as one.
 
 ### 3. Summarize
@@ -251,7 +255,10 @@ Before a change on that phase, check its baseline is clean (DND-1622):
 metric the change will be recorded on. Judge's confound window reaches back
 over the whole before-set, so a same-phase trailer inside it (a settled
 predecessor's change, or its revert) confounds the next change with
-certainty. Read SETTLING as a pending change on the phase:
+certainty. A declared series break on the phase inside it does too
+(DND-1810), so settling names breaks as well. An instrumentation change
+checks `--metric na_share`, which reads breaks only: no trailer confounds
+instrumentation. Read SETTLING as a pending change on the phase:
 
 - **CLEAN**: the phase is a change target.
 - **SETTLING**: not a target this run. The action is `no action` ("<phase>
@@ -399,6 +406,20 @@ another experiment inside a pending change's window makes that change
 carries it: `leadtime-product cut --metric M` prints the line, and `pr`
 refuses a lane with no commit carrying it (the squash keeps commit
 messages, not the PR body).
+
+#### Declaring a series break
+
+A change to how the ledger MEASURES a phase (a lead-time-phases rule, an
+anchor, which landings it joins) is a series break: rows before and after it
+measure that phase by different rules, so no experiment is comparable across
+it. Its one home is `ai/config/lead-time-series-breaks.json` (DND-1810). Add
+one row: `ticket`, `commit` (the 40-hex SHA as it LANDED on custom's main),
+`phases` (every phase whose values change), and `what`. A landed SHA is known
+only after the landing, so the row lands in a follow-up commit: the change's
+report names the phases, and whoever lands the change adds the row. Judge
+then confounds every experiment whose window holds the break, including one
+it already settled keep or owes a revert on. A row whose commit is not on
+main, or that names an unknown phase, makes judge exit 3 until it is fixed.
 
 A gate or the judge refusing the change (a RED, a BLOCK) is journaled, and
 the run's action ends there. Never retry around a gate. On the cron path,

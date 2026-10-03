@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "breaks": [
+    {
+      "ticket": "DND-1501",
+      "commit": "a2d79e442f3c7c9e79f607baa979f4db7fe89147",
+      "phases": ["verify", "queue", "merge"],
+      "what": "with-critic phase_flow: verify, queue and merge are not comparable between rows with no phase_flow and with-critic rows after it"
+    },
+    {
+      "ticket": "DND-1809",
+      "commit": "c465983fced340452844756d6f264e8b25f6743f",
+      "phases": ["integrate", "verify", "queue", "merge"],
+      "what": "a clean-rebase push row joins its gated head: integrate and its with-critic flow are read on landings that read n/a and standalone before"
+    },
+    {
+      "ticket": "DND-1819",
+      "commit": "412ea7352ab783253ada696bc0cc5c25362eee5d",
+      "phases": ["verify", "implement"],
+      "what": "a landing whose first gate run is inside its final integration run: verify reads a measured 0 (was invalid) and implement ends at the run's start"
+    }
+  ]
+}

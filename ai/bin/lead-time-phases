@@ -89,6 +89,10 @@ HELP = <<~TXT
   merge. Rows are frozen at ingest, so a row ingested before DND-1501 keeps
   its old reading (no phase_flow), and verify, queue and merge are not
   comparable across that boundary; implement and integrate are.
+  A change to how this tool measures a phase is a series break: declare it
+  in ai/config/lead-time-series-breaks.json, the one place experiment
+  judge reads breaks from (DND-1810; athena:lead-time-improve ->
+  *Declaring a series break*).
   Each improve row records `phase_flow` (with_critic | standalone; none
   on a foreign row) and `phases.verify.gate_runs_s`: the gate-run wall
   (harness_gate.run or gate.run, each clipped to verify) inside verify, to

@@ -1313,11 +1313,14 @@ check("settling: an unknown phase or metric is a usage error, as record's parse 
   end
 end
 
-check("settling: na_share is refused: an instrumentation change is never confounded, so it never waits") do
-  settle(ten600, [], metric: "na_share")
-  false
-rescue X::UsageError => e
-  e.message.include?("instrumentation")
+check("settling: na_share is checked for series breaks only, never for trailers (DND-1810)") do
+  # An instrumentation change is exempt from trailers, so a change trailer
+  # inside leaves it CLEAN; a declared break on its phase does not.
+  trailer = settle(ten600, [tc(OTHER_SHA, -3, REVERT_MSG)], metric: "na_share")
+  brk = X.settling(ten600, [], phase: "verify", metric: "na_share", now: SET_NOW,
+                               breaks: [{ "ticket" => "DND-9001", "commit" => OTHER_SHA, "phases" => ["verify"],
+                                          "what" => "w", "at" => (SET_NOW - (3 * 3600)).utc.iso8601 }])
+  trailer["verdict"] == "CLEAN" && trailer["confounders"].empty? && brk["verdict"] == "SETTLING" && brk["confounded"]
 end
 
 # What judge says of a change recorded at `now` (landing at now) with no new
@@ -1378,6 +1381,97 @@ check("settling: text for CLEAN, SHORT and a malformed trailer") do
     !short.include?("clean after") && short_conf.include?("judge would read confounded") &&
     short_conf.include?("clean after 8 more comparable landings") &&
     bad.include?("malformed") && bad.include?("not counted as a confounder")
+end
+
+# ── declared series breaks (DND-1810) ───────────────────────────────────────
+# A change to how a phase is measured: before and after it the ledger
+# measures the phase by different rules. The registry holds them; the
+# manager adds each break's landing time ("at").
+
+BRK_SHA = "b" * 40
+
+def brk(hours, phases = ["verify"], sha: BRK_SHA, ticket: "DND-9001")
+  { "ticket" => ticket, "commit" => sha, "phases" => phases, "what" => "a measurement change",
+    "at" => (t(RECORDED) + (hours * 3600)).utc.iso8601 }
+end
+
+def registry(*rows) = { "schema" => 1, "breaks" => rows.map { |r| r.except("at") } }
+
+check("series_breaks: a well-formed registry reads its breaks, ticket and commit first") do
+  b, why = X.series_breaks(registry(brk(1, %w[verify queue])))
+  why.nil? && b.size == 1 && b[0].keys.first(2) == %w[ticket commit] && b[0]["phases"] == %w[verify queue]
+end
+check("series_breaks: an empty list is read, and is not an error") do
+  X.series_breaks(registry) == [[], nil]
+end
+check("series_breaks: every malformed shape is an error naming it, never an empty list") do
+  bad = {
+    "not a JSON object" => [],
+    "schema" => { "schema" => 2, "breaks" => [] },
+    "no breaks list" => { "schema" => 1 },
+    "ticket" => registry(brk(1).merge("ticket" => "")),
+    "40-hex" => registry(brk(1).merge("commit" => "abc")),
+    "unknown phase \"verfy\"" => registry(brk(1, ["verfy"])),
+    "phases" => registry(brk(1, [])),
+    "what" => registry(brk(1).merge("what" => " ")),
+  }
+  bad.all? do |needle, data|
+    b, why = X.series_breaks(data)
+    b.nil? && why.to_s.include?(needle)
+  end
+end
+check("series_breaks: tail is a phase a break may name") do
+  X.series_breaks(registry(brk(1, ["tail"])))[1].nil?
+end
+
+check("breaks_inside: a break on the phase inside the window, edges included") do
+  inside = X.breaks_inside(exp, [brk(-10, sha: "1" * 40), brk(3, sha: "2" * 40), brk(10, sha: "3" * 40)], from: FROM, to: TO)
+  inside.map { |b| b["commit"] } == ["1" * 40, "2" * 40, "3" * 40]
+end
+check("breaks_inside: outside the window, or on another phase, has no effect") do
+  X.breaks_inside(exp, [brk(-11), brk(11), brk(2, ["queue"])], from: FROM, to: TO).empty?
+end
+check("breaks_inside: the experiment's own commit is not a break against itself") do
+  X.breaks_inside(exp, [brk(0, sha: LANDING)], from: FROM, to: TO).empty?
+end
+check("breaks_inside: an instrumentation experiment is NOT exempt (a break changes what n/a means)") do
+  X.breaks_inside(exp(kind: "instrumentation", metric: "na_share"), [brk(2)], from: FROM, to: TO).size == 1
+end
+
+check("confound: a declared break makes a keep confounded, naming the break and what it read") do
+  v = X.confound(KEEP_V, [], phase: "verify", breaks: [brk(2, %w[verify implement])])
+  v["status"] == "confounded" && v["breaks"] == [brk(2, %w[verify implement])] && !v.key?("confounders") &&
+    v["reason"].include?("a declared series break on verify landed inside the window: DND-9001 #{BRK_SHA[0, 12]} " \
+                         "(verify/implement, #{brk(2)['at']})") &&
+    v["reason"].include?("unconfounded it read keep")
+end
+check("confound: a trailer and a break are both named") do
+  v = X.confound(KEEP_V, CONF, phase: "verify", breaks: [brk(2)])
+  v["confounders"] == CONF && v["breaks"].size == 1 && v["reason"].include?("another experiment's change") &&
+    v["reason"].include?("a declared series break")
+end
+check("confound: neither leaves the verdict alone") { X.confound(KEEP_V, [], phase: "verify", breaks: []) == KEEP_V }
+
+check("settling: a break inside the would-be before-set is SETTLING, named, needed = K - after it") do
+  s = X.settling(ten600, [], phase: "verify", metric: "phase", now: SET_NOW, breaks: [brk(-5)])
+  s["verdict"] == "SETTLING" && s["breaks"].map { |b| b["ticket"] } == ["DND-9001"] && s["confounders"].empty? &&
+    s["after_latest"] == 4 && s["needed"] == 6 && s["confounded"] &&
+    X.settling_text("custom", s).include?("series break(s) in the window: DND-9001 #{BRK_SHA[0, 12]}")
+end
+check("settling: a break on another phase, or before the window, is CLEAN") do
+  %w[queue].all? do |p|
+    X.settling(ten600, [], phase: "verify", metric: "phase", now: SET_NOW, breaks: [brk(-5, [p]), brk(-11)])["verdict"] == "CLEAN"
+  end
+end
+check("settling: the latest of a trailer and a break decides how many more landings are needed") do
+  s = X.settling(ten600, [tc(OTHER_SHA, -8, REVERT_MSG)], phase: "verify", metric: "phase", now: SET_NOW, breaks: [brk(-2.5)])
+  s["latest"]["commit"] == BRK_SHA && s["after_latest"] == 2 && s["needed"] == 8
+end
+
+check("the tracked registry is well formed (ai/config/lead-time-series-breaks.json)") do
+  path = File.expand_path("../../../config/lead-time-series-breaks.json", __dir__)
+  b, why = X.series_breaks(JSON.parse(File.read(path)))
+  why.nil? && b.map { |x| x["ticket"] } == %w[DND-1501 DND-1809 DND-1819]
 end
 
 # ── store ───────────────────────────────────────────────────────────────────
