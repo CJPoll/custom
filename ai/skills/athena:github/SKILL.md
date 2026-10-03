@@ -113,7 +113,8 @@ refuses every command that writes a remote ref other than `git push`
 (`send-pack`, `http-push`, a `remote-<name>` helper, `subtree push`), since
 only a push is judged for a red or ungated main: push with `gh-athena git
 push` (for a subtree, `git subtree split` first). It also refuses a
-`git-<name>` program on PATH that is not git's own (run it with plain git),
+`git-<name>` program on PATH that is not git's own (run it by its own name,
+`git-<name>`),
 and a subcommand git does not know, because `help.autocorrect` would run
 another one (DND-1867). It does **not** see an `~/.ssh/config` Host alias for
 github.com, a command git runs from config or a hook, `clone
@@ -136,7 +137,8 @@ naming this form (DND-577). It reads only the command text, so the agent PATH
 (DND-1803; `ai/lib/agent-forge-push.sh`): a push to github.com or gitlab.com
 runs only with this route's credential isolation. Every other remote-ref
 writer to them (send-pack, http-push, `remote-<name>`, subtree push) is
-refused there, as are a `git-<name>` program on PATH and a
+refused there, as are a `git-<name>` program on PATH, `git lfs` included
+(run it as `git-<name>`, so the git it runs is the wrapper), and a
 subcommand git does not know (DND-1881). The agent PATH `gh` and
 `glab` wrappers refuse a plain forge write the same way
 (`ai/lib/agent-forge-cli.sh`); reads pass. Both layers need the agent env

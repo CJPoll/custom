@@ -243,6 +243,13 @@ else
   if [ "${rc}" -eq 1 ] && [[ "${out}" == *"REFUSED git st: the forge-identity check"*"Fix:"* ]]; then
     ok "FT13. no forge-identity check beside the wrapper: an alias is refused with a Fix:"
   else bad "FT13. missing forge-identity check fails closed" "rc=${rc} out=$(printf '%s' "${out}" | head -c 300)"; fi
+  # A check that exits with a status it never gives on a verdict is refused too.
+  mkdir -p "${TMP}/badlib/bin" "${TMP}/badlib/lib"; cp "${WBIN}/git" "${TMP}/badlib/bin/git"; fsg_require_stubs "${TMP}/badlib/bin" git
+  printf 'exit 7\n' > "${TMP}/badlib/lib/agent-forge-push.sh"
+  out="$(PATH="${TMP}/badlib/bin:${GDIR}" timeout 10 git st 2>&1)"; rc=$?
+  if [ "${rc}" -eq 1 ] && [[ "${out}" == *"REFUSED git st: the forge-identity check"*"failed (exit 7)"*"Fix:"* ]]; then
+    ok "FT14. a forge-identity check that crashes (exit 7): refused with a Fix:, never run"
+  else bad "FT14. a crashed forge-identity check fails closed" "rc=${rc} out=$(printf '%s' "${out}" | head -c 300)"; fi
   out="$(PATH="${WBIN}" "${WBIN}/git" status 2>&1)"; rc=$?
   if [ "${rc}" -eq 127 ] && [[ "${out}" == *"no real git on PATH"*"Fix:"* ]]; then
     ok "FT2. no real git on PATH: exit 127 with a Fix:"

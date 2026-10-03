@@ -21,6 +21,8 @@ Measured 2026-10-03 on git 2.54.0, branch `dnd-1881-agentbin-writers`.
 |---|---|
 | Baseline: the unfixed tree (origin/main `e2821cc8`) | `agent forge-identity: 81 passed, 21 failed`. X1-X21 all failed. Every N case passed. Each writer reached git unjudged, and where it ran for real it moved a ref of the local remote: X1 `send-pack <github URL>` created `main`, X9 `subtree push` created `synth-x9`, X12 a `git-<name>` program on PATH moved `main`, X14 `pusj` under `help.autocorrect=immediate` moved `main`. |
 | The fix | `agent forge-identity: 102 passed, 0 failed` |
+| Review floor: X22-X24 added (a moved exec-path), run against the fix before its exec-path refusal | `agent forge-identity: 102 passed, 3 failed`. X22 `--exec-path=<dir> synthmoved` and X23 `GIT_EXEC_PATH=<dir> synthmoved` ran the program (`rc=0 calls=[PATHPROG moved ]`); X24 was refused, but as "a remote ref on github.com", the wrong reason |
+| The fix with the exec-path refusal | `agent forge-identity: 105 passed, 0 failed` |
 
 | Mutation | Red cases |
 |---|---|

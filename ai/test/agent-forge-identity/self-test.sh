@@ -435,6 +435,19 @@ wrefused "X20. subtree push to a local remote whose pushurl is github.com" 'subt
 wrun "${FR}" git remote-https lf
 wrefused "X21. remote-https on a remote whose URL is github.com and pushurl local (a helper reads the URL)" 'gh-athena git push'
 
+# A moved exec-path makes every git-<name> in it read as one of git's own
+# commands (`git --list-cmds=main`), so a program there would pass as git's
+# own and run (review floor). The push already refuses it (DND-1844).
+EBIN="${TMP}/moved-exec"; mkdir -p "${EBIN}"
+printf '#!/bin/sh\nprintf "PATHPROG moved %%s\\n" "$*" >> "%s"\n' "${LOG}" > "${EBIN}/git-synthmoved"
+chmod +x "${EBIN}/git-synthmoved"
+wrun "${WR}" git --exec-path="${EBIN}" synthmoved
+wrefused "X22. --exec-path=<dir> <name>: a program in a moved exec-path is not git's own" 'exec-path'
+wrun "${WR}" env GIT_EXEC_PATH="${EBIN}" git synthmoved
+wrefused "X23. GIT_EXEC_PATH=<dir> <name>" 'GIT_EXEC_PATH'
+wrun "${WR}" env GIT_EXEC_PATH="${EBIN}" git send-pack "${FB}" HEAD:refs/heads/main
+wrefused "X24. GIT_EXEC_PATH=<dir> send-pack <local path> (git runs <dir>/git-receive-pack)" 'GIT_EXEC_PATH'
+
 echo
 echo "--- DND-1881: the same writers to a non-forge remote, and the Fix's own forms, still work ---"
 writer_repo "${FB}"

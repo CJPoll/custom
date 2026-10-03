@@ -164,7 +164,7 @@ EOF
 # ---- Push recursion into submodules (DND-1803, DND-1841) ---------------------
 # One copy, shared: this passthrough judges `push` with it (subtree push is
 # refused outright, DND-1867),
-# and ai/lib/agent-forge-push.sh (the agent PATH git wrapper's push check)
+# and ai/lib/agent-forge-push.sh (the agent PATH git wrapper's forge-identity check)
 # sources this file and calls it too.
 #
 # fg_push_recurses <probe> [<push args>...] : 0 when the push would also push
@@ -691,7 +691,7 @@ fg_cmd_known() {
 fg_refuse_path_cmd() {
   cat >&2 <<EOF
 $FG_TOOL: REFUSING \`git $1\`: git-$1 is a program on PATH, not one of git's own commands. It would run with this route's bot header in its environment, and a push it makes is not checked for its remote, its submodules, a red main or the gate.
-  Fix: run \`git $1\` with plain git, outside the Athena route, and push what it makes with \`~/dev/custom/ai/bin/$FG_TOOL git push <repository> <src>:<dst>\`. $FG_ESCALATE
+  Fix: run it by its own name, \`git-$1 …\`, outside the Athena route (in an agent session the git it runs is then the agent PATH wrapper, which refuses \`git $1\` too, DND-1881), and push what it makes with \`~/dev/custom/ai/bin/$FG_TOOL git push <repository> <src>:<dst>\`. $FG_ESCALATE
 EOF
   exit 3
 }

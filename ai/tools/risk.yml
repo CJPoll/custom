@@ -333,8 +333,10 @@ tools:
   # allow-listed select value, which ticket-file never sends), then reads
   # it back: tracker state.
   skills/athena:ticket-management/scripts/ticket-file: { class: destructive, reason: tracker }
-  # DND-775: the agent PATH git wrapper. It refuses stash-list writes, then
-  # execs the real git with argv unchanged, so it can do anything git can.
+  # DND-775: the agent PATH git wrapper. It refuses stash-list writes, and
+  # pushes and other remote-ref writers to a forge not made as Athena
+  # (DND-1803, DND-1881), then execs the real git with argv unchanged, so it
+  # can do anything git can.
   agent-bin/git: { class: destructive, reason: git }
   # DND-1803: the agent PATH gh and glab wrappers. They refuse a forge write
   # not made through gh-athena/glab-athena, then exec the real CLI with argv

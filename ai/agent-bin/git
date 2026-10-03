@@ -51,9 +51,11 @@
 #      alias that shadows a builtin), and neither does any other command git
 #      runs before an alias (3b). rc 1 means no alias, and with no command of
 #      that name either it is refused (DND-1881): under help.autocorrect git
-#      runs the closest command instead (`pusj` runs push). Any other failure
-#      prints `could not resolve alias ... not checked` and passes through
-#      (DND-802: a failed read never reads as an empty one). A `!` alias is
+#      runs the closest command instead (`pusj` runs push). A config git
+#      cannot read is refused in 3b, COULD NOT LOOK, before any alias read;
+#      any other failure of the alias read prints `could not resolve alias
+#      ... not checked` and passes through (DND-802: a failed read never
+#      reads as an empty one). A `!` alias is
 #      refused only when its body names stash.
 #   3b. A name that is not a builtin is first put to the forge-identity check
 #      (ai/lib/agent-forge-push.sh, DND-1881), because git runs its own
@@ -280,6 +282,14 @@ forge_check() {
   eval "ATHENA_REAL_GIT=\"\$real\" bash \"\$_afp\" $globals \"\$@\""
 }
 
+# forge_check_failed <subcommand> <status>: the check exited with a status it
+# never gives on a verdict (bash missing, a crash, 10 for push or send-pack),
+# so whether the command writes to a forge is unknown: refuse.
+forge_check_failed() {
+  refuse "git $1: the forge-identity check ai/lib/agent-forge-push.sh failed (exit $2), so whether this command writes to a forge as the machine owner is unknown" \
+    "Fix: make sure bash is on PATH and ai/lib/forge-git-passthrough.sh sits beside the check, then retry; to push to a forge meanwhile, use ~/dev/custom/ai/bin/gh-athena git push ... or ~/dev/custom/ai/bin/glab-athena git push ...."
+}
+
 names_stash_ref() {
   case "$1" in
     stash | refs/stash | stash@\{*\} | refs/stash@\{*\}) return 0 ;;
@@ -345,7 +355,8 @@ while :; do
   case "$_frc" in
     0) break ;;
     10) ;;
-    *) exit "$_frc" ;;
+    1) exit 1 ;;
+    *) forge_check_failed "$sub" "$_frc" ;;
   esac
   depth=$((depth + 1))
   if [ "$depth" -gt 10 ]; then
@@ -388,7 +399,14 @@ done
 # judge them here. Every other subcommand that writes a remote ref is not a
 # builtin and was judged in the walk (forge_check, step 3b).
 case "$sub" in
-  push | send-pack) forge_check "$sub" "$@" || exit $? ;;
+  push | send-pack)
+    _frc=0
+    forge_check "$sub" "$@" || _frc=$?
+    case "$_frc" in
+      0) ;;
+      1) exit 1 ;;
+      *) forge_check_failed "$sub" "$_frc" ;;
+    esac ;;
 esac
 
 # $sub is the resolved subcommand; "$@" holds its arguments.

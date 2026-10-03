@@ -7,9 +7,10 @@
 #
 # The wrapper passes the argv it resolved (aliases expanded, global options
 # kept). Exit 0: the command may run. Exit 1: refused, one stderr line ending
-# in a Fix:. Exit 10 (not push): git runs no command of that name, so the
-# wrapper reads it as an alias. The wrapper exits with any other status before
-# git runs. `push -h` and
+# in a Fix: (a COULD NOT LOOK on git's command lists is the passthrough's own
+# two-line refusal, fg_cmd_list). Exit 10 (not push): git runs no command of
+# that name, so the wrapper reads it as an alias. The wrapper refuses on any
+# other status, before git runs. `push -h` and
 # `push --help` are not judged when -h or --help is the first push argument;
 # anywhere else it is judged, since there it may be an option's value
 # (DND-1843). The global-option peel below and the push walk it borrows
@@ -45,6 +46,9 @@
 # WHAT ELSE IS JUDGED (DND-1881). A subcommand other than push, by the
 # passthrough's "Remote-ref writers other than push" (DND-1867), so the two
 # routes share one classification:
+#   * a moved exec-path (--exec-path=<dir>, a GIT_EXEC_PATH that is not
+#     git's own) is refused first: every git-<name> in <dir> would read as
+#     git's own command (DND-1844);
 #   * a name git does not run as its own command (`git --list-cmds=main`):
 #     a git-<name> program on PATH (`--list-cmds=others`) is refused, because
 #     every git it runs comes from git's exec-path, past this wrapper, and
@@ -58,16 +62,19 @@
 #     insteadOf), and as git resolves it for a push and for a fetch (a
 #     remote's URLs and push URLs, pushInsteadOf, insteadOf). A word that
 #     cannot be resolved counts as reaching the forge;
-#   * one that makes git run a command (send-pack --receive-pack or --exec,
-#     an ext:: address, remote-ext) is refused to any remote (DND-1844), and
-#     remote-fd, whose host no argument names, is refused outright;
+#   * a remote-ref writer that makes git run a command (send-pack
+#     --receive-pack or --exec, an ext:: address, remote-ext) is refused to
+#     any remote (DND-1844), and remote-fd, whose host no argument names, is
+#     refused outright. A command that writes no remote ref is not checked
+#     for that here (`fetch ext::…`, `subtree add ext::…`): see RESIDUAL;
 #   * every other own command runs.
 # Accepted false refusals (fail closed): a forge URL written out in the argv
 # that the repository's insteadOf sends elsewhere (a remote NAME so rewritten
 # passes); a refspec, prefix or other word spelled like a forge URL or named
 # like a remote that reaches one; remote-fd; any git-<name> program on PATH,
-# whatever it does (git-custom's `git hub`, `git rekt`, …: run them as
-# `git-hub`, `git-rekt`).
+# whatever it does (git-custom's `git hub`, `git rekt`, …, and `git lfs`
+# where git-lfs is installed on PATH: run them as `git-hub`, `git-rekt`,
+# `git-lfs`).
 #
 # WHAT IS ROUTED. A forge push is allowed only when it carries the credential
 # isolation the Athena passthrough (fg_git_exec) gives git, for that host:
@@ -91,7 +98,8 @@
 # process git starts itself (a `!` alias, `rebase -x`, `submodule foreach`,
 # `bisect run`, a git hook), which runs with git's exec-path first on PATH,
 # where a real `git` sits (the Athena route refuses these forms, DND-1844;
-# this check refuses only those named in "WHAT ELSE IS JUDGED"); a non-git
+# this check refuses only those named in "WHAT ELSE IS JUDGED", so an ext::
+# address outside a remote-ref writer, `fetch ext::…`, runs); a non-git
 # client (libgit2, an HTTP call); and a forge host no URL spells as github.com
 # or gitlab.com (an ~/.ssh/config Host alias such as `myalias:owner/repo`, an
 # IP literal).
@@ -259,11 +267,18 @@ afp_writer_reaches() {
     if [ "$kind" = push ]; then AFP_ARGV=("${AFP_GLOB[@]}" push --no-recurse-submodules -- "$w")
     else AFP_ARGV=("${AFP_GLOB[@]}" ls-remote -- "$w"); fi
     rc=0; afp_reaches "$host" || rc=$?
-    [ "$rc" = 0 ] || { AFP_URL="${AFP_URL:-$w}"; return 0; }
-    [ -n "$AFP_URL" ] && return 0
+    # 3: the route's resolver refuses it for <host> (a non-HTTPS forge URL).
+    # Anything else: it could not resolve the word, which is no "not a forge".
+    case "$rc" in
+      0) [ -n "$AFP_URL" ] && return 0 ;;
+      3) AFP_URL="${AFP_URL:-$w}"; return 0 ;;
+      *) AFP_URL="$w"; AFP_WR_UNSURE="its target could not be resolved (exit $rc), so it may"; return 0 ;;
+    esac
   done
   return 1
 }
+
+AFP_WR_UNSURE=""
 
 # afp_writer <subcommand> <args...> : judge a subcommand other than push, and
 # exit: 0 it may run; 1 refused; AFP_NOT_A_COMMAND when git runs no command of
@@ -272,6 +287,13 @@ afp_writer() {
   local sub="$1" a w host
   shift
   FG_TOOL="$AFP_TAG"
+  # A moved exec-path (--exec-path=<dir>, a GIT_EXEC_PATH that is not git's
+  # own) makes every git-<name> in <dir> read as git's own command, and git
+  # runs its helpers from there: the push refuses it (DND-1844), so does this.
+  if fg_exec_path_moved "${AFP_GLOB[@]}"; then
+    afp_refuse "\`git $sub …\`: $FG_RC_WHAT, so a program there reads as one of git's own commands and any git it runs is past this wrapper (DND-1844, DND-1881)." \
+      "$FG_RC_FIX."
+  fi
   # git's command lists, read once here; fg_cmd_list refuses, COULD NOT LOOK,
   # when git cannot list them, and a failed list is never an empty one.
   FG_OWN_CMDS=$'\n'"$(fg_cmd_list main)"$'\n' || exit 1
@@ -297,7 +319,7 @@ afp_writer() {
       afp_writer_reaches "$host" "$w" || continue
       case "$host" in github.com) FG_TOOL=gh-athena ;; *) FG_TOOL=glab-athena ;; esac
       fg_writes_remote_ref "$sub" "$@"
-      afp_refuse "\`git $sub …\` to $(afp_shown "$AFP_URL"): it writes a remote ref on $host without \`git push\` ($FG_RW_WHAT), so it goes out with the machine owner's SSH key or credential helper, never as Athena, and this wrapper judges only \`git push\` for its remote and identity (DND-1881)." \
+      afp_refuse "\`git $sub …\` to $(afp_shown "$AFP_URL"): ${AFP_WR_UNSURE:-it} writes a remote ref on $host without \`git push\` ($FG_RW_WHAT), so it goes out with the machine owner's SSH key or credential helper, never as Athena: only \`git push\` is judged for its remote and identity, so only a push can go out as Athena (DND-1881)." \
         "$FG_RW_FIX."
     done
   done
