@@ -650,8 +650,10 @@ fg_exec_path_moved() {
 FG_OWN_CMDS=""
 FG_PATH_CMDS=""
 
-# fg_cmd_list <kind> : print git's --list-cmds=<kind> one name per line,
-# wrapped in newlines; exit 3 with COULD NOT LOOK when git cannot list them.
+# fg_cmd_list <kind> : print git's --list-cmds=<kind>, one name per line;
+# exit 3 with COULD NOT LOOK when git cannot list them. A caller wraps the
+# list in newlines itself: a command substitution strips the trailing one,
+# and the last name would then never match.
 # A failed listing never reads as "no commands" (every name unknown) or as an
 # empty PATH list (every git-<name> allowed).
 fg_cmd_list() {
@@ -659,12 +661,12 @@ fg_cmd_list() {
   out="$(G --list-cmds="$1" 2>/dev/null)" || rc=$?
   if [ "$rc" != 0 ] || { [ "$1" = main ] && [[ $'\n'"$out"$'\n' != *$'\n'push$'\n'* ]]; }; then
     cat >&2 <<EOF
-$FG_TOOL: REFUSING this git command: COULD NOT LOOK which commands git has (\`git --list-cmds=$1\` exited $rc${out:+ and listed no push}), so whether the subcommand is git's own, a program on PATH, or a typo git may autocorrect into another command is unknown.
+$FG_TOOL: REFUSING this git command: COULD NOT LOOK which commands git has (\`git --list-cmds=$1\` exited $rc and, for main, must list push), so whether the subcommand is git's own, a program on PATH, or a typo git may autocorrect into another command is unknown.
   Fix: check that \`git --list-cmds=$1\` lists git's commands in this shell (the git on PATH, its exec-path), then retry. $FG_ESCALATE
 EOF
     exit 3
   fi
-  printf '\n%s\n' "$out"
+  printf '%s' "$out"
 }
 
 # fg_cmd_known <name> : 0 when <name> is one of git's own commands (builtin or
@@ -673,8 +675,8 @@ EOF
 # a name git does not know.
 fg_cmd_known() {
   if [ -z "$FG_OWN_CMDS" ]; then
-    FG_OWN_CMDS="$(fg_cmd_list main)" || exit 3
-    FG_PATH_CMDS="$(fg_cmd_list others)" || exit 3
+    FG_OWN_CMDS=$'\n'"$(fg_cmd_list main)"$'\n' || exit 3
+    FG_PATH_CMDS=$'\n'"$(fg_cmd_list others)"$'\n' || exit 3
   fi
   [[ "$FG_OWN_CMDS" == *$'\n'"$1"$'\n'* ]] && return 0
   [[ "$FG_PATH_CMDS" == *$'\n'"$1"$'\n'* ]] && fg_refuse_path_cmd "$1"

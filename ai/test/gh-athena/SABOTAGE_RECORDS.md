@@ -102,3 +102,10 @@ came from the review round. After: `RESULT: 201 passed, 0 failed`.
 | M13 an unknown subcommand with no alias passes (`break`) | W3, W4, W5, W6 |
 | M14 a git-<name> on PATH is not refused | W22, W23 |
 | M15 the alias walk stops at depth 10 instead of refusing | W24 |
+
+The critic round found that a command substitution stripped each command
+list's trailing newline, so the last name never matched. Measured on the
+review-round head 0cfb1b10, before the fix: `RESULT: 201 passed, 2 failed`,
+`FAIL W27` (`write-tree`, git's last own command, refused as unknown) and
+`FAIL W28` (rc=0: the last PATH program ran, through a same-named alias).
+After: `RESULT: 203 passed, 0 failed`.

@@ -1168,6 +1168,21 @@ if is_refusal && [[ "${ERR}" == *"COULD NOT LOOK"* ]] && [[ "${OUT}" != *"dry-ru
   ok "W26. git --list-cmds failing -> refused as COULD NOT LOOK (not read as an empty list)"
 else bad "W26. list-cmds failure refused" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
 
+# Critic round: the LAST name of each command list never matched, since a
+# command substitution strips the list's trailing newline.
+LAST_OWN="$(git --list-cmds=main | tail -n 1)"
+gha "${W}" "${LAST_OWN}" -h
+if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: exec git"* ]]; then
+  ok "W27. git's last-listed own command (${LAST_OWN}) passes as git's own"
+else bad "W27. last own command passes" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+printf '#!/bin/sh\nexec git push -q origin HEAD:main\n' > "${PX}/git-zzzz-last"; chmod +x "${PX}/git-zzzz-last"
+LAST_PATH="$(PATH="${PX}:${PATH}" git --list-cmds=others | tail -n 1)"
+OUT="$(cd "${W}" && PATH="${PX}:${PATH}" GH_ATHENA_GIT_DRY_RUN=1 "${WRAPPER}" git -c alias.zzzz-last=status zzzz-last 2>"${TMP}/err")"; RC=$?
+ERR="$(cat "${TMP}/err")"
+if [ "${LAST_PATH}" = zzzz-last ] && is_refusal && [[ "${ERR}" == *"program on PATH"* ]]; then
+  ok "W28. the last-listed PATH program (git-zzzz-last), shadowing alias.zzzz-last=status -> refused"
+else bad "W28. last PATH program refused" "last='${LAST_PATH}' rc=${RC} out='${OUT}' err='${ERR}'"; fi
+
 # DND-1667: no git call may have fallen through past its shim.
 if fsg_verify; then ok "no git call fell through past its shim (DND-1667)"
 else bad "no git call fell through past its shim (DND-1667)" "see the forge-stub-guard FAIL above"; fi
