@@ -150,6 +150,38 @@ module ToolSandbox
       [:ok, named.values]
     end
 
+    # Facts about a --stdin FILE (DND-176), gathered by the host adapter:
+    #   path / realpath / exists / regular (a plain file) / symlink (the LEAF)
+    #   owned (by our uid) / nlink / size / lstat_error
+    StdinFacts = Struct.new(:path, :realpath, :exists, :regular, :symlink, :owned, :nlink, :size, :lstat_error,
+                            keyword_init: true)
+    STDIN_MAX_BYTES = 16 * 1024 * 1024
+
+    # --stdin FILE is validated as a key, like --work: absolute, an existing
+    # regular file that is not a symlink, owned by us, with one link, at most
+    # STDIN_MAX_BYTES, and strictly beneath the temp root. The host reads it and
+    # feeds its bytes through a pipe, so the child never holds the file itself.
+    def validate_stdin(facts, tmp_root:)
+      path = facts.path
+      return [:error, "--stdin is empty"] if path.nil? || path.empty?
+      return [:error, "--stdin #{path} is not absolute"] unless absolute?(path)
+      return [:error, "--stdin #{path} cannot be inspected (#{facts.lstat_error})"] if facts.lstat_error
+      return [:error, "--stdin #{path} does not exist"] unless facts.exists
+      return [:error, "--stdin #{path} is a symlink; pass the real file"] if facts.symlink
+
+      real = facts.realpath
+      return [:error, "--stdin #{path} could not be resolved to a realpath"] unless absolute?(real)
+      return [:error, "--stdin #{path} resolves to #{real}, outside the temp root #{tmp_root}"] unless under?(real, tmp_root)
+      return [:error, "--stdin #{path} is not a regular file"] unless facts.regular
+      return [:error, "--stdin #{path} is not owned by this user"] unless facts.owned
+      return [:error, "--stdin #{path} is hardlinked (#{facts.nlink} links)"] unless facts.nlink == 1
+      unless facts.size.is_a?(Integer) && facts.size <= STDIN_MAX_BYTES
+        return [:error, "--stdin #{path} is over #{STDIN_MAX_BYTES} bytes"]
+      end
+
+      [:ok, real]
+    end
+
     def validate_timeout(secs)
       return [:ok, TIMEOUT_DEFAULT] if secs.nil?
       return [:ok, secs] if secs.is_a?(Integer) && TIMEOUT_RANGE.cover?(secs)

@@ -177,18 +177,56 @@ module ToolSandbox
       Dir.rmdir(dest) if created
     end
 
-    # Run the Policy argv. stdin is /dev/null, every fd but 0-2 and the status
-    # pipe is closed, and the environment is LAUNCH_ENV only.
+    # -> Policy::StdinFacts for a --stdin FILE (DND-176).
+    def stdin_facts(path)
+      base = { path: path, realpath: nil, exists: false, regular: false, symlink: false, owned: false, nlink: 0,
+               size: nil, lstat_error: nil }
+      return Policy::StdinFacts.new(**base) if path.nil? || path.empty? || !path.start_with?("/")
+
+      st = begin
+        File.lstat(path)
+      rescue Errno::ENOENT, Errno::ENOTDIR
+        return Policy::StdinFacts.new(**base)
+      end
+      Policy::StdinFacts.new(**base, exists: true, realpath: safe_realpath(path), symlink: st.symlink?,
+                                     regular: st.file?, owned: st.uid == Process.uid, nlink: st.nlink, size: st.size)
+    rescue SystemCallError => e
+      Policy::StdinFacts.new(**base, lstat_error: errno_name(e))
+    end
+
+    # The bytes of a validated --stdin file, read without following a symlink
+    # swapped in after validation, and capped.
+    def read_stdin(real)
+      File.open(real, File::RDONLY | File::NOFOLLOW) do |f|
+        raise Errno::EINVAL, "#{real} is not a regular file" unless f.stat.file?
+
+        f.read(Policy::STDIN_MAX_BYTES + 1).to_s.b.tap do |data|
+          raise Errno::EFBIG, real if data.bytesize > Policy::STDIN_MAX_BYTES
+        end
+      end
+    end
+
+    # Run the Policy argv. stdin is /dev/null, or (--stdin) a pipe the host
+    # writes the file's bytes into, so the child never holds a descriptor of
+    # the host file and cannot reopen or write it through /proc/self/fd/0.
+    # Every fd but 0-2 and the status pipe is closed, and the environment is
+    # LAUNCH_ENV only.
     # -> { status: Integer (128+N if signalled), status_text: String,
     #      elapsed: wall seconds, interrupted: forwarded signal name or nil }
-    def execute(argv)
+    def execute(argv, stdin_bytes: nil)
       reader, writer = IO.pipe
+      in_r, in_w = stdin_bytes ? IO.pipe : [nil, nil]
+      feeder = nil
       state = { pid: nil, interrupted: nil }
       started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       status = with_forwarded_signals(state) do
         state[:pid] = Process.spawn(LAUNCH_ENV, *argv, unsetenv_others: true, close_others: true,
-                                                       in: File::NULL, STATUS_FD => writer)
+                                                       in: in_r || File::NULL, STATUS_FD => writer)
         writer.close
+        if in_r
+          in_r.close
+          feeder = Thread.new { feed(in_w, stdin_bytes) }
+        end
         # A signal that arrived before the pid existed is delivered now.
         forward(state) if state[:interrupted]
         Process.wait2(state[:pid])[1]
@@ -200,6 +238,19 @@ module ToolSandbox
     ensure
       writer.close if writer && !writer.closed?
       reader&.close
+      in_r.close if in_r && !in_r.closed?
+      in_w.close if in_w && !in_w.closed?
+      feeder&.join
+    end
+
+    # Write the bytes, then close: the child sees EOF. A child that exits
+    # without reading closes the pipe, which ends the write with EPIPE.
+    def feed(io, bytes)
+      io.write(bytes)
+    rescue Errno::EPIPE, IOError
+      nil
+    ensure
+      io.close unless io.closed?
     end
 
     # A TERM/INT/HUP to tool-sandbox is passed on to timeout(1), which stops

@@ -7,7 +7,7 @@
 # "Harness -- sandboxed tool creation"). It is the execution boundary for
 # model-written code. Operator doc: ai/docs/tool-sandbox.md.
 #
-#   ai/bin/tool-sandbox --work DIR [--out DIR] [--timeout SECS] -- CMD [ARGS...]
+#   ai/bin/tool-sandbox --work DIR [--out DIR] [--stdin FILE] [--timeout SECS] -- CMD [ARGS...]
 #   ai/bin/tool-sandbox --prepare-clone DEST [--sha SHA]
 #   ai/bin/tool-sandbox --self-test
 #   ai/bin/tool-sandbox --help
@@ -37,7 +37,7 @@ require_relative "../lib/tool_sandbox/clone"
 
 HELP = <<~HELP
   Usage:
-    tool-sandbox --work DIR [--out DIR] [--timeout SECS] -- CMD [ARGS...]
+    tool-sandbox --work DIR [--out DIR] [--stdin FILE] [--timeout SECS] -- CMD [ARGS...]
     tool-sandbox --prepare-clone DEST [--sha SHA]
     tool-sandbox --self-test
     tool-sandbox --help
@@ -46,10 +46,14 @@ HELP = <<~HELP
   unix sockets), no HOME, no ~/.claude, no main checkout, no inbox root, no
   docker socket, and an environment of PATH HOME LANG TMPDIR TERM
   XDG_STATE_HOME XDG_CACHE_HOME only. /usr and /etc are read-only; /tmp and
-  /home/sandbox are fresh and discarded; stdin is /dev/null.
+  /home/sandbox are fresh and discarded; stdin is /dev/null unless --stdin.
 
     --work DIR       read-write at /work, the working directory (required)
     --out DIR        read-write at /out (optional)
+    --stdin FILE     feed FILE's bytes to CMD's stdin through a pipe (optional);
+                     FILE must be a regular file beneath the temp root, not a
+                     symlink, owned by you, one link, at most 16 MiB; it is
+                     never bound inside
     --timeout SECS   wall limit, 1-7200 (default 1800); also the CPU rlimit
     --prepare-clone DEST
                      build DEST/origin.git (only ref: main = SHA) and DEST/repo
@@ -73,7 +77,7 @@ HELP = <<~HELP
 HELP
 
 CLI_SPEC = {
-  "--work" => :value, "--out" => :value, "--timeout" => :integer,
+  "--work" => :value, "--out" => :value, "--stdin" => :value, "--timeout" => :integer,
   "--prepare-clone" => :value, "--sha" => :value,
   "--self-test" => :switch, "--help" => :switch
 }.freeze
@@ -98,6 +102,8 @@ module ToolSandboxCLI
              "and --work DEST/repo."
   FIX_TMP_ROOT = "leave TMPDIR unset or point it at a sticky, world-writable temp dir such as /tmp; a private " \
                  "(0700) TMPDIR is refused, since the temp root bounds what may be bound."
+  FIX_STDIN = "pass --stdin a regular file you wrote beneath the temp root (e.g. in a `mktemp -d`), not a " \
+              "symlink, not hardlinked, owned by you, at most 16 MiB."
   FIX_INTERRUPTED = "tool-sandbox was sent a signal and stopped the sandbox; nothing was left running. Re-run it " \
                     "if the interruption was not intended."
   FIX_CLONE = "run it from inside a git checkout whose refs/remotes/origin/main is current (`git fetch origin`), " \
@@ -184,8 +190,18 @@ module ToolSandboxCLI
     out = opts["--out"] ? dir!(opts["--out"], :out, root) : nil
     origin = origin_sibling(work, root)
     unwrap(P.validate_disjoint(work: work, out: out, origin: origin), code: P::EXIT_SETUP, fix: FIX_PATH)
+    stdin_bytes = opts.key?("--stdin") ? stdin!(opts["--stdin"], root) : nil
     argv = policy_argv(work: work, out: out, origin: origin, timeout: timeout, cmd: cmd)
-    launch(argv, timeout)
+    launch(argv, timeout, stdin_bytes: stdin_bytes)
+  end
+
+  # --stdin FILE (DND-176): validated as a key, then read by the host. Its
+  # bytes reach the child through a pipe; the file itself is never bound.
+  def stdin!(path, root)
+    real = unwrap(P.validate_stdin(H.stdin_facts(path), tmp_root: root), code: P::EXIT_SETUP, fix: FIX_STDIN)
+    H.read_stdin(real)
+  rescue SystemCallError => e
+    raise Refusal.new("--stdin #{path} could not be read: #{e.message}", code: P::EXIT_SETUP, fix: FIX_STDIN)
   end
 
   # DEST/origin.git beside a --work DEST/repo. A sibling that is present but
@@ -213,9 +229,9 @@ module ToolSandboxCLI
   end
 
   # Execute a Policy argv and map its outcome to our exit code.
-  def launch(argv, timeout)
+  def launch(argv, timeout, stdin_bytes: nil)
     result = begin
-      H.execute(argv)
+      H.execute(argv, stdin_bytes: stdin_bytes)
     rescue SystemCallError => e
       raise Refusal.new("could not start the sandbox: #{e.message}", code: P::EXIT_SETUP, fix: FIX_SETUP)
     end
@@ -274,7 +290,7 @@ class SelfTest
   HANG_CAP = "120"
   # The probes this file defines produce at least this many results; fewer
   # means discovery found nothing, which must never read as a pass.
-  MIN_PROBES = 34
+  MIN_PROBES = 41
 
   def initialize
     @results = []
@@ -722,6 +738,49 @@ class SelfTest
     rescue SystemCallError
       false
     end
+  end
+
+  # ---- E-23 --stdin FILE (DND-176, S-1) -----------------------------------
+  def probe_e23_stdin_file
+    input = "line one\n\0bin\xffary\nSECRET-TAIL".b
+    path = File.join(dir("e23-in"), "input")
+    File.binwrite(path, input)
+    probe("E-23 --stdin: the child reads exactly the file's bytes through a pipe, cannot reach or write the file") do
+      work = dir("e23")
+      File.write(File.join(work, "probe.rb"), <<~RUBY)
+        data = STDIN.binmode.read
+        puts data.unpack1("H*")
+        puts File.readlink("/proc/self/fd/0").start_with?("pipe:") ? "PIPE" : "NOTPIPE"
+        puts(begin; File.lstat(ARGV[0]); "PRESENT"; rescue Errno::ENOENT; "ENOENT"; end)
+        puts(begin; File.open("/proc/self/fd/0", "w") { |f| f.write("X") }; "WROTE"; rescue StandardError => e; e.class.name; end)
+      RUBY
+      out, err, code = cli("--work", work, "--stdin", path, "--timeout", "30", "--", INSIDE_RUBY, "/work/probe.rb", path)
+      lines = out.split("\n")
+      [code.zero? && lines[0] == input.unpack1("H*") && lines[1] == "PIPE" && lines[2] == "ENOENT" &&
+        File.binread(path) == input,
+       "exit #{code}, saw #{lines.inspect}, stderr #{err.strip[0, 200]}"]
+    end
+    link = File.join(@scratch, "e23-link")
+    File.symlink(path, link)
+    hard = File.join(@scratch, "e23-hard")
+    File.link(path, hard)
+    marker = "tool-sandbox-selftest-#{Process.pid}-e23"
+    { "a symlink" => [link, "symlink"], "outside the temp root" => ["/etc/passwd", "outside the temp root"],
+      "a directory" => [dir("e23-dir"), "not a regular file"], "a missing file" => [File.join(@scratch, "nope"), "does not exist"],
+      "a relative path" => ["input", "not absolute"] }.each do |what, (arg, reason)|
+      probe("E-23 --stdin #{what} is refused (125) and CMD never runs") do
+        work = dir("e23-#{what.tr(' ', '-')}")
+        _, err, code = cli("--work", work, "--stdin", arg, "--", "/usr/bin/touch", "/work/#{marker}")
+        [code == 125 && err.include?(reason) && err.include?("Fix:") && !File.exist?(File.join(work, marker)),
+         "exit #{code}, stderr #{err.strip[0, 300]}"]
+      end
+    end
+    probe("E-23 --stdin a hardlinked file is refused (125)") do
+      File.unlink(link)
+      _, err, code = cli("--work", dir("e23-hl"), "--stdin", path, "--", "/usr/bin/true")
+      [code == 125 && err.include?("hardlinked"), "exit #{code}, stderr #{err.strip[0, 300]}"]
+    end
+    File.unlink(hard)
   end
 
   # ---- E-21 stdin is /dev/null --------------------------------------------

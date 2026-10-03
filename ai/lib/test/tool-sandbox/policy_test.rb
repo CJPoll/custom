@@ -373,6 +373,41 @@ check("X-5 exit code for each outcome") do
     P.exit_code_for([:interrupted, "TERM"]) == 143 && P.exit_code_for([:interrupted, "INT"]) == 130
 end
 
+# ---------------------------------------------------------------------------
+# validate_stdin (DND-176, S-1): --stdin FILE is a key, validated like --work
+# ---------------------------------------------------------------------------
+def sfacts(path, **over)
+  base = { path: path, realpath: path, exists: true, regular: true, symlink: false, owned: true, nlink: 1,
+           size: 10, lstat_error: nil }
+  P::StdinFacts.new(**base.merge(over))
+end
+
+check("S-1 a regular file beneath the temp root is accepted, as its realpath") do
+  P.validate_stdin(sfacts("/tmp/x/in", realpath: "/tmp/x/in"), tmp_root: ROOT) == [:ok, "/tmp/x/in"]
+end
+{
+  "empty" => [sfacts(""), /empty/], "relative" => [sfacts("in"), /not absolute/],
+  "missing" => [sfacts("/tmp/x/in", exists: false), /does not exist/],
+  "a symlink" => [sfacts("/tmp/x/in", symlink: true), /symlink/],
+  "outside the temp root" => [sfacts("/tmp/x/in", realpath: "/home/u/in"), /outside the temp root/],
+  "a /tmpfoo sibling" => [sfacts("/tmpfoo/in", realpath: "/tmpfoo/in"), /outside the temp root/],
+  "a directory or device" => [sfacts("/tmp/x/in", regular: false), /not a regular file/],
+  "not ours" => [sfacts("/tmp/x/in", owned: false), /not owned/],
+  "hardlinked" => [sfacts("/tmp/x/in", nlink: 2), /hardlinked/],
+  "too big" => [sfacts("/tmp/x/in", size: P::STDIN_MAX_BYTES + 1), /over/],
+  "an unknown size" => [sfacts("/tmp/x/in", size: nil), /over/],
+  "uninspectable" => [sfacts("/tmp/x/in", lstat_error: "EACCES"), /EACCES/],
+  "unresolvable" => [sfacts("/tmp/x/in", realpath: nil), /realpath/]
+}.each do |what, (f, pattern)|
+  check("S-1 --stdin #{what} is refused, named") { err?(P.validate_stdin(f, tmp_root: ROOT), pattern) }
+end
+check("S-1 --stdin adds no bind and no env to the argv (the file is fed by the host, never bound)") do
+  argv = P.argv(tools: { timeout: "/usr/bin/timeout", prlimit: "/usr/bin/prlimit", bwrap: "/usr/bin/bwrap" },
+                links: [], work: "/tmp/x/w", timeout: 10, status_fd: 3, cmd: ["/usr/bin/true"],
+                hard_limits: { cpu: nil, fsize: nil, nofile: nil })
+  !argv.include?("--stdin") && argv.count("--bind") == 1
+end
+
 if $failures.empty?
   puts "tool-sandbox policy: self-test OK (#{$checks} checks)"
   exit 0
