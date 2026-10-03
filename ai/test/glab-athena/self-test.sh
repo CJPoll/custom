@@ -161,6 +161,17 @@ printf '[submodule "lib"]\n\tpath = lib\n\turl = https://gitlab.com/example-grou
 gla "${R}" -c submodule.recurse=true push origin HEAD
 is_refusal && [[ "${ERR}" == *"submodule.recurse"* ]] && ok "13b. \`-c submodule.recurse=true push\` -> refused (DND-1841)" \
   || bad "13b. submodule.recurse push refused" "rc=${RC} out='${OUT}' err='${ERR}'"
+# A command submodule foreach runs inherits the bot's header and pushes
+# through git's exec-path, unjudged (DND-1844).
+gla "${R}" submodule foreach 'git push'
+is_refusal && [[ "${ERR}" == *"runs a command"* ]] && [[ "${ERR}" == *"git -C <submodule>"* ]] \
+  && [[ "${OUT}" != *"dry-run: exec git"* ]] \
+  && ok "13c. \`submodule foreach 'git push'\` -> refused, Fix: run it per submodule (DND-1844)" \
+  || bad "13c. submodule foreach refused" "rc=${RC} out='${OUT}' err='${ERR}'"
+gla "${R}" submodule status
+[ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: exec git"* ]] && [[ "${ERR}" != *"REFUSING"* ]] \
+  && ok "13d. \`submodule status\` is unchanged (DND-1844)" \
+  || bad "13d. submodule status passes" "rc=${RC} out='${OUT}' err='${ERR}'"
 
 R="$(new_repo notoken 'git@gitlab.com:example-group/example-app.git')"
 ( cd "${R}" && GITLAB_ATHENA_TOKEN_FILE="${TMP}/no-such-token" GLAB_ATHENA_GIT_DRY_RUN=1 "${WRAPPER}" git push origin HEAD ) \

@@ -118,9 +118,12 @@ For that one command, with no git or glab config change, the passthrough:
 It **refuses**, exit 3 with a `Fix:`, a network op that would still reach
 gitlab.com over SSH or plain HTTP: an `ssh://git@gitlab.com/…` remote or URL, a
 `pushurl` override, an `insteadOf`/`pushInsteadOf` that forces SSH, a shell
-alias, or a push that recurses into submodules. A missing token file is refused
-too; `glab-athena refresh` is owner-gated, so do not run it. The mechanism and
-its named residuals (an `~/.ssh/config` Host alias, `ext::`, git-lfs, …) are
+alias, a push that recurses into submodules, or a form that makes git run a
+command itself (`submodule foreach`, `bisect run`, `rebase --exec`, an `ext::`
+address, …; run such a command per submodule, or with plain git). A missing
+token file is refused too; `glab-athena refresh` is owner-gated, so do not run
+it. The mechanism and its named residuals (an `~/.ssh/config` Host alias, a
+command from config or a hook, git-lfs, …) are
 shared with `gh-athena git` and listed in `ai/lib/forge-git-passthrough.sh`.
 The `forge-identity-guard.sh` hook denies a plain `git push` to a gitlab.com
 remote before it runs, with a `Fix:` naming this form (DND-577). The agent PATH

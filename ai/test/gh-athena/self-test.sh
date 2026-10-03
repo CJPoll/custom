@@ -892,6 +892,110 @@ gha "${R}" push --repo=https://github.com/o/r.git --no-repo
 is_refusal && ok "S41. push --repo=<https> --no-repo: git pushes to the default remote (ssh://), which is refused" \
   || bad "S41. --no-repo cancels --repo" "rc=${RC} out='${OUT}' err='${ERR}'"
 
+echo
+echo "--- DND-1844: a subcommand that runs a command git starts itself is REFUSED ---"
+# A command git runs itself (submodule foreach, bisect run, rebase --exec, ...)
+# inherits the bot's header from the environment config channel, and a push it
+# runs goes through git's exec-path, where no wrapper judges the remote, the
+# recursion, a red main or the gate. Each such form is refused, never run.
+# rc_refused <label> [<text the Fix must carry>] : exit 3 with the
+# command-running refusal and its Fix, and git never ran.
+rc_refused() {
+  if is_refusal && [[ "${ERR}" == *"runs a command"* ]] && [[ "${OUT}" != *"dry-run: exec git"* ]] \
+    && [[ "${ERR}" == *"${2:-Fix:}"* ]]; then ok "$1"
+  else bad "$1" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+}
+# rc_passed <label> : exit 0, no refusal, git would run.
+rc_passed() {
+  if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: exec git"* ]] && [[ "${ERR}" != *"REFUSING"* ]]; then ok "$1"
+  else bad "$1" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+}
+PER_SM="git -C <submodule>"
+gha "${SM}" submodule foreach 'git push'
+rc_refused "C1. submodule foreach 'git push' -> refused, Fix: run it per submodule through the route" "${PER_SM}"
+gha "${SM}" submodule --quiet foreach --recursive git push origin HEAD:refs/heads/feat
+rc_refused "C2. submodule --quiet foreach --recursive git push -> refused" "${PER_SM}"
+gha "${SM}" submodule--helper foreach 'git push'
+rc_refused "C3. submodule--helper foreach (the helper git-submodule calls) -> refused" "${PER_SM}"
+gha "${SM}" -c 'alias.fe=submodule foreach git push' fe
+rc_refused "C4. an alias that expands to submodule foreach -> refused" "${PER_SM}"
+gha "${SM}" -c alias.submodule=status submodule foreach 'git push'
+rc_refused "C5. alias.submodule=status does not hide foreach (git ignores an alias named for a git command)" "${PER_SM}"
+gha "${SM}" bisect run git push
+rc_refused "C6. bisect run <cmd> -> refused"
+gha "${SM}" -c alias.bisect=status bisect run git push
+rc_refused "C7. alias.bisect=status does not hide bisect run (git ignores it)"
+gha "${SM}" rebase --exec 'git push' HEAD~1
+rc_refused "C8. rebase --exec <cmd> -> refused"
+gha "${SM}" rebase -x 'git push' HEAD~1
+rc_refused "C9. rebase -x <cmd> -> refused"
+gha "${SM}" rebase -ix 'git push' HEAD~1
+rc_refused "C10. rebase -ix <cmd> (x inside a short cluster) -> refused"
+gha "${SM}" rebase --ex='git push' HEAD~1
+rc_refused "C11. rebase --ex=<cmd> (an abbreviation git accepts) -> refused"
+gha "${SM}" difftool --extcmd='git push' HEAD~1
+rc_refused "C12. difftool --extcmd <cmd> -> refused"
+gha "${SM}" mergetool --tool=vimdiff
+rc_refused "C13. mergetool (it always launches a tool command) -> refused"
+gha "${SM}" grep -O'git push' init
+rc_refused "C14. grep -O<pager> -> refused"
+gha "${SM}" grep --open-files-in-pager='git push' init
+rc_refused "C15. grep --open-files-in-pager=<pager> -> refused"
+gha "${SM}" filter-branch --tree-filter 'git push' HEAD
+rc_refused "C16. filter-branch (its filters are shell) -> refused"
+gha "${SM}" send-email --to-cmd='git push' HEAD~1
+rc_refused "C17. send-email (its --*-cmd options run commands) -> refused"
+gha "${SM}" hook run pre-push
+rc_refused "C18. hook run <hook> -> refused"
+gha "${SM}" -c 'alias.x=!git push' x
+if is_refusal && [[ "${ERR}" == *"shell alias"* ]]; then
+  ok "C19. -c 'alias.x=!git push' (a shell alias from -c) -> refused"
+else bad "C19. shell alias from -c refused" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+gha "${SM}" push --receive-pack='git push; true' "${SUPBARE}" HEAD:refs/heads/feat
+rc_refused "C20. push --receive-pack=<cmd> (run locally for a local remote) -> refused"
+gha "${SM}" push --exec='git push; true' "${SUPBARE}" HEAD:refs/heads/feat
+rc_refused "C21. push --exec=<cmd> -> refused"
+gha "${SM}" push --rece 'git push; true' "${SUPBARE}" HEAD:refs/heads/feat
+rc_refused "C22. push --rece <cmd> (an abbreviation of --receive-pack) -> refused"
+gha "${SM}" fetch --upload-pack='git push; true' "${SUBBARE}"
+rc_refused "C23. fetch --upload-pack=<cmd> -> refused"
+gha "${SM}" ls-remote --u='git push; true' "${SUBBARE}"
+rc_refused "C24. ls-remote --u=<cmd> (an abbreviation of --upload-pack) -> refused"
+gha "${TMP}" clone -u 'git push; true' "${SUBBARE}" "${TMP}/c-clone"
+rc_refused "C25. clone -u <cmd> -> refused"
+gha "${SM}" archive --remote="${SUPBARE}" --exec='git push; true' HEAD
+rc_refused "C26. archive --exec=<cmd> -> refused"
+gha "${SM}" -c protocol.ext.allow=always fetch 'ext::sh -c git% push' main
+rc_refused "C27. an ext:: URL (its address is a shell command) -> refused"
+R="$(new_repo extremote 'ext::sh -c git% push')"
+gha "${R}" -c protocol.ext.allow=always fetch origin
+rc_refused "C27b. a remote whose configured URL is ext:: -> refused"
+gha "${SM}" --exec-path="${TMP}/evil-exec" status
+rc_refused "C28. --exec-path=<dir> (git runs its helpers from there) -> refused"
+OUT="$(cd "${SM}" && GIT_EXEC_PATH="${TMP}/evil-exec" GH_ATHENA_GIT_DRY_RUN=1 "${WRAPPER}" git status 2>"${TMP}/err")"; RC=$?
+ERR="$(cat "${TMP}/err")"
+rc_refused "C29. GIT_EXEC_PATH set to another directory -> refused"
+
+gha "${SM}" submodule status
+rc_passed "C30. submodule status passes"
+gha "${SM}" submodule init
+rc_passed "C31. submodule init passes"
+gha "${SM}" submodule sync
+rc_passed "C32. submodule sync passes"
+gha "${SM}" submodule update --recursive
+rc_passed "C33. submodule update passes"
+gha "${SM}" rebase --no-exec HEAD~1
+rc_passed "C34. rebase with no exec passes"
+gha "${SM}" grep -e TODO -- init
+rc_passed "C35. grep with no pager option passes"
+gha "${SM}" bisect log
+rc_passed "C36. bisect log passes"
+gha "${SM}" hook list pre-push
+rc_passed "C37. hook list passes"
+OUT="$(cd "${SM}" && GIT_EXEC_PATH="$(env -u GIT_EXEC_PATH git --exec-path)" GH_ATHENA_GIT_DRY_RUN=1 "${WRAPPER}" git status 2>"${TMP}/err")"; RC=$?
+ERR="$(cat "${TMP}/err")"
+rc_passed "C38. GIT_EXEC_PATH set to git's own exec-path (as git exports it to its children) passes"
+
 # DND-1667: no git call may have fallen through past its shim.
 if fsg_verify; then ok "no git call fell through past its shim (DND-1667)"
 else bad "no git call fell through past its shim (DND-1667)" "see the forge-stub-guard FAIL above"; fi

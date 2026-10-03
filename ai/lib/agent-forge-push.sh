@@ -190,8 +190,8 @@ for host in github.com gitlab.com; do
   rc=0; afp_reaches "$host" || rc=$?
   case "$rc" in
     0) ;;
-    3) afp_refuse "this git push${AFP_URL:+ to $(afp_shown "$AFP_URL")}: it would reach $host over SSH or another non-HTTPS transport, or recurse into submodules, or it carries an option or alias the check cannot read by git's grammar, so it can go out with the machine owner's SSH key, not Athena's (DND-1803, DND-1843)." \
-         "$(afp_fix "$host") Point the remote at https://$host/<owner>/<repo>.git (or git@$host:<owner>/<repo>.git, which the route rewrites), push each submodule separately, and spell every option in full as \`git push -h\` lists it." ;;
+    3) afp_refuse "this git push${AFP_URL:+ to $(afp_shown "$AFP_URL")}: it would reach $host over SSH or another non-HTTPS transport, or recurse into submodules, or it carries an option or alias the check cannot read by git's grammar, or it makes git run a command itself (--receive-pack, --exec, an ext:: address, --exec-path), so it can go out with the machine owner's SSH key, not Athena's (DND-1803, DND-1843, DND-1844)." \
+         "$(afp_fix "$host") Point the remote at https://$host/<owner>/<repo>.git (or git@$host:<owner>/<repo>.git, which the route rewrites), push each submodule separately, spell every option in full as \`git push -h\` lists it, and drop --receive-pack, --exec and --exec-path." ;;
     *) afp_refuse "this git push: its remote could not be resolved (exit $rc), so whether it goes to $host as the machine owner is unknown (DND-1803)." \
          "run it again from inside the repository with a configured remote; to push to a forge, $(afp_fix "$host")" ;;
   esac

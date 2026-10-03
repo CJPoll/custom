@@ -28,8 +28,12 @@
 #     submodules (fg_push_recurses says what counts). Also refused: a global
 #     option, or a push option, that git's grammar does not have, since the
 #     word after it could be its value (DND-1843; "git's own argv grammar"
-#     below holds the tables, and names the walks that read them). A
-#     refusal is exit 3
+#     below holds the tables, and names the walks that read them). Also
+#     refused: any form that makes git run a command the caller chose
+#     (submodule foreach, bisect run, rebase --exec, an ext:: address,
+#     --exec-path, ...), since that command inherits the bot's credential
+#     and pushes past every check here (DND-1844; "Commands git runs
+#     itself" below lists them and the residual). A refusal is exit 3
 #     with a Fix: line.
 #   * fg_refuse_red_main (DND-1482): a push to main is refused while
 #     ai/bin/main-health has recorded origin/main RED, unless it lands a gated
@@ -40,10 +44,11 @@
 #     refusal" below.
 #
 # Residual (NOT checked; each still runs): an ~/.ssh/config Host alias for the
-# forge host (`myalias:owner/repo`); ext:: transports; `clone
+# forge host (`myalias:owner/repo`); `clone
 # --recurse-submodules` (the submodule URLs are unknown until the clone lands);
 # git-lfs transfers; third-party `git-<name>` subcommands; any subcommand not
-# named above; a push whose recursion comes from config, in a repository where
+# named above; a command git runs from config, the environment or a hook
+# ("Commands git runs itself" names them); a push whose recursion comes from config, in a repository where
 # only the pushed commit (not the index, .gitmodules or config) records a
 # populated nested repository as a gitlink (fg_push_recurses).
 #
@@ -358,6 +363,188 @@ fg_push_long() {
   FG_PL_NAME="$hit"
 }
 
+# ---- Commands git runs itself (DND-1844) -------------------------------------
+# A command git starts itself inherits this route's environment: the bot's
+# header (fg_git_exec puts it in the environment config channel) and git's
+# exec-path at the front of PATH, where a real git sits and no wrapper does.
+# A push that command makes is judged by nothing here: not its remote, its
+# submodule recursion, a red main or the gate. So every argv form that makes
+# git run a command the caller chose is refused, never run. Measured on git
+# 2.54; one walk, run on the alias-expanded argv fg_refuse_non_https reads:
+#   * submodule foreach (and submodule--helper foreach, which git-submodule
+#     calls), bisect run, hook run;
+#   * rebase --exec / -x (an abbreviation such as --ex=, or x in a short
+#     cluster such as -ix);
+#   * grep -O / --open-files-in-pager (its pager is any command);
+#   * difftool, mergetool, filter-branch, send-email, instaweb and daemon,
+#     outright: each runs a tool, filter, hook or helper command by design;
+#   * push --receive-pack / --exec, fetch / pull / ls-remote / clone
+#     --upload-pack (clone -u), archive --exec: for a local or ext:: remote
+#     git runs that value as a local command;
+#   * an ext:: address anywhere in the argv (its address is a shell command),
+#     and an ext:: URL any remote resolves to (the URL check below);
+#   * --exec-path=<dir>, or a GIT_EXEC_PATH that is not git's own: git runs
+#     every helper (git-remote-https included) from there;
+#   * a shell alias (`!...`): fg_refuse_shell_alias, above.
+# These subcommands are taken as written, never alias-expanded: git ignores
+# an alias named for one of its own commands (`alias.bisect=status`).
+# Conservative, so a parse slip can only over-refuse: a word that may be an
+# option's value still counts (`submodule add <url> foreach` is refused).
+# Residual (NOT checked; each still runs): a command named in config, from
+# the repository's own config as much as from -c, --config-env or the
+# environment config channel (core.sshCommand, core.editor, core.pager,
+# sequence.editor, core.fsmonitor, diff.external, a diff, merge, filter or
+# textconv driver, gpg.program, remote.<name>.uploadpack / receivepack,
+# submodule.<name>.update=!cmd, include.path, ...); the same commands from
+# the environment (GIT_SSH_COMMAND, GIT_EDITOR, GIT_PAGER,
+# GIT_SEQUENCE_EDITOR, GIT_EXTERNAL_DIFF, ...); a git hook (pre-push runs
+# inside a routed push); a merge strategy (-s <name> runs git-merge-<name>);
+# a transport helper `<name>::` other than ext (git-remote-<name>).
+FG_RUNS_COMMAND_SUBS="submodule submodule--helper bisect hook rebase grep difftool mergetool filter-branch send-email instaweb daemon push fetch pull ls-remote clone archive"
+FG_RC_WHAT=""
+FG_RC_FIX=""
+
+# fg_short_has <word> <letter> <value letters> : 0 when <word> is a short
+# option cluster (-abc) holding <letter> before any letter that takes the
+# rest of the cluster as its value.
+fg_short_has() {
+  local w="$1" c
+  case "$w" in --*|-) return 1 ;; -*) w="${w#-}" ;; *) return 1 ;; esac
+  while [ -n "$w" ]; do
+    c="${w:0:1}"; w="${w:1}"
+    [ "$c" = "$2" ] && return 0
+    [[ "$3" == *"$c"* ]] && return 1
+  done
+  return 1
+}
+
+# fg_long_is <word> <long name> : 0 when <word> is --<p> or --<p>=<v> and <p>
+# is a non-empty prefix of <long name> (git accepts a unique abbreviation; an
+# ambiguous one is refused by git, so counting it can only over-refuse).
+fg_long_is() {
+  local n
+  case "$1" in --no-*|--) return 1 ;; --*) n="${1#--}"; n="${n%%=*}" ;; *) return 1 ;; esac
+  [ -n "$n" ] && [[ "$2" == "$n"* ]]
+}
+
+# fg_runs_command <subcommand> <args...> : 0 when this argv makes git run a
+# command the caller chose. Sets FG_RC_WHAT (what runs it) and FG_RC_FIX.
+fg_runs_command() {
+  local sub="$1" a o plain
+  shift
+  plain="it needs no forge identity: run it with plain git, outside the Athena route, and push the result afterwards with \`~/dev/custom/ai/bin/$FG_TOOL git push …\`"
+  FG_RC_WHAT=""; FG_RC_FIX="$plain"
+  for a in "$@"; do
+    case "${a,,}" in
+      ext::*|--*=ext::*)
+        FG_RC_WHAT="an ext:: address ('$a') is a shell command git runs"
+        FG_RC_FIX="name the repository by its https://$FG_HOST/<owner>/<repo>.git URL or a local path"
+        return 0 ;;
+    esac
+  done
+  case "$sub" in
+    submodule|submodule--helper)
+      for a in "$@"; do
+        [ "$a" = foreach ] || continue
+        FG_RC_WHAT="submodule foreach runs its command in every submodule"
+        FG_RC_FIX="run the command in each submodule yourself, through the route: list them with \`~/dev/custom/ai/bin/$FG_TOOL git submodule status\`, then run \`~/dev/custom/ai/bin/$FG_TOOL git -C <submodule> <git command>\` once per submodule, a push included. A command that reaches no forge needs no Athena route: run it with plain git"
+        return 0
+      done ;;
+    bisect)
+      for a in "$@"; do
+        [ "$a" = run ] && { FG_RC_WHAT="bisect run runs its command at every step"; return 0; }
+      done ;;
+    hook)
+      for a in "$@"; do
+        [ "$a" = run ] && { FG_RC_WHAT="hook run runs a hook script"; return 0; }
+      done ;;
+    rebase)
+      for a in "$@"; do
+        # -s, -X and -C take the rest of a cluster as their value; -S a key id.
+        if fg_long_is "$a" exec || fg_short_has "$a" x sXCS; then
+          FG_RC_WHAT="rebase --exec / -x runs its command after each commit"; return 0
+        fi
+      done ;;
+    grep)
+      for a in "$@"; do
+        # -A, -B, -C, -m, -e and -f take the rest of a cluster as their value.
+        if fg_long_is "$a" open-files-in-pager || fg_short_has "$a" O ABCmef; then
+          FG_RC_WHAT="grep -O / --open-files-in-pager runs its pager, which may be any command"; return 0
+        fi
+      done ;;
+    difftool|mergetool)
+      FG_RC_WHAT="$sub always launches a tool command (--extcmd, --tool or its config)"; return 0 ;;
+    filter-branch)
+      FG_RC_WHAT="filter-branch runs its filters as shell commands"; return 0 ;;
+    send-email)
+      FG_RC_WHAT="send-email runs commands (--to-cmd, --cc-cmd, --header-cmd, --sendmail-cmd, a --smtp-server path)"; return 0 ;;
+    instaweb)
+      FG_RC_WHAT="instaweb runs a web server and browser command (--httpd, --browser)"; return 0 ;;
+    daemon)
+      FG_RC_WHAT="daemon runs an access hook (--access-hook) and serves the repository"; return 0 ;;
+    push)
+      # By git's push grammar, so an abbreviation (--rece) is read in full.
+      fg_push_argv "$@"
+      for o in "${FG_PA_OPTS[@]}"; do
+        case "$o" in
+          --receive-pack=*|--exec=*)
+            FG_RC_WHAT="push ${o%%=*} names the receive-pack command, which git runs locally for a local or ext:: remote"
+            FG_RC_FIX="drop ${o%%=*}: a push over HTTPS to $FG_HOST never uses it"
+            return 0 ;;
+        esac
+      done ;;
+    fetch|pull|ls-remote|clone)
+      for a in "$@"; do
+        # clone's -o, -b, -c and -j take the rest of a cluster as their value.
+        if fg_long_is "$a" upload-pack || { [ "$sub" = clone ] && fg_short_has "$a" u objc; }; then
+          FG_RC_WHAT="$sub --upload-pack names the upload-pack command, which git runs locally for a local or ext:: remote"
+          FG_RC_FIX="drop --upload-pack: a $sub over HTTPS from $FG_HOST never uses it"
+          return 0
+        fi
+      done ;;
+    archive)
+      for a in "$@"; do
+        if fg_long_is "$a" exec; then
+          FG_RC_WHAT="archive --exec names the upload-archive command, which git runs locally for a local remote"
+          FG_RC_FIX="drop --exec, or run the archive with plain git, outside the Athena route"
+          return 0
+        fi
+      done ;;
+  esac
+  return 1
+}
+
+# fg_refuse_runs_command <what git was asked> : refuse FG_RC_WHAT with FG_RC_FIX.
+fg_refuse_runs_command() {
+  cat >&2 <<EOF
+$FG_TOOL: REFUSING \`git $1\`: it runs a command that git starts itself ($FG_RC_WHAT). That command inherits this route's bot credential, and any git it runs comes from git's exec-path, where $FG_TOOL never sees it: a push it makes is not checked for its remote, its submodules, a red main or the gate.
+  Fix: $FG_RC_FIX. $FG_ESCALATE
+EOF
+  exit 3
+}
+
+# fg_exec_path_moved <global options...> : 0 when git would run its helpers
+# from a directory other than its own: a --exec-path=<dir> global option, or
+# a non-empty GIT_EXEC_PATH that differs from git's own exec-path (git exports
+# its own to every command it runs, so that value passes). Sets FG_RC_WHAT.
+fg_exec_path_moved() {
+  local g own
+  for g in "$@"; do
+    case "$g" in
+      --exec-path=*)
+        FG_RC_WHAT="--exec-path=${g#--exec-path=} makes git run its helpers, git-remote-https included, from that directory"
+        FG_RC_FIX="drop --exec-path=<dir> and run the command again"
+        return 0 ;;
+    esac
+  done
+  [ -n "${GIT_EXEC_PATH:-}" ] || return 1
+  own="$(env -u GIT_EXEC_PATH git --exec-path 2>/dev/null || true)"
+  [ "$GIT_EXEC_PATH" = "$own" ] && return 1
+  FG_RC_WHAT="GIT_EXEC_PATH=$GIT_EXEC_PATH makes git run its helpers, git-remote-https included, from that directory, not from git's own ($own)"
+  FG_RC_FIX="unset GIT_EXEC_PATH and run the command again"
+  return 0
+}
+
 # fg_push_argv <push args...> : read the args after `push` as git does. Sets
 #   FG_PA_OPTS   every option, spelled in full: --<long> or --<long>=<value>
 #                (a short option becomes its long name; -h stays -h);
@@ -485,6 +672,8 @@ fg_refuse_non_https() {
     sub="$1"; shift
     [ "$depth" -lt 10 ] || break
     case "$sub" in push|fetch|pull|ls-remote|clone|remote|submodule|subtree) break ;; esac
+    # git ignores an alias named for one of its own commands (DND-1844).
+    [[ " $FG_RUNS_COMMAND_SUBS " == *" $sub "* ]] && break
     alias_val="$(G config --get "alias.$sub" 2>/dev/null || true)"
     [ -n "$alias_val" ] || break
     case "$alias_val" in
@@ -498,6 +687,11 @@ fg_refuse_non_https() {
     set -- "${ex[@]}" "$@"
     depth=$((depth + 1))
   done
+
+  # A command git starts itself carries the bot's credential past every check
+  # below (DND-1844): refuse it, on the alias-expanded argv.
+  fg_exec_path_moved "${glob[@]}" && fg_refuse_runs_command "${glob[*]:+${glob[*]} }$sub"
+  fg_runs_command "$sub" "$@" && fg_refuse_runs_command "$sub $*"
 
   local recurse=0 a0
   for a0 in "$@"; do
@@ -663,6 +857,12 @@ fg_refuse_non_https() {
     for u in "${urls[@]}"; do
       [ -n "$u" ] || continue
       FG_RESOLVED_URLS+="$u"$'\n'
+      # A remote whose URL is ext:: runs that address as a shell command (DND-1844).
+      case "${u,,}" in
+        ext::*) FG_RC_WHAT="'$t' resolves to the ext:: address '$u', a shell command git runs"
+                FG_RC_FIX="point the remote at https://$FG_HOST/<owner>/<repo>.git or a local path"
+                fg_refuse_runs_command "$sub" ;;
+      esac
       fg_reaches_forge_insecurely "$u" && fg_refuse "$sub" "$t" "$u"
     done
   done

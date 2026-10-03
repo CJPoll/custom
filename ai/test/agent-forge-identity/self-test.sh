@@ -289,6 +289,8 @@ repo 'ssh://git@github.com/synth-owner/synth-repo.git'
 run "${R}" git push --repo="${TMP}/nowhere.git" --no-repo
 refused "K18. push --repo=<local> --no-repo: git uses the default remote (ssh github), which is judged" git gh-athena 'REAL-GIT'
 repo "${SYNTH_GH}"
+run "${R}" git push --receive-pack='git push; true' origin HEAD
+refused "K19. push --receive-pack=<cmd> makes git run a command itself (DND-1844)" git 'DND-1844' 'REAL-GIT'
 run "${R}" git --synth-unknown-opt push origin HEAD
 refused "K12. an unknown global option before push is refused (deny by default)" git gh-athena 'REAL-GIT'
 run "${R}" git push --help
