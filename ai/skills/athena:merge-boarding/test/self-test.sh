@@ -2116,12 +2116,16 @@ R="${TMP}/wl"; new_repo "$R"
 ( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
 record_pass "$R"
 mkfifo "${TMP}/wl-started" "${TMP}/wl-release"
-printf '#!/bin/sh\necho up > "%s"\nread _ < "%s"\nexit 0\n' "${TMP}/wl-started" "${TMP}/wl-release" > "${R}/g.sh"; chmod +x "${R}/g.sh"
+printf '#!/bin/sh\nls -l /proc/$$/fd > "%s" 2>&1\necho up > "%s"\nread _ < "%s"\nexit 0\n' "${TMP}/wl-fds" "${TMP}/wl-started" "${TMP}/wl-release" > "${R}/g.sh"; chmod +x "${R}/g.sh"
 printf '#!/bin/sh\ntouch "%s"\nexit 0\n' "${R}/WL_SECOND_RAN" > "${R}/gp.sh"; chmod +x "${R}/gp.sh"
 printf '/WL_SECOND_RAN\n' >> "${R}/.git/info/exclude"
 ( cd "$R" && ATHENA_TEST_SLOTS=3 "$GATE" --target main --no-fetch --gate "${R}/g.sh" >"${TMP}/wl-first.out" 2>&1 ) &
 WL_FIRST=$!
-read -r _ < "${TMP}/wl-started"
+# The timeout only caps a hang (the first gate never reaching its gate); it is not a wait.
+timeout 120 bash -c 'read -r _ < "$1"' _ "${TMP}/wl-started" && ok "wl0 the first gate reached its declared gate" \
+  || { bad "wl0 the first gate never reached its gate"; kill "$WL_FIRST" 2>/dev/null; }
+grep -q 'integration-gate.lock' "${TMP}/wl-fds" && bad "wl0 the declared gate inherited the worktree lock fd" "$(cat "${TMP}/wl-fds")" \
+  || ok "wl0 the declared gate does not inherit the worktree lock"
 WL_HEAD="$(git -C "$R" rev-parse HEAD)"
 out="$( cd "$R" && ATHENA_TEST_SLOTS=3 "$GATE" --target main --no-fetch --gate "${R}/gp.sh" 2>&1 )"; rc=$?
 [ "$rc" -eq 7 ] && ok "wl1 a second run in the same worktree exits 7" || bad "wl1 expected exit 7, got $rc" "$out"
@@ -2130,19 +2134,24 @@ wl_pid="$(grep -o 'holder pid=[0-9]*' <<<"$out" | head -n 1 | cut -d= -f2)"
 wl_lockpid="$(head -n 1 "$(git -C "$R" rev-parse --absolute-git-dir)/integration-gate.lock")"
 [ -n "$wl_pid" ] && kill -0 "$wl_pid" 2>/dev/null && [ "$wl_pid" = "$wl_lockpid" ] \
   && ok "wl1 names the live holder's pid" || bad "wl1 did not name a live holder pid (got '${wl_pid}', lock file '${wl_lockpid}')" "$out"
+[ ! -e "$(git -C "$R" rev-parse --path-format=absolute --git-common-dir)/integration-receipts/${WL_HEAD}.json" ] \
+  && ok "wl1 the refused run left no receipt" || bad "wl1 a receipt exists for the head while its holder is still running"
 grep -q 'INTEGRATION OK' <<<"$out" && bad "wl1 the refused run printed INTEGRATION OK" "$out" || ok "wl1 the refused run prints no INTEGRATION OK"
 [ ! -f "${R}/WL_SECOND_RAN" ] && ok "wl1 the refused run did not run its gate" || bad "wl1 the second run was admitted and ran its gate"
 # A different worktree of the same repo is unaffected.
-( cd "$R" && git worktree add -q "${TMP}/wl-other" -b wl-other >/dev/null 2>&1 )
+( cd "$R" && git worktree add -q "${TMP}/wl-other" -b wl-other >/dev/null 2>&1 \
+  && cd "${TMP}/wl-other" && echo o > o.txt && git add o.txt && git commit -qm o )
+rm -f "${R}/WL_SECOND_RAN"
 record_pass "${TMP}/wl-other"
 out="$( cd "${TMP}/wl-other" && ATHENA_TEST_SLOTS=3 "$GATE" --target main --no-fetch --gate "${R}/gp.sh" 2>&1 )"; rc=$?
 [ "$rc" -eq 0 ] && ok "wl2 a run in a different worktree is admitted" || bad "wl2 expected exit 0 in another worktree, got $rc" "$out"
 # The holder finishes; the lock is released with it.
-echo go > "${TMP}/wl-release"
+timeout 120 bash -c 'echo go > "$1"' _ "${TMP}/wl-release"
 wait "$WL_FIRST"; wl_rc=$?
 [ "$wl_rc" -eq 0 ] && ok "wl3 the holder still finishes green" || bad "wl3 holder exited ${wl_rc}" "$(cat "${TMP}/wl-first.out")"
 [ -f "$(git -C "$R" rev-parse --path-format=absolute --git-common-dir)/integration-receipts/${WL_HEAD}.json" ] \
   && ok "wl3 the holder's receipt stands" || bad "wl3 the holder's receipt is missing"
+rm -f "${R}/WL_SECOND_RAN"
 out="$( cd "$R" && ATHENA_TEST_SLOTS=3 "$GATE" --target main --no-fetch --gate "${R}/gp.sh" 2>&1 )"; rc=$?
 [ "$rc" -eq 0 ] && [ -f "${R}/WL_SECOND_RAN" ] && ok "wl4 the lock is released when the holder exits" || bad "wl4 a later run was refused, rc=$rc" "$out"
 wl_help="$("$GATE" --help 2>&1)"

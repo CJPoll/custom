@@ -424,8 +424,16 @@ if ! { exec {IG_WT_FD}<>"$IG_WT_LOCK"; } 2>/dev/null; then
   echo "Fix: make ${IG_WT_GITDIR} writable and re-run; a gate that cannot take its lock could run beside another in this worktree." >&2
   exit 2
 fi
-if flock -n "$IG_WT_FD"; then
+# Children that outlive the run must not inherit the lock (a surviving orphan
+# would hold it with a dead holder pid): the judge and the declared gate run
+# with the fd closed. -E separates "held" (99) from a flock failure.
+flock -n -E 99 "$IG_WT_FD"; IG_WT_RC=$?
+if [ "$IG_WT_RC" -eq 0 ]; then
   printf '%s\n' "$$" >"$IG_WT_LOCK" 2>/dev/null
+elif [ "$IG_WT_RC" -ne 99 ]; then
+  echo "${PROG}: flock failed on ${IG_WT_LOCK} (exit ${IG_WT_RC}), so the per-worktree lock could not be taken." >&2
+  echo "Fix: install util-linux flock on PATH and make ${IG_WT_GITDIR} writable, then re-run; a gate that cannot take its lock could run beside another in this worktree." >&2
+  exit 2
 elif [ "${INTEGRATION_GATE_IN_SLOT:-}" != 1 ]; then
   IG_WT_HOLDER="$(head -n 1 "$IG_WT_LOCK" 2>/dev/null)"
   [[ "$IG_WT_HOLDER" =~ ^[1-9][0-9]*$ ]] || IG_WT_HOLDER="unknown"
@@ -596,7 +604,7 @@ start_critic() {
   local -a judge_slot=( --pool model --label "critic-review $(basename "$ROOT") ${1:0:8}" )
   [ -n "$SLOT_WAIT" ] && judge_slot+=( --wait-timeout "$SLOT_WAIT" )
   CRITIC_LOG="$(mktemp "${TMPDIR:-/tmp}/integration-gate-critic.XXXXXX")"
-  ( cd "$ROOT" && exec setsid "$TEST_SLOT" "${judge_slot[@]}" -- "$CRITIC" --base "$TARGET" ) >"$CRITIC_LOG" 2>&1 &
+  ( cd "$ROOT" && exec setsid "$TEST_SLOT" "${judge_slot[@]}" -- "$CRITIC" --base "$TARGET" ) {IG_WT_FD}>&- >"$CRITIC_LOG" 2>&1 &
   CRITIC_PGID=$!
   CRITIC_ADOPTED=0; CRITIC_ACTIVE=1
   echo "${PROG}: --with-critic: running the standing judge on $(short "$1") beside the gate (pgid ${CRITIC_PGID}, log ${CRITIC_LOG})"
@@ -768,7 +776,7 @@ if [ "$IN_SLOT" -eq 0 ]; then
   [ -n "$SLOT_WAIT" ] && SLOT_ARGS+=( --wait-timeout "$SLOT_WAIT" )
   gate_slot_weight
   echo "${PROG}: taking a machine test slot first (${SLOT_WEIGHT_NOTE}); the fetch and the containment check run inside it (DND-1064)"
-  "$TEST_SLOT" "${SLOT_ARGS[@]}" -- env INTEGRATION_GATE_IN_SLOT=1 INTEGRATION_GATE_FACTS="$IG_FACTS_OUT" bash "$(realpath "${BASH_SOURCE[0]}")" "${ORIG_ARGS[@]}"
+  "$TEST_SLOT" "${SLOT_ARGS[@]}" -- env INTEGRATION_GATE_IN_SLOT=1 INTEGRATION_GATE_FACTS="$IG_FACTS_OUT" bash "$(realpath "${BASH_SOURCE[0]}")" "${ORIG_ARGS[@]}" {IG_WT_FD}>&-
   SLOT_RC=$?
   OUTCOME_LINE="$(cat "$OUTCOME" 2>/dev/null)"
   if [[ "$OUTCOME_LINE" =~ ^ran\ exit=([0-9]+)$ ]]; then
@@ -1048,7 +1056,7 @@ if [ "$JUDGE_SAME_REPO" -eq 1 ] && [ "$LANDED_REEXEC" -eq 0 ]; then
   exec env INTEGRATION_GATE_IN_SLOT=1 INTEGRATION_GATE_LANDED_REEXEC=1 \
     INTEGRATION_GATE_SCRIPT_COMMON="$SELF_COMMON_REAL" INTEGRATION_GATE_LANDED_DIR="$LANDED_TMP" \
     INTEGRATION_GATE_FACTS="${IG_FACTS}" INTEGRATION_GATE_PRESTARTED_CRITIC="${REEXEC_PRESTARTED}" \
-    bash "${LANDED_TMP}/${IG_SELF_REL}" "${REEXEC_ARGS[@]}"
+    bash "${LANDED_TMP}/${IG_SELF_REL}" "${REEXEC_ARGS[@]}" {IG_WT_FD}>&-
 fi
 if [ "$LANDED_REEXEC" -eq 1 ]; then
   # This copy was materialised from git a moment ago; assert it is the target
@@ -1369,7 +1377,7 @@ SLOT_ARGS=( --label "integration-gate $(basename "$ROOT") $(short "$HEAD_SHA")" 
 GATE_RUN_CLAIM=""
 [ "$DECL_RC" -eq 0 ] && [ "$LANDED_GATE" != ai/bin/harness-gate ] && GATE_RUN_CLAIM="${ROOT}/${LANDED_GATE}"
 ATHENA_TEST_SLOT_GATE_RUN="$GATE_RUN_CLAIM" \
-  "$TEST_SLOT" "${SLOT_ARGS[@]}" -- bash -c 'set -uo pipefail; cd "$1" && eval "$2"' _ "$ROOT" "$GATE_CMD"
+  "$TEST_SLOT" "${SLOT_ARGS[@]}" -- bash -c 'set -uo pipefail; cd "$1" && eval "$2"' _ "$ROOT" "$GATE_CMD" {IG_WT_FD}>&-
 SLOT_RC=$?
 OUTCOME_LINE="$(cat "$OUTCOME" 2>/dev/null)"
 case "$OUTCOME_LINE" in
