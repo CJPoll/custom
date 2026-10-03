@@ -117,6 +117,7 @@ done
 printf '%s\n' "${render}" > "${TMP}/cfg"
 if grk_config_has_runner alpha-ci < "${TMP}/cfg"; then ok "lib: config_has_runner finds a rendered entry"; else bad "lib: config_has_runner finds a rendered entry"; fi
 if grk_config_has_runner alpha < "${TMP}/cfg"; then bad "lib: config_has_runner matches whole names only"; else ok "lib: config_has_runner matches whole names only"; fi
+eq "lib: config_roles reads each entry's role" "$(printf '%s\n%s\n%s\n' "$(grk_render_runner a ci 1 https://gitlab.com /x "${TOK_A}")" "$(grk_render_runner b - 1 https://gitlab.com /x "${TOK_A}")" '[[runners]]' | grk_config_roles | tr '\n' ' ')" "ci - ? "
 eq "lib: --runner NAME:- is an untagged runner" "$(grk_parse_runner walt-ui:-:3)" "walt-ui - 3"
 case "$(grk_render_runner walt-ui - 3 https://gitlab.com /srv/ci/gitlab-runner "${TOK_A}")" in
   *"untagged: no tags, run_untagged = true"*) ok "lib: an untagged entry says so, not run_untagged = false" ;;
@@ -350,7 +351,7 @@ rm -f "${ROOT}/fake-groups/gitlab-runner-bravo"
 # --- the runner: tokens on stdin, config.toml 0600 ---------------------------
 : > "${ARGV_LOG}"
 printf '%s\n%s\n' "${TOK_A}" "${TOK_B}" > "${TMP}/tokens-ab"
-kit setup-gitlab-runner --user gitlab-runner-alpha --runner alpha-ci:ci --runner alpha-deploy:deploy:2 "${TMP}/tokens-ab"
+kit setup-gitlab-runner --user gitlab-runner-alpha --runner alpha-ci:ci --runner alpha-ci2:ci:2 "${TMP}/tokens-ab"
 expect_rc "runner alpha: setup-gitlab-runner succeeds" 0
 CFG="${ROOT}/home/gitlab-runner-alpha/.gitlab-runner/config.toml"
 eq "runner alpha: config.toml is 0600" "$(mode_of "${CFG}")" "600"
@@ -359,8 +360,8 @@ check "runner alpha: concurrent is the summed limits" grep -qx 'concurrent = 3' 
 eq "runner alpha: two [[runners]] entries" "$(grep -c '^\[\[runners\]\]$' "${CFG}")" "2"
 check "runner alpha: first token is in its entry" grep -qxF "  token = \"${TOK_A}\"" "${CFG}"
 check "runner alpha: second token is in its entry" grep -qxF "  token = \"${TOK_B}\"" "${CFG}"
-check "runner alpha: the deploy entry records its tag" grep -qF 'tags = ["deploy"], run_untagged = false' "${CFG}"
-check "runner alpha: the deploy entry has its own limit" grep -qx '  limit = 2' "${CFG}"
+check "runner alpha: an entry records its tag" grep -qF 'tags = ["ci"], run_untagged = false' "${CFG}"
+check "runner alpha: an entry has its own limit" grep -qx '  limit = 2' "${CFG}"
 eq "runner alpha: the instance is a symlink to the base initd" "$(readlink "${ROOT}/etc/init.d/gitlab-runner.alpha")" "gitlab-runner"
 check "runner alpha: conf.d names the config" \
   grep -qx 'RUNNER_CONFIG="/home/gitlab-runner-alpha/.gitlab-runner/config.toml"' "${ROOT}/etc/conf.d/gitlab-runner.alpha"
@@ -368,16 +369,40 @@ check "runner alpha: the config is written as the user, not by root" grep -q '^r
 if grep -q '^rc-service .* start' "${ARGV_LOG}"; then bad "runner alpha: the service is not started"; else ok "runner alpha: the service is not started"; fi
 
 cfg_before="$(cat "${CFG}")"
-kit setup-gitlab-runner --user gitlab-runner-alpha --runner alpha-ci:ci --runner alpha-deploy:deploy:2 "${NOIN}"
+kit setup-gitlab-runner --user gitlab-runner-alpha --runner alpha-ci:ci --runner alpha-ci2:ci:2 "${NOIN}"
 expect_rc "runner alpha: a re-run with the entries present reads no token" 0
 eq "runner alpha: a re-run leaves the config unchanged" "$(cat "${CFG}")" "${cfg_before}"
 
 printf '%s\n' "${TOK_C}" > "${TMP}/tokens-c"
-kit setup-gitlab-runner --user gitlab-runner-alpha --runner alpha-ci:ci --runner alpha-extra:extra "${TMP}/tokens-c"
+kit setup-gitlab-runner --user gitlab-runner-alpha --runner alpha-ci:ci --runner alpha-ci3:ci "${TMP}/tokens-c"
 expect_rc "runner alpha: a new entry is appended, reading only its token" 0
 eq "runner alpha: three entries after the append" "$(grep -c '^\[\[runners\]\]$' "${CFG}")" "3"
 check "runner alpha: the appended entry has the new token" grep -qxF "  token = \"${TOK_C}\"" "${CFG}"
 eq "runner alpha: the config stays 0600 after the append" "$(mode_of "${CFG}")" "600"
+
+# One trust role per runner user: a deploy runner never joins a ci user's config.
+before="$(snapshot)"
+kit setup-gitlab-runner --user gitlab-runner-alpha --runner alpha-deploy:deploy "${TMP}/tokens-c"
+expect_rc "runner alpha: a deploy entry in a ci user's config is refused" 1
+case "${ERR}" in *"one trust role"*Fix:*"--user gitlab-runner-alpha-deploy"*) ok "the role refusal's Fix: names a separate deploy user" ;;
+  *) bad "the role refusal's Fix: names a separate deploy user" "${ERR}" ;; esac
+eq "runner alpha: the role refusal changes no file" "$(snapshot)" "${before}"
+kit setup-gitlab-runner --user gitlab-runner-bravo --runner bravo-ci:ci --runner bravo-deploy:deploy "${TMP}/tokens-ab"
+expect_rc "runner bravo: ci and deploy in one call for one user is refused" 1
+eq "runner bravo: that refusal changes no file" "$(snapshot)" "${before}"
+# The deploy runner as its own user: its own config, its own dockerd service.
+kit setup-gitlab-runner --user gitlab-runner-charlie --runner charlie-deploy:deploy "${TMP}/tokens-c"
+expect_rc "runner charlie: a deploy runner under its own user succeeds" 0
+check "runner charlie: its config holds the deploy entry" \
+  grep -qF 'tags = ["deploy"], run_untagged = false' "${ROOT}/home/gitlab-runner-charlie/.gitlab-runner/config.toml"
+if grep -qF 'deploy' "${CFG}"; then bad "runner alpha: the ci user's config holds no deploy entry"; else ok "runner alpha: the ci user's config holds no deploy entry"; fi
+# An entry whose role this kit cannot tell (register wrote it) blocks additions.
+printf '[[runners]]\n  name = "legacy"\n' > "${TMP}/legacy-cfg"
+mkdir -p "${ROOT}/home/gitlab-runner-delta/.gitlab-runner"
+cp "${TMP}/legacy-cfg" "${ROOT}/home/gitlab-runner-delta/.gitlab-runner/config.toml"
+kit setup-gitlab-runner --user gitlab-runner-delta --runner delta-ci:ci "${TMP}/tokens-c"
+expect_rc "runner delta: adding to a config with an untold role is refused" 1
+case "${ERR}" in *"cannot tell"*Fix:*) ok "the untold-role refusal carries Fix:" ;; *) bad "the untold-role refusal carries Fix:" "${ERR}" ;; esac
 
 # A bad token, or none, is refused with Fix: and nothing is written.
 printf '%s\n' "${NOT_TOK}" > "${TMP}/tokens-bad"

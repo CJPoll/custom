@@ -37,7 +37,13 @@ unchanged. A second user adds `--user gitlab-runner-<suffix>` to all three
 scripts; it gets its own subuid block, rootless dockerd
 (`docker-rootless-gitlab-runner.<suffix>`), runner service
 (`gitlab-runner.<suffix>`) and `0700` `/srv/ci/<user>/{docker,cache}`. Each
-script's `--help` has the flags.
+script's `--help` has the flags. One runner user holds one trust role: a ci
+runner and a deploy runner are two users (e.g. `gitlab-runner-<suffix>` and
+`gitlab-runner-<suffix>-deploy`), because a ci job runs merge-request code with
+its user's docker socket and could otherwise reach a deploy job's OIDC token,
+checkout and images. `setup-gitlab-runner` refuses a deploy entry in a ci user's
+config. The deploy runner is created in GitLab with
+`access_level=ref_protected`, so only protected-branch jobs reach it.
 
 ## 2. Register (as the runner user)
 

@@ -187,6 +187,39 @@ grk_config_has_runner() {
   grep -Eq "^[[:space:]]*name[[:space:]]*=[[:space:]]*\"$1\"[[:space:]]*$"
 }
 
+# grk_config_roles < CONFIG -> one line per [[runners]] entry: its tag, "-" when
+# untagged, or "?" when the entry has no role comment (gitlab-runner register
+# wrote it). The role comment is the one grk_render_runner writes.
+grk_config_roles() {
+  awk '
+    /^[[:space:]]*\[\[runners\]\]/ { if (n) print (r == "" ? "?" : r); n = 1; r = ""; next }
+    n && /^[[:space:]]*# tags = \["/ { s = $0; sub(/.*# tags = \["/, "", s); sub(/"\].*/, "", s); r = s; next }
+    n && /^[[:space:]]*# untagged:/ { r = "-"; next }
+    END { if (n) print (r == "" ? "?" : r) }'
+}
+
+# grk_one_role USER ROLE... -> 0 when every ROLE is the same known role, else a
+# refusal. One runner user holds ONE trust role (DND-1937): a ci job's code
+# reaches its user's docker socket, builds dir and cache, so a deploy runner
+# sharing that user would hand MR code the deploy job's OIDC token and checkout.
+grk_one_role() {
+  local user="$1" first="" r; shift
+  for r in "$@"; do
+    if [ "${r}" = "?" ]; then
+      grk_refuse "${user}'s config.toml has a [[runners]] entry whose tag this kit cannot tell (no role comment), so adding runners could mix trust roles" \
+        "add these runners under a new user (--user gitlab-runner-<suffix>), or give the existing entry its role comment by hand"
+      return 1
+    fi
+    [ -n "${first}" ] || first="${r}"
+    if [ "${r}" != "${first}" ]; then
+      local sfx="${r//[^a-z0-9]/}"; [ -n "${sfx}" ] || sfx="untagged"
+      grk_refuse "runner user ${user} would hold runners tagged '${first}' and '${r}': one runner user holds one trust role" \
+        "give each role its own user, e.g. --user ${user} for '${first}' and --user ${user}-${sfx} for '${r}' (each gets its own dockerd, cache and 0700 home)"
+      return 1
+    fi
+  done
+}
+
 # grk_render_header CONCURRENT -> the top of a new config.toml.
 grk_render_header() {
   printf '# Written by scripts/setup-gitlab-runner (DND-1937). Holds glrt- runner\n'

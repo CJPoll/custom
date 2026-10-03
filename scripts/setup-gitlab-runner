@@ -13,9 +13,10 @@
 #                       service is gitlab-runner (default user) or the OpenRC
 #                       instance gitlab-runner.<suffix>.
 #   --runner SPEC       NAME:TAG[:LIMIT], repeatable. One [[runners]] entry: its
-#                       name, its one tag, and its own job limit (default 1).
-#                       Tags and run_untagged=false are set on the runner in
-#                       GitLab when it is created; the entry records them.
+#                       name, its one tag (- for untagged), and its own job
+#                       limit (default 1). Tags and run_untagged=false are set
+#                       on the runner in GitLab when it is created; the entry
+#                       records them.
 #   --concurrent <N>    the config's global job cap for a NEW config.toml.
 #                       Default: the sum of the runners' limits, so one runner
 #                       never queues behind another's jobs.
@@ -30,9 +31,18 @@
 # its 0700 ~/.gitlab-runner. An entry already in the config is kept and its
 # token is not read. Without --runner the script installs and prints the steps.
 #
-# Example (two runners, tokens from the two `POST user/runners` responses):
-#   sudo scripts/setup-gitlab-runner --user gitlab-runner-personal \
-#     --runner personal-ci:ci --runner personal-deploy:deploy
+# One trust role per runner user. Every entry in one config.toml carries the
+# same tag; a ci entry and a deploy entry in one config are refused. A ci job
+# runs merge-request code with its user's docker socket, so a deploy runner in
+# the same user could be read or tampered with by it (its OIDC token, its
+# checkout, its images). The deploy runner therefore gets its OWN user, subuid
+# block, rootless dockerd, services, builds dir and cache, and is created in
+# GitLab with access_level=ref_protected so only protected-branch jobs reach it.
+#
+# Example (ci and deploy as two users; each token from its `POST user/runners`):
+#   sudo scripts/setup-gitlab-runner --user gitlab-runner-personal --runner personal-ci:ci
+#   sudo scripts/setup-gitlab-runner --user gitlab-runner-personal-deploy --runner personal-deploy:deploy
+# (setup-gitlab-runner-user and setup-gitlab-runner-docker first, same --user each.)
 #
 # Idempotent. Prerequisites: setup-gitlab-runner-user, setup-gitlab-runner-docker
 # (same --user). Flags may come in any order.
@@ -149,6 +159,13 @@ for i in "${!R_NAMES[@]}"; do
     NEW_IDX+=("${i}")
   fi
 done
+# One runner user holds one trust role: never a ci and a deploy runner in one
+# config.toml, sharing one docker socket, builds dir and cache.
+grk_one_role "${USER_NAME}" "${R_TAGS[@]+"${R_TAGS[@]}"}" || exit 1
+if [ "${#NEW_IDX[@]}" -gt 0 ] && $HAVE_CFG; then
+  mapfile -t EXISTING_ROLES < <(grk_config_roles <<<"${EXISTING_CFG}")
+  grk_one_role "${USER_NAME}" "${EXISTING_ROLES[@]+"${EXISTING_ROLES[@]}"}" "${R_TAGS[@]}" || exit 1
+fi
 TOKENS=()
 if [ "${#NEW_IDX[@]}" -gt 0 ] && ! $DRY_RUN; then
   for i in "${NEW_IDX[@]}"; do
@@ -277,6 +294,8 @@ GitLab Runner binary at ${BIN_PATH}; ${SERVICE_NAME} installed, not registered. 
   1. Create each runner in GitLab with its tag and "Run untagged jobs" OFF,
      e.g. glab api -X POST user/runners -f runner_type=project_type \\
        -F project_id=<id> -f description=<name> -f tag_list=<tag> -F run_untagged=false
+     A deploy runner also gets -f access_level=ref_protected, and its own
+     --user (one trust role per runner user; see --help).
      Keep the 'glrt-...' token from the response. Never paste it into a chat.
 
   2. Write the config, tokens on stdin in --runner order (never as arguments):

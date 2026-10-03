@@ -510,5 +510,9 @@ subuid/subgid block is `1000000000 + (cksum(name) mod 4096) * 65536` (the POSIX
 a root-owned `/srv/ci/<user>` (`0710`). Root never writes through a path the
 runner user owns: the config and `.bashrc` are written as the user (`runuser`). `setup-gitlab-runner --runner
 NAME:TAG[:LIMIT]` writes the `[[runners]]` entries into a `0600` config.toml,
-reading one `glrt-` token per entry on stdin, never argv. The rules live in
+reading one `glrt-` token per entry on stdin, never argv. One runner user holds
+one trust role: a ci entry and a deploy entry in one config.toml are refused,
+because a ci job's merge-request code reaches its user's docker socket. The
+deploy runner is its own user (e.g. `gitlab-runner-<suffix>-deploy`), created in
+GitLab with `access_level=ref_protected`. The rules live in
 `scripts/lib/gitlab-runner-kit.sh`; the tests in `scripts/test/gitlab-runner-kit/`.

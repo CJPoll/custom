@@ -108,7 +108,10 @@ rule above still holds: nothing in `/etc/init.d` points into the repo. Its user,
 OpenRC sources the base `/etc/conf.d/<service>` first, so an instance inherits
 what the base sets. The kit's base conf.d names no user, and each initd's
 `start_pre` refuses an instance whose resolved user, home or data root is not
-its own, with a `Fix:`. The runner instance starts after its own docker instance. The
+its own, with a `Fix:`. The runner instance starts after its own docker instance.
+A ci runner and a deploy runner are always two users, each with its own
+instance pair (one trust role per runner user; `scripts/setup-gitlab-runner
+--help`). The
 config.toml is written by `scripts/setup-gitlab-runner --runner …` (tokens on
 stdin), not by `gitlab-runner register --token` in argv; the registry declares
 each runner user's config.toml (`ai/secrets/registry.json`, field `user`).
