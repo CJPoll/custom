@@ -352,9 +352,7 @@ STATIC_CHECKS = [
 # lines are excluded because comments cite other tools' suites. Residual, said
 # out loud: a suite behind a differently named flag, or a definer whose only
 # mention is inside a comment, is not seen.
-# The definition is FirstParty::INLINE_SELF_TEST_RE (DND-1577): the lead-time
-# improver reads the same token to find a tool's self-test block.
-INLINE_SELF_TEST_RE = FirstParty::INLINE_SELF_TEST_RE
+INLINE_SELF_TEST_RE = /(?<![\w-])--self-test(?![\w-])/.freeze
 
 # tool -> the check (argv[0] of a CHECKS entry) that already runs its suite.
 # Corroborated in the gate: the tool's code names the suite's path (>= the

@@ -117,54 +117,6 @@ module FirstParty
     seg.gsub(/([a-z0-9])([A-Z])/, '\1 \2').gsub(/([A-Z]+)([A-Z][a-z])/, '\1 \2').downcase.split(/[^a-z0-9]+/)
   end
 
-  # The token that marks a tool's inline self-test (DND-507): a non-comment
-  # line holding `--self-test` (not a prefix of a longer flag). Deliberately a
-  # token, not a list of dispatch shapes; ai/bin/harness-gate's coverage check
-  # and `inline_self_test_lines` below read this one definition.
-  INLINE_SELF_TEST_RE = /(?<![\w-])--self-test(?![\w-])/.freeze
-
-  # A function that holds the suite: `def run_self_test`, `function self_test`,
-  # `self_test() {`, an Elixir `defp run_self_test`. Its body is a self-test block even when the `--self-test`
-  # token sits elsewhere in the file (the dispatch line).
-  SELF_TEST_DEF_RE = /\A\s*(?:(?:defp?|function)\s+(?:self\.)?\w*self[_-]?test|\w*self_test\w*\s*\(\s*\))/i.freeze
-
-  # The line closing a block, taken into it: end, fi, done, esac, }, ), ;;.
-  BLOCK_CLOSER_RE = /\A\s*(?:end|fi|done|esac|\}|\)|;;)(?![\w-])/.freeze
-
-  # The 1-based numbers of the lines of a tool's inline self-test blocks
-  # (DND-1577), from the tool's text. A block opens at a non-comment line
-  # that holds the `--self-test` token or defines a self-test function, and
-  # takes the blank and deeper-indented lines after it plus one closing line.
-  # A tool with no such line has none. Residual: a block's line at a shallower
-  # indent than its opener (a heredoc body at column 0) ends it early, so the
-  # lines after are not seen; lines it over-reads only hold a revert.
-  def inline_self_test_lines(text)
-    lines = text.to_s.each_line.to_a
-    found = []
-    lines.each_with_index do |line, i|
-      next if line.lstrip.start_with?("#")
-      next unless line.match?(INLINE_SELF_TEST_RE) || line.match?(SELF_TEST_DEF_RE)
-
-      found.concat(block_from(lines, i))
-    end
-    found.uniq.sort
-  end
-
-  def indent(line) = line[/\A[ \t]*/].length
-
-  # Line numbers: the opener at index `i`, its body and the closing line.
-  def block_from(lines, i)
-    base = indent(lines[i])
-    last = i
-    j = i + 1
-    while j < lines.size && (lines[j].strip.empty? || indent(lines[j]) > base)
-      last = j unless lines[j].strip.empty?
-      j += 1
-    end
-    last = j if j < lines.size && lines[j].match?(BLOCK_CLOSER_RE) && last > i
-    (i..last).map { |n| n + 1 }
-  end
-
   def lib_path?(rel)
     (segments(rel)[0..-2] & LIB_SEGMENTS).any?
   end

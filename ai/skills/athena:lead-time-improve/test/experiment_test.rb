@@ -718,29 +718,35 @@ RUBY_TOOL = <<~RB
   exit(ARGV.include?("--self-test") ? run_self_test : run_check)
 RB
 
+check("INLINE_SELF_TEST_RE is harness-gate's own token, byte for byte (one definition, not two)") do
+  gate = File.read(File.expand_path("../../../../ai/bin/harness-gate", __dir__ || "."))
+  m = gate.match(%r{^INLINE_SELF_TEST_RE = /(.*)/\.freeze$})
+  !m.nil? && m[1] == X::INLINE_SELF_TEST_RE.source
+end
+
 check("inline_self_test_lines: a bash if-block takes its body and the fi, not the code after") do
-  FirstParty.inline_self_test_lines(BASH_TOOL) == [3, 4, 5, 6, 7]
+  X.inline_self_test_lines(BASH_TOOL) == [3, 4, 5, 6, 7]
 end
 
 check("inline_self_test_lines: a ruby self-test function takes its body and end (and the dispatch line), not run_check") do
-  FirstParty.inline_self_test_lines(RUBY_TOOL) == [1, 2, 3, 4, 5, 11]
+  X.inline_self_test_lines(RUBY_TOOL) == [1, 2, 3, 4, 5, 11]
 end
 
 check("inline_self_test_lines: a bash self_test() function takes its body and the closing brace") do
-  FirstParty.inline_self_test_lines("self_test() {\n  echo a\n  echo b\n}\necho after\n") == [1, 2, 3, 4]
+  X.inline_self_test_lines("self_test() {\n  echo a\n  echo b\n}\necho after\n") == [1, 2, 3, 4]
 end
 
 check("inline_self_test_lines: a bash case branch takes its body up to the ;;") do
   text = "case \"$1\" in\n  --self-test)\n    echo a\n    ;;\n  *) echo run ;;\nesac\n"
-  FirstParty.inline_self_test_lines(text) == [2, 3, 4]
+  X.inline_self_test_lines(text) == [2, 3, 4]
 end
 
 check("inline_self_test_lines: an Elixir defp run_self_test takes its body") do
-  FirstParty.inline_self_test_lines("defp run_self_test do\n  :ok\nend\n\ndefp run, do: :x\n") == [1, 2, 3]
+  X.inline_self_test_lines("defp run_self_test do\n  :ok\nend\n\ndefp run, do: :x\n") == [1, 2, 3]
 end
 
 check("inline_self_test_lines: a one-line opener with no body is only itself") do
-  FirstParty.inline_self_test_lines("x = 1\nexit(ARGV.include?(\"--self-test\") ? 0 : 1)\ny = 2\n") == [2]
+  X.inline_self_test_lines("x = 1\nexit(ARGV.include?(\"--self-test\") ? 0 : 1)\ny = 2\n") == [2]
 end
 
 check("file_additions: a repo that is not on this machine is could not look, never none") do
@@ -749,15 +755,15 @@ check("file_additions: a repo that is not on this machine is could not look, nev
 end
 
 check("inline_self_test_lines: a tool with no self-test has none") do
-  FirstParty.inline_self_test_lines("echo hi\nif true; then\n  echo x\nfi\n").empty?
+  X.inline_self_test_lines("echo hi\nif true; then\n  echo x\nfi\n").empty?
 end
 
 check("inline_self_test_lines: a comment naming --self-test opens nothing") do
-  FirstParty.inline_self_test_lines("# run --self-test\n  echo x\n").empty?
+  X.inline_self_test_lines("# run --self-test\n  echo x\n").empty?
 end
 
 check("inline_self_test_lines: --self-test-case is not the marker (harness-gate's token rule)") do
-  FirstParty.inline_self_test_lines("if x = --self-test-case; then\n  echo a\nfi\n").empty?
+  X.inline_self_test_lines("if x = --self-test-case; then\n  echo a\nfi\n").empty?
 end
 
 check("inline_candidates: non-test paths that gained lines; not tests, deletions or binaries") do

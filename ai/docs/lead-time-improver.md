@@ -596,9 +596,11 @@ p90 over the last K comparable landings), and a status.
   about 50 tracked tools carry one) was not held. `record` now also stores
   `revert_inline_tests` (or `_na`): the non-test paths whose added lines fall
   inside an inline self-test block. The block rule is
-  `FirstParty.inline_self_test_lines`: a block opens at a non-comment line
-  holding `--self-test` (the token `harness-gate`'s coverage check uses,
-  now `FirstParty::INLINE_SELF_TEST_RE`) or defining a self-test function,
+  `LeadTimeExperiment.inline_self_test_lines`: a block opens at a non-comment
+  line holding `--self-test` (the token `harness-gate`'s coverage check
+  uses; the experiment library's copy is pinned to it by a test, because
+  editing `harness-gate` holds a merge for the owner) or defining a
+  self-test function,
   and takes the deeper-indented lines after it plus the closing line.
   Prose and data files (`.md`, `.json`, `.yml` and the like) are never read:
   docs mention `--self-test` on lines that would open a block.

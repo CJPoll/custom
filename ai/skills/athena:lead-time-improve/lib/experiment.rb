@@ -28,7 +28,8 @@
 #     Judge never writes `declined`, and a worse guard is never declined.
 #   * a revert whose commit added test lines, or where git could not tell,
 #     is HELD (DND-1549): still `revert`, but a plain git revert is ruled
-#     out. Only FirstParty.test_file_any_layout? and unclassified_layout?
+#     out. A case added inside a tool's own inline --self-test block counts
+#     too (DND-1577; inline_self_test_lines). Only FirstParty.test_file_any_layout? and unclassified_layout?
 #     (pure functions) are used from ai/lib/first_party.rb; its git readers
 #     are not called here. Added paths in a test-like layout with no test
 #     word are named as unclassified (DND-1634) and never held.
@@ -766,7 +767,7 @@ module LeadTimeExperiment
   # A tool carries its own suite in its body (`--self-test`), and that body is
   # no test path, so numstat alone reads a case added there as source. The
   # files to read are the non-test paths a commit added lines to; whether an
-  # added line sits in a self-test block is FirstParty.inline_self_test_lines'.
+  # added line sits in a self-test block is `inline_self_test_lines`'.
   # Prose and data files are no tools: harness docs mention `--self-test` on
   # lines that would open a block, so they are not read. Every other file is
   # (over-reading only holds a revert).
@@ -788,10 +789,59 @@ module LeadTimeExperiment
     end
     hits = readings.select do |_, src|
       added, text = src.items.first
-      (Array(added) & FirstParty.inline_self_test_lines(text)).any?
+      (Array(added) & inline_self_test_lines(text)).any?
     end
     { "revert_inline_tests" => hits.keys.sort }
   end
+
+# The token that marks a tool's inline self-test: ai/bin/harness-gate's
+# INLINE_SELF_TEST_RE (DND-507), the one definition. harness-gate is a
+# script and cannot be required, and its owner-approval hold keeps it out of
+# this change, so the copy here is pinned by experiment_test.rb, which
+# reads the regex out of harness-gate and compares it.
+INLINE_SELF_TEST_RE = /(?<![\w-])--self-test(?![\w-])/.freeze
+
+# A function that holds the suite: `def run_self_test`, `function self_test`,
+# `self_test() {`, an Elixir `defp run_self_test`. Its body is a self-test
+# block even when the `--self-test` token sits elsewhere (the dispatch line).
+SELF_TEST_DEF_RE = /\A\s*(?:(?:defp?|function)\s+(?:self\.)?\w*self[_-]?test|\w*self_test\w*\s*\(\s*\))/i.freeze
+
+# The line closing a block, taken into it: end, fi, done, esac, }, ), ;;.
+BLOCK_CLOSER_RE = /\A\s*(?:end|fi|done|esac|\}|\)|;;)(?![\w-])/.freeze
+
+# The 1-based numbers of the lines of a tool's inline self-test blocks, from
+# the tool's text. A block opens at a non-comment line that holds the
+# `--self-test` token or defines a self-test function, and takes the blank
+# and deeper-indented lines after it plus one closing line. A tool with no
+# such line has none. Residual: a line shallower than its opener inside a
+# block (a heredoc body at column 0) ends it early, so the lines after it
+# are not seen; lines it over-reads only hold a revert.
+def inline_self_test_lines(text)
+  lines = text.to_s.each_line.to_a
+  found = []
+  lines.each_with_index do |line, i|
+    next if line.lstrip.start_with?("#")
+    next unless line.match?(INLINE_SELF_TEST_RE) || line.match?(SELF_TEST_DEF_RE)
+
+    found.concat(self_test_block_from(lines, i))
+  end
+  found.uniq.sort
+end
+
+def self_test_indent(line) = line[/\A[ \t]*/].length
+
+# Line numbers: the opener at index `i`, its body and the closing line.
+def self_test_block_from(lines, i)
+  base = self_test_indent(lines[i])
+  last = i
+  j = i + 1
+  while j < lines.size && (lines[j].strip.empty? || self_test_indent(lines[j]) > base)
+    last = j unless lines[j].strip.empty?
+    j += 1
+  end
+  last = j if j < lines.size && lines[j].match?(BLOCK_CLOSER_RE) && last > i
+  (i..last).map { |n| n + 1 }
+end
 
   # The inline fields for one commit: from its numstat Source, reading each
   # candidate file through the block (path -> Source, XG.file_additions).
