@@ -3904,6 +3904,10 @@ def self_test
      # DND-1873: the GitLab merge guard decides a merge on the receipt since DND-1845
      ["the GitLab merge guard", "ai/lib/glab-merge-guard.sh", "[owner-approval-policy]"],
      ["the glab-athena entry point", "ai/bin/glab-athena", "[owner-approval-policy]"],
+     # DND-1888: the role guard enforces "merging is the admiral's alone" (DND-726)
+     ["the merge role guard hook", "ai/hooks/merge-role-guard.sh", "[owner-approval-policy]"],
+     ["the merge role library", "ai/lib/merge_role.rb", "[owner-approval-policy]"],
+     ["the merge role IO library", "ai/lib/merge_role_io.rb", "[owner-approval-policy]"],
      ["locked-merge", "ai/skills/athena:merge-boarding/scripts/locked-merge", "[owner-approval-policy]"],
      ["the push-guard fix-push exception", "ai/lib/main-health.sh", "[owner-approval-policy]"],
      ["the main-health CLI", "ai/bin/main-health", "[owner-approval-policy]"],

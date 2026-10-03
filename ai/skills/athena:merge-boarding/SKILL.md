@@ -568,7 +568,9 @@ one.
 `integration-gate` (the script and its `ai/bin` shim), `ai/lib/integration-receipt.sh`,
 `ai/lib/receipt_seal.rb`, `ai/bin/receipt-seal`, the merge and push guards
 (`ai/lib/gh-merge-guard.sh`, `ai/lib/glab-merge-guard.sh`,
-`ai/lib/forge-git-passthrough.sh`) and what they
+`ai/lib/forge-git-passthrough.sh`), the merge role guard
+(`ai/hooks/merge-role-guard.sh`, `ai/lib/merge_role.rb`,
+`ai/lib/merge_role_io.rb`) and what they
 load to decide a call is a merge or a push (`ai/lib/forge-api-scan.sh`,
 `ai/lib/forge-cli-isolation.sh`), `ai/bin/gh-athena`, `ai/bin/glab-athena`,
 `locked-merge`,
@@ -592,6 +594,12 @@ GitHub pair, so a diff that weakened `glmg_receipt_gate` no longer reads COLD.
 `blast-radius --self-test` walks every tracked file that sources
 `integration-receipt.sh` and fails, with a `Fix:`, on one that decides a merge
 or push and is not held.
+
+**Later (2026-10-03, DND-1888):** this paragraph did not name the merge role
+guard, so DND-1865's change to it read COLD. It enforces that merging is the
+admiral's alone (DND-726) and now sits in the same class: a diff that weakens
+who may merge needs the owner's record. `blast-radius --self-test` has a case
+per file.
 
 **The gate comes from the landed target, not from you.** The first of
 `bin/prep-commit.sh` (gen_saas) and `ai/bin/harness-gate` (`~/dev/custom`) that
