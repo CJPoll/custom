@@ -92,6 +92,26 @@ check("M8 idle_workflow is carried: absent is nil, a file or none as given") do
     P.parse_manifest(manifest_doc(repos: [r])).repo("prod").idle_workflow == v
   end
 end
+check("M8b idle_workflow has ONE home: a value one refuses the other refuses (DND-1671)") do
+  home = LeadTimeConfig::IDLE_WORKFLOW_RE
+  config_refuses = lambda do |v|
+    doc = JSON.generate("repos" => [{ "name" => "prod", "path" => "/src/prod", "mode" => "improve", "idle_workflow" => v }],
+                        "window" => 20, "improvement_epic" => "epic")
+    LeadTimeConfig.parse(doc, home: "/home/x", path: "cfg.json")
+    false
+  rescue LeadTimeConfig::Error
+    true
+  end
+  product_refuses = lambda do |v|
+    base = JSON.parse(manifest_doc)["repos"][0].merge("idle_workflow" => v)
+    !raised { P.parse_manifest(manifest_doc(repos: [base])) }.nil?
+  end
+  !P.const_defined?(:IDLE_WORKFLOW_RE, false) && home.frozen? &&
+    ["post-merge.yml", "none", "../x.yml", "a/b.yml", "x.txt", "", ".hidden.yml", "none ", 5, ["a.yml"]].all? do |v|
+      config_refuses.call(v) == product_refuses.call(v) &&
+        config_refuses.call(v) == !(v.is_a?(String) && home.match?(v))
+    end
+end
 check("M9 an idle_workflow with a path in it is refused") do
   r = JSON.parse(manifest_doc)["repos"][0].merge("idle_workflow" => "../x.yml")
   raised { P.parse_manifest(manifest_doc(repos: [r])) }

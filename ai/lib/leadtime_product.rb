@@ -16,6 +16,7 @@
 
 require "json"
 require "time"
+require_relative "lead_time_config"
 
 module LeadTimeProduct
   # A refusal, with the instruction that makes the next attempt pass.
@@ -60,7 +61,6 @@ module LeadTimeProduct
   # ── the run's manifest (written by scripts/athena-leadtime-run.sh) ─────────
 
   RepoLane = Struct.new(:name, :path, :common, :lanes_dir, :lane, :lock, :idle_workflow, keyword_init: true)
-  IDLE_WORKFLOW_RE = /\A(none|[A-Za-z0-9][A-Za-z0-9_.-]*\.ya?ml)\z/.freeze
 
   Manifest = Struct.new(:run_id, :state_dir, :repos, keyword_init: true) do
     def repo(name)
@@ -101,7 +101,7 @@ module LeadTimeProduct
       bad_manifest("#{r['name']}: lane and lock must be <lanes_dir>/#{run_id} and its .lock")
     end
     idle = r["idle_workflow"]
-    unless idle.nil? || (idle.is_a?(String) && idle.match?(IDLE_WORKFLOW_RE))
+    unless idle.nil? || (idle.is_a?(String) && idle.match?(LeadTimeConfig::IDLE_WORKFLOW_RE))
       bad_manifest("#{r['name']}: idle_workflow #{idle.inspect} is not a workflow file name or none")
     end
     RepoLane.new(name: r["name"], path: r["path"], common: r["common"], lanes_dir: r["lanes_dir"],
@@ -115,7 +115,7 @@ module LeadTimeProduct
   # the landing: deny by default, never a merge without the repo's own bar.
   def idle_args(idle)
     return [] if idle == "none"
-    return ["--require-idle-workflow", idle] if idle.is_a?(String) && idle.match?(IDLE_WORKFLOW_RE)
+    return ["--require-idle-workflow", idle] if idle.is_a?(String) && idle.match?(LeadTimeConfig::IDLE_WORKFLOW_RE)
 
     raise Error.new("the repo declares no idle_workflow, so its merge bar (locked-merge --require-idle-workflow) is unknown; nothing lands",
                     "add \"idle_workflow\": \"<its post-merge workflow file>\" (or \"none\" when it has none) to the repo's entry in this machine's lead-time config (ai/bin/lead-time-repos --help).")
