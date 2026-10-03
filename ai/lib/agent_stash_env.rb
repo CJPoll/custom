@@ -21,7 +21,8 @@
 #             inside GIT_CONFIG_COUNT. Then the runtime is asserted too (the
 #             hook script exists and is executable in the main checkout; git
 #             lists the hook; the wrapper is executable and its directory
-#             holds nothing but BIN_FILES; the CLAUDE_ENV_FILE script carries the PATH line)
+#             holds nothing but what ai/agent-bin/ holds AS LANDED; the
+#             CLAUDE_ENV_FILE script carries the PATH line)
 #             and each failure is exit 1 with a Fix:.
 #   DRIFT     some keys present, or a value that differs (a hook path in a
 #             worktree, say). Exit 1, each difference named.
@@ -83,10 +84,14 @@ module AgentStashEnv
   # PATH change reaches the Bash tool's shell.
   ENV_LINE    = 'if [ -n "${ATHENA_AGENT_BIN:-}" ] && [ -x "$ATHENA_AGENT_BIN/git" ]; then PATH="$ATHENA_AGENT_BIN:$PATH"; export PATH; fi'
   ENV_FILE    = "CLAUDE_ENV_FILE"
-  # The files ATHENA_AGENT_BIN may hold: the git wrapper (DND-775) and the
-  # gh/glab forge-identity wrappers (DND-1803). Each shadows the real command on
-  # agent PATH on purpose; anything else there would shadow one by accident.
-  BIN_FILES   = %w[git gh glab].freeze
+  # The files ATHENA_AGENT_BIN may hold are those ai/agent-bin/ holds AS LANDED
+  # (DND-1842): each shadows the real command on agent PATH on purpose, and
+  # anything else there would shadow one by accident. ai/bin/check-hooks-registered
+  # reads the list from git at the landed tip; it is never kept here. A constant
+  # in this file is in the diff it judges (DND-1803 finding 2), and an older
+  # pinned tree's constant misjudges a main checkout that a newer landing has
+  # already filled (the false main-health RED on 5414505c, 2026-10-03).
+  BIN_REL     = "ai/agent-bin"
   # Vars other tools set too. Their presence alone is no trace of the guard.
   SHARED_VARS = ["GIT_TRACE2", ENV_FILE].freeze
   DISABLE     = "scripts/setup-hooks --remove-env"
@@ -198,8 +203,19 @@ module AgentStashEnv
     diffs.empty? ? Result.new(:active, [], 0) : Result.new(:drift, diffs, 1)
   end
 
-  # Runtime problems of an ACTIVE install: [] when all hold.
-  def runtime_problems(env, exp, main:)
+  # The entries of the live wrapper directory `bin` that `allowed` does not
+  # name, sorted. Empty when the directory cannot be listed: the missing-wrapper
+  # problem in runtime_problems reports that case.
+  def bin_extras(bin, allowed)
+    (Dir.children(bin) - allowed).sort
+  rescue SystemCallError
+    []
+  end
+
+  # Runtime problems of an ACTIVE install: [] when all hold. bin_files is the
+  # wrapper directory's allowlist, and bin_bar names where it was read (the
+  # landed ai/agent-bin/, or a newer origin/main's).
+  def runtime_problems(env, exp, main:, bin_files:, bin_bar:)
     out = []
     hook = File.join(main, HOOK_REL)
     unless File.file?(hook) && File.executable?(hook)
@@ -219,9 +235,10 @@ module AgentStashEnv
     if !(File.file?(wrapper) && File.executable?(wrapper))
       out << "the PATH git wrapper #{wrapper} is missing or not executable; the CLAUDE_ENV_FILE line then leaves PATH " \
              "alone and drop/reflog go unguarded. Fix: restore ai/agent-bin/git in #{main}."
-    elsif (extra = Dir.children(bin) - BIN_FILES).any?
-      out << "#{bin} holds #{extra.sort.join(', ')} besides #{BIN_FILES.join(', ')}; anything there shadows a real command on " \
-             "agent PATH. Fix: move it out of #{bin}."
+    elsif (extra = bin_extras(bin, bin_files)).any?
+      out << "#{bin} holds #{extra.join(', ')} besides #{bin_files.sort.join(', ')} (#{bin_bar}); anything there " \
+             "shadows a real command on agent PATH. Fix: move it out of #{bin}, or land it in #{BIN_REL}/ on " \
+             "main first."
     end
     out.concat(env_file_problems(exp, main))
     out

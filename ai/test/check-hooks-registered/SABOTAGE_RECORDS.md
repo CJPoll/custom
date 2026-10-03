@@ -167,3 +167,24 @@ cases (`pin predates the env ...`). The inline `keys present but the env has not
 landed -> FAIL` case had gone RED once `run_agent_stash_env` read the live origin
 (`FAIL env: keys present but the env has not landed`); the inline harness now injects
 `newer_env`, hermetic by default.
+
+## DND-1842: the agent-bin allowlist is what landed
+
+The false main-health RED on 5414505c (2026-10-03): its checker judged the main
+checkout's ai/agent-bin, already at 780d81d3 (gh, glab added), against the
+older tip's own allowlist constant. Section 18 of self-test.sh pins it, with a
+synthetic wrapper `tea` no checker version allows.
+
+Fail-first, against the unfixed checker at cd05293d (52 passed, 5 failed):
+- `older pinned tip, live agent-bin holds a wrapper a NEWER origin/main landed ->
+  ACTIVE, named ahead, exit 0`: `exit 1, want 0; output: ... agent-stash env:
+  FAIL ... ai/agent-bin holds tea besides git, gh, glab`.
+- `...and it names the agent-bin as ahead of the pinned bar`: the same `exit 1`.
+- `unpinned: a wrapper that landed on origin/main is allowed -> ACTIVE`:
+  `exit 1, want 0; ... holds tea besides git, gh, glab`.
+- `live agent-bin holds a wrapper origin/main never landed -> FAIL (the checker's
+  own list is not the bar)`: `exit 0, want 1; ... agent-stash env: ACTIVE` (gh
+  was allowed by the constant, though the fixture's origin/main never landed it).
+- `a branch that adds a wrapper -> ACTIVE, the wrapper named pending, exit 0`:
+  `output lacks` the pending pattern (no pending line existed).
+After the fix: 57 passed, 0 failed.

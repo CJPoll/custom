@@ -914,7 +914,10 @@ and pronoun-guard; nothing detected it. The durable fix:
   merges it and is the OWNER's activation step; `--remove-env` removes exactly
   it (the one-command disable). Restart sessions after either. Like a hook,
   it is installed only after it lands. The expected values are read from the
-  registry AS LANDED, like the hooks' bar.
+  registry AS LANDED, like the hooks' bar. So is what `ATHENA_AGENT_BIN` may
+  hold: the entries of `ai/agent-bin/` at the landed tip, never a list in the
+  checker (DND-1842). A live file only a newer origin/main lands is *ahead of
+  the pinned bar*; one a branch adds is *pending*.
   The same PATH carries forge identity (DND-1803): the git wrapper refuses a
   push to github.com or gitlab.com not made through `gh-athena git` /
   `glab-athena git` (`ai/lib/agent-forge-push.sh`), and the `gh` / `glab`

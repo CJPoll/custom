@@ -581,6 +581,63 @@ pinned_session "${D}" "${SNAP_OLD}" stale
 expect "pin predates the env, live env equals neither -> still FAIL" 1 "agent-stash env: FAIL" \
   "agent-stash env: ahead of the pinned bar"
 
+# 18. THE AGENT-BIN ALLOWLIST IS WHAT LANDED (DND-1842, folding in DND-1803's
+#     finding 2). ATHENA_AGENT_BIN is the MAIN checkout's ai/agent-bin: machine
+#     state that follows the newest landing, not the pinned tree. The pre-fix
+#     checker judged it against a BIN_FILES constant in the checker itself, so
+#     (a) an older pinned tip's checker failed a live directory that a newer
+#     origin/main had already filled (the false main-health RED on 5414505c,
+#     2026-10-03), and (b) a branch could widen its own allowlist. The fix reads
+#     the allowlist from ai/agent-bin/ AS LANDED, retries a miss against a newer
+#     origin/main (ahead of the pinned bar), and names a branch-added wrapper
+#     as pending. `tea` is a synthetic wrapper name no checker version allows.
+bin_ahead_fixture() { # bin_ahead_fixture <name>: env landed and pinned, then a newer main lands ai/agent-bin/tea
+  D="$(env_fixture "$1")"
+  PIN="$(git -C "${D}/main" rev-parse HEAD)"
+  KEY="$(cd "$(git -C "${D}/main" rev-parse --path-format=absolute --git-common-dir)" && pwd -P)"
+  printf '#!/bin/sh\nexit 0\n' > "${D}/main/ai/agent-bin/tea"; chmod +x "${D}/main/ai/agent-bin/tea"
+  commit "${D}/main" newer-wrapper
+  git -C "${D}/main" push -q origin HEAD:refs/heads/main >/dev/null 2>&1
+  git -C "${D}/main" fetch -q origin >/dev/null 2>&1
+  env_settings "${D}" "${INSTALL_AFTER}"
+}
+
+bin_ahead_fixture bin-ahead
+pinned_session "${D}" "${SNAP_OLD}" wrapper
+expect "older pinned tip, live agent-bin holds a wrapper a NEWER origin/main landed -> ACTIVE, named ahead, exit 0" 0 \
+  "agent-stash env: ACTIVE" "agent-stash env: FAIL|holds tea besides"
+expect "...and it names the agent-bin as ahead of the pinned bar" 0 "agent-bin.*ahead of the pinned bar"
+
+bin_ahead_fixture bin-ahead-extra
+printf '#!/bin/sh\n' > "${D}/main/ai/agent-bin/ls"; chmod +x "${D}/main/ai/agent-bin/ls"
+pinned_session "${D}" "${SNAP_OLD}" wrapper
+expect "older pinned tip, live agent-bin also holds an unlanded file -> still FAIL naming it" 1 \
+  "holds ls" "agent-stash env: ACTIVE"
+
+D="$(env_fixture bin-unpinned-landed)"
+printf '#!/bin/sh\nexit 0\n' > "${D}/main/ai/agent-bin/tea"; chmod +x "${D}/main/ai/agent-bin/tea"
+commit "${D}/main" land-wrapper
+git -C "${D}/main" push -q origin HEAD:refs/heads/main >/dev/null 2>&1; git -C "${D}/main" fetch -q origin >/dev/null 2>&1
+git -C "${D}/wt" "${GITC[@]}" rebase -q origin/main >/dev/null 2>&1
+env_settings "${D}" "${INSTALL_AFTER}"
+session_check "${D}" "${SNAP_OLD}" wrapper
+expect "unpinned: a wrapper that landed on origin/main is allowed -> ACTIVE" 0 "agent-stash env: ACTIVE" "holds .*tea"
+
+D="$(env_fixture bin-unlanded-live)"
+printf '#!/bin/sh\nexit 0\n' > "${D}/main/ai/agent-bin/gh"; chmod +x "${D}/main/ai/agent-bin/gh"
+env_settings "${D}" "${INSTALL_AFTER}"
+session_check "${D}" "${SNAP_OLD}" wrapper
+expect "live agent-bin holds a wrapper origin/main never landed -> FAIL (the checker's own list is not the bar)" 1 \
+  "holds gh" "agent-stash env: ACTIVE"
+
+D="$(env_fixture bin-pending)"
+printf '#!/bin/sh\nexit 0\n' > "${D}/wt/ai/agent-bin/tea"; chmod +x "${D}/wt/ai/agent-bin/tea"
+commit "${D}/wt" branch-adds-wrapper
+env_settings "${D}" "${INSTALL_AFTER}"
+session_check "${D}" "${SNAP_OLD}" wrapper
+expect "a branch that adds a wrapper -> ACTIVE, the wrapper named pending, exit 0" 0 \
+  "agent-bin.*tea.*pending|pending.*tea" "agent-stash env: (FAIL|DRIFT)"
+
 # Unpinned, there is no newer origin/main to be ahead of.
 D="$(new_fixture unpinned-unwired)"
 printf '{"hooks": {}}\n' > "${D}/settings.json"

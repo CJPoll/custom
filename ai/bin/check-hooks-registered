@@ -893,7 +893,89 @@ def landed_env_section(root = REPO_DIR)
   end
   tip_label = pts.first&.first
   tip = bars.find { |(label, _)| label == tip_label }
-  [Landed.describe([pts.first]), tip ? tip[1] : nil]
+  [Landed.describe([pts.first]), tip ? tip[1] : nil, pts.first&.last]
+end
+
+# THE AGENT-BIN ALLOWLIST IS WHAT LANDED (DND-1842). ATHENA_AGENT_BIN is the
+# MAIN checkout's ai/agent-bin, machine state that follows the newest landing.
+# So the files it may hold are the entries of ai/agent-bin/ in the tree of the
+# same landed tip the env bar came from, read from git, never a list in the
+# diff under check. A live file the pinned tip lacks is retried against a newer
+# origin/main (Landed.newer_tip), like the env and the hook rows (DND-1552,
+# DND-1570): when that commit lands every live file, it is named ahead of the
+# pinned bar and passes; anything it does not land still fails. A branch's own
+# ai/agent-bin/ only feeds the pending note.
+#
+# The entries of ai/agent-bin/ at commit sha, as base names. An absent
+# directory is [] (a measurement: nothing landed there). A failed read raises
+# Landed::Unreadable.
+def bin_files_at(root, sha, label)
+  rel = AgentStashEnv::BIN_REL
+  raise Landed::Unreadable.new([[label, "no landed commit to read #{rel}/ at"]]) if sha.to_s.empty?
+
+  out, ok = Landed.git_read(root, "ls-tree", "-z", "--name-only", sha, "--", "#{rel}/")
+  raise Landed::Unreadable.new([[label, "#{sha[0, 12]}: git ls-tree failed for #{rel}/"]]) unless ok
+
+  out.split("\0").reject(&:empty?).map { |p| p.delete_prefix("#{rel}/") }
+end
+
+# The landed allowlist as [description, files] for the landed tip sha.
+def landed_bin_files(root, sha)
+  ["#{AgentStashEnv::BIN_REL}/ @ #{sha.to_s[0, 12]}", bin_files_at(root, sha, "landed #{AgentStashEnv::BIN_REL}/")]
+end
+
+# The newer origin/main's allowlist as [description, files], or nil when there
+# is no pin or origin's main is the pin. Raises Landed::Unreadable or
+# Landed::Mismatch as Landed.newer_tip does.
+def newer_bin_files(root)
+  tip = Landed.newer_tip(root)
+  return nil unless tip
+
+  label, sha = tip
+  ["#{AgentStashEnv::BIN_REL}/ @ newer origin/main #{sha[0, 12]}", bin_files_at(root, sha, label)]
+end
+
+# The entries of the checkout's own ai/agent-bin/ (the branch under check).
+def branch_bin_files(root)
+  Dir.children(File.join(root, AgentStashEnv::BIN_REL))
+rescue SystemCallError
+  []
+end
+
+# The allowlist the live wrapper directory is judged against, as
+# [files, bar, notes]. notes holds the ahead-of-the-pinned-bar line (only
+# when the live directory passes the newer bar in full), the reason it is not
+# ahead, and the pending line for wrappers the branch adds.
+def bin_bar(bin, root, tip_sha, landed_bin:, newer_bin:, branch_bin:)
+  bar, files = landed_bin.call(root, tip_sha)
+  notes = []
+  extras = AgentStashEnv.bin_extras(bin, files)
+  unless extras.empty?
+    begin
+      got = newer_bin.call(root)
+      if got
+        ndesc, nfiles = got
+        still = AgentStashEnv.bin_extras(bin, nfiles)
+        if still.empty?
+          notes << "agent-bin ahead of the pinned bar — #{bin} holds #{extras.join(', ')}, which #{ndesc} lands, a " \
+                   "commit that landed after harness-gate pinned origin/main (not drift)."
+          bar = "#{ndesc}, ahead of the pinned bar (#{bar})"
+          files = nfiles
+        else
+          notes << "the live agent-bin is not ahead of the pinned bar either: #{ndesc} does not land #{still.join(', ')}"
+        end
+      end
+    rescue Landed::Unreadable, Landed::Mismatch => e
+      notes << "could not read a newer origin/main to tell whether the live agent-bin is ahead of the pinned bar " \
+               "(#{e.message}); it is measured against the pinned bar alone"
+    end
+  end
+  pending = (branch_bin.call(root) - files - AgentStashEnv.bin_extras(bin, files)).sort
+  unless pending.empty?
+    notes << "#{AgentStashEnv::BIN_REL}/ on this branch adds #{pending.join(', ')}: pending (not judged until it " \
+             "lands on main and the main checkout fast-forwards)."
+  end
+  [files, bar, notes]
 end
 
 # AHEAD OF THE PINNED BAR (DND-1570), the agent-stash env's counterpart of the
@@ -949,6 +1031,9 @@ end
 def run_agent_stash_env(path: settings_path, main: nil, root: REPO_DIR,
                         landed_env: ->(r) { landed_env_section(r) },
                         newer_env: ->(r) { newer_env_section(r) },
+                        landed_bin: ->(r, sha) { landed_bin_files(r, sha) },
+                        newer_bin: ->(r) { newer_bin_files(r) },
+                        branch_bin: ->(r) { branch_bin_files(r) },
                         proc_env: ENV,
                         session_snapshot: ->(now) { AgentStashEnv.session_snapshot(now: now) },
                         now: -> { Time.now }, out: $stdout, err: $stderr)
@@ -973,7 +1058,7 @@ def run_agent_stash_env(path: settings_path, main: nil, root: REPO_DIR,
   end
 
   begin
-    bar, section = landed_env.call(root)
+    bar, section, tip_sha = landed_env.call(root)
   rescue Landed::Unreadable => e
     err.puts "#{tag}: COULD NOT MEASURE — this is not a pass."
     Landed.unreadable_lines("hook registry env", e.probes).each { |l| err.puts l }
@@ -1042,24 +1127,36 @@ def run_agent_stash_env(path: settings_path, main: nil, root: REPO_DIR,
     return EXIT_FAIL
   end
 
-  problems = AgentStashEnv.runtime_problems(env, exp, main: main)
+  begin
+    bin_files, bin_desc, bin_notes = bin_bar(exp[:vars]["ATHENA_AGENT_BIN"].to_s, root, tip_sha,
+                                             landed_bin: landed_bin, newer_bin: newer_bin, branch_bin: branch_bin)
+  rescue Landed::Unreadable => e
+    err.puts "#{tag}: COULD NOT MEASURE — this is not a pass."
+    Landed.unreadable_lines("agent-bin allowlist", e.probes).each { |l| err.puts l }
+    return EXIT_UNMEASURED
+  end
+  # DND-1599: an ahead line is printed only after a passing verdict.
+  bin_ahead, bin_other = bin_notes.partition { |n| n.start_with?("agent-bin ahead") }
+  problems = AgentStashEnv.runtime_problems(env, exp, main: main, bin_files: bin_files, bin_bar: bin_desc)
   notes, session, path_problem = AgentStashEnv.session_state(exp, proc_env: proc_env)
   problems += session
   if problems.empty? && path_problem.nil?
     out.puts "#{tag}: ACTIVE — settings values match #{bar}; hook script, `git hook list` (agentstash), " \
              "wrapper and CLAUDE_ENV_FILE PATH line verified. OK."
     out.puts "  note: #{ahead_line}" if ahead_line
-    notes.each { |n| out.puts "  note: #{n}" }
+    (bin_ahead + bin_other + notes).each { |n| out.puts "  note: #{n}" }
     return EXIT_OK
   end
   unless problems.empty?
     err.puts "#{tag}: FAIL — the settings values match (active), but:"
     (problems + [path_problem].compact).each { |l| err.puts "  - #{l}" }
+    bin_other.each { |n| err.puts "  note: #{n}" }
     return EXIT_FAIL
   end
   code = report_session_path(path_problem, env, tag: tag, main: main, snapshot: session_snapshot, now: now.call,
                                                 out: out, err: err)
   out.puts "  note: #{ahead_line}" if ahead_line && code == EXIT_OK
+  (code == EXIT_OK ? bin_ahead + bin_other : bin_other).each { |n| out.puts "  note: #{n}" }
   code
 rescue JSON::ParserError, SystemCallError => e
   err.puts "#{tag}: COULD NOT MEASURE — #{e.message.lines.first.to_s.strip}. " \
@@ -1156,11 +1253,16 @@ def agent_stash_env_self_test(check)
     now = Time.utc(2026, 9, 28, 8, 0, 0)
     snap_old = ->(_now) { [Time.utc(2026, 9, 26, 19, 31, 9), "/h/.claude/shell-snapshots/snapshot-zsh-1-a.sh"] }
     # Hermetic by default: no pin, so no newer origin/main (DND-1570).
-    run = lambda do |env, proc_env: {}, landed_env: landed, snapshot: snap_old, newer_env: ->(_root) { nil }|
+    # DND-1842: the agent-bin allowlist is injected as landed; the default
+    # fixture bar lands git, gh and glab, with no newer main and no branch adds.
+    landed_bin = ->(_root, _sha) { ["fixture landed ai/agent-bin/", %w[gh git glab]] }
+    run = lambda do |env, proc_env: {}, landed_env: landed, snapshot: snap_old, newer_env: ->(_root) { nil },
+                     landed_bin_bar: landed_bin, newer_bin: ->(_root) { nil }, branch_bin: ->(_root) { [] }|
       File.write(settings, JSON.generate(env.nil? ? {} : { "env" => env }))
       o = StringIO.new
       e = StringIO.new
       code = run_agent_stash_env(path: settings, main: main, landed_env: landed_env, newer_env: newer_env,
+                                 landed_bin: landed_bin_bar, newer_bin: newer_bin, branch_bin: branch_bin,
                                  proc_env: proc_env, session_snapshot: snapshot, now: -> { now }, out: o, err: e)
       [code, o.string + e.string]
     end
@@ -1204,12 +1306,50 @@ def agent_stash_env_self_test(check)
     File.write(File.join(main, "ai", "agent-bin", "ls"), "#!/bin/sh\n")
     code, text = run.call(full)
     File.delete(File.join(main, "ai", "agent-bin", "ls"))
-    check.call("env: a second file in the wrapper dir -> FAIL", code == 1 && text.include?("besides git, gh, glab"))
+    check.call("env: a second file in the wrapper dir -> FAIL naming it and the landed allowlist",
+               code == 1 && text.include?("holds ls besides gh, git, glab (fixture landed ai/agent-bin/)"))
     %w[gh glab].each { |t| File.write(File.join(main, "ai", "agent-bin", t), "#!/bin/sh\n") }
     code, text = run.call(full)
-    %w[gh glab].each { |t| File.delete(File.join(main, "ai", "agent-bin", t)) }
-    check.call("env: the gh and glab forge-identity wrappers beside git (DND-1803) are not a stray file",
-               !text.include?("besides git"))
+    check.call("env: the gh and glab wrappers beside git, landed in ai/agent-bin/ (DND-1803), are not stray",
+               code.zero? && !text.include?("besides"))
+
+    # DND-1842: the allowlist is what LANDED, never a list in the checker.
+    git_only = ->(_root, _sha) { ["fixture pinned ai/agent-bin/", %w[git]] }
+    code, text = run.call(full, landed_bin_bar: git_only)
+    check.call("bin: live gh/glab the landed tip lacks, no newer main -> FAIL naming them",
+               code == EXIT_FAIL && text.include?("holds gh, glab besides git"))
+    newer_all = ->(_root) { ["fixture newer ai/agent-bin/", %w[gh git glab]] }
+    code, text = run.call(full, landed_bin_bar: git_only, newer_bin: newer_all)
+    check.call("bin: older pinned tip, live gh/glab a newer main landed -> ACTIVE, named ahead, exit 0",
+               code.zero? && text.index("ACTIVE") && text.include?("agent-bin ahead of the pinned bar") &&
+               text.index("ACTIVE") < text.index("agent-bin ahead"))
+    File.write(File.join(main, "ai", "agent-bin", "ls"), "#!/bin/sh\n")
+    code, text = run.call(full, landed_bin_bar: git_only, newer_bin: newer_all)
+    File.delete(File.join(main, "ai", "agent-bin", "ls"))
+    check.call("bin: ahead for gh/glab but an unlanded ls too -> FAIL, never ahead",
+               code == EXIT_FAIL && text.include?("holds gh, glab, ls besides git") &&
+               text.include?("does not land ls") && !text.include?("agent-bin ahead"))
+    code, text = run.call(full, landed_bin_bar: git_only,
+                                newer_bin: ->(_root) { raise Landed::Unreadable.new([["fixture probe", "unreachable"]]) })
+    check.call("bin: newer main unreadable -> the pinned FAIL stands, says it could not judge",
+               code == EXIT_FAIL && text.include?("could not read a newer origin/main to tell whether the live agent-bin"))
+    code, text = run.call(full, landed_bin_bar: ->(_r, _s) { raise Landed::Unreadable.new([["fixture probe", "ls-tree failed"]]) })
+    check.call("bin: landed allowlist unreadable -> COULD NOT MEASURE, exit 3, never ACTIVE",
+               code == EXIT_UNMEASURED && text.include?("agent-bin allowlist") && !text.include?("ACTIVE —"))
+    code, text = run.call(full, branch_bin: ->(_root) { %w[gh git glab tea] })
+    check.call("bin: a branch that adds a wrapper -> ACTIVE, the wrapper named pending, exit 0",
+               code.zero? && text.include?("adds tea: pending"))
+    File.write(File.join(main, "ai", "agent-bin", "tea"), "#!/bin/sh\n")
+    code, text = run.call(full, branch_bin: ->(_root) { %w[gh git glab tea] })
+    %w[gh glab tea].each { |t| File.delete(File.join(main, "ai", "agent-bin", t)) }
+    check.call("bin: a branch that adds tea cannot excuse a live unlanded tea -> FAIL, not pending",
+               code == EXIT_FAIL && text.include?("holds tea besides") && !text.include?("pending"))
+    sha_seen = nil
+    run.call(full, landed_env: ->(_root) { ["fixture landed", registry["env"], "f" * 40] },
+                   landed_bin_bar: ->(_root, sha) { sha_seen = sha; ["fixture", %w[git]] })
+    check.call("bin: the allowlist is read at the same landed tip the env bar came from", sha_seen == "f" * 40)
+    check.call("bin: no allowlist constant is left in ai/lib/agent_stash_env.rb (it was in the diff it judged)",
+               !defined?(AgentStashEnv::BIN_FILES))
     File.write(env_file, "# fixture\n")
     code, text = run.call(full)
     File.write(env_file, "# fixture\n#{AgentStashEnv::ENV_LINE}\n")
