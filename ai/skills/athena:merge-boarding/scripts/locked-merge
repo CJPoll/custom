@@ -438,10 +438,10 @@ merge_rc=0
 ( cd "${REPO}" && "${AI_BIN}/gh-athena" pr merge "${PR}" --squash --match-head-commit "${HEAD_SHA}" ) 2>"${merge_err}" || merge_rc=$?
 cat "${merge_err}" >&2
 merge_red="" merge_look=""
-if [ "${merge_rc}" -ne 0 ] && grep -qF -- "REFUSING" "${merge_err}" && grep -qF -- "${GMG_RED_MARK}" "${merge_err}"; then merge_red=1; fi
+if [ "${merge_rc}" -ne 0 ] && gmg_refusal_has_reason "${merge_err}" "${GMG_RED_MARK}"; then merge_red=1; fi
 # DND-1907: the guard could not look (tip runs, tree, content, or the gate
 # declaration). Red outranks it, as in the guard. Nothing landed either.
-if [ -z "${merge_red}" ] && [ "${merge_rc}" -ne 0 ] && grep -qF -- "REFUSING" "${merge_err}" && grep -qF -- "${GMG_LOOK_MARK}" "${merge_err}"; then merge_look=1; fi
+if [ -z "${merge_red}" ] && [ "${merge_rc}" -ne 0 ] && gmg_refusal_has_reason "${merge_err}" "${GMG_LOOK_MARK}"; then merge_look=1; fi
 rm -f "${merge_err}"
 # DND-1906: the tip turned red between the check above and the guard's own
 # re-check. The guard refused before any call to the forge, so nothing landed:

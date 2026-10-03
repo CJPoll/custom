@@ -171,10 +171,39 @@ GMG_SAFE_PATH="wait until every check on the PR's exact head SHA is green (\`~/d
 # an alias, which is expanded and checked.
 GMG_BUILTINS=" agent-task alias api attestation auth browse cache codespace completion config copilot extension gist gpg-key help issue label org pr preview project release repo ruleset run search secret ssh-key status variable version workflow "
 
+# GMG_REFUSE_WORD is the word every guard refusal carries. gmg_refuse prints
+# `<tool>: <word> `<what>`: <why>`, and gmg_refusal_has_reason reads that shape
+# back, so the format has one home (DND-1908): a merge tool that classifies a
+# refusal calls the reader and never spells the word or the shape itself.
+GMG_REFUSE_WORD="REFUSING"
+
 gmg_refuse() {
   # $1 what was refused, $2 why (may be multi-line), $3 the Fix: text
-  printf '%s: REFUSING `%s`: %s\n  Fix: %s. %s\n' "$GMG_TOOL" "$1" "$2" "$3" "$GMG_ESCALATE" >&2
+  printf '%s: %s `%s`: %s\n  Fix: %s. %s\n' "$GMG_TOOL" "$GMG_REFUSE_WORD" "$1" "$2" "$3" "$GMG_ESCALATE" >&2
   exit 3
+}
+
+# gmg_refusal_has_reason <stderr-file> <mark> : true when a guard refusal in the
+# file opens its reason with <mark>, a line shaped
+# `<tool>: <word> `<what>`: <mark>...` as gmg_refuse prints it. A mark inside
+# the refused command text, or opening a later line of the reason, is no match.
+# An unreadable file or an empty mark is false.
+gmg_refusal_has_reason() {
+  local line rest
+  [ -r "$1" ] && [ -n "$2" ] || return 1
+  while IFS= read -r line || [ -n "${line}" ]; do
+    case "${line}" in
+      *": ${GMG_REFUSE_WORD} \`"*) ;;
+      *) continue ;;
+    esac
+    rest="${line#*": ${GMG_REFUSE_WORD} \`"}"
+    case "${rest}" in
+      *"\`: "*) rest="${rest#*"\`: "}" ;;
+      *) continue ;;
+    esac
+    [[ "${rest}" == "$2"* ]] && return 0
+  done < "$1"
+  return 1
 }
 
 # gmg_false_word <value> : true when cobra would parse <value> as boolean false.
@@ -996,7 +1025,9 @@ gmg_content_health() {
 
 # GMG_RED_MARK opens a red-tip refusal's reason. The merge tool reads it back
 # from the guard's stderr to tell a red tip from the guard's other exit-3
-# refusals (DND-1906), so the guard and the tool share this one constant.
+# refusals (DND-1906), so the guard and the tool share this one constant. It
+# reads it with gmg_refusal_has_reason, anchored on the refusal's own shape
+# (DND-1908).
 GMG_RED_MARK="MAIN RED:"
 # GMG_LOOK_MARK opens a COULD NOT LOOK refusal's reason (DND-1907): the guard
 # could not read the base tip's runs, tree or content, or whether the repo

@@ -81,16 +81,29 @@ cat > "${STUBS}/gh-athena" <<'EOF'
 echo "$*" >> "${ST}/merge.log"
 mode="$(cat "${ST}/merge_mode")"
 [ "${mode}" = refuse ] && { echo "refused: checks not green" >&2; exit 1; }
+# DND-1908: every refusal below is printed by the guard's OWN gmg_refuse and
+# its own marks, never a hand-typed copy of the format, so a format change in
+# the guard reaches this stub and the tool must still classify it.
+# $ST/gmg_lib names the guard library.
+. "$(cat "${ST}/gmg_lib")" || exit 99
+GMG_TOOL=gh-athena
+refuse() { ( gmg_refuse "$@" ); exit $?; }
 # DND-1906: the guard's own re-check finds the tip red (it turned red after
 # the tool's own check): the guard's refusal shape, exit 3, nothing lands.
-[ "${mode}" = redtip ] && { printf 'gh-athena: REFUSING `gh pr merge`: MAIN RED: main tip abc is RED, so the line is stopped (DND-1902).\n  Fix: land only a red-main fix. Never merge around this.\n' >&2; exit 3; }
+[ "${mode}" = redtip ] && refuse 'gh pr merge' "${GMG_RED_MARK} main tip abc is RED, so the line is stopped (DND-1902)." 'land only a red-main fix'
 # DND-1907: the guard's own re-check cannot read the tip's runs: COULD NOT LOOK
 # (a refusal too, exit 3, nothing lands), worded as the guard words it.
-[ "${mode}" = looktip ] && { printf 'gh-athena: REFUSING `gh pr merge`: COULD NOT LOOK: whether the main tip abc is red cannot be told: gh run list failed.\n  Fix: check gh auth, then re-run.\n' >&2; exit 3; }
+[ "${mode}" = looktip ] && refuse 'gh pr merge' "${GMG_LOOK_MARK} whether the main tip abc is red cannot be told: gh run list failed." 'check gh auth, then re-run'
 # Both marks in one refusal: red outranks COULD NOT LOOK.
-[ "${mode}" = redlook ] && { printf 'gh-athena: REFUSING `gh pr merge`: MAIN RED: main tip abc is RED.\n  COULD NOT LOOK: whether more is red.\n  Fix: land only a red-main fix.\n' >&2; exit 3; }
+[ "${mode}" = redlook ] && refuse 'gh pr merge' "${GMG_RED_MARK} main tip abc is RED.
+  ${GMG_LOOK_MARK} whether more is red." 'land only a red-main fix'
 # Any other guard refusal is exit 3 too, but not a red tip.
-[ "${mode}" = guardother ] && { printf 'gh-athena: REFUSING `gh pr merge`: a check is not green.\n  Fix: wait for green.\n' >&2; exit 3; }
+[ "${mode}" = guardother ] && refuse 'gh pr merge' 'a check is not green.' 'wait for green'
+# DND-1908: a mark OUTSIDE the refusal's reason shape (inside the refused
+# command text, or opening a later line) is not a classification.
+[ "${mode}" = markinwhat ] && refuse 'gh pr merge MAIN RED: COULD NOT LOOK:' 'a check is not green.' 'wait for green'
+[ "${mode}" = marklater ] && refuse 'gh pr merge' 'a check is not green.
+  MAIN RED: quoted from a log line' 'wait for green'
 sha=""; prev=""
 for a in "$@"; do [ "${prev}" = "--match-head-commit" ] && sha="${a}"; prev="${a}"; done
 G="git --git-dir=${BARE}"
@@ -147,7 +160,7 @@ fixture() {
     && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f && git push -q origin feature )
   H="$(git -C "${WT}" rev-parse HEAD)"
   printf '{"state":"OPEN","headRefOid":"%s","headRefName":"dnd-42-fixture","baseRefName":"main"}\n' "${H}" > "${ST}/pr.json"
-  echo '[]' > "${ST}/runs.json"; echo good > "${ST}/merge_mode"; echo 0 > "${ST}/confirm_rc"
+  echo '[]' > "${ST}/runs.json"; echo "$(cd "${HERE}/../../../.." && pwd)/lib/gh-merge-guard.sh" > "${ST}/gmg_lib"; echo good > "${ST}/merge_mode"; echo 0 > "${ST}/confirm_rc"
   echo 0 > "${ST}/teardown_rc"; : > "${ST}/teardown.log"; export LOCK_PATH="${TMP}/$1.lock"
   : > "${ST}/merge.log"
   plant_receipt "${H}" "$(git --git-dir="${BARE}" rev-parse main)"
@@ -558,6 +571,41 @@ grep -q "^Fix: .*Nothing was merged" <<<"${out}" && ok "b12 own Fix: present" ||
 # b13 red outranks COULD NOT LOOK when a refusal carries both marks: exit 11.
 fixture b13; echo redlook > "${ST}/merge_mode"; echo 1 > "${ST}/confirm_rc"
 run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/b13.lock"; expect b13 11; no_teardown b13
+
+# b14 DND-1908 THE MISS: the tool matched the literal REFUSING and each mark
+# anywhere in the guard's stderr. A mark inside the refused command text, or
+# opening a later line, read as a red tip or a COULD NOT LOOK. Only the guard's
+# own `REFUSING ...: <mark>` shape counts: both keep exit 4.
+fixture b14; echo markinwhat > "${ST}/merge_mode"; echo 1 > "${ST}/confirm_rc"
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/b14.lock"; expect b14 4; no_teardown b14
+fixture b15; echo marklater > "${ST}/merge_mode"; echo 1 > "${ST}/confirm_rc"
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/b15.lock"; expect b15 4; no_teardown b15
+# b16 the tool holds no copy of the refusal format: it asks the guard library.
+grep -qF 'REFUSING' "${TOOL}" && bad "b16 the tool carries a literal REFUSING" "$(grep -nF REFUSING "${TOOL}")" || ok "b16 no literal REFUSING in the tool (the guard's format is shared)"
+
+# b17 DND-1908: whatever gmg_refuse prints, gmg_refusal_has_reason reads back,
+# including after a format change (a different refusal word): the writer and
+# the reader share one definition, so they cannot drift apart.
+b17_lib="$(cd "${HERE}/../../../.." && pwd)/lib/gh-merge-guard.sh"
+b17_err="${TMP}/b17.err"
+for b17_word in REFUSING DENIED; do
+  ( . "${b17_lib}" && GMG_TOOL=gh-athena && GMG_REFUSE_WORD="${b17_word}" && gmg_refuse 'gh pr merge' "${GMG_RED_MARK} tip is RED" 'fix it' ) 2> "${b17_err}"
+  if ( . "${b17_lib}" && GMG_REFUSE_WORD="${b17_word}" && gmg_refusal_has_reason "${b17_err}" "${GMG_RED_MARK}" ); then
+    ok "b17 a ${b17_word} refusal is read back by its red mark"
+  else
+    bad "b17 reader missed a ${b17_word} refusal" "$(cat "${b17_err}")"
+  fi
+  if ( . "${b17_lib}" && GMG_REFUSE_WORD="${b17_word}" && gmg_refusal_has_reason "${b17_err}" "${GMG_LOOK_MARK}" ); then
+    bad "b17 reader matched the wrong mark" "$(cat "${b17_err}")"
+  else
+    ok "b17 the other mark does not match a ${b17_word} refusal"
+  fi
+done
+if ( . "${b17_lib}" && gmg_refusal_has_reason "${TMP}/b17.absent" "${GMG_RED_MARK}" ); then
+  bad "b17 an unreadable file matched" ""
+else
+  ok "b17 an unreadable stderr file is no match"
+fi
 
 # c14 --help: stdout, exit 0, no side effects.
 hout="$("${TOOL}" --help 2>/dev/null)"; rc=$?
