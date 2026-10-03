@@ -73,11 +73,11 @@ Run once per shipwright cron run, after the report mining. The state lives in
    ```
    S="$SHIPWRIGHT_STATE_DIR"
    ai/bin/judgment-feedback scan-tickets --json \
-     --since "$(cat "$S/judgment-ticket-scan-cursor.txt")" \
+     --cursor-file "$S/judgment-ticket-scan-cursor.txt" \
      --recorded-file "$S/judgment-ticket-scan-recorded.txt"
    ```
 
-   On a first run (no cursor file), pass
+   On a first run (no cursor file), also pass
    `--since "$(date -u -d '1 day ago' +%Y-%m-%dT%H:%M:00Z)"` (Notion stamps
    edits to the minute). It reads the
    DND tickets edited since then (read only) and records `field_changed`
@@ -96,10 +96,11 @@ Run once per shipwright cron run, after the report mining. The state lives in
    - scan-tickets: COULD NOT MEASURE (<the JSON's reason>, exit <n>); since kept
    ```
 
-   On exit 0 with `"complete": true`, write its `next_since` to
-   `judgment-ticket-scan-cursor.txt`. On any other exit keep the old cursor:
-   the next run reads the same window again, and the recorded file stops a
-   second send. A `refused` edit is the server's answer (`not_found` for a
+   A complete scan writes its `next_since` to the cursor file itself; any
+   other exit leaves it as it was. Never write the cursor file by hand. The
+   next run then reads the same window again, and the recorded file stops a
+   second send. Exit 3 after a `"complete": true` line is a cursor that
+   could not be written: journal it as could not measure. A `refused` edit is the server's answer (`not_found` for a
    call that is not the owner's or was pruned); name it in the journal,
    never retry it. A refusal as `invalid` is exit 4: the scan's labels no
    longer match the question set, so file a ticket for the scan. Journal
@@ -110,6 +111,11 @@ Run once per shipwright cron run, after the report mining. The state lives in
    `ticket-reclassify` pass plans its verbatim line. No tool heals an
    `unparseable_<reason>` ticket, so name each one (DND-1354).
    Never create or edit the recorded file by hand.
+
+   **Later (2026-10-03):** the run passed `--since "$(cat <cursor>)"` and
+   then wrote `next_since` to the cursor file itself. Superseded by
+   `--cursor-file`: the 2026-10-03 09:00Z and 18:00Z runs journaled a new
+   scan cursor but never wrote it, so the next run re-read the window.
 
    A filer who disagrees with a `jev` classification or Path files its own
    value and leaves the line as it is. This scan is what records that report

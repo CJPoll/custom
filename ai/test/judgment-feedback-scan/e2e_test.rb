@@ -194,6 +194,38 @@ check("an edit already recorded is counted, not sent again (flags in any order)"
   rc.zero? && out.include?("records: recorded 0, replaced 0, already_recorded 2, refused 1, not_sent 0") && posts(log).size == before + 1
 end
 
+puts "== the cursor file: the scan reads and advances its own --since"
+cur = File.join(DIR, "scan-cursor.txt")
+rc, out, err = run(env, "scan-tickets", "--cursor-file", cur)
+check("--cursor-file that does not exist, with no --since, is usage: nothing read", "rc #{rc}; err: #{err}") do
+  rc == 2 && err.include?("--cursor-file") && err.include?("--since") && err.include?("Fix:") && out.empty?
+end
+rc, out, = run(env, "scan-tickets", "--since", SINCE, "--cursor-file", cur, "--json")
+written = File.exist?(cur) ? File.read(cur) : ""
+check("a complete scan writes its next_since to --cursor-file, one line", "rc #{rc}; file #{written.inspect}; out: #{out}") do
+  rc.zero? && written == "#{JSON.parse(out.lines.last)['next_since']}\n"
+end
+File.write(cur, "2026-10-01T05:00:00Z\n")
+q_before = requests(log).count { |r| r["path"].end_with?("/query") }
+rc, out, = run(env, "scan-tickets", "--cursor-file", cur)
+query = requests(log).select { |r| r["path"].end_with?("/query") }.drop(q_before).first
+check("with no --since, the scan reads it from --cursor-file", "rc #{rc}; out: #{out}") do
+  rc.zero? && out.include?("since 2026-10-01T05:00:00Z") &&
+    query["body"]["filter"]["last_edited_time"] == { "on_or_after" => "2026-10-01T05:00:00Z" }
+end
+File.write(cur, "not a time\n")
+rc, _out, err = run(env, "scan-tickets", "--cursor-file", cur)
+check("a --cursor-file that holds no time is usage, never a whole-tracker scan") { rc == 2 && err.include?("ISO 8601 time with a zone") }
+icur = File.join(DIR, "scan-cursor-incomplete.txt")
+File.write(icur, "#{SINCE}\n")
+_ilog, ienv = fake("cursor-incomplete", "post_status" => 503)
+rc, = run(ienv, "scan-tickets", "--cursor-file", icur)
+check("an incomplete scan leaves --cursor-file as it was") { rc == 3 && File.read(icur) == "#{SINCE}\n" }
+rc, out, err = run(env, "scan-tickets", "--since", SINCE, "--cursor-file", File.join(DIR, "no-such-dir", "cursor.txt"))
+check("a cursor that cannot be written is exit 3 with a Fix:, after a complete scan's counts", "rc #{rc}; out: #{out}; err: #{err}") do
+  rc == 3 && out.include?("complete: next_since") && err.include?("could not write --cursor-file") && err.include?("Fix:")
+end
+
 puts "== paraphrased lines are recovered or named by reason (DND-1354)"
 para_rows = [row(7, kind: "Bug", severity: "LOW", security: "none"), row(8, kind: "Bug", severity: "LOW", security: "none"),
              row(9, kind: "Bug", severity: "LOW", security: "none")]

@@ -41,6 +41,7 @@ USAGE = <<~EOF
          judgment-feedback list [--after <cursor or time>] [--limit N] [--json]
                                 [--overlap-s N] [--seen-file <f>] [--with-payloads]
          judgment-feedback scan-tickets --since <time> [--recorded-file <f>] [--json]
+         judgment-feedback scan-tickets --cursor-file <f> [--since <time>] [--recorded-file <f>] [--json]
          judgment-feedback --help
 
   Receiver feedback on Jev judgments (ai/contracts/athena-judgments.md ->
@@ -105,7 +106,14 @@ USAGE = <<~EOF
            {<question>: <the current value as the question's label>}. It
            writes nothing but that feedback (and --recorded-file).
              --since T          an ISO 8601 time with a zone (the previous
-                        run's next_since). Required: never a whole-tracker scan.
+                        run's next_since). Required, or read from
+                        --cursor-file: never a whole-tracker scan.
+             --cursor-file f  the scan's own cursor. With no --since, the
+                        --since is read from it (a missing file is usage:
+                        pass --since on a first run). A complete scan
+                        writes its next_since to it, one line; an
+                        incomplete one leaves it as it was. A cursor that
+                        cannot be written is exit 3, after the counts.
              --recorded-file f  "<call> <question>=<label>" per line: what
                         earlier scans recorded. Such an edit is counted
                         already_recorded and not sent again (a second report
@@ -249,6 +257,24 @@ module Effects
     raise Failure.new(3, "#{PROG}: could not append to --recorded-file #{path}: #{e.class}. Fix: check that file is writable; the record itself was sent")
   end
 
+  # write_cursor(path, next_since, err) -> exit code. The file is replaced
+  # whole (a temp file renamed over it), so a reader never sees half a line.
+  def write_cursor(path, next_since, err)
+    tmp = "#{path}.tmp-#{Process.pid}"
+    File.write(tmp, "#{next_since}\n")
+    File.rename(tmp, path)
+    0
+  rescue SystemCallError => e
+    begin
+      File.delete(tmp)
+    rescue SystemCallError
+      nil
+    end
+    err.puts "#{PROG}: could not write --cursor-file #{path}: #{e.class}. Fix: check that its directory exists and is writable; " \
+             "the scan was complete, so re-run it with the same --since"
+    3
+  end
+
   def notion_line(error)
     "COULD NOT READ NOTION: #{error.message}. Fix: #{error.fix}"
   end
@@ -350,8 +376,8 @@ module Manager
   # the tracker first, then sends one record per new edit. Counts are printed
   # whatever happened; only a complete scan prints a next_since.
   def scan(opts, out, err)
-    usage!("scan-tickets needs --since", "pass the previous run's next_since; on a first run, a time with a zone such as a day ago") unless opts["--since"]
-    since = JFS.parse_since(opts["--since"])
+    cursor_file = opts["--cursor-file"]
+    since = JFS.parse_since(opts["--since"] || Scan.since_from(cursor_file))
     file = opts["--recorded-file"]
     recorded = file && File.exist?(file) ? JFS.recorded_keys(Effects.read_file("--recorded-file", file)) : Set.new
     started = Effects.now
@@ -366,11 +392,19 @@ module Manager
     Scan.print(view, opts["--json"], out)
     return Scan.incomplete(view, opts["--json"], out, err) unless view["complete"]
 
-    0
+    cursor_file ? Effects.write_cursor(cursor_file, view["next_since"], err) : 0
   end
 
   # The scan's tracker reading, its records and its printed view.
   class Scan
+    # since_from(cursor file or nil) -> the --since text it holds.
+    def self.since_from(path)
+      usage!("scan-tickets needs --since", "pass the previous run's next_since, or --cursor-file; on a first run, a time with a zone such as a day ago") unless path
+      usage!("--cursor-file #{path} does not exist and no --since was given",
+             "on a first run pass --since with a time with a zone (such as a day ago) beside --cursor-file; a complete scan then writes the file") unless File.exist?(path)
+      Effects.read_file("--cursor-file", path).strip
+    end
+
     def self.tickets(rows)
       tickets = rows.filter_map { |r| TriageCorpus.ticket_from_row(r) }
       missing = tickets.flat_map { |t| t["schema_missing"] + (t["path_select"] ? [] : ["Path"]) }.uniq.sort
@@ -576,7 +610,7 @@ LIST_SPEC = { "--after" => :value, "--limit" => :integer, "--json" => :switch, "
               "--seen-file" => :value, "--with-payloads" => :switch }.freeze
 RECORD_SPEC = { "--call" => :value, "--use-case" => :value, "--subject" => :value, "--signal" => :value,
                 "--note-file" => :value, "--session-label" => :value }.freeze
-SCAN_SPEC = { "--since" => :value, "--recorded-file" => :value, "--json" => :switch }.freeze
+SCAN_SPEC = { "--since" => :value, "--recorded-file" => :value, "--cursor-file" => :value, "--json" => :switch }.freeze
 
 # split_corrections(argv) -> [the --correct values, the rest]. --correct is
 # the one repeatable flag, so it is taken out before the strict parse.
