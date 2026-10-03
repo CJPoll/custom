@@ -1083,9 +1083,13 @@ EOF
 d2 "D2-29c. residual: a mid-word regex group" deny <<'EOF'
 grep -E 'dnd-(9[0-9]|1[01][0-9])' f
 EOF
-# -- `stash` after | or ( is a command named stash --
-d2 "D2-30. grep -E alternation naming stash" allow <<'EOF'
+# -- residual: `stash` after a separator in a payload stays denied, since
+# xargs -d can split the text on any delimiter (review floor, D2 round 1) --
+d2 "D2-30. residual: grep -E alternation naming stash" deny <<'EOF'
 grep -n -i -E 'friction|harness|guard|stash|In Review' f
+EOF
+d2 "D2-30a. a payload split by xargs -d hands stash pop to git" deny <<'EOF'
+printf 'a|stash pop' | xargs -d'|' git
 EOF
 # -- test operands are never run --
 d2 "D2-31. [ -n \"\$d\" ] after git -C \"\$d\"" allow <<'EOF'
@@ -1130,6 +1134,70 @@ d2 "D2-48. a glob inside a mid-word group" deny <<'EOF'
 EOF
 d2 "D2-49. a group closing right before a glob" deny <<'EOF'
 /usr/bin/env (g|x)?t stash pop
+EOF
+d2 "D2-49a. a glob joined after a command substitution" deny <<'EOF'
+/usr/bin/g$(printf i)[t] stash pop
+EOF
+d2 "D2-49b. a glob joined after a substitution, ? form" deny <<'EOF'
+/usr/bin/g$(printf i)? stash pop
+EOF
+d2 "D2-49c. a glob joined after a backtick substitution" deny <<'EOF'
+/usr/bin/g`printf i`[t] stash pop
+EOF
+d2 "D2-49d. a glob joined before a backtick substitution" deny <<'EOF'
+/usr/bin/g?`printf t` stash pop
+EOF
+d2 "D2-49e. a glob joined after an empty command substitution" deny <<'EOF'
+/usr/bin/g$(true)?t stash pop
+EOF
+# Review floor, D2 round 1 (code-reviewer): each ran git stash pop in zsh.
+d2 "D2-49f. a glob in a directory part of a wrapper" deny <<'EOF'
+/usr/b?n/env g?t stash pop
+EOF
+d2 "D2-49g. a glob first path part of a wrapper" deny <<'EOF'
+/u*/bin/nohup g?t stash pop
+EOF
+d2 "D2-49h. a brace in a directory part of a wrapper" deny <<'EOF'
+/usr/{b,x}in/env g?t stash pop
+EOF
+d2 "D2-49i. a directory-glob wrapper with an option" deny <<'EOF'
+/usr/b?n/env -i g?t stash pop
+EOF
+d2 "D2-49j. a brace that opens inside a bracket class" deny <<'EOF'
+/usr/bin/[{]e]nv,]g]it} stash pop
+EOF
+d2 "D2-49k. set -o with an option name built by expansion" deny <<'EOF'
+X=extended; set -o ${X}glob; /usr/bin/g?#t stash pop
+EOF
+d2 "D2-49l. set -o braceccl built by expansion" deny <<'EOF'
+X=brace; set -o ${X}ccl; /usr/bin/{g}it stash pop
+EOF
+d2 "D2-49m. zsh -o with an option name built by expansion" deny <<'EOF'
+X=extended; zsh -o ${X}glob -c '/usr/bin/g?#t stash pop'
+EOF
+d2 "D2-49n. eval re-parses a test bracket" deny <<'EOF'
+eval [ 1 ] \&\& \$G stash pop
+EOF
+d2 "D2-49o. command eval re-parses test" deny <<'EOF'
+command eval test 1 \; \$G stash pop
+EOF
+d2 "D2-49p. a glob wrapper, an option, a second glob wrapper" deny <<'EOF'
+[e]nv -i [n]ohup /usr/bin/g?t stash pop
+EOF
+d2 "D2-49q. a glob wrapper, an option, a glob xargs" deny <<'EOF'
+[e]nv -i /usr/bin/x[a]rgs /usr/bin/g?t stash pop
+EOF
+d2 "D2-49r. eval git with a quoted stash payload" deny <<'EOF'
+eval git 'stash pop'
+EOF
+d2 "D2-49s. watch git with a quoted stash payload" deny <<'EOF'
+watch -n1 git 'stash pop'
+EOF
+d2 "D2-49t. fish expands a one-word brace" deny <<'EOF'
+fish -c '{git} stash pop'
+EOF
+d2 "D2-49u. a group at a command start is a parse error, not a glob" allow <<'EOF'
+(g|x)?t stash pop
 EOF
 d2 "D2-50. a tilde before a glob" deny <<'EOF'
 ~x/g?t stash pop
@@ -1187,6 +1255,12 @@ xargs git <<'X'
 stash pop
 X
 EOF
+d2 "D2-67a. a quoted payload starting stash, piped to xargs git (critic round 7)" deny <<'EOF'
+printf 'stash pop' | xargs git
+EOF
+d2 "D2-67b. a payload split by xargs -d on ;" deny <<'EOF'
+printf 'x;stash pop' | xargs -d';' git
+EOF
 d2 "D2-68. [ ... ] && a real expanded git stash" deny <<'EOF'
 [ -n "$d" ] && $G stash pop
 EOF
@@ -1210,6 +1284,16 @@ OUT=$(json "$WT" '/usr/bin/^x* stash pop' | ZDOTDIR="$D2U" CLAUDE_CONFIG_DIR="$D
 if [ -r "$D2U/.zshenv" ]; then record "D2-73. an unreadable zshenv (skipped: running as a user who can read mode 000)" PASS
 else check "D2-73. an unreadable zshenv" deny; fi
 chmod 600 "$D2U/.zshenv"
+D2D="$TMP/d2zdir"; mkdir -p "$D2D/.zshenv"
+OUT=$(json "$WT" '/usr/bin/^x* stash pop' | ZDOTDIR="$D2D" CLAUDE_CONFIG_DIR="$D1CFG" sh "$HOOK" 2>/dev/null); STATUS=$?
+check "D2-73a. a zshenv that is a directory cannot be read" deny
+D2L="$TMP/d2snapnl"; mkdir -p "$D2L/shell-snapshots"
+cp "$D1CFG/shell-snapshots/snapshot-zsh-1-fixture.sh" "$D2L/shell-snapshots/"
+chmod 300 "$D2L/shell-snapshots"
+OUT=$(json "$WT" '/usr/bin/^x* stash pop' | ZDOTDIR="$D2Z" CLAUDE_CONFIG_DIR="$D2L" sh "$HOOK" 2>/dev/null); STATUS=$?
+if [ -r "$D2L/shell-snapshots" ]; then record "D2-73b. a snapshot dir that cannot be listed (skipped: running as a user who can list mode 300)" PASS
+else check "D2-73b. a snapshot dir that cannot be listed" deny; fi
+chmod 700 "$D2L/shell-snapshots"
 OUT=$(json "$WT" '/usr/bin/^x* stash pop' | BASH_ENV=/tmp/x ZDOTDIR="$D2Z" CLAUDE_CONFIG_DIR="$D1CFG" sh "$HOOK" 2>/dev/null); STATUS=$?
 check "D2-74. BASH_ENV in the environment" deny
 # DND-1216: a finding from the words passed to the grep alias names its own
