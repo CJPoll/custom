@@ -827,9 +827,10 @@ never a URL. `--json` carries it on the message; the text form prints a marker
 line after the text, inside the fence:
 `[1 file: photo.jpg (image/jpeg, 2048 bytes, F…)]`. A stub with only an id
 prints `[1 file: F… (file, F…)]`. File names are the sender's words. The `id`
-is what athena:slack's file read takes. A line with no files renders as
+is what the `slack_read_file` tool takes (`ai/contracts/athena-events.md` →
+*`slack_read_file` reads one Slack file*). A line with no files renders as
 before, and a malformed `files` is read as none. A line from a server that
-does not write `files` carries none even when the message had a file
+predates gen_saas #760 carries none even when the message had a file
 (*Line format*, the `files` paragraphs); `read-thread` on the thread lists
 them.
 

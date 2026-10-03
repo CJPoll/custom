@@ -857,25 +857,32 @@ One JSON object per line, UTF-8, no pretty-printing, newline-terminated:
  "channel":"C…|D…","user":"U…","ts":"1788….…","thread_ts":"1788….… or null",
  "text":"…raw text…","permalink":"https://… (optional)","event_id":"Ev…",
  "route":"thread_claim|topic_judgment|session_mention|channel_route (optional)",
- "topic":{"label":"… or null","confidence":0.0,"model":"jev-1.13.0 or null","reason":"… or null"} (optional),
  "files":[{"id":"F…","name":"… or null","title":"… or null","filetype":"… or null",
-           "mimetype":"… or null","size":0,"mode":"… or null"}] (optional)}
+           "mimetype":"… or null","size":0,"mode":"… or null"}] (optional),
+ "topic":{"label":"… or null","confidence":0.0,"model":"jev-1.13.0 or null","reason":"… or null"} (optional)}
 ```
 
 **`files` lists the message's attachments (DND-1835).** It is present only
-when the Slack message carried at least one file; a message with none has no
-`files` key, so its line is byte-identical to one written before the field
-existed. Each entry is an **allowlist** of the Slack file object: `id` (the
-handle a reader fetches the file by), `name`, `title`, `filetype`, `mimetype`,
-`size` (bytes, a number) and `mode` (`hosted`, `canvas`, `snippet`,
-`tombstone`, `hidden_by_limit`, …). Every member but `id` may be null: Slack
-sends a stub with only an `id` under `file_access: "check_file_info"`.
+when the Slack message carried at least one file with a Slack file id; a
+message with none has no `files` key, so its line is byte-identical to one
+written before the field existed. A message whose file entries all lack an id
+has no `files` key either. It follows `route` and precedes `topic`, which stays
+the last key. Each entry is an **allowlist** of the Slack file object, an
+object with exactly these keys, in this order: `id` (a Slack file id, `F`
+then capital letters and digits: the handle a reader fetches the file by, and
+the argument of the `slack_read_file` tool, `ai/contracts/athena-events.md` →
+*`slack_read_file` reads one Slack file*), `name`, `title`, `filetype`,
+`mimetype`, `size` (an integer, in bytes) and `mode` (`hosted`, `canvas`,
+`snippet`, `tombstone`, `hidden_by_limit`, …). Every member but `id` may be
+null: Slack sends a stub with only an `id` under `file_access:
+"check_file_info"`, and a member of the wrong type is written as null.
 
 - **No body and no URL.** A producer MUST NOT write file content, `url_private`,
   `url_private_download`, a thumbnail, a permalink, or any other URL a file
   object carries. Some carry a token.
 - **Names are untrusted.** `name` and `title` were chosen by the sender. A
-  reader renders them inside the fence with the text (*Untrusted input*).
+  producer JSON-encodes them exactly as `text`, and a reader renders them only
+  inside the untrusted-content fence with the text (*Untrusted input*).
 - **A reader tolerates every shape.** A reader keeps only object entries and
   only the allowlisted members, coerces each to its type, and treats a `files`
   that is absent, null, not an array, or holds no object as no files. A
@@ -886,16 +893,18 @@ sends a stub with only an `id` under `file_access: "check_file_info"`.
   `[2 files: console.jpg (image/jpeg, 2048 bytes, F…), notes (canvas, 512 bytes, F…)]`.
   The marker is for people; a program reads `--json`.
 
-**The Slack receiver writes no `files` key** (gen_saas:
-`Athena.SlackEvents.Payload.parse/1` keeps only a `has_files` flag, and
-`Athena.SlackEvents.InboxLine.encode/5` writes the key set above without
-`files`; the server half is DND-1835). So no producer writes `files` onto a
-line, and a receiver line for a message with a file reads like one for a
-message without. The athena:slack Web API backstop lists files in its own
-`read-inbox` output, which is outside this contract (*State file*), but it
-does not re-show a message the receiver's `log` line already delivered (the
-shared `seen_keys`). A reader that needs the files of such a message reads the
-thread with athena:slack `read-thread`, which lists them (DND-1822).
+**Later (2026-10-03, DND-1835):** this paragraph said "The Slack receiver
+writes no `files` key". `Athena.SlackEvents.Payload.parse/1` kept only a
+`has_files` flag and `Athena.SlackEvents.InboxLine.encode/5` wrote the key set
+without `files`, so a receiver line for a message with a file read like one for
+a message without, and the Web API backstop did not re-show it (the shared
+`seen_keys`). A reader that needed the files read the thread with athena:slack
+`read-thread` (DND-1822). Superseded by gen_saas #760 (`ed3e66c5`): the
+receiver keeps each file's allowlisted members (`Payload.parse/1`) and
+`InboxLine.encode/5` writes them as `files`, so the line itself names the file
+ids a session passes to `slack_read_file`. A line from a server that predates
+#760 carries no `files` even when the message had a file, and `read-thread`
+still lists them.
 
 `v` **and `kind`** are mandatory on every line, regardless of producer. The
 remaining fields are the Slack producer's schema; another producer defining a
