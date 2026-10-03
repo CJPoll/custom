@@ -1182,9 +1182,16 @@ fg_push_and_record() {
   # header is on no argv). https is the only protocol it may use, so a
   # config rewrite of the URL cannot hand the header to a helper (`<name>::`),
   # ext::, ssh's command or a local path. A local push URL needs no header
-  # and gets none.
+  # and gets none. It runs with the transport's network settings (DND-1899,
+  # ai/lib/forge-http-pin.sh): TLS verification on, no proxy, no curl trace;
+  # where the caller's config would weaken TLS anyway, the probe does not run
+  # (the push's transport then refuses with a Fix:).
   hprobe() (
     case "$purl" in "https://$FG_HOST/"*)
+      . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/forge-http-pin.sh" 2>/dev/null || exit 1
+      fg_http_pin_args "$purl" "$purl"
+      probe+=( "${FG_HTTP_ARGS[@]}" )
+      fg_http_check "$purl" "$purl" "${probe[@]}" || exit 1
       export "GIT_CONFIG_KEY_$n=$hk" "GIT_CONFIG_VALUE_$n=$FG_HEADER" GIT_CONFIG_COUNT="$((n + 1))" \
         GIT_ALLOW_PROTOCOL=https ;;
     esac
@@ -1484,11 +1491,12 @@ fg_refuse_ungated_main() {
 # the header in their environment, with https as the only protocol git may
 # use (GIT_ALLOW_PROTOCOL), so no helper or command a config rewrite names
 # can receive it.
+# The transport and the probes both run with TLS verification on, no proxy
+# and no curl trace, whatever the caller set, and refuse a CA or TLS-backend
+# setting (ai/lib/forge-http-pin.sh, DND-1899).
 # Residual: same uid is not a boundary (a process that reads the token cache,
-# or the transport's /proc/<pid>/environ while it runs, gets the token); the
-# grant rests on fg_refuse_non_https's URL resolution; and the transport and
-# the probes read the caller's http.* config (proxy, TLS verification) like
-# any git over https.
+# or the transport's /proc/<pid>/environ while it runs, gets the token); and
+# the grant rests on fg_refuse_non_https's URL resolution.
 FG_CRED=""
 FG_CRED_WHY=""
 FG_CRED_URL=""

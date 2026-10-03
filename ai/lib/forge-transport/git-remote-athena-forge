@@ -26,6 +26,10 @@
 #   * ATHENA_FG_CRED_FD that does not name a pipe;
 #   * an empty pipe: the one grant for this command was already used.
 #
+# It also runs with TLS verification on, no proxy and no curl trace,
+# whatever the caller set, and refuses a caller's CA or TLS-backend setting
+# (ai/lib/forge-http-pin.sh, DND-1899).
+#
 # Residual (same uid is not a boundary): a process that reads this program's
 # /proc/<pid>/environ while it runs, or the bot's token cache, gets the token.
 set -u
@@ -61,6 +65,20 @@ case "${url}" in
   *) refuse "the route grants a connection to https://${host}/ only, and this URL is not one; the grant was not read." \
        "name the repository by its https://${host}/<owner>/<repo>.git URL, and drop any url.athena-forge::<other host> insteadOf rule from git config." ;;
 esac
+
+# The network settings this process runs with (DND-1899): TLS verification
+# on and no proxy, appended LAST to GIT_CONFIG_PARAMETERS where they beat a
+# caller's -c; no proxy, TLS-override or curl-trace environment; and a CA or
+# TLS-backend setting, which nothing can reset, refused. Before the grant is
+# read, so a refused connection never spends it.
+# shellcheck source=../forge-http-pin.sh
+. "${HERE}/../forge-http-pin.sh" 2>/dev/null \
+  || refuse "its network-settings library (${HERE}/../forge-http-pin.sh) did not load, so TLS verification and proxy settings cannot be pinned." \
+       "check that ai/lib/forge-http-pin.sh exists beside ai/lib/forge-transport/ in this checkout, then retry."
+fg_http_pin "${1:-}" "${url}"
+fg_http_check "${1:-}" "${url}" git \
+  || refuse "the caller's git config would weaken TLS on the connection that carries the bot's credential: ${FG_HTTP_WHY}." \
+       "drop that setting (http.sslVerify, http.proxy, http.<url>.*, remote.<name>.proxy, http.sslCAInfo, http.sslCAPath, http.sslBackend) from the command's -c options and from git config; the route uses git's default TLS verification and CA store, with no proxy."
 
 fd="${ATHENA_FG_CRED_FD:-}"
 [ -n "${fd}" ] || refuse "ATHENA_FG_CRED_FD is not set: this git was not started by the Athena route, so it holds no credential for ${host}." \

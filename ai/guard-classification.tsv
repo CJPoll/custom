@@ -51,6 +51,7 @@ ai/lib/fleet/resume-manager.sh	guard
 ai/lib/forge-cli-isolation.sh	guard	
 ai/lib/forge-stub-guard.sh	guard	
 ai/lib/forge-git-passthrough.sh	guard	
+ai/lib/forge-http-pin.sh	library	the network settings for a process holding the bot header (DND-1899), sourced by ai/lib/forge-transport/git-remote-athena-forge and ai/lib/forge-git-passthrough.sh; returns a status with FG_HTTP_WHY, and each caller composes the refusal that carries Fix:
 ai/lib/forge-transport/git-remote-athena-forge	guard	
 ai/lib/forge-transport/refuse-signing	guard	
 ai/lib/gh-merge-guard.sh	guard	

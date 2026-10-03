@@ -180,3 +180,21 @@ failed`, `FAIL R2` with `c_rc=1 d_rc=1` (not refused) and the
 post-index-change hook's probe lines `r2 hdr=absent fd=pipe transport=RAN`:
 the hook held the grant and used it. After (any prefix of --rebase, any
 short cluster with r, counts as rebasing): `RESULT: 232 passed, 0 failed`.
+
+## DND-1899: no caller proxy, TLS or curl-trace setting reaches a process holding the header
+
+The transport and the route's own ls-remote probes carry the bot's header,
+and git over https honoured a caller's `-c http.proxy`, `HTTPS_PROXY`,
+`-c http.sslVerify=false`, `http.sslCAInfo` and curl-trace environment.
+Cases N1-N5 were added first. N1/N2 run git's real git-remote-https with a
+local listener named as the proxy (`http.curloptResolve` keeps a direct
+connection on 127.0.0.1). On 12f9ed29: `RESULT: 232 passed, 7 failed`:
+`FAIL N1` and `FAIL N2` with `listener=[CONNECT github.com:443 HTTP/1.1]`;
+`FAIL N3` with `net via=transport verify=false proxy=[http://127.0.0.1:9]
+rproxy=[http://127.0.0.1:9] env=[HTTPS_PROXY,ALL_PROXY,GIT_SSL_NO_VERIFY,
+GIT_TRACE_CURL,GIT_CURL_VERBOSE,GIT_TRACE_REDACT,SSLKEYLOGFILE,]`; three
+`FAIL N4` (sslCAInfo, sslCAPath, sslBackend: `rc=0`, the transport ran);
+`FAIL N5` with `net via=direct verify=false proxy=[http://127.0.0.1:9]`.
+After (ai/lib/forge-http-pin.sh: TLS verification on and no proxy appended
+last, the environment unset, a CA or backend setting refused):
+`RESULT: 239 passed, 0 failed`.

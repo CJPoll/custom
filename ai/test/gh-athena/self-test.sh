@@ -1200,7 +1200,7 @@ echo "--- DND-1868: the bot credential reaches only the forge transport ---"
 # under X_FORGE, and speaks the remote-helper `connect` capability.
 X="${TMP}/x1868"; mkdir -p "${X}/bin" "${X}/shim" "${X}/exec"
 export X_REAL_GIT="$(git --exec-path)/git" X_EXEC="${X}/exec" X_FORGE="${X}/forge"
-export X_STUB_LOG="${X}/stub.log" X_PROBE_LOG="${X}/probe.log" X_B64="${B64}" X_USER=x-access-token
+export X_STUB_LOG="${X}/stub.log" X_NET_LOG="${X}/net.log" X_PROBE_LOG="${X}/probe.log" X_B64="${B64}" X_USER=x-access-token
 for f in "$(git --exec-path)"/*; do ln -s "${f}" "${X_EXEC}/${f##*/}"; done
 rm -f "${X_EXEC}/git-remote-https"
 cat > "${X_EXEC}/git-remote-https" <<'EOF'
@@ -1220,6 +1220,10 @@ case "${GIT_CONFIG_PARAMETERS:-}" in *refuse-signing*) via=transport ;; esac
 for k in gpg.program gpg.openpgp.program gpg.x509.program gpg.ssh.program; do gpg="${gpg}${k}=$(git config --get "${k}" | sed 's|.*/||'),"; done
 eff="gpg:$(git config --get gpg.program | sed 's|.*/||'),helper:$(git config --get-all credential.helper | tail -n 1 | sed 's|.*/||'),askpass:$(git config --get core.askPass | sed 's|.*/||')"
 printf 'start via=%s url=%s hdr=%s gpg=%s eff=%s argv=%s\n' "${via}" "${url}" "${hdr}" "${gpg}" "${eff}" "$*" >> "${X_STUB_LOG}"
+# DND-1899: what git's http layer resolves for this URL in this process.
+envs=""; for e in HTTPS_PROXY https_proxy ALL_PROXY GIT_SSL_NO_VERIFY GIT_SSL_CAINFO GIT_TRACE_CURL GIT_CURL_VERBOSE GIT_TRACE_REDACT SSLKEYLOGFILE; do [ -n "${!e+x}" ] && envs="${envs}${e},"; done
+printf 'net via=%s verify=%s proxy=[%s] rproxy=[%s] env=[%s]\n' "${via}" "$(git config --get-urlmatch http.sslverify "${url%/}/")" \
+  "$(git config --get-urlmatch http.proxy "${url%/}/")" "$(git config --get "remote.$1.proxy")" "${envs}" >> "${X_NET_LOG:-/dev/null}"
 repo="${X_FORGE}/${url#https://*/}"
 while IFS= read -r line; do
   case "${line}" in
@@ -1329,6 +1333,81 @@ p2 ls-remote "${X}/src" ls-remote origin
 p2 clone "${X}" clone -q https://github.com/o/r.git "${X}/p2-clone"
 git -C "${X}/src" push -q "${X_FORGE}/o/r.git" "$(git -C "${X}/src" commit-tree -p HEAD -m p2 "$(git -C "${X}/src" rev-parse 'HEAD^{tree}')"):refs/heads/main"
 p2 pull "${X}/p2-clone" pull -q --ff-only
+
+echo "--- DND-1899: no caller proxy, TLS or curl-trace setting reaches a process holding the header ---"
+# N1/N2 run git's REAL git-remote-https (the shim with an exec-path copy that
+# keeps it) against a local listener named as the proxy.
+# http.curloptResolve sends a direct connection to 127.0.0.1:443, so nothing
+# leaves the machine either way. The fake token only.
+mkdir -p "${X}/exec-real"
+for f in "$(git --exec-path)"/*; do ln -s "${f}" "${X}/exec-real/${f##*/}"; done
+cat > "${X}/listener.rb" <<'EOF'
+require 'socket'
+s = TCPServer.new('127.0.0.1', 0)
+File.open(ARGV[0], 'w') { |f| f.puts s.addr[1] }
+c = s.accept
+File.write(ARGV[1], c.gets.to_s)
+c.close
+EOF
+# lsn <label> <proxy-via: arg|env> : a routed ls-remote with the listener as
+# the caller's proxy; ok when no connection reached the listener.
+lsn() {
+  local l="$1" how="$2" port="" lp
+  rm -f "${X}/lsn.fifo" "${X}/lsn.cap"; mkfifo "${X}/lsn.fifo"
+  timeout 60 ruby "${X}/listener.rb" "${X}/lsn.fifo" "${X}/lsn.cap" & lp=$!
+  IFS= read -r -t 20 port < "${X}/lsn.fifo"
+  if [ -z "${port}" ]; then bad "${l}" "the listener did not start"; kill "${lp}" 2>/dev/null; wait "${lp}" 2>/dev/null; return; fi
+  local -a pre=( -c http.curloptResolve=github.com:443:127.0.0.1 ) envp=()
+  case "${how}" in
+    arg) pre+=( -c "http.proxy=http://127.0.0.1:${port}" ) ;;
+    env) envp=( "HTTPS_PROXY=http://127.0.0.1:${port}" "https_proxy=http://127.0.0.1:${port}" ) ;;
+  esac
+  OUT="$(cd "${X}/src" && env "${envp[@]}" X_EXEC="${X}/exec-real" PATH="${XPATH}" timeout 30 "${WRAPPER}" git "${pre[@]}" ls-remote origin 2>"${TMP}/err")"; RC=$?
+  ERR="$(cat "${TMP}/err")"
+  kill "${lp}" 2>/dev/null; wait "${lp}" 2>/dev/null
+  if [ "${RC}" != 0 ] && [ ! -s "${X}/lsn.cap" ]; then ok "${l}"
+  else bad "${l}" "rc=${RC} listener=[$(head -c 120 "${X}/lsn.cap" 2>/dev/null)] err=$(printf '%s' "${ERR}" | tail -n 2)"; fi
+}
+lsn "N1. a caller's -c http.proxy: the transport's connection never reaches that proxy" arg
+lsn "N2. a caller's HTTPS_PROXY: the transport's connection never reaches that proxy" env
+
+# N3. The transport resolves TLS verification on, no proxy and no curl trace,
+# whatever the caller set, at every URL specificity; the fetch still works.
+NX="http://127.0.0.1:9"
+: > "${X_STUB_LOG}"; : > "${X_NET_LOG}"
+OUT="$(cd "${X}/src" && HTTPS_PROXY="${NX}" ALL_PROXY="${NX}" GIT_SSL_NO_VERIFY=1 GIT_TRACE_CURL="${X}/curl.trace" \
+  GIT_TRACE_REDACT=0 GIT_CURL_VERBOSE=1 SSLKEYLOGFILE="${X}/keys.log" PATH="${XPATH}" "${WRAPPER}" git \
+  -c http.sslVerify=false -c 'http.https://github.com/o/r.git/.sslVerify=false' -c 'http.https://github.com/o/r.git.sslVerify=false' \
+  -c "http.proxy=${NX}" -c "http.https://github.com/o/r.git/.proxy=${NX}" -c "remote.origin.proxy=${NX}" fetch -q origin 2>"${TMP}/err")"; RC=$?
+ERR="$(cat "${TMP}/err")"
+if [ "${RC}" = 0 ] && [ "$(x_starts)" = 1 ] && grep -qx 'net via=transport verify=true proxy=\[\] rproxy=\[\] env=\[\]' "${X_NET_LOG}"; then
+  ok "N3. a caller's sslVerify=false, proxy (http., http.<url>., remote.<name>.) and TLS/trace environment: the transport resolves verify on, no proxy, no trace; the fetch succeeds"
+else bad "N3. the transport's TLS, proxy and trace settings" "$(xdiag) net=[$(cat "${X_NET_LOG}")]"; fi
+
+# N4. A CA setting cannot be reset to curl's default, so it is refused before
+# git's git-remote-https starts.
+: > "${X_STUB_LOG}"
+for ca in http.sslCAInfo 'http.https://github.com/.sslCAPath' http.sslBackend; do
+  xgh "${X}/src" -c "${ca}=${X}/ca" fetch -q origin
+  if [ "${RC}" != 0 ] && [ "$(x_starts)" = 0 ] && [[ "${ERR}" == *"git-remote-athena-forge: REFUSING"* ]] && [[ "${ERR}" == *"Fix:"* ]]; then
+    ok "N4. a caller's ${ca}: refused with a Fix:, git-remote-https never started"
+  else bad "N4. caller ${ca}" "$(xdiag)"; fi
+done
+
+# N5. The route's own ls-remote probes around a push carry the header too:
+# they resolve the same settings, and the push still lands.
+x_reset; x_sync; git -C "${X}/src" commit -q --allow-empty -m n5
+: > "${X_NET_LOG}"
+S="${X}/n5-store"
+OUT="$(cd "${X}/src" && HTTPS_PROXY="${NX}" GIT_SSL_NO_VERIFY=1 GIT_TRACE_CURL="${X}/curl.trace" PATH="${XPATH}" ATHENA_TELEMETRY_DIR="${S}" \
+  "${WRAPPER}" git -c http.sslVerify=false -c "http.proxy=${NX}" -c 'http.https://github.com/o/r.git/.sslVerify=false' push -q origin HEAD:main 2>"${TMP}/err")"; RC=$?
+ERR="$(cat "${TMP}/err")"
+n5_direct="$(grep -c '^net via=direct ' "${X_NET_LOG}")"
+if [ "${RC}" = 0 ] && [ "$(git --git-dir="${X_FORGE}/o/r.git" rev-parse main)" = "$(git -C "${X}/src" rev-parse HEAD)" ] \
+  && [ "${n5_direct:-0}" -ge 2 ] && [ "$(landed_n "${S}")" = 1 ] \
+  && [ -z "$(grep -v -x 'net via=[a-z]* verify=true proxy=\[\] rproxy=\[\] env=\[\]' "${X_NET_LOG}")" ]; then
+  ok "N5. a push's own ls-remote probes and its transport resolve verify on, no proxy, no trace; the push lands, merge.landed emitted"
+else bad "N5. probes' TLS, proxy and trace settings" "$(xdiag) net=[$(cat "${X_NET_LOG}")] landed=$(landed_n "${S}")"; fi
 
 # H1. A pre-push hook in the repository.
 x_reset; x_sync; git -C "${X}/src" commit -q --allow-empty -m h1
