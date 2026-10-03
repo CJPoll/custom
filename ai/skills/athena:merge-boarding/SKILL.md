@@ -428,10 +428,10 @@ of the owner's `slack.interaction` line on this project's `session` channel
 a `Fix:`, a click relayed from another channel or project, a non-owner
 click, a click on another message, a click for another PR, an approve the
 owner later reversed or held, and a record it cannot verify (`integration-gate
---help`). The click names one head, A. It also clears a later head B of the
-same PR when the PR's own diff (`git diff --binary <merge-base(origin/main,
-head)> <head>`) is byte-identical at A and B, and origin's PR head ref is B
-(DND-1832). So a rebase or a merge of main that moves no byte of the PR's own
+--help`). The click names one head, A. It also clears head B, origin's
+current head of the same PR, when the PR's own diff (`git diff --binary
+<merge-base(target, head)> <head>`, against the gate's target) is
+byte-identical at A and B (DND-1832). So a rebase or a merge of main that moves no byte of the PR's own
 change needs no new click: push B, then run the approval gate on B without
 `--rebase`. Any byte difference refuses with both merge-bases named, and
 needs a new DM and a new click on B. The gate needs A's objects; it says

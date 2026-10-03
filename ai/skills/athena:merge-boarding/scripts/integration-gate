@@ -264,7 +264,8 @@ prefixed `integration-gate: `; it never changes the verdict or exit code.
                    <merge-base(target, head)> <head>, computed here from git
                    objects, is byte-identical at A and B; origin's PR head
                    ref (refs/pull/<pr>/head or refs/merge-requests/<pr>/head)
-                   is B; and no later owner click names that PR and holds it.
+                   is B; and no later owner click holds it (a value naming
+                   that PR that is no approve-exit4, or a hold naming no PR).
                    So a rebase or a merge of main that moves no byte of the
                    PR's change needs no new click. A relayed click, a click
                    on another message, a click for another PR, a head whose

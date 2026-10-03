@@ -3729,7 +3729,14 @@ def self_test
     cgit.call("add", "-A")
     cgit.call("commit", "-qm", "one byte")
     b_byte = crev.call("HEAD")
+    # B = the rebase plus a submodule pointer, with config that hides
+    # submodule changes from a plain `git diff` (set below).
+    cgit.call("checkout", "-q", "-b", "pr-sub", b_rebase)
+    cgit.call("update-index", "--add", "--cacheinfo", "160000,#{cm0},vendor/lib")
+    cgit.call("commit", "-qm", "submodule pointer")
+    b_sub = crev.call("HEAD")
     cgit.call("checkout", "-q", "main")
+    cgit.call("config", "diff.ignoreSubmodules", "all")
     absent = "ab" * 20
     bare = File.join(ssh_root, "example", "widgets.git")
     FileUtils.mkdir_p(File.dirname(bare))
@@ -3738,22 +3745,42 @@ def self_test
     # one-byte change, #43 -> another head, #44 and #47 -> the rebase. #49 has none.
     cgit.call("push", "-q", bare, "#{b_rebase}:refs/pull/42/head", "#{b_merge}:refs/pull/45/head",
               "#{b_byte}:refs/pull/46/head", "#{b_byte}:refs/pull/43/head", "#{b_rebase}:refs/pull/44/head",
-              "#{b_rebase}:refs/pull/47/head")
+              "#{b_rebase}:refs/pull/47/head", "#{b_sub}:refs/pull/50/head")
     approve = ->(pr, sha = ca) { OwnerClick.ask_value("example/widgets", pr, sha) }
-    File.open(File.join(inbox, "proj-session.jsonl"), "a") do |f|
-      [click_line.call(30, value: approve.call(42)),
-       click_line.call(35, value: approve.call(45)),
-       click_line.call(36, value: approve.call(46)),
-       click_line.call(34, value: approve.call(43)),
-       click_line.call(32, value: approve.call(44)),
+    # The carry cases read their own inbox root, so 13e's bare "hold" clicks
+    # (each a later hold that names no PR) never reach them.
+    late = ->(n, **kw) { click_line.call(n, **kw, extra: { "action_ts" => format("1700000300.%06d", n) }) }
+    carry_root = File.join(tmp, "inbox-carry")
+    FileUtils.mkdir_p(File.join(carry_root, "projects"))
+    FileUtils.cp(File.join(inbox, "projects", "proj.json"), File.join(carry_root, "projects", "proj.json"))
+    carry_env = click_env.merge("ATHENA_INBOX_ROOT" => carry_root)
+    File.open(File.join(carry_root, "proj-session.jsonl"), "a") do |f|
+      [late.call(30, value: approve.call(42)),
+       late.call(35, value: approve.call(45)),
+       late.call(36, value: approve.call(46)),
+       late.call(34, value: approve.call(43)),
+       late.call(32, value: approve.call(44)),
        # A later owner hold on ANOTHER message naming #44 overrides the carry.
-       click_line.call(33, value: "hold-exit4 example/widgets#44@#{b_rebase}"),
+       late.call(33, value: "hold-exit4 example/widgets#44@#{b_rebase}"),
        # A later hold naming #420 is another PR: it never reverses #42.
-       click_line.call(38, value: "hold-exit4 example/widgets#420@#{b_rebase}"),
-       click_line.call(37, value: approve.call(47, absent)),
-       click_line.call(39, value: approve.call(49))].each { |j| f.puts(JSON.dump(j)) }
+       late.call(38, value: "hold-exit4 example/widgets#420@#{b_rebase}"),
+       late.call(37, value: approve.call(47, absent)),
+       late.call(39, value: approve.call(49)),
+       late.call(40, value: approve.call(50))].each { |j| f.puts(JSON.dump(j)) }
     end
-    carry = lambda do |head, n, env: click_env|
+    # Inbox copies holding one extra click each, after every click above.
+    with_click = lambda do |name, line|
+      root = File.join(tmp, "inbox-#{name}")
+      FileUtils.mkdir_p(File.join(root, "projects"))
+      FileUtils.cp(File.join(carry_root, "projects", "proj.json"), File.join(root, "projects", "proj.json"))
+      FileUtils.cp(File.join(carry_root, "proj-session.jsonl"), root)
+      File.open(File.join(root, "proj-session.jsonl"), "a") { |f| f.puts(JSON.dump(line)) }
+      carry_env.merge("ATHENA_INBOX_ROOT" => root)
+    end
+    bare_hold_env = with_click.call("bare-hold", late.call(60, value: "hold"))
+    undated_hold_env = with_click.call("undated-hold", click_line.call(61, value: "hold-exit4 example/widgets#42",
+                                                                          extra: { "action_ts" => "soon" }))
+    carry = lambda do |head, n, env: carry_env|
       run_br.call(["--base", cm1, "--head", head, "--repo", cc, "--owner-approval", "click:#{did.call(n)}",
                    "--gate-ran", "ai/bin/harness-gate"], env: env)
     end
@@ -3792,12 +3819,28 @@ def self_test
     check.call("carry: a PR with no head ref on origin is COULD NOT LOOK (exit 2, Fix:)",
                code == 2 && err.include?("could not look") && err.include?("refs/pull/49/head") &&
                  err.include?("Fix:") && !out.include?("HOT-OWNER-APPROVED"), "exit=#{code} out=#{out} err=#{err}")
-    out, err, code = carry.call(b_rebase, 30, env: click_env.merge("FAKE_SSH_ROOT" => File.join(tmp, "no-forge")))
+    out, err, code = carry.call(b_rebase, 30, env: carry_env.merge("FAKE_SSH_ROOT" => File.join(tmp, "no-forge")))
     check.call("carry: an origin that cannot be read is COULD NOT LOOK (exit 2, Fix:), never a pass",
                code == 2 && err.include?("could not look") && err.include?("ls-remote") && err.include?("Fix:") &&
                  !out.include?("HOT-OWNER-APPROVED"), "exit=#{code} out=#{out} err=#{err}")
+    out, err, code = carry.call(b_sub, 40)
+    check.call("carry: a submodule pointer that git config hides from a plain diff still differs (exit 2)",
+               code == 2 && err.include?("different head") && err.include?("Fix:") &&
+                 !out.include?("HOT-OWNER-APPROVED"), "exit=#{code} out=#{out} err=#{err}")
+    out, err, code = carry.call(b_rebase, 30, env: bare_hold_env)
+    check.call("carry: a later owner hold that names no PR refuses (could not tell), never carries",
+               code == 2 && err.include?("names no PR") && err.include?("Fix:") && !out.include?("HOT-OWNER-APPROVED"),
+               "exit=#{code} out=#{out} err=#{err}")
+    out, err, code = carry.call(b_rebase, 30, env: undated_hold_env)
+    check.call("carry: an owner hold naming the PR that cannot be ordered refuses",
+               code == 2 && err.include?("cannot be ordered") && err.include?("Fix:") &&
+                 !out.include?("HOT-OWNER-APPROVED"), "exit=#{code} out=#{out} err=#{err}")
+    out, err, code = carry.call(cm1, 30)
+    check.call("carry: a head B with an empty own diff refuses (nothing to carry to)",
+               code == 2 && err.include?("is empty") && !out.include?("HOT-OWNER-APPROVED"),
+               "exit=#{code} out=#{out} err=#{err}")
     out, err, code = run_br.call(["--base", cm1, "--head", ca, "--repo", cc, "--owner-approval", "click:#{did.call(30)}"],
-                                 env: click_env)
+                                 env: carry_env)
     check.call("carry: the click on head A itself still clears A with no carry",
                code.zero? && out.include?("HOT-OWNER-APPROVED #{ca[0, 7]}") && !out.include?("carried from"),
                "exit=#{code} out=#{out} err=#{err}")

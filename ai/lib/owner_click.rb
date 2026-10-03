@@ -41,7 +41,7 @@ require_relative "private_overlay_resolver"
 #      reject after the approve is the owner's last word, and it wins. A
 #      rival click that cannot be ordered refuses. The check is per
 #      message: a hold on a different DM does not reverse this one.
-#   6. The carry (DND-1832). The owner approved this rule by click, relayed
+#   6. The carry (DND-1832), cited by name as *The carry*. The owner approved this rule by click, relayed
 #      by the laptop and the coordinator on 2026-10-03. A click that passes
 #      1-5 for head A of PR X also clears a later head B when ALL of these
 #      hold, and it is refused otherwise:
@@ -57,10 +57,14 @@ require_relative "private_overlay_resolver"
 #      - origin's PR head ref for X (`refs/pull/X/head` on GitHub,
 #        `refs/merge-requests/X/head` on GitLab) is B, read with `git
 #        ls-remote`. A different PR never matches. A ref that is missing or
-#        cannot be read is COULD NOT LOOK.
+#        cannot be read is COULD NOT LOOK. "Later" means exactly this: B is
+#        origin's current head for X.
 #      - No owner click after the approve, on any message, names X and is
 #        not an exit-4 approve. Such a click is a later hold, and it wins.
-#        A later click on the same message is check 5.
+#        A later click whose value starts with a hold verb and names no PR
+#        at all refuses too: whether it held X cannot be told. A later
+#        click on the same message is check 5.
+#      - B's own diff is not empty.
 #      The blast-radius classification still runs on B's own diff.
 #
 # Every refusal names what it looked at (the files, how many lines, clicks and
@@ -255,28 +259,46 @@ module OwnerClick
           .match?(value)
   end
 
-  # PURE. A later owner click, on any message, that names the approved PR and
-  # is not an exit-4 approve: a hold, and the owner's last word on that PR.
-  # -> nil, or [:refused, kind, reason].
-  def later_hold(info, clicks, owner_id)
+  # A value that names any PR at all: <owner>/<repo>#<n>.
+  ANY_PR_RE = /(?<![A-Za-z0-9_.\/-])#{SLUG}#[0-9]+/.freeze
+  # A decision verb that stops an approval when it names no PR.
+  HOLD_VERB_RE = /\A\s*(?:hold|reject|deny|decline|block|stop|cancel)\b/i.freeze
+
+  # PURE. A later owner click, on any message, that holds the approved PR:
+  # its value names the PR and is not an exit-4 approve. A click whose value
+  # starts with a hold verb and names no PR at all might hold this one, so
+  # it refuses too (could not tell). A click with the approve's own
+  # action_ts counts as later: an order that cannot be told fails closed.
+  # -> nil, or [:refused, kind, reason, fix].
+  def later_hold(info, clicks, owner_id, head)
+    fix = new_click_fix(info, head)
     named = clicks.select do |c|
-      owner_click?(c, owner_id) && c["delivery_id"] != info[:delivery_id] &&
-        parse_ask_value(c["value"]).nil? && names_pr?(c["value"], info[:slug], info[:pr])
+      next false unless owner_click?(c, owner_id) && c["delivery_id"] != info[:delivery_id]
+      next false unless parse_ask_value(c["value"]).nil?
+
+      names_pr?(c["value"], info[:slug], info[:pr]) ||
+        (HOLD_VERB_RE.match?(c["value"].to_s) && !ANY_PR_RE.match?(c["value"].to_s))
     end
     undated = named.find { |c| action_time(c["action_ts"]).nil? }
     if undated
       return [:refused, :unverifiable,
-              "an owner click naming #{info[:slug]}##{info[:pr]} (#{undated['action_id'].inspect}) has an " \
+              "an owner click that may hold #{info[:slug]}##{info[:pr]} (#{undated['action_id'].inspect}) has an " \
               "action_ts that cannot be ordered, so whether it held the PR after click #{info[:delivery_id]} " \
-              "could not be told"]
+              "could not be told", fix]
     end
-    later = named.find { |c| (action_time(c["action_ts"]) <=> info[:at]) == 1 }
+    later = named.find { |c| (action_time(c["action_ts"]) <=> info[:at]) >= 0 }
     return nil unless later
 
-    [:refused, :superseded,
-     "the owner clicked #{later['action_id'].inspect} (#{later['value'].to_s[0, 120].inspect}), naming " \
-     "#{info[:slug]}##{info[:pr]}, after click #{info[:delivery_id]}: that later hold is the owner's decision, " \
-     "so the approve of #{info[:sha]} does not carry"]
+    if names_pr?(later["value"], info[:slug], info[:pr])
+      return [:refused, :superseded,
+              "the owner clicked #{later['action_id'].inspect} (#{later['value'].to_s[0, 120].inspect}), naming " \
+              "#{info[:slug]}##{info[:pr]}, after click #{info[:delivery_id]}: that later hold is the owner's " \
+              "decision, so the approve of #{info[:sha]} does not carry", fix]
+    end
+    [:refused, :unverifiable,
+     "the owner clicked #{later['action_id'].inspect} (#{later['value'].to_s[0, 120].inspect}) after click " \
+     "#{info[:delivery_id]}. It is a hold that names no PR, so whether it held #{info[:slug]}##{info[:pr]} could " \
+     "not be told, and the approve of #{info[:sha]} does not carry", fix]
   end
 
   def new_click_fix(info, head)
@@ -303,6 +325,11 @@ module OwnerClick
     if facts[:error]
       return [:refused, :unverifiable,
               "the PR's own diffs could not look: #{facts[:error]}", new_click_fix(info, head)]
+    end
+    if facts[:diff_to].empty?
+      return [:refused, :unverifiable,
+              "head B #{head}'s own diff against merge-base #{facts[:mb_to]} is empty, so there is no change for " \
+              "the click to carry to", new_click_fix(info, head)]
     end
     return nil if facts[:diff_from] == facts[:diff_to]
 
@@ -403,7 +430,7 @@ module OwnerClick
     refusal = judge_carry_diff(info, head, base, facts, repo: repo)
     return refusal if refusal
 
-    refusal = later_hold(info, clicks, owner_id)
+    refusal = later_hold(info, clicks, owner_id, head)
     return refusal if refusal
 
     refs = origin_pr_head(repo, info[:pr])
@@ -429,19 +456,24 @@ module OwnerClick
   end
 
   # The PR's own diff at `head`: `git diff --binary <merge-base(base, head)>
-  # <head>`. The flags pin what config could vary (an external diff driver,
-  # textconv, color, rename detection, a relative diff), so the bytes depend
-  # on git objects alone. -> [merge_base, bytes, nil] or [nil, nil, why].
+  # <head>`. The flags pin what config or the checked-out .gitmodules could
+  # vary (an external diff driver, textconv, color, rename detection, a
+  # relative diff, a submodule `ignore`), so the bytes depend on git objects
+  # alone. A criss-cross history with more than one merge-base is refused,
+  # never resolved by picking one. -> [merge_base, bytes, nil] or
+  # [nil, nil, why].
   def pr_diff(repo, base, head)
-    out, err, st = Open3.capture3("git", "-C", repo, "merge-base", base, head)
-    mb = out.strip
-    unless st.success? && /\A[0-9a-f]{40}\z/.match?(mb)
-      return [nil, nil, "`git merge-base #{base} #{head}` found no merge-base (exit #{st.exitstatus}: " \
-                        "#{err.lines.first.to_s.strip})"]
+    out, err, st = Open3.capture3("git", "-C", repo, "merge-base", "--all", base, head)
+    mbs = out.split
+    unless st.success? && mbs.size == 1 && /\A[0-9a-f]{40}\z/.match?(mbs.first)
+      return [nil, nil, "`git merge-base --all #{base} #{head}` gave #{mbs.size} merge-base(s), not exactly one " \
+                        "(exit #{st.exitstatus}#{err.empty? ? '' : ": #{err.lines.first.to_s.strip}"})"]
     end
 
+    mb = mbs.first
     out, err, st = Open3.capture3("git", "-C", repo, "diff", "--binary", "--no-ext-diff", "--no-textconv",
-                                  "--no-color", "--no-renames", "--no-relative", mb, head, binmode: true)
+                                  "--no-color", "--no-renames", "--no-relative", "--ignore-submodules=none",
+                                  mb, head, binmode: true)
     return [nil, nil, "`git diff --binary #{mb} #{head}` failed (exit #{st.exitstatus}: #{err.lines.first.to_s.strip})"] unless st.success?
 
     [mb, out, nil]
@@ -451,7 +483,7 @@ module OwnerClick
   # -> {state: :found, shas: {ref => sha}} | {state: :none} |
   # {state: :error, detail:}.
   def origin_pr_head(repo, pr)
-    out, err, st = Open3.capture3({ "GIT_TERMINAL_PROMPT" => "0" }, "timeout", "120", "git", "-C", repo,
+    out, err, st = Open3.capture3({ "GIT_TERMINAL_PROMPT" => "0" }, "timeout", "--kill-after=10", "120", "git", "-C", repo,
                                   "ls-remote", "origin", *pr_refs(pr))
     unless st.success?
       return { state: :error, detail: "exit #{st.exitstatus}: #{err.lines.first.to_s.strip}" }
