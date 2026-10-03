@@ -74,16 +74,26 @@
 # The variables:
 #   FG_TOOL      the wrapper's name, for messages (gh-athena / glab-athena)
 #   FG_HOST      the forge host (github.com / gitlab.com); subdomains match too
-#   FG_BOT       the bot identity pushes must carry (athena-harness[bot] / athena-amby)
+#   FG_BOT       the bot identity pushes must carry (athena-harness[bot], or
+#                the GitLab bot for the namespace, ai/lib/forge-identity.sh)
 #   FG_DRY_RUN   "1" to print the resolved URLs + redacted argv instead of exec
 #   FG_ROUTE_ONLY "1" (the default) refuses a URL not on FG_HOST (DND-2000);
 #                "0" only for a reader of the resolver, not a route
 #                (ai/lib/agent-forge-push.sh)
+#   FG_CRED_RESOLVER  optional: the NAME of a shell function. When set, the
+#                <token> given to fg_git_exec is ignored: for a command that
+#                is granted a credential, fg_git_exec calls
+#                `$FG_CRED_RESOLVER <the one forge URL it reaches>`, which sets
+#                FG_CRED_TOKEN (and FG_BOT) for THAT URL's project or exits 3
+#                with a Fix:. glab-athena uses it so the bot follows the
+#                pushed project's namespace (DND-1936). Reset to "" each time
+#                this file is sourced; only a function is ever called.
 #
 # Test seam: FG_DRY_RUN=1 runs the resolution and refusal, then prints the
 # resolved URLs and the git argv (token redacted) instead of exec'ing git.
 
 FG_OWNER="the machine OWNER (CJPoll)"
+FG_CRED_RESOLVER=""
 FG_ESCALATE='If it cannot be done as Athena, do not work around this with a plain `git push` or the owner'"'"'s credentials; escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can'"'"'t be done as Athena").'
 
 # The route's transport (DND-1868): a directory holding only
@@ -1884,6 +1894,18 @@ fg_git_exec() {
       "drop -p / --paginate; the route runs git with --no-pager."
   fi
   fg_cred_decide
+  if [ -n "$FG_CRED_RESOLVER" ]; then
+    token=""
+    if [ "$FG_CRED" = grant ]; then
+      declare -F "$FG_CRED_RESOLVER" >/dev/null || fg_refuse_cred "the credential resolver '$FG_CRED_RESOLVER' is not a function" \
+        "run $FG_TOOL from a full ~/dev/custom checkout."
+      FG_CRED_TOKEN=""
+      "$FG_CRED_RESOLVER" "$FG_CRED_URL"
+      token="$FG_CRED_TOKEN"; FG_CRED_TOKEN=""
+      [ -n "$token" ] || fg_refuse_cred "the credential resolver gave no token for $FG_CRED_URL" \
+        "check ai/lib/forge-identity.sh and the bot's token file."
+    fi
+  fi
   FG_HEADER="AUTHORIZATION: basic $(printf '%s:%s' "$user" "$token" | openssl base64 -A)"
   fg_rewrite_args
   set -- --no-pager -c credential.helper= -c core.askPass= "${FG_REWRITE_ARGS[@]}" "$@"

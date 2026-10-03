@@ -1,29 +1,126 @@
 #!/usr/bin/env bash
-# Run glab (or curl via `glab-athena api ...`) AS the Athena GitLab service
-# account (athena-amby, in the work GitLab group). Token read at call time from a 600
-# file; never in argv or config. Use for writes that should be attributed to
-# Athena (MR create/comment/approve, merge-train boarding, merges). Reads may
-# keep using the owner's OAuth glab. Every merge path is judged by the merge
-# guard first (DND-742, "The merge guard" below).
+# Run glab (or curl via `glab-athena api ...`) AS the Athena GitLab bot for the
+# project's namespace. Token read at call time from a 600 file; never in argv
+# or config. Use for writes that should be attributed to Athena (MR
+# create/comment/approve, merge-train boarding, merges). Reads may keep using
+# the owner's OAuth glab. Every merge path is judged by the merge guard first
+# (DND-742, "The merge guard" below).
 #
-# Owner-run repair: `glab-athena refresh` mints a fresh PAT for the athena-amby
-# service account and writes it to the token file. It uses the OWNER's plain
-# `glab` (Cody's OAuth session, group owner of the work GitLab group) to mint, so it works
-# even when the current Athena token is expired/revoked (chicken-and-egg).
-# `refresh` is OWNER-GATED: it uses the owner's glab session. Agents never run it:
-# the `glab-athena refresh` deny in ai/hooks/forge-auth-guard.sh blocks it in
-# every Claude Code session, so only the owner runs it, in their own terminal.
-# An agent that finds the token expired escalates to its admiral.
+# Which bot (DND-1936): gitlab.com hosts a work group with its own bot and the
+# personal cjpoll/ namespace with another, so the bot follows the project's
+# (host, top-level namespace), never a default. The key comes from -R/--repo,
+# else an `api projects/<g>%2F<p>/…` endpoint, else the cwd checkout's origin;
+# for `git`, from the one forge URL the command reaches. The map is
+# ai/config/forge-identities.json (public: the personal entry) plus the private
+# overlay's gitlab .identities (work entries); ai/lib/forge-identity.sh reads
+# it. A namespace with no entry, a malformed key, an unreadable map half or a
+# bot not named yet is REFUSED with a Fix:, exit 3 (1 for `refresh`); nothing
+# falls back to the owner's login or to the other bot.
 #
-# Git passthrough (DND-393): `glab-athena git <args>` runs git as athena-amby for
-# ONE command, over HTTPS only — see "The git passthrough" below.
+# Owner-run repair: `glab-athena refresh [-R <namespace>/<project>]` renews the
+# token of the bot for that project's namespace, by the entry's `refresh`:
+#   * group_service_account (a work group bot): mints a fresh PAT for the
+#     group service account with the OWNER's plain `glab` (Cody's OAuth
+#     session, group owner), so it works even when the current bot token is
+#     expired/revoked (chicken-and-egg);
+#   * self_rotate (the personal bot, an ordinary user; gitlab.com Free has no
+#     service accounts): rotates the bot's own live PAT
+#     (personal_access_tokens/self/rotate). A dead token cannot rotate itself:
+#     the owner then creates a new one in the browser, as the bot.
+# `refresh` is OWNER-GATED. Agents never run it: the `glab-athena refresh` deny
+# in ai/hooks/forge-auth-guard.sh blocks it in every Claude Code session, so
+# only the owner runs it, in their own terminal. An agent that finds the token
+# expired escalates to its admiral.
+#
+# Git passthrough (DND-393): `glab-athena git <args>` runs git as the
+# namespace's bot for ONE command, over HTTPS only — see "The git passthrough"
+# below.
+#
+# Test seams: GITLAB_ATHENA_TOKEN_FILE replaces the RESOLVED identity's token
+# file (the identity is still resolved and refused the same way);
+# ATHENA_FORGE_IDENTITIES_FILE / ATHENA_PRIVATE_ROOT name fixture map halves.
 set -eu
-TOKEN_FILE="${GITLAB_ATHENA_TOKEN_FILE:-$HOME/.claude/gitlab-athena-token}"
+
+GA_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+FID_LIB="$GA_DIR/../lib/forge-identity.sh"
+[ -r "$FID_LIB" ] || {
+	echo "glab-athena: REFUSING: cannot load $FID_LIB, so which bot acts on this project is unknown." >&2
+	echo "  Fix: run glab-athena from a full ~/dev/custom checkout (ai/bin and ai/lib side by side)." >&2
+	exit 3
+}
+# shellcheck source=../lib/forge-identity.sh
+. "$FID_LIB"
+
+# ga_refuse_identity <rc> <what> : print the identity refusal, exit <rc>.
+ga_refuse_identity() {
+	echo "glab-athena: REFUSING $2: $FID_STATE: ${FID_WHY%.}." >&2
+	echo "  Fix: $FID_FIX" >&2
+	exit "$1"
+}
 
 # --- refresh subcommand: intercepted before exec so it never reaches glab ----
 if [ "${1:-}" = refresh ]; then
-	SA_USERNAME=athena-amby
+	shift
+	fid_resolve_glab_args "$@" || ga_refuse_identity 1 "\`refresh\`; nothing was minted"
+	SA_USERNAME="$FID_BOT"
+	SA_HOST="$FID_HOST"
+	TOKEN_FILE="${GITLAB_ATHENA_TOKEN_FILE:-$FID_TOKEN_FILE}"
 	SA_TOKEN_NAME=glab-athena
+	# GitLab caps PAT lifetime at 1 year; stay just under.
+	EXPIRES_AT="$(date -d "+364 days" +%F)"
+	# Secrets are piped straight from each API response into the token file under
+	# a tight umask; never echoed to stdout/argv. Only non-secret metadata prints.
+	umask 077
+
+	# ga_verify_whoami : the token file now authenticates as the active bot.
+	ga_verify_whoami() {
+		local tok who
+		tok="$(tr -d '[:space:]' < "$TOKEN_FILE")"
+		who="$(GITLAB_TOKEN="$tok" GITLAB_HOST="$SA_HOST" GLAB_NO_PROMPT=1 glab api user)" || who=""
+		echo "glab-athena refresh: whoami ->"
+		printf '%s' "$who" | jq '{username, state}' 2>/dev/null || true
+		printf '%s' "$who" | jq -e --arg u "$SA_USERNAME" '.username==$u and .state=="active"' >/dev/null 2>&1 || {
+			echo "glab-athena refresh: verification FAILED (the token does not resolve to an active $SA_USERNAME on $SA_HOST)" >&2
+			echo "Fix: check the token file $TOKEN_FILE holds $SA_USERNAME's token; if not, create one as $SA_USERNAME and write it there." >&2
+			exit 1
+		}
+	}
+
+	case "$FID_REFRESH" in
+	self_rotate)
+		# The personal bot is an ordinary user: only its own live token can
+		# rotate it. No owner session can mint for it.
+		CUR_TOKEN=""
+		[ -r "$TOKEN_FILE" ] && CUR_TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE" 2>/dev/null || true)"
+		if [ -z "$CUR_TOKEN" ] || ! GITLAB_TOKEN="$CUR_TOKEN" GITLAB_HOST="$SA_HOST" GLAB_NO_PROMPT=1 \
+			glab api user >/dev/null 2>&1; then
+			echo "glab-athena refresh: the $SA_USERNAME token in $TOKEN_FILE is missing or no longer authenticates on $SA_HOST, so it cannot rotate itself; nothing was minted." >&2
+			echo "Fix: log in to https://$SA_HOST as $SA_USERNAME, create a PAT at https://$SA_HOST/-/user_settings/personal_access_tokens (scopes api, read_repository, write_repository; expiry at most 365 days), and write it with \`(umask 077; cat > $TOKEN_FILE)\`." >&2
+			exit 1
+		fi
+		RESP="$(GITLAB_TOKEN="$CUR_TOKEN" GITLAB_HOST="$SA_HOST" GLAB_NO_PROMPT=1 \
+			glab api --method POST "personal_access_tokens/self/rotate?expires_at=$EXPIRES_AT" 2>/dev/null)" || RESP=""
+		printf '%s' "$RESP" | jq -e 'has("token")' >/dev/null 2>&1 || {
+			echo "glab-athena refresh: self-rotate of the $SA_USERNAME token failed; the old token is unchanged:" >&2
+			printf '%s\n' "$RESP" | jq -c '{message, error}' >&2 2>/dev/null || echo "(no JSON response)" >&2
+			echo "Fix: check the token has the api scope, or create a new one as $SA_USERNAME in the browser (see the Fix above)." >&2
+			exit 1
+		}
+		printf '%s' "$RESP" | jq -r '.token' > "$TOKEN_FILE"
+		chmod 600 "$TOKEN_FILE"
+		echo "glab-athena refresh: rotated the $SA_USERNAME token (self-rotate)."
+		printf '%s' "$RESP" | jq '{id, name, scopes, active, expires_at}'
+		ga_verify_whoami
+		echo "glab-athena refresh: OK."
+		exit 0
+		;;
+	group_service_account) ;;
+	*)
+		echo "glab-athena refresh: the identity for $FID_HOST/$FID_NS has refresh '$FID_REFRESH', which this tool cannot run; nothing was minted." >&2
+		echo "Fix: set refresh to self_rotate or group_service_account in its map entry." >&2
+		exit 1
+		;;
+	esac
 
 	# Resolve group + service-account ids dynamically (owner OAuth glab, not the
 	# Athena token) so a renamed/renumbered account doesn't brick the script.
@@ -49,12 +146,6 @@ if [ "${1:-}" = refresh ]; then
 		exit 1
 	}
 
-	# GitLab caps service-account PAT lifetime at 1 year; stay just under.
-	EXPIRES_AT="$(date -d "+364 days" +%F)"
-
-	# Secrets are piped straight from each API response into the token file under
-	# a tight umask; never echoed to stdout/argv. Only non-secret metadata prints.
-	umask 077
 	NEW_ID=""
 	minted=""
 
@@ -62,9 +153,9 @@ if [ "${1:-}" = refresh ]; then
 	if [ -r "$TOKEN_FILE" ]; then
 		CUR_TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE" 2>/dev/null || true)"
 		if [ -n "${CUR_TOKEN:-}" ] \
-			&& GITLAB_TOKEN="$CUR_TOKEN" GITLAB_HOST=gitlab.com GLAB_NO_PROMPT=1 \
+			&& GITLAB_TOKEN="$CUR_TOKEN" GITLAB_HOST="$SA_HOST" GLAB_NO_PROMPT=1 \
 				glab api user >/dev/null 2>&1; then
-			if RESP="$(GITLAB_TOKEN="$CUR_TOKEN" GITLAB_HOST=gitlab.com GLAB_NO_PROMPT=1 \
+			if RESP="$(GITLAB_TOKEN="$CUR_TOKEN" GITLAB_HOST="$SA_HOST" GLAB_NO_PROMPT=1 \
 				glab api --method POST "personal_access_tokens/self/rotate?expires_at=$EXPIRES_AT" 2>/dev/null)" \
 				&& printf '%s' "$RESP" | jq -e 'has("token")' >/dev/null 2>&1; then
 				printf '%s' "$RESP" | jq -r '.token' > "$TOKEN_FILE"
@@ -94,14 +185,7 @@ if [ "${1:-}" = refresh ]; then
 	fi
 
 	# --- verify via the wrapper's own auth path --------------------------------
-	VER_TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE")"
-	WHOAMI="$(GITLAB_TOKEN="$VER_TOKEN" GITLAB_HOST=gitlab.com GLAB_NO_PROMPT=1 glab api user)"
-	echo "glab-athena refresh: whoami ->"
-	printf '%s' "$WHOAMI" | jq '{username, state}'
-	printf '%s' "$WHOAMI" | jq -e '.username=="athena-amby" and .state=="active"' >/dev/null 2>&1 || {
-		echo "glab-athena refresh: verification FAILED (token does not resolve to an active athena-amby)" >&2
-		exit 1
-	}
+	ga_verify_whoami
 
 	# --- tidy: best-effort revoke older glab-athena PATs to avoid pile-up ------
 	if [ -n "${NEW_ID:-}" ] && [ "$NEW_ID" != null ]; then
@@ -118,16 +202,18 @@ if [ "${1:-}" = refresh ]; then
 
 	echo "glab-athena refresh: OK."
 	exit 0
+
 fi
 
 # ---- The git passthrough (DND-393) ------------------------------------------
-# `glab-athena git <args>` runs git authenticated as athena-amby for ONE command.
-# No git or glab config change, no auth subcommand:
+# `glab-athena git <args>` runs git authenticated as the namespace's bot for ONE
+# command. No git or glab config change, no auth subcommand:
 #   * url.athena-forge::https://gitlab.com/.insteadOf=git@gitlab.com: (and
 #     =https://gitlab.com/) send both forms to the route's transport;
 #   * credential.helper= / core.askPass= / GIT_ASKPASS, SSH_ASKPASS unset /
 #     GIT_TERMINAL_PROMPT=0 keep every owner credential source out;
-#   * the athena-amby PAT, read from TOKEN_FILE at call time, as an
+#   * the bot's PAT, read at call time from the token file of the identity
+#     that owns the ONE forge URL the command reaches (DND-1936), as an
 #     `oauth2:<PAT>` basic-auth header, reaches only the route's transport
 #     (git-remote-athena-forge) through a one-shot pipe — never on argv, in a
 #     URL, a config file or git's environment (DND-1868);
@@ -142,30 +228,52 @@ fi
 # (token redacted) instead of exec'ing git.
 if [ "${1:-}" = git ]; then
 	shift
-	LIB="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/forge-git-passthrough.sh"
+	LIB="$GA_DIR/../lib/forge-git-passthrough.sh"
 	[ -r "$LIB" ] || {
 		echo "glab-athena: cannot load $LIB. Fix: run glab-athena from a full ~/dev/custom checkout (ai/bin and ai/lib side by side)." >&2
 		exit 3
 	}
 	# shellcheck source=../lib/forge-git-passthrough.sh
 	. "$LIB"
-	FG_TOOL=glab-athena FG_HOST=gitlab.com FG_BOT=athena-amby
+	FG_TOOL=glab-athena FG_HOST=gitlab.com
+	# For messages before the URL is known: the bot of this checkout's origin
+	# when it resolves. The credential itself is chosen by ga_git_cred below,
+	# from the URL the command actually reaches.
+	FG_BOT="the Athena bot for the remote's namespace"
+	if ga_origin="$(git remote get-url origin 2>/dev/null)" && fid_resolve_url "$ga_origin" 2>/dev/null; then
+		FG_BOT="$FID_BOT"
+	fi
 	# Pinned, never inherited: the caller's environment cannot turn off the
 	# refusal of another forge's host (DND-2000).
 	FG_ROUTE_ONLY=1
 	FG_DRY_RUN="${GLAB_ATHENA_GIT_DRY_RUN:-}"
 	fg_refuse_non_https "$@"
-	TOKEN=""
-	[ -r "$TOKEN_FILE" ] && TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE")"
-	[ -n "$TOKEN" ] || {
-		echo "glab-athena: REFUSING \`git\`: the athena-amby token file $TOKEN_FILE is missing, unreadable or empty, so the push cannot run as Athena." >&2
-		echo "  Fix: do not run \`glab-athena refresh\` or any \`glab auth\` yourself (owner-gated), and do not fall back to a plain \`git push\`; $FG_ESCALATE" >&2
-		exit 3
+
+	# ga_git_cred <https url> : FG_CRED_TOKEN and FG_BOT for <url>'s project, or
+	# exit 3 with a Fix:. Called by fg_git_exec only for a command granted a
+	# credential, so a local command needs no identity.
+	ga_git_cred() {
+		local tf t=""
+		fid_resolve_url "$1" || ga_refuse_identity 3 "\`git\` to $1"
+		FG_BOT="$FID_BOT"
+		tf="${GITLAB_ATHENA_TOKEN_FILE:-$FID_TOKEN_FILE}"
+		[ -r "$tf" ] && t="$(tr -d '[:space:]' < "$tf")"
+		[ -n "$t" ] || {
+			echo "glab-athena: REFUSING \`git\`: the $FID_BOT token file $tf (for $FID_HOST/$FID_NS) is missing, unreadable or empty, so the push cannot run as Athena." >&2
+			echo "  Fix: do not run \`glab-athena refresh\` or any \`glab auth\` yourself (owner-gated), and do not fall back to a plain \`git push\`; $FG_ESCALATE" >&2
+			exit 3
+		}
+		FG_CRED_TOKEN="$t"
 	}
-	fg_git_exec oauth2 "$TOKEN" "$@"
+	FG_CRED_RESOLVER=ga_git_cred
+	fg_git_exec oauth2 "" "$@"
 fi
 
-# --- normal path: run glab as the Athena service account -------------------
+# --- normal path: run glab as the namespace's bot -----------------------------
+# DND-1936: which bot first. A refusal here runs nothing.
+fid_resolve_glab_args "$@" || ga_refuse_identity 3 "this glab command; nothing ran"
+GA_BOT="$FID_BOT" GA_HOST="$FID_HOST"
+TOKEN_FILE="${GITLAB_ATHENA_TOKEN_FILE:-$FID_TOKEN_FILE}"
 # DND-725: a readable file is not enough. An empty or whitespace-only token file
 # (or GITLAB_ATHENA_TOKEN_FILE pointing at one) used to export GITLAB_TOKEN="",
 # and glab then answered as the OWNER from its own config and keyring. Now the
@@ -173,7 +281,7 @@ fi
 # inherited identity/host variables, so the owner's login is unreachable even if
 # a token check were ever wrong. Mechanism and measurements:
 # ai/lib/forge-cli-isolation.sh.
-FCI_LIB="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/forge-cli-isolation.sh"
+FCI_LIB="$GA_DIR/../lib/forge-cli-isolation.sh"
 [ -r "$FCI_LIB" ] || {
 	echo "glab-athena: REFUSING: cannot load $FCI_LIB, so glab cannot be isolated from the owner's login." >&2
 	echo "  Fix: run glab-athena from a full ~/dev/custom checkout (ai/bin and ai/lib side by side)." >&2
@@ -185,13 +293,13 @@ TOKEN=""
 [ -r "$TOKEN_FILE" ] && TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE")"
 # Read before the scrub below, which removes every GLAB_* variable.
 MERGE_DRY_RUN="${GLAB_ATHENA_MERGE_DRY_RUN:-}"
-fci_require_token 1 glab-athena athena-amby "token file $TOKEN_FILE" "$TOKEN"
+fci_require_token 1 glab-athena "$GA_BOT" "token file $TOKEN_FILE" "$TOKEN"
 # Every GITLAB_*/GLAB_*/GL_* variable (token sources, GITLAB_URI/GITLAB_API_HOST
 # host overrides, GLAB_CONFIG_DIR, CI autologin), plus OAUTH_TOKEN and
 # CI_JOB_TOKEN. Only the values set below reach glab.
 fci_scrub_env '^(GITLAB_|GLAB_|GL_)|^(OAUTH_TOKEN|CI_JOB_TOKEN)$'
 fci_isolate glab-athena GLAB_CONFIG_DIR
-export GITLAB_TOKEN="$TOKEN" GITLAB_HOST=gitlab.com GLAB_NO_PROMPT=1 GLAB_CHECK_UPDATE=false
+export GITLAB_TOKEN="$TOKEN" GITLAB_HOST="$GA_HOST" GLAB_NO_PROMPT=1 GLAB_CHECK_UPDATE=false
 unset TOKEN
 
 # ---- The merge guard (DND-742) ---------------------------------------------
@@ -211,7 +319,7 @@ unset TOKEN
 # Test seam: GLAB_ATHENA_MERGE_DRY_RUN=1 runs the guard (reads only) and then
 # prints the command instead of running glab, for ANY command.
 #
-# After isolation, so the guard's own glab reads run as athena-amby.
+# After isolation, so the guard's own glab reads run as the same bot.
 GLMG_LIB="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/glab-merge-guard.sh"
 [ -r "$GLMG_LIB" ] || {
 	echo "glab-athena: REFUSING: cannot load $GLMG_LIB, so no merge can be judged." >&2

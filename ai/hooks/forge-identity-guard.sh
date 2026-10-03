@@ -378,7 +378,7 @@ GFLAT=$(printf '%s' "$CMD" | bless_wrapper_var | tr '\n\t' '; ' | sed -E "$EMPTY
 GIT_PUSH_RE='(^|[[:space:];&|(/])git([[:space:]]+--?[^[:space:];&|]+([[:space:]]+[^-[:space:];&|][^[:space:];&|]*)?)*[[:space:]]+push([[:space:]]|$|[;&|)])'
 
 PUSH_FIX='Fix: push through the wrapper, which authenticates as athena-harness[bot] over HTTPS for that one command: `GIT_TERMINAL_PROMPT=0 ~/dev/custom/ai/bin/gh-athena git -c credential.helper= -c url.https://github.com/.insteadOf=git@github.com: push …` (athena:github -> "Pushing as Athena"). If the wrapper refuses or fails, do not work around this; escalate to your admiral with the command + error and wait.'
-GITLAB_PUSH_FIX='Fix: push through the wrapper, which authenticates as athena-amby over HTTPS for that one command: `GIT_TERMINAL_PROMPT=0 ~/dev/custom/ai/bin/glab-athena git push …` (athena:gitlab -> "Pushing as Athena"). If the wrapper refuses or fails, do not work around this; escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can'"'"'t be done as Athena").'
+GITLAB_PUSH_FIX='Fix: push through the wrapper, which authenticates as the Athena bot of the project namespace over HTTPS for that one command: `GIT_TERMINAL_PROMPT=0 ~/dev/custom/ai/bin/glab-athena git push …` (athena:gitlab -> "Pushing as Athena"). If the wrapper refuses or fails, do not work around this; escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can'"'"'t be done as Athena").'
 
 # forge_of_url <url> : prints "github" / "gitlab" when the URL's HOST is
 # github.com / gitlab.com (or a subdomain); prints nothing otherwise. A local
@@ -681,7 +681,7 @@ while [ "$N" -lt 10 ] && printf '%s' "$GFLAT" | grep -Eq "$GIT_PUSH_RE"; do
       github)
         add_warning "forge-identity: this is a plain \`git push\` to a github.com remote ('${_t}' -> ${u}), which authenticates with the machine owner's SSH key or credential helper — GitHub records the push as CJPoll, not Athena. ${PUSH_FIX}" ;;
       gitlab)
-        add_warning "forge-identity: this is a plain \`git push\` to a gitlab.com remote ('${_t}' -> ${u}), which authenticates with the machine owner's SSH key or credential helper — GitLab records the push as the owner, not athena-amby. ${GITLAB_PUSH_FIX}" ;;
+        add_warning "forge-identity: this is a plain \`git push\` to a gitlab.com remote ('${_t}' -> ${u}), which authenticates with the machine owner's SSH key or credential helper — GitLab records the push as the owner, not the Athena bot for that namespace. ${GITLAB_PUSH_FIX}" ;;
     esac
   done
   IFS=$_ifs
@@ -822,7 +822,7 @@ if [ -n "$FORGE_WRITE" ]; then
   _reads=$(printf '%s' "$FORGE_WRITE" | cut -f4 | sed -E 's/^\|//; s/\|$//; s/\|/, /g')
   [ -n "$_reads" ] || _reads='none; it runs an agent or a server that can write as the owner'
   if [ "$_cli" = gh ]; then _who='GitHub records it as the machine owner (CJPoll), not athena-harness[bot]'
-  else _who='GitLab records it as the machine owner, not athena-amby'; fi
+  else _who='GitLab records it as the machine owner, not the Athena bot for the project'\''s namespace (ai/config/forge-identities.json + the private overlay)'; fi
   _esc='If the wrapper itself fails, do not work around this; escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can'"'"'t be done as Athena").'
   if [ "$_grp" = api ]; then
     deny "forge-identity: this is a plain \`$_cli api\` call that WRITES: a method other than GET/HEAD, a field or --input with no \`-X GET\` (the CLI then POSTs), a method-override header, or a GraphQL mutation or query read from a file. $_who: the silent mis-attribution DND-203 exists to prevent (DND-1179). Fix: run the same call through the wrapper, \`~/dev/custom/ai/bin/$_cli-athena api …\` (check it with \`~/dev/custom/ai/bin/forge-preflight\` if it fails). To only READ, pass \`-X GET\` with the fields, or drop them. $_esc"

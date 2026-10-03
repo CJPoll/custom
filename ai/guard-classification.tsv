@@ -53,6 +53,9 @@ ai/lib/forge-cli-isolation.sh	guard
 ai/lib/forge-stub-guard.sh	guard	
 ai/lib/forge-git-passthrough.sh	guard	
 ai/lib/forge-http-pin.sh	library	the network settings for a process holding the bot header (DND-1899), sourced by ai/lib/forge-transport/git-remote-athena-forge and ai/lib/forge-git-passthrough.sh; returns a status with FG_HTTP_WHY, and each caller composes the refusal that carries Fix:
+ai/lib/forge-identity-lookup.jq	library	jq program for fid_lookup in ai/lib/forge-identity.sh (DND-1936): prints a FOUND or MISS record, never fails a command; the callers of the lib compose the refusal that carries Fix:
+ai/lib/forge-identity.jq	library	jq program for fid_load in ai/lib/forge-identity.sh (DND-1936): validates and merges the identity map halves into {ok, entries} or {ok:false, error}; the lib turns an error into a COULD NOT LOOK state with FID_FIX, and each caller composes the refusal that carries Fix:
+ai/lib/forge-identity.sh	library	the per-namespace GitLab bot identity resolver (DND-1936), sourced by ai/bin/glab-athena, ai/bin/forge-preflight and ai/bin/push-actor-check; returns a status with FID_STATE/FID_WHY/FID_FIX, and each caller composes the refusal that carries Fix:
 ai/lib/forge-transport/git-remote-athena-forge	guard	
 ai/lib/forge-transport/refuse-signing	guard	
 ai/lib/gh-merge-guard.sh	guard	

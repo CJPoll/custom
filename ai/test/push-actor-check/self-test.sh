@@ -61,6 +61,14 @@ reads() { cat "${TMP}/$1/count" 2>/dev/null || echo 0; }
 gh_event()  { printf '[{"ref":"refs/heads/%s","after":"%s","activity_type":"push","actor":{"login":"%s"}}]' "$1" "$2" "$3"; }
 gl_event()  { printf '[{"action_name":"pushed to","author":{"username":"%s"},"push_data":{"ref":"%s","commit_to":"%s"}}]' "$3" "$1" "$2"; }
 
+# DND-1936: the expected GitLab bot follows the project's namespace. A fixture
+# identity map (synthetic names) and an empty fixture overlay.
+GL_BOT="synthetic-group-bot" GL_PBOT="synthetic-personal-bot"
+export ATHENA_FORGE_IDENTITIES_FILE="${TMP}/forge-identities.json"
+printf '{"kind":"athena-forge-identities","schema":1,"identities":[{"host":"gitlab.com","namespace":"g","bot":"%s","token_file":"/fixture/w","refresh":"group_service_account"},{"host":"gitlab.com","namespace":"cjpoll","bot":"%s","token_file":"/fixture/p","refresh":"self_rotate"}]}\n' "${GL_BOT}" "${GL_PBOT}" > "${ATHENA_FORGE_IDENTITIES_FILE}"
+export ATHENA_PRIVATE_ROOT="${TMP}/empty-overlay"; mkdir -p "${ATHENA_PRIVATE_ROOT}/overlay"; chmod 700 "${ATHENA_PRIVATE_ROOT}"
+printf '{"kind":"athena-private-overlay","schema":1}\n' > "${ATHENA_PRIVATE_ROOT}/athena-overlay.json"
+
 mkrepo() { git init -q "${TMP}/$1" && git -C "${TMP}/$1" remote add origin "$2"; }
 mkrepo repo_gh 'git@github.com:o/r.git'
 mkrepo repo_gl 'https://gitlab.com/g/sub/r.git'
@@ -189,19 +197,35 @@ run_in repo_gh --sha "${SHA}" --window 1 --interval 1 feat
 expect "7. unparseable response -> 3" 3 'could not read'
 
 # GitLab: bot and owner authors; nested group path is URL-encoded.
-reset_stub glab; gl_event feat "${SHA}" 'athena-amby' > "${TMP}/glab/responses/default"
+reset_stub glab; gl_event feat "${SHA}" "${GL_BOT}" > "${TMP}/glab/responses/default"
 run_in repo_gl --sha "${SHA}" --window 5 --interval 1 feat
-expect "8. gitlab bot event -> 0" 0 'athena-amby'
+expect "8. gitlab bot event -> 0" 0 "${GL_BOT}"
 grep -qF 'projects/g%2Fsub%2Fr/events' "${TMP}/glab/argv" && ok "8a. project path URL-encoded" || bad "8a. project path" "$(cat "${TMP}/glab/argv")"
 reset_stub glab
-printf '[]' > "${TMP}/glab/responses/1"; gl_event feat "${OLD}" 'athena-amby' > "${TMP}/glab/responses/2"
-gl_event feat "${SHA}" 'athena-amby' > "${TMP}/glab/responses/default"
+printf '[]' > "${TMP}/glab/responses/1"; gl_event feat "${OLD}" "${GL_BOT}" > "${TMP}/glab/responses/2"
+gl_event feat "${SHA}" "${GL_BOT}" > "${TMP}/glab/responses/default"
 run_in repo_gl --sha "${SHA}" --window 10 --interval 1 feat
-expect "8b. gitlab lagging event found on the third read -> 0" 0 'athena-amby'
+expect "8b. gitlab lagging event found on the third read -> 0" 0 "${GL_BOT}"
 [ "$(reads glab)" = 3 ] && ok "8c. exactly three gitlab reads" || bad "8c. gitlab read count" "reads=$(reads glab)"
 reset_stub glab; gl_event feat "${SHA}" 'cjpoll' > "${TMP}/glab/responses/default"
 run_in repo_gl --sha "${SHA}" --window 5 --interval 1 feat
 expect "9. gitlab wrong author -> 1" 1 'cjpoll'
+# DND-1936: the expected bot is the pushed project's namespace's bot.
+mkrepo repo_pers 'https://gitlab.com/cjpoll/custom.git'
+mkrepo repo_unmapped 'https://user:s3cr3t@gitlab.com/someone-else/r.git'
+reset_stub glab; gl_event feat "${SHA}" "${GL_PBOT}" > "${TMP}/glab/responses/default"
+run_in repo_pers --sha "${SHA}" --window 5 --interval 1 feat
+expect "9a. cjpoll/ project pushed by the personal bot -> 0" 0 "${GL_PBOT}"
+reset_stub glab; gl_event feat "${SHA}" "${GL_BOT}" > "${TMP}/glab/responses/default"
+run_in repo_pers --sha "${SHA}" --window 5 --interval 1 feat
+expect "9b. cjpoll/ project pushed by the WORK bot -> 1 (not this namespace's bot)" 1 "not ${GL_PBOT}"
+reset_stub glab
+run_in repo_unmapped --sha "${SHA}" --window 5 --interval 1 feat
+if [ "${RC}" -eq 2 ] && grep -qF 'gitlab.com/someone-else' <<<"${OUT}" && grep -qF 'Fix:' <<<"${OUT}" \
+  && ! grep -qF 's3cr3t' <<<"${OUT}" && [ "$(reads glab)" = 0 ]; then
+  ok "9c. a namespace with no bot -> 2 naming gitlab.com/someone-else, no events read, no credential printed"
+else bad "9c. unmapped namespace" "rc=${RC} reads=$(reads glab) out=[${OUT}]"; fi
+
 set_git_mode "hit:${SHA}"   # restore the default for the tests below
 
 # ---- Repo/branch resolution (DND-451) --------------------------------------

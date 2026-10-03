@@ -44,6 +44,20 @@ FAKE_TOKEN="glpat-SELFTESTFAKETOKEN0000"
 printf '%s\n' "${FAKE_TOKEN}" > "${TMP}/token"; chmod 600 "${TMP}/token"
 export GITLAB_ATHENA_TOKEN_FILE="${TMP}/token"
 unset GLAB_ATHENA_MERGE_DRY_RUN GLAB_ATHENA_GIT_DRY_RUN
+# DND-1936: glab-athena resolves the bot from the project's (host, namespace)
+# before the merge guard runs. A fixture map gives every (host, namespace) the
+# receipt-project cases below use the one synthetic bot, so each case still
+# reaches the guard it tests; an empty fixture overlay keeps this machine's own
+# overlay out. The identity refusals have their own suites
+# (ai/test/forge-identity, ai/test/glab-athena).
+export ATHENA_FORGE_IDENTITIES_FILE="${TMP}/forge-identities.json"
+jq -n --arg t "${TMP}/token" '{kind:"athena-forge-identities", schema:1, identities:
+  [["gitlab.com","example-group"], ["gitlab.com","x"], ["evil-gitlab.com","example-group"],
+   ["gitlabxcom","example-group"], ["other.example.com","example-group"]]
+  | map({host:.[0], namespace:.[1], bot:"synthetic-merge-bot", token_file:$t, refresh:"group_service_account"})}' \
+  > "${ATHENA_FORGE_IDENTITIES_FILE}"
+export ATHENA_PRIVATE_ROOT="${TMP}/empty-overlay"; mkdir -p "${ATHENA_PRIVATE_ROOT}/overlay"; chmod 700 "${ATHENA_PRIVATE_ROOT}"
+printf '{"kind":"athena-private-overlay","schema":1}\n' > "${ATHENA_PRIVATE_ROOT}/athena-overlay.json"
 
 FX="${TMP}/fx"; mkdir -p "${FX}" "${TMP}/bin"
 export STUB_FX="${FX}" STUB_READS="${TMP}/reads.log" STUB_EXECS="${TMP}/execs.log"
@@ -537,15 +551,17 @@ receipt_refused R4 "criterion 1: a receipt for the merged-result commit, none fo
   && ok "R4b. the receipt searched is the head's, not the merged-result commit's" || bad "R4b. head, not merge ref" "$(detail)"
 
 # Criterion 2: non-merge writes stay unguarded: no reads, no receipt, and not
-# even a checkout needed.
+# even a checkout needed. Outside a checkout the project is named by -R or by
+# the api endpoint, which is what picks the bot (DND-1936).
 mkdir -p "${TMP}/not-a-repo"; cd "${TMP}/not-a-repo" || exit 2
-reset_fx; expect_ran R5a "criterion 2: api PUT an Auto-Deploy label, outside any checkout" none api -X PUT "projects/:id/merge_requests/4242" -f "add_labels=Auto-Deploy"
-reset_fx; expect_ran R5b "criterion 2: mr update --label (a risk label)" none mr update 4242 --label "risk::low"
-reset_fx; expect_ran R5c "criterion 2: mr note" none mr note 4242 --message "gated"
-reset_fx; expect_ran R5d "criterion 2: mr approve" none mr approve 4242
-reset_fx; expect_ran R5e "criterion 2: api POST approve" none api -X POST "projects/:id/merge_requests/4242/approve"
-reset_fx; expect_ran R5f "criterion 2: api POST play a manual job (release deploy)" none api -X POST "projects/:id/jobs/9000000002/play"
-reset_fx; expect_ran R5g "criterion 2: ci trigger a manual job" none ci trigger 9000000003
+P_ENC="example-group%2Fexample-app" P_R="example-group/example-app"
+reset_fx; expect_ran R5a "criterion 2: api PUT an Auto-Deploy label, outside any checkout" none api -X PUT "projects/${P_ENC}/merge_requests/4242" -f "add_labels=Auto-Deploy"
+reset_fx; expect_ran R5b "criterion 2: mr update --label (a risk label)" none mr update 4242 --label "risk::low" -R "${P_R}"
+reset_fx; expect_ran R5c "criterion 2: mr note" none mr note 4242 --message "gated" -R "${P_R}"
+reset_fx; expect_ran R5d "criterion 2: mr approve" none mr approve 4242 -R "${P_R}"
+reset_fx; expect_ran R5e "criterion 2: api POST approve" none api -X POST "projects/${P_ENC}/merge_requests/4242/approve"
+reset_fx; expect_ran R5f "criterion 2: api POST play a manual job (release deploy)" none api -X POST "projects/${P_ENC}/jobs/9000000002/play"
+reset_fx; expect_ran R5g "criterion 2: ci trigger a manual job" none ci trigger 9000000003 -R "${P_R}"
 cd "${REPO_FX}" || exit 2
 
 # Criterion 3: an exit-4 head leaves NO receipt (integration-gate writes one
@@ -608,7 +624,7 @@ else bad "R14. unsearchable store" "$(detail)"; fi
 
 # Where the receipt is read from: the checkout of the MR's own project.
 reset_fx; green_fx; cd "${TMP}/not-a-repo" || exit 2
-receipt_refused R15 "run outside any checkout -> refused (COULD NOT LOOK)" "COULD NOT LOOK" "${MERGE_ARGS[@]}"
+receipt_refused R15 "run outside any checkout -> refused (COULD NOT LOOK)" "COULD NOT LOOK" mr -R example-group/example-app merge 4242 --sha "${HEAD_SHA}"
 cd "${REPO_FX}" || exit 2
 for other in "git@gitlab.com:example-group/other-app.git" "git@evil-gitlab.com:example-group/example-app.git" "https://gitlab.com/x/example-group/example-app.git"; do
   OFX="${TMP}/other-$RANDOM"; git init -q -b main "${OFX}"; git -C "${OFX}" remote add origin "${other}"
@@ -622,10 +638,16 @@ reset_fx; green_fx; cd "${WT_FX}" || exit 2
 receipt_ran R17 "run from a linked worktree -> reads the shared git common dir, runs" "${MERGE_ARGS[@]}"
 cd "${REPO_FX}" || exit 2
 HTTPS_FX="${TMP}/https-app"; git init -q -b main "${HTTPS_FX}"; git -C "${HTTPS_FX}" remote add origin "https://gitlab.com/Example-Group/Example-App.git"
+# The bot is resolved from -R here: with no -R, the Example-Group origin is
+# itself refused by the identity map, whose namespaces match exactly (R18b).
 reset_fx; green_fx; cd "${HTTPS_FX}" || exit 2
-run "${MERGE_ARGS[@]}"
+run mr -R example-group/example-app merge 4242 --sha "${HEAD_SHA}"
 if refused && [[ "${ERR}" == *"NO RECEIPT"* ]] && [[ "${ERR}" == *"${HTTPS_FX}"* ]]; then ok "R18. an https remote (any case) matches the project; its own store is the one read"
 else bad "R18. https remote matches" "$(detail)"; fi
+reset_fx; green_fx
+run "${MERGE_ARGS[@]}"
+if refused && [[ "${ERR}" == *"NO ENTRY"* ]] && [[ "${ERR}" == *"differs only in case"* ]] && [ ! -s "${STUB_READS}" ]; then ok "R18b. with no -R, a differently cased origin is refused by the identity map before any read (DND-1936)"
+else bad "R18b. differently cased origin refused" "$(detail)"; fi
 cd "${REPO_FX}" || exit 2
 # matched_in <id> <label> <dir> : run from <dir>, the guard took it as the MR's
 # checkout: it searched <dir>'s own store (empty) and refused NO RECEIPT.

@@ -155,7 +155,7 @@ afc_main() {
   [ "$AFC_VERDICT" = READ ] && exec "$AFC_REAL" "$@"
   IFS=$'\t' read -r _ grp verb reads <<<"$AFC_VERDICT"
   if [ "$AFC_TOOL" = gh ]; then who='GitHub records it as the machine owner, not athena-harness[bot]'; route=gh-athena
-  else who='GitLab records it as the machine owner, not athena-amby'; route=glab-athena; fi
+  else who='GitLab records it as the machine owner, not the Athena bot for the project'\''s namespace (ai/config/forge-identities.json + the private overlay)'; route=glab-athena; fi
   if [ "$grp" = api ]; then
     afc_refuse "\`$AFC_TOOL api …\`: a plain \`$AFC_TOOL api\` call that WRITES (a method other than GET/HEAD, a field or --input with no -X GET, a method-override header, or a GraphQL mutation or a query read from a file). $who (DND-1803). Fix: run the same call through the Athena route, \`~/dev/custom/ai/bin/$route api …\` (check it with \`~/dev/custom/ai/bin/forge-preflight\` if it fails); to only READ, pass \`-X GET\`. $AFC_ESC"
   fi

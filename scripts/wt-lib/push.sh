@@ -10,7 +10,7 @@
 # goes through the Athena forge wrapper for the remote's host, so the forge
 # records the bot, not the owner:
 #   github.com -> gh-athena git push ...   (athena-harness[bot])
-#   gitlab.com -> glab-athena git push ... (athena-amby)
+#   gitlab.com -> glab-athena git push ... (the bot of the project namespace)
 # Under the signal nothing falls back to a plain push. A remote no wrapper
 # covers, a remote that does not resolve, a missing wrapper, or a wrapper
 # refusal each FAIL, exit 3, with a Fix:. A Graphite submit (which pushes with

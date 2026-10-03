@@ -64,6 +64,13 @@ export GH_ATHENA_APP_ID_FILE="${TMP}/app-id" GH_ATHENA_KEY="${TMP}/key.pem" GH_A
 # glab-athena: a fixture PAT.
 printf 'glpat-SELFTESTFAKE0000\n' > "${TMP}/glab-token"; chmod 600 "${TMP}/glab-token"
 export GITLAB_ATHENA_TOKEN_FILE="${TMP}/glab-token"
+# DND-1936: glab-athena picks the bot from the project's namespace: a fixture
+# map gives synth-group one, and an empty fixture overlay keeps this
+# machine's own overlay out.
+export ATHENA_FORGE_IDENTITIES_FILE="${TMP}/forge-identities.json"
+printf '{"kind":"athena-forge-identities","schema":1,"identities":[{"host":"gitlab.com","namespace":"synth-group","bot":"synthetic-agent-bot","token_file":"%s/glab-token","refresh":"group_service_account"}]}\n' "${TMP}" > "${ATHENA_FORGE_IDENTITIES_FILE}"
+export ATHENA_PRIVATE_ROOT="${TMP}/empty-overlay"; mkdir -p "${ATHENA_PRIVATE_ROOT}/overlay"; chmod 700 "${ATHENA_PRIVATE_ROOT}"
+printf '{"kind":"athena-private-overlay","schema":1}\n' > "${ATHENA_PRIVATE_ROOT}/athena-overlay.json"
 export ATHENA_TELEMETRY_DIR="${TMP}/telemetry" ATHENA_SECRETS_ROOT="${TMP}/secrets"
 unset ATHENA_UNIT
 
@@ -517,8 +524,9 @@ if [ "${RC}" = 3 ] && [[ "${OUT}" == *"glab-athena: REFUSING"* ]] && [[ "${OUT}"
 else bad "R3. glab-athena git push to a github.com remote" "rc=${RC} calls=[${CALLS}] out=$(printf '%s' "${OUT}" | head -c 400)"; fi
 run "${R}" "${GHA}" pr create --title t --body b -R synth-owner/synth-repo
 passed "R4. gh-athena pr create reaches gh as the App (token, isolated config)" 'REAL-GH pr create --title t --body b -R synth-owner/synth-repo|token=set|cfg=gh-athena-cfg.'
+repo 'https://gitlab.com/synth-group/synth-repo.git'
 run "${R}" "${GLA}" mr create --title t --description d
-passed "R5. glab-athena mr create reaches glab as athena-amby (token, isolated config)" 'REAL-GLAB mr create --title t --description d|token=set|cfg=glab-athena-cfg.'
+passed "R5. glab-athena mr create reaches glab as the namespace's bot (token, isolated config)" 'REAL-GLAB mr create --title t --description d|token=set|cfg=glab-athena-cfg.'
 
 echo
 echo "--- plain gh / glab writes: REFUSED (scripts included) ---"

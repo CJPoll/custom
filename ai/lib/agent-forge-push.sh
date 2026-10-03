@@ -127,7 +127,7 @@ afp_refuse() {
 afp_fix() {
   case "$1" in
     github.com) printf 'push through the Athena route, `~/dev/custom/ai/bin/gh-athena git push …` (athena:github -> "Pushing as Athena"), which authenticates as athena-harness[bot] over HTTPS for that one command.' ;;
-    *) printf 'push through the Athena route, `~/dev/custom/ai/bin/glab-athena git push …` (athena:gitlab -> "Pushing as Athena"), which authenticates as athena-amby over HTTPS for that one command.' ;;
+    *) printf 'push through the Athena route, `~/dev/custom/ai/bin/glab-athena git push …` (athena:gitlab -> "Pushing as Athena"), which authenticates as the Athena bot of the project namespace over HTTPS for that one command.' ;;
   esac
 }
 

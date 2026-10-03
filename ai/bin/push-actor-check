@@ -5,7 +5,8 @@
 #
 # athena:github / athena:gitlab -> "Pushing as Athena" end with an actor check:
 # the push must show up as athena-harness[bot] (GitHub activity API) or
-# athena-amby (GitLab events API). Those APIs can lag a push by several seconds,
+# the GitLab bot of the project's namespace (GitLab events API; the identity
+# map in ai/lib/forge-identity.sh, DND-1936). Those APIs can lag a push by several seconds,
 # so one read that finds "no event for your ref and SHA" is not yet a failure
 # (DND-397; measured on the DND-393 live probe). This re-reads for up to
 # --window seconds (default 20), SLEEPING --interval seconds between reads
@@ -70,8 +71,10 @@ confirm-merged) if it isn't the current directory. Confirms the forge recorded
 the push of <branch> at <sha> (default: the local refs/heads/<branch> in --repo,
 NOT --repo's HEAD -- refs are shared across worktrees of a repo, HEAD isn't;
 DND-514) as Athena: athena-harness[bot] on
-github.com, athena-amby on gitlab.com. The forge is read from the push URL of
---remote (default: origin) inside --repo.
+github.com; on gitlab.com, the bot the project's (host, top-level namespace)
+maps to (ai/config/forge-identities.json plus the private overlay; a key with
+no bot is exit 2). The forge is read from the push URL of --remote (default:
+origin) inside --repo.
 
 Before reading any event, it asserts <branch> exists on that remote and <sha>
 is its remote head (`git ls-remote`). A CONFIRMED mismatch means the wrong
@@ -164,7 +167,16 @@ case "${HOST}" in
     ACTOR_JQ='if type != "array" then error("not an array") else
       first(.[] | select(.ref == ("refs/heads/" + $b) and .after == $s) | .actor.login) // "" end' ;;
   gitlab.com)
-    FORGE=gitlab; EXPECT='athena-amby'
+    # DND-1936: the bot follows the pushed project's (host, top-level
+    # namespace), through the same identity map glab-athena pushes with. A key
+    # that resolves to no bot is not "some other actor": it is a usage error,
+    # because no Athena push to that project can exist.
+    FID_LIB="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/forge-identity.sh"
+    # shellcheck source=../lib/forge-identity.sh
+    { [ -r "${FID_LIB}" ] && . "${FID_LIB}"; } || die_usage "cannot load ${FID_LIB}, so the expected GitLab bot is unknown" \
+      "run push-actor-check from a full ~/dev/custom checkout (ai/bin and ai/lib side by side)"
+    fid_resolve_url "${URL}" || die_usage "no Athena GitLab bot for remote '${REMOTE}': ${FID_STATE}: ${FID_WHY%.}" "${FID_FIX}"
+    FORGE=gitlab; EXPECT="${FID_BOT}"
     ENC=$(printf '%s' "${PATH_}" | sed 's#/#%2F#g')
     read_events() { "${GLAB_BIN}" api "projects/${ENC}/events?action=pushed&per_page=50"; }
     ACTOR_JQ='if type != "array" then error("not an array") else

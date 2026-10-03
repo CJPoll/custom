@@ -1,0 +1,210 @@
+#!/usr/bin/env bash
+# Self-test for ai/lib/forge-identity.sh (DND-1936): which Athena bot acts on
+# a GitLab project, keyed on (host, top-level namespace).
+#
+# The defect this pins: glab-athena, forge-preflight and push-actor-check
+# hard-coded ONE bot for every gitlab.com project. With a work group and the
+# personal cjpoll/ namespace on the same host, a push to cjpoll/custom would
+# have gone out as the work bot. Each identity must resolve for its own
+# namespace, and every wrongly computed key (an SSH remote form, a different
+# case, a subgroup path, no namespace, an unknown host) and every missing map
+# half must be a NAMED refusal, never the other identity.
+#
+# Hermetic: a fixture public map (ATHENA_FORGE_IDENTITIES_FILE) and a fixture
+# private overlay (ATHENA_PRIVATE_ROOT); synthetic names only. No network.
+# Gated: harness-gate runs every tracked **/self-test.sh.
+set -uo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AI_DIR="$(cd "${HERE}/../.." && pwd)"
+LIB="${FORGE_IDENTITY_LIB_UNDER_TEST:-${AI_DIR}/lib/forge-identity.sh}"
+
+TMP="$(mktemp -d)"; trap 'rm -rf "${TMP}"' EXIT
+PASS=0; FAIL=0
+ok()  { printf '  ok    %s\n' "$1"; PASS=$((PASS+1)); }
+bad() { printf '  FAIL  %s\n        %s\n' "$1" "$2"; FAIL=$((FAIL+1)); }
+
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="${TMP}/gitconfig"
+: > "${GIT_CONFIG_GLOBAL}"
+export HOME="${TMP}/home"; mkdir -p "${HOME}"
+
+P_BOT="synthetic-personal-bot" W_BOT="synthetic-work-bot" W_NS="synthetic-work-group"
+
+MAP="${TMP}/forge-identities.json"
+write_map() { # [bot-json]
+  cat > "${MAP}" <<EOF
+{"kind":"athena-forge-identities","schema":1,"identities":[
+ {"host":"gitlab.com","namespace":"cjpoll","bot":${1:-\"${P_BOT}\"},"pending":"synthetic pending reason","token_file":"~/.claude/personal-token","refresh":"self_rotate"}]}
+EOF
+}
+write_map
+OV="${TMP}/overlay"; mkdir -p "${OV}/overlay"; chmod 700 "${OV}"
+printf '{"kind":"athena-private-overlay","schema":1}\n' > "${OV}/athena-overlay.json"
+write_ov() { # <identities-json>
+  printf '{"group":"%s","identities":%s}\n' "${W_NS}" "$1" > "${OV}/overlay/gitlab.json"
+}
+W_ENTRY="{\"host\":\"gitlab.com\",\"namespace\":\"${W_NS}\",\"bot\":\"${W_BOT}\",\"token_file\":\"/abs/work-token\",\"refresh\":\"group_service_account\"}"
+write_ov "[${W_ENTRY}]"
+export ATHENA_FORGE_IDENTITIES_FILE="${MAP}" ATHENA_PRIVATE_ROOT="${OV}"
+
+# fid <function> <args...> : run one lib function in a fresh shell; prints
+# rc|state|bot|token|why|fix.
+fid() {
+  bash -c '. "$1"; shift; f="$1"; shift; "$f" "$@"; rc=$?
+    printf "%s|%s|%s|%s|%s|%s" "$rc" "$FID_STATE" "$FID_BOT" "$FID_TOKEN_FILE" "$FID_WHY" "$FID_FIX"' _ "${LIB}" "$@"
+}
+# fid_in <dir> <function> <args...> : the same, run in <dir>.
+fid_in() { local d="$1"; shift; ( cd "$d" && fid "$@" ); }
+
+R="" ; f_rc() { printf '%s' "${R%%|*}"; }
+field() { printf '%s' "${R}" | cut -d'|' -f"$1"; }
+# expect <id> <label> <rc> <state> <bot or -> <must-contain or ->
+expect() {
+  local id="$1" label="$2" rc="$3" st="$4" b="$5" want="$6"
+  if [ "$(f_rc)" = "$rc" ] && [ "$(field 2)" = "$st" ] && { [ "$b" = - ] || [ "$(field 3)" = "$b" ]; } \
+    && { [ "$want" = - ] || [[ "$R" == *"$want"* ]]; } \
+    && { [ "$rc" = 0 ] || [[ "$(field 6)" == *"Never fall back"* ]]; }; then ok "${id}. ${label}"
+  else bad "${id}. ${label}" "got '${R}'"; fi
+}
+# neither_bot <id> <label> : a refusal hands out no bot at all.
+neither_bot() {
+  if [ "$(f_rc)" != 0 ] && [ -z "$(field 3)" ] && [ -z "$(field 4)" ]; then ok "$1. $2"
+  else bad "$1. $2" "got '${R}'"; fi
+}
+
+echo "forge-identity self-test"
+echo "lib: ${LIB}"
+echo
+echo "--- HIT: each identity resolves for its own namespace ---"
+R="$(fid fid_resolve_url https://gitlab.com/cjpoll/custom.git)"
+expect H1 "https cjpoll/custom -> the personal bot, its token file under HOME" 0 FOUND "${P_BOT}" "${HOME}/.claude/personal-token"
+R="$(fid fid_resolve_url "https://gitlab.com/${W_NS}/app.git")"
+expect H2 "https work project -> the work bot from the overlay" 0 FOUND "${W_BOT}" "/abs/work-token"
+R="$(fid fid_resolve_url git@gitlab.com:cjpoll/gen_saas.git)"
+expect H3 "scp-like SSH remote git@gitlab.com:cjpoll/... parses to the personal key" 0 FOUND "${P_BOT}" -
+R="$(fid fid_resolve_url "ssh://git@GitLab.com:2222/${W_NS}/app.git/")"
+expect H4 "ssh:// with a port, a mixed-case host and a trailing .git/ -> the work bot" 0 FOUND "${W_BOT}" -
+R="$(fid fid_resolve_url "https://gitlab.com/${W_NS}/sub/deeper/app.git")"
+expect H5 "a project in a work subgroup keys on the top-level namespace" 0 FOUND "${W_BOT}" -
+
+echo
+echo "--- MISS: a wrongly computed key is a NAMED refusal, never the other bot ---"
+R="$(fid fid_lookup git@gitlab.com cjpoll)"
+expect K1 "host 'git@gitlab.com' (an SSH remote form) -> BAD KEY naming it" 2 "BAD KEY" "" "SSH remote form"; neither_bot K1b "no bot handed out"
+R="$(fid fid_lookup gitlab.com git@gitlab.com:cjpoll)"
+expect K2 "namespace 'git@gitlab.com:cjpoll' (an SSH remote form) -> BAD KEY" 2 "BAD KEY" "" "SSH remote form"
+R="$(fid fid_lookup gitlab.com CJPoll)"
+expect K3 "namespace 'CJPoll' (different case) -> NO ENTRY, names the canonical 'cjpoll'" 1 "NO ENTRY" "" "differs only in case"; neither_bot K3b "no bot handed out"
+R="$(fid fid_resolve_url https://gitlab.com/CJPoll/custom.git)"
+expect K3c "a remote spelled CJPoll/custom -> NO ENTRY, not the personal bot" 1 "NO ENTRY" "" "gitlab.com/CJPoll"
+R="$(fid fid_lookup gitlab.com "${W_NS}/sub")"
+expect K4 "namespace '<group>/sub' (a subgroup path) -> BAD KEY" 2 "BAD KEY" "" "subgroup or project path"
+R="$(fid fid_lookup gitlab.com cjpoll/custom)"
+expect K4b "namespace 'cjpoll/custom' (a project path) -> BAD KEY, not the personal bot" 2 "BAD KEY" "" "TOP-LEVEL"
+R="$(fid fid_resolve_url https://gitlab.com/custom.git)"
+expect K5 "a remote with no namespace -> BAD KEY" 2 "BAD KEY" "" "names no <namespace>/<project>"
+R="$(fid fid_lookup gitlab.com "")"
+expect K5b "an empty namespace -> BAD KEY" 2 "BAD KEY" "" "no namespace"
+R="$(fid fid_resolve_url https://gitlab.example.com/cjpoll/custom.git)"
+expect K6 "an unknown host -> NO ENTRY naming host and namespace" 1 "NO ENTRY" "" "gitlab.example.com/cjpoll"
+R="$(fid fid_lookup GITLAB.com cjpoll)"
+expect K7 "an upper-case host passed as the key -> BAD KEY (not lower-cased on the lookup side)" 2 "BAD KEY" "" "not lower case"
+R="$(fid fid_resolve_url "https://gitlab.com/otherns/app.git")"
+expect K8 "a namespace with no entry -> NO ENTRY naming both halves searched" 1 "NO ENTRY" "" "private overlay's gitlab .identities [PRESENT"
+R="$(fid fid_resolve_url /local/path/repo.git)"
+expect K9 "a local path -> BAD KEY" 2 "BAD KEY" "" "local path"
+R="$(fid fid_resolve_url "")"
+expect K10 "an empty remote -> BAD KEY" 2 "BAD KEY" "" "empty"
+R="$(fid fid_resolve_url "https://user:s3cr3t@gitlab.com/custom.git")"
+if [ "$(f_rc)" = 2 ] && [[ "$R" == *"https://gitlab.com/custom.git"* ]] && [[ "$R" != *s3cr3t* ]]; then
+  ok "K11. a refusal names the remote without its user:password@"
+else bad "K11. credential kept out of the refusal" "got '${R}'"; fi
+R="$(fid fid_resolve_url "https://user:s3cr3t@gitlab.com/cjpoll/custom.git")"
+expect K12 "credentials in the URL change no key: still the personal bot" 0 FOUND "${P_BOT}" -
+
+echo
+echo "--- the map's two halves: missing, unreadable or conflicting is never a quiet miss ---"
+R="$(unset ATHENA_PRIVATE_ROOT; fid fid_resolve_url "https://gitlab.com/${W_NS}/app.git")"
+expect M1 "work remote, overlay ABSENT -> NO ENTRY that says the overlay is absent" 1 "NO ENTRY" "" "ABSENT"; neither_bot M1b "the work remote does not get the personal bot"
+R="$(unset ATHENA_PRIVATE_ROOT; fid fid_resolve_url https://gitlab.com/cjpoll/custom.git)"
+expect M2 "personal remote, overlay ABSENT -> still the personal bot" 0 FOUND "${P_BOT}" -
+printf '{"group":"%s"}\n' "${W_NS}" > "${OV}/overlay/gitlab.json"
+R="$(fid fid_resolve_url "https://gitlab.com/${W_NS}/app.git")"
+expect M3 "overlay present with no .identities key -> NO ENTRY that says so" 1 "NO ENTRY" "" "no gitlab .identities key"
+write_ov "[${W_ENTRY}]"
+BAD_OV="${TMP}/bad-overlay"; mkdir -p "${BAD_OV}/overlay"; chmod 700 "${BAD_OV}"
+printf '{"kind":"something-else","schema":1}\n' > "${BAD_OV}/athena-overlay.json"
+R="$(ATHENA_PRIVATE_ROOT="${BAD_OV}" fid fid_resolve_url https://gitlab.com/cjpoll/custom.git)"
+expect M4 "a MALFORMED overlay -> COULD NOT LOOK, even for the personal namespace" 3 "COULD NOT LOOK" "" "MALFORMED"
+R="$(ATHENA_FORGE_IDENTITIES_FILE="${TMP}/no-such-map.json" fid fid_resolve_url https://gitlab.com/cjpoll/custom.git)"
+expect M5 "an unreadable public map -> COULD NOT LOOK naming the file" 3 "COULD NOT LOOK" "" "no-such-map.json"
+printf 'not json' > "${TMP}/garbage.json"
+R="$(ATHENA_FORGE_IDENTITIES_FILE="${TMP}/garbage.json" fid fid_resolve_url https://gitlab.com/cjpoll/custom.git)"
+expect M6 "a public map that is not JSON -> COULD NOT LOOK" 3 "COULD NOT LOOK" "" "not a JSON object"
+write_map '"bad user name"'
+R="$(fid fid_resolve_url https://gitlab.com/cjpoll/custom.git)"
+expect M7 "an entry whose bot is not a username -> COULD NOT LOOK naming the entry" 3 "COULD NOT LOOK" "" "public entry 0"
+write_map
+write_ov "[${W_ENTRY},{\"host\":\"gitlab.com\",\"namespace\":\"CJPOLL\",\"bot\":\"${W_BOT}\",\"token_file\":\"/abs/work-token\",\"refresh\":\"group_service_account\"}]"
+R="$(fid fid_resolve_url https://gitlab.com/cjpoll/custom.git)"
+expect M8 "an overlay entry claiming cjpoll (any case) -> COULD NOT LOOK, never the work bot" 3 "COULD NOT LOOK" "" "two entries claim"
+write_ov "[{\"host\":\"gitlab.com\",\"namespace\":\"${W_NS}\",\"bot\":\"${W_BOT}\",\"token_file\":\"~/.claude/personal-token\",\"refresh\":\"group_service_account\"}]"
+R="$(fid fid_resolve_url https://gitlab.com/cjpoll/custom.git)"
+expect M9 "two bots sharing one token file -> COULD NOT LOOK" 3 "COULD NOT LOOK" "" "share the token file"
+write_ov "[${W_ENTRY}]"
+write_map null
+R="$(fid fid_resolve_url https://gitlab.com/cjpoll/custom.git)"
+expect M10 "an entry with bot null -> PENDING with its reason, no bot" 4 PENDING "" "synthetic pending reason"; neither_bot M10b "no bot handed out"
+write_map
+R="$(ATHENA_FORGE_IDENTITIES_FILE= fid fid_resolve_url https://gitlab.com/cjpoll/custom.git)"
+expect M11 "the tracked map: cjpoll is PENDING until the owner names the bot (Q2)" 4 PENDING "" "Q2"
+
+echo
+echo "--- glab's own arguments: -R, the api endpoint, origin ---"
+mkrepo() { git init -q "${TMP}/$1"; git -C "${TMP}/$1" remote add origin "$2"; printf '%s' "${TMP}/$1"; }
+PERS="$(mkrepo pers https://gitlab.com/cjpoll/custom.git)"
+WORK="$(mkrepo work "git@gitlab.com:${W_NS}/app.git")"
+mkdir -p "${TMP}/norepo"
+R="$(fid_in "${PERS}" fid_resolve_glab_args mr create --fill)"
+expect G1 "no -R: the identity of the checkout's origin (personal)" 0 FOUND "${P_BOT}" -
+R="$(fid_in "${PERS}" fid_resolve_glab_args mr -R "${W_NS}/app" create --fill)"
+expect G2 "-R <work>/<p> from a personal checkout -> the work bot (-R wins)" 0 FOUND "${W_BOT}" -
+R="$(fid_in "${WORK}" fid_resolve_glab_args --repo=cjpoll/custom mr list)"
+expect G3 "--repo=cjpoll/custom from a work checkout -> the personal bot" 0 FOUND "${P_BOT}" -
+R="$(fid_in "${TMP}/norepo" fid_resolve_glab_args api -X POST "projects/${W_NS}%2Fapp/merge_requests/1/notes" -f body=x)"
+expect G4 "api projects/<work>%2F<p>/... outside any checkout -> the work bot" 0 FOUND "${W_BOT}" -
+R="$(fid_in "${TMP}/norepo" fid_resolve_glab_args api user)"
+expect G5 "no -R, no endpoint project, no origin -> COULD NOT LOOK" 3 "COULD NOT LOOK" "" "no -R/--repo and no origin"
+R="$(fid_in "${PERS}" fid_resolve_glab_args -R cjpoll/custom api "projects/${W_NS}%2Fapp/issues")"
+expect G6 "-R and the api endpoint name different namespaces -> BAD KEY" 2 "BAD KEY" "" "api endpoint names"
+R="$(fid_in "${PERS}" fid_resolve_glab_args mr -R cjpoll/custom list -R "${W_NS}/app")"
+expect G7 "two different -R values -> BAD KEY" 2 "BAD KEY" "" "more than once"
+R="$(fid_in "${PERS}" fid_resolve_glab_args api --hostname gitlab.example.com user)"
+expect G8 "--hostname of an unknown host -> NO ENTRY naming that host" 1 "NO ENTRY" "" "gitlab.example.com/cjpoll"
+R="$(fid_in "${PERS}" fid_resolve_glab_args mr -R gitlab.com/cjpoll/custom list)"
+expect G9 "-R HOST/OWNER/REPO (ambiguous with GROUP/SUB/REPO) -> BAD KEY" 2 "BAD KEY" "" "could be HOST/OWNER/REPO"
+R="$(fid_in "${PERS}" fid_resolve_glab_args mr -R https://gitlab.com/cjpoll/custom list)"
+expect G10 "-R as a full URL -> parsed as a remote" 0 FOUND "${P_BOT}" -
+R="$(fid_in "${PERS}" fid_resolve_glab_args mr -R cjpoll list)"
+expect G11 "-R with no project part -> BAD KEY" 2 "BAD KEY" "" "names no <namespace>/<project>"
+git -C "${PERS}" remote add fork https://gitlab.com/someone-else/custom.git
+R="$(fid_in "${PERS}" fid_resolve_glab_args mr list)"
+expect G12 "a second remote with no Athena identity is ignored" 0 FOUND "${P_BOT}" -
+git -C "${PERS}" remote add upstream "https://gitlab.com/${W_NS}/custom.git"
+R="$(fid_in "${PERS}" fid_resolve_glab_args mr list)"
+expect G13 "a second remote that is ANOTHER bot's namespace -> BAD KEY, pass -R" 2 "BAD KEY" "" "its own Athena identity"
+R="$(fid_in "${PERS}" fid_resolve_glab_args mr -R cjpoll/custom list)"
+expect G14 "the same checkout with -R -> resolves (the explicit project wins)" 0 FOUND "${P_BOT}" -
+R="$(fid_in "${PERS}" fid_resolve_glab_args api "projects/123/merge_requests")"
+expect G15 "a numeric api project id names no namespace: origin is used (and the ambiguity refused)" 2 "BAD KEY" "" "its own Athena identity"
+GH="$(mkrepo ghrepo https://github.com/someone/custom.git)"
+R="$(fid_in "${GH}" fid_resolve_glab_args api user)"
+expect G16 "a github.com origin -> NO ENTRY naming github.com" 1 "NO ENTRY" "" "github.com/someone"
+
+echo
+echo "==================================================="
+printf 'RESULT: %d passed, %d failed\n' "${PASS}" "${FAIL}"
+echo "==================================================="
+[ "${FAIL}" -eq 0 ] || exit 1
+echo "ALL CASES PASS"
+exit 0

@@ -604,7 +604,10 @@ auth guard that keeps the owner's forge credentials from agents
 merge, a push or a forge write (`ai/lib/forge-api-scan.sh`,
 `ai/lib/forge-cli-isolation.sh`, `ai/lib/forge-write-class.awk`),
 the red-main content declaration the merge guard reads its bar from
-(`ai/config/main-content-checks.json`, DND-1905),
+(`ai/config/main-content-checks.json`, DND-1905), the per-namespace GitLab
+bot identity map that decides as whom `glab-athena` writes and pushes
+(`ai/config/forge-identities.json`, `ai/lib/forge-identity.sh`,
+`ai/lib/forge-identity.jq`, `ai/lib/forge-identity-lookup.jq`, DND-1936),
 `ai/bin/gh-athena`, `ai/bin/glab-athena`,
 `locked-merge`,
 `ai/bin/main-health` and `ai/lib/main-health.sh` (the push guard's fix-push

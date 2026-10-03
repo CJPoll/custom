@@ -1,0 +1,15 @@
+{
+  "kind": "athena-forge-identities",
+  "schema": 1,
+  "_about": "Which Athena bot acts on a GitLab project, keyed on (host, top-level namespace) of the project (DND-1936). Read by ai/lib/forge-identity.sh for glab-athena, forge-preflight and push-actor-check. Public entries only: a work namespace's entry lives in the private overlay (overlay/gitlab.json .identities, same entry shape), never here. A namespace with no entry is refused, never given another bot or the owner's login. Entry fields: host (lowercase), namespace (exact case), bot (the GitLab username, or null with `pending` saying why), token_file (~/ or absolute; 0600, declared in ai/secrets/registry.json), refresh (self_rotate | group_service_account).",
+  "identities": [
+    {
+      "host": "gitlab.com",
+      "namespace": "cjpoll",
+      "bot": null,
+      "pending": "the personal bot's GitLab username is not chosen yet (owner question Q2 in the GitLab migration design, then step A1); set `bot` to it here and drop `pending`",
+      "token_file": "~/.claude/gitlab-personal-athena-token",
+      "refresh": "self_rotate"
+    }
+  ]
+}

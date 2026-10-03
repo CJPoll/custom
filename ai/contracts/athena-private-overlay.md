@@ -128,6 +128,7 @@ Keys in use (DND-704), with where each is used:
 | `notion` | `.work.first_dispatch_from` | array of status names a move to `In Progress` from which is a first dispatch | same |
 | `notion` | `.work.restart_dispatch_from` | OPTIONAL array of park status names a move to `In Progress` from which restarts the dispatch stamp (DND-1838); none in common with `.work.first_dispatch_from`. Absent: no park is detected, and `mark-in-progress` names this key on every move it cannot classify | same |
 | `gitlab` | `.group` | the work GitLab group path (string) | `ai/bin/glab-athena refresh` (resolves the group id to mint the service-account token; DND-1668) |
+| `gitlab` | `.identities` | array of identity entries `{host, namespace, bot, token_file, refresh}`, the shape of `ai/config/forge-identities.json` (`refresh` is `group_service_account` for a work group bot) | `ai/lib/forge-identity.sh`: the bot `ai/bin/glab-athena`, `ai/bin/forge-preflight` and `ai/bin/push-actor-check` use for a work namespace (DND-1936). Absent: a work remote is refused with a Fix:, never given the personal bot or the owner's login |
 | `notion` | `.vip_person_ids` | array of notion-work person ids | declared as the VIP seed in `athena-events.md`; the server keeps its own copy in its config |
 
 The Athena bot's own Slack user and bot ids are not overlay keys: `athena:slack`

@@ -14,12 +14,22 @@ token at call time and execs `glab`.
 | | Acts as | Use it for |
 |---|---|---|
 | **plain `glab`** (Cody's OAuth, `~/.config/glab-cli/config.yml`) | Cody Poll | **reads** — `mr view`, `ci status`, `api` GETs, issue/pipeline queries |
-| **`glab-athena` wrapper** (`athena-amby`, Maintainer in the work GitLab group) | the Athena bot | **writes** — MR create, comment, approve, thread replies/resolves, label PUTs, pipeline triggers, job retries/cancels, merge-train boarding, merges |
+| **`glab-athena` wrapper** (the bot of the project's namespace: `athena-amby` in the work GitLab group, the personal bot in `cjpoll/`) | the Athena bot | **writes** — MR create, comment, approve, thread replies/resolves, label PUTs, pipeline triggers, job retries/cancels, merge-train boarding, merges |
 
 Writing through plain `glab` puts **Cody's name** on actions Athena took. That
 is the one thing this wrapper exists to prevent, so: **every GitLab write that
 represents Athena's own work goes through `glab-athena`.** Reads may stay on
 plain `glab` — there's nothing to misattribute in a GET.
+
+**Which bot (DND-1936).** gitlab.com hosts two namespaces with two bots, so
+`glab-athena` picks the bot from the project's (host, top-level namespace): from
+`-R`, else an `api projects/<g>%2F<p>/…` endpoint, else the checkout's origin;
+for `glab-athena git`, from the URL the command reaches. The map is
+`ai/config/forge-identities.json` (the personal entry) plus the private
+overlay's `gitlab` `.identities` (work entries). A namespace with no entry, a
+differently cased one, a bot not named yet, or an unreadable map is refused
+with a `Fix:`. It never falls back to another bot or to Cody's login, so run
+from the project's checkout or pass `-R <namespace>/<project>`.
 
 ## The wrapper
 
@@ -66,7 +76,7 @@ reasons are in
 When anything is confusing, settle it first:
 
 ```sh
-~/dev/custom/ai/bin/glab-athena api user   # -> username: athena-amby
+~/dev/custom/ai/bin/glab-athena api user   # -> the bot of this repo's namespace (athena-amby in the work group)
 glab api user                              # -> Cody
 ```
 
@@ -120,8 +130,9 @@ For that one command, with no git or glab config change, the passthrough:
 - clears every credential helper (`credential.helper=`) and askpass, and sets
   `GIT_TERMINAL_PROMPT=0`, so the owner's credentials cannot answer and a
   bot-auth failure **fails**;
-- authenticates as `athena-amby` with an `oauth2:<PAT>` basic-auth header. The
-  PAT is read from the token file (see *Setup*) at call time and reaches only
+- authenticates as the bot of the pushed project's namespace (*Which bot*)
+  with an `oauth2:<PAT>` basic-auth header. The PAT is read from that bot's
+  token file (see *Setup*) at call time and reaches only
   the route's own transport (`git-remote-athena-forge`, DND-1868), through a
   one-shot pipe: never argv, and never git's environment, so a hook, filter,
   editor or nested git never holds it. One forge remote per command.
@@ -165,7 +176,7 @@ glab api 'projects/:id/events?action=pushed&per_page=20' \
       | .author.username+" "+.push_data.ref+" "+.push_data.commit_to' | head -n1
 ```
 
-It must print `athena-amby <branch> <your head SHA>`. Any other author means the
+It must print `<the namespace's bot> <branch> <your head SHA>` (`athena-amby` in the work group). Any other author means the
 push did not go out as Athena. The events API lags a push by a few seconds, so
 **no event for your ref and SHA counts as a failure only after re-reading for
 ~20s**, sleeping between reads. `~/dev/custom/ai/bin/push-actor-check <branch>` does that

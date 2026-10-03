@@ -41,6 +41,20 @@ FAKE_TOKEN="glpat-SELFTESTFAKETOKEN0000"
 printf '%s\n' "${FAKE_TOKEN}" > "${TMP}/token"
 chmod 600 "${TMP}/token"
 export GITLAB_ATHENA_TOKEN_FILE="${TMP}/token"
+# DND-1936: the bot follows the project's namespace. A fixture identity map
+# (synthetic names) and NO private overlay, so the suite never reads this
+# machine's own overlay or the tracked map.
+WORK_BOT="synthetic-group-bot" PERS_BOT="synthetic-personal-bot"
+export ATHENA_FORGE_IDENTITIES_FILE="${TMP}/forge-identities.json"
+cat > "${ATHENA_FORGE_IDENTITIES_FILE}" <<EOF
+{"kind":"athena-forge-identities","schema":1,"identities":[
+ {"host":"gitlab.com","namespace":"example-group","bot":"${WORK_BOT}","token_file":"${TMP}/token","refresh":"group_service_account"},
+ {"host":"gitlab.com","namespace":"g","bot":"${WORK_BOT}","token_file":"${TMP}/token","refresh":"group_service_account"},
+ {"host":"gitlab.com","namespace":"cjpoll","bot":"${PERS_BOT}","token_file":"${TMP}/personal-token","refresh":"self_rotate"},
+ {"host":"gitlab.com","namespace":"pending-ns","bot":null,"pending":"synthetic: username not chosen","token_file":"${TMP}/pending-token","refresh":"self_rotate"}]}
+EOF
+export ATHENA_PRIVATE_ROOT="${TMP}/empty-overlay"; mkdir -p "${ATHENA_PRIVATE_ROOT}/overlay"; chmod 700 "${ATHENA_PRIVATE_ROOT}"
+printf '{"kind":"athena-private-overlay","schema":1}\n' > "${ATHENA_PRIVATE_ROOT}/athena-overlay.json"
 # If the wrapper under test has no passthrough it would exec glab: make any
 # glab it reaches a harmless stub that says so, never the real CLI.
 mkdir -p "${TMP}/stubbin"
@@ -110,8 +124,8 @@ echo
 echo "--- MISS: a remote the rewrite cannot cover is REFUSED with a Fix: ---"
 R="$(new_repo sshurl 'ssh://git@gitlab.com/example-group/example-app.git')"
 gla "${R}" push origin HEAD
-is_refusal && [[ "${ERR}" == *"gitlab.com"* ]] && [[ "${ERR}" == *"athena-amby"* ]] \
-  && ok "4. ssh://git@gitlab.com/ origin -> refused (exit 3, Fix:, escalate, names athena-amby)" \
+is_refusal && [[ "${ERR}" == *"gitlab.com"* ]] && [[ "${ERR}" == *"${WORK_BOT}"* ]] \
+  && ok "4. ssh://git@gitlab.com/ origin -> refused (exit 3, Fix:, escalate, names the namespace's bot)" \
   || bad "4. ssh:// origin refused" "rc=${RC} out='${OUT}' err='${ERR}'"
 
 R="$(new_repo pushurl 'https://gitlab.com/example-group/example-app.git')"
@@ -311,13 +325,19 @@ else bad "20. glab ungated push to main refused" "rc=${RC} out='${OUT}' err='${E
 RB="${TMP}/refreshbin"; mkdir -p "${RB}"
 printf '#!/bin/sh\necho "$*" >> "%s/glab.args"\necho "{\\"id\\": null}"\n' "${TMP}" > "${RB}/glab"
 chmod +x "${RB}/glab"
-run_refresh() { # <overlay-root-or-empty>
+# DND-1936: refresh names the bot's project (-R); the work identity is in the overlay.
+run_refresh() { # <overlay-root-or-empty> [refresh args...]
   rm -f "${TMP}/glab.args"
-  local root="${TMP}/no-such-overlay"
-  [ -z "$1" ] || root="$1"
-  OUT="$(env ATHENA_PRIVATE_ROOT="${root}" PATH="${RB}:${PATH}" "${WRAPPER}" refresh 2>"${TMP}/err")"; RC=$?
+  local root="$1"; shift
+  [ "$#" -gt 0 ] || set -- -R synthetic-group/app
+  if [ -z "${root}" ]; then
+    OUT="$(env -u ATHENA_PRIVATE_ROOT HOME="${TMP}/home-no-overlay" PATH="${RB}:${PATH}" "${WRAPPER}" refresh "$@" 2>"${TMP}/err")"; RC=$?
+  else
+    OUT="$(env ATHENA_PRIVATE_ROOT="${root}" PATH="${RB}:${PATH}" "${WRAPPER}" refresh "$@" 2>"${TMP}/err")"; RC=$?
+  fi
   ERR="$(cat "${TMP}/err")"
 }
+mkdir -p "${TMP}/home-no-overlay"
 run_refresh ""
 if [ "${RC}" = 1 ] && [[ "${ERR}" == *"private overlay"* ]] && [[ "${ERR}" == *"Fix:"* ]] && [ ! -e "${TMP}/glab.args" ]; then
   ok "21. refresh with no overlay: refused with Fix:, glab never called (DND-1668)"
@@ -331,7 +351,7 @@ if [ "${RC}" = 1 ] && [[ "${ERR}" == *"Fix:"* ]] && [ ! -e "${TMP}/glab.args" ];
   ok "22. refresh with the overlay present but no gitlab .group: refused with Fix:, glab never called (DND-1668)"
 else bad "22. refresh, key missing" "rc=${RC} err='${ERR}'"; fi
 
-printf '{"group":"synthetic-group"}\n' > "${OV}/overlay/gitlab.json"
+printf '{"group":"synthetic-group","identities":[{"host":"gitlab.com","namespace":"synthetic-group","bot":"synthetic-sa-bot","token_file":"%s/sa-token","refresh":"group_service_account"}]}\n' "${TMP}" > "${OV}/overlay/gitlab.json"
 run_refresh "${OV}"
 if [[ "$(cat "${TMP}/glab.args" 2>/dev/null)" == "api groups/synthetic-group" ]] && [[ "${ERR}" == *"synthetic-group"* ]]; then
   ok "23. refresh looks the group up by the overlay's value (DND-1668)"
@@ -407,6 +427,101 @@ ERR="$(cat "${TMP}/err")"
 is_refusal && [[ "${ERR}" == *"gh-athena git"* ]] \
   && ok "XF11. FG_ROUTE_ONLY=0 in the caller's environment: still refused (the wrapper pins it)" \
   || bad "XF11. FG_ROUTE_ONLY env bypass" "rc=${RC} out='${OUT}' err='${ERR}'"
+
+echo "--- DND-1936: the bot follows the project's (host, top-level namespace) ---"
+# Two tokens, two bots. The personal token is ABSENT at first, so a push that
+# picked the wrong identity would show up as a grant instead of a refusal.
+printf '%s\n' "glpat-SELFTESTWORKTOKEN0001" > "${TMP}/work-token"; chmod 600 "${TMP}/work-token"
+jq --arg w "${TMP}/work-token" '.identities |= map(if .bot == "'"${WORK_BOT}"'" then .token_file = $w else . end)' \
+  "${ATHENA_FORGE_IDENTITIES_FILE}" > "${TMP}/m.tmp" && mv "${TMP}/m.tmp" "${ATHENA_FORGE_IDENTITIES_FILE}"
+# glai <dir> <args...> : glab-athena with NO token-file override, so the
+# resolved identity's own token file is the one read.
+glai() {
+  local d="$1"; shift
+  OUT="$(cd "${d}" && env -u GITLAB_ATHENA_TOKEN_FILE GLAB_ATHENA_GIT_DRY_RUN=1 PATH="${IDBIN}:${PATH}" "${WRAPPER}" "$@" 2>"${TMP}/err")"; RC=$?
+  ERR="$(cat "${TMP}/err")"
+}
+# A stub glab that says which token and host it was given, never the token.
+IDBIN="${TMP}/idbin"; mkdir -p "${IDBIN}"
+cat > "${IDBIN}/glab" <<'EOF'
+#!/bin/sh
+case "${GITLAB_TOKEN:-}" in
+  glpat-SELFTESTWORKTOKEN0001) who=work ;; glpat-SELFTESTPERSONAL0001) who=personal ;; '') who=none ;; *) who=other ;;
+esac
+echo "STUB-ID token=${who} host=${GITLAB_HOST:-unset} args=$*"
+EOF
+chmod +x "${IDBIN}/glab"
+fsg_require_stubs "${IDBIN}" glab
+PR="$(new_repo pers-1936 'https://gitlab.com/cjpoll/custom.git')"
+WR="$(new_repo work-1936 'git@gitlab.com:example-group/example-app.git')"
+UR="$(new_repo unmapped-1936 'https://gitlab.com/someone-else/app.git')"
+CR="$(new_repo case-1936 'https://gitlab.com/CJPoll/custom.git')"
+NR="$(new_repo pending-1936 'https://gitlab.com/pending-ns/app.git')"
+mkdir -p "${TMP}/norepo-1936"
+
+glai "${PR}" git push origin HEAD
+if [ "${RC}" = 3 ] && [[ "${ERR}" == *"${PERS_BOT} token file ${TMP}/personal-token"* ]] && [[ "${ERR}" == *"Fix:"* ]] \
+  && [[ "${OUT}" != *"cred: granted"* ]]; then
+  ok "N1. push to cjpoll/ with the personal token absent -> refused naming the PERSONAL bot's token file, not granted the work token"
+else bad "N1. personal push uses the personal token file" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+glai "${WR}" git push origin HEAD
+if [ "${RC}" = 0 ] && [[ "${OUT}" == *"cred: granted (one forge URL: https://gitlab.com/example-group/example-app.git)"* ]]; then
+  ok "N2. the same environment, a push to the work namespace -> granted (its own token file)"
+else bad "N2. work push granted" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+glai "${UR}" git push origin HEAD
+if [ "${RC}" = 3 ] && [[ "${ERR}" == *"NO ENTRY"* ]] && [[ "${ERR}" == *"gitlab.com/someone-else"* ]] && [[ "${ERR}" == *"Fix:"* ]] \
+  && [[ "${OUT}" != *"exec git"* ]]; then
+  ok "N3. push to a namespace with no entry -> NO ENTRY naming gitlab.com/someone-else, nothing run"
+else bad "N3. unmapped push refused" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+glai "${CR}" git push origin HEAD
+if [ "${RC}" = 3 ] && [[ "${ERR}" == *"differs only in case"* ]] && [[ "${OUT}" != *"exec git"* ]]; then
+  ok "N4. push to CJPoll/custom (wrong case) -> refused, names the canonical cjpoll"
+else bad "N4. case refusal" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+glai "${NR}" git push origin HEAD
+if [ "${RC}" = 3 ] && [[ "${ERR}" == *"PENDING"* ]] && [[ "${ERR}" == *"synthetic: username not chosen"* ]]; then
+  ok "N5. push to a namespace whose bot is not named yet -> PENDING refusal with its reason"
+else bad "N5. pending refusal" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+
+printf '%s\n' "glpat-SELFTESTPERSONAL0001" > "${TMP}/personal-token"; chmod 600 "${TMP}/personal-token"
+glai "${PR}" mr list
+[ "${RC}" = 0 ] && [[ "${OUT}" == "STUB-ID token=personal host=gitlab.com args=mr list" ]] \
+  && ok "N6. glab in a cjpoll/ checkout runs with the personal token" || bad "N6. personal token on the normal path" "rc=${RC} out='${OUT}' err='${ERR}'"
+glai "${WR}" mr list
+[ "${RC}" = 0 ] && [[ "${OUT}" == "STUB-ID token=work host=gitlab.com args=mr list" ]] \
+  && ok "N7. glab in a work checkout runs with the work token" || bad "N7. work token on the normal path" "rc=${RC} out='${OUT}' err='${ERR}'"
+glai "${WR}" mr list -R cjpoll/custom
+[ "${RC}" = 0 ] && [[ "${OUT}" == "STUB-ID token=personal host=gitlab.com args=mr list -R cjpoll/custom" ]] \
+  && ok "N8. -R cjpoll/custom from a work checkout -> the personal token (-R names the project)" || bad "N8. -R selects the identity" "rc=${RC} out='${OUT}' err='${ERR}'"
+glai "${TMP}/norepo-1936" api -X POST "projects/example-group%2Fexample-app/issues" -f title=t
+[ "${RC}" = 0 ] && [[ "${OUT}" == "STUB-ID token=work host=gitlab.com "* ]] \
+  && ok "N9. api projects/<ns>%2F<p>/... outside a checkout -> that namespace's token" || bad "N9. endpoint selects the identity" "rc=${RC} out='${OUT}' err='${ERR}'"
+glai "${UR}" mr list
+[ "${RC}" = 3 ] && [[ "${ERR}" == *"NO ENTRY"* ]] && [[ "${OUT}" != *STUB-ID* ]] \
+  && ok "N10. glab in a checkout of an unmapped namespace -> refused, glab never runs" || bad "N10. unmapped normal path" "rc=${RC} out='${OUT}' err='${ERR}'"
+glai "${TMP}/norepo-1936" mr list
+[ "${RC}" = 3 ] && [[ "${ERR}" == *"COULD NOT LOOK"* ]] && [[ "${ERR}" == *"-R <namespace>/<project>"* ]] && [[ "${OUT}" != *STUB-ID* ]] \
+  && ok "N11. no -R and no origin -> COULD NOT LOOK with a Fix:, glab never runs" || bad "N11. no key" "rc=${RC} out='${OUT}' err='${ERR}'"
+printf '  \n' > "${TMP}/personal-token"
+glai "${PR}" mr list
+[ "${RC}" != 0 ] && [[ "${ERR}" == *"REFUSING"* ]] && [[ "${ERR}" == *"${PERS_BOT} token"* ]] && [[ "${OUT}" != *STUB-ID* ]] \
+  && ok "N12. a whitespace-only personal token file still refuses (DND-725), naming the personal bot" || bad "N12. empty personal token" "rc=${RC} out='${OUT}' err='${ERR}'"
+
+# refresh, personal bot: self-rotate only, and a dead token never reaches a mint.
+RB2="${TMP}/refreshbin2"; mkdir -p "${RB2}"
+printf '#!/bin/sh\necho "$*" >> "%s/glab2.args"\nexit 1\n' "${TMP}" > "${RB2}/glab"; chmod +x "${RB2}/glab"
+fsg_require_stubs "${RB2}" glab
+printf '%s\n' "glpat-SELFTESTPERSONAL0001" > "${TMP}/personal-token"
+rm -f "${TMP}/glab2.args"
+OUT="$(cd "${PR}" && env -u GITLAB_ATHENA_TOKEN_FILE PATH="${RB2}:${PATH}" "${WRAPPER}" refresh 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"
+if [ "${RC}" = 1 ] && [[ "${ERR}" == *"cannot rotate itself"* ]] && [[ "${ERR}" == *"Fix:"* ]] \
+  && [ "$(cat "${TMP}/glab2.args")" = "api user" ] && [ "$(cat "${TMP}/personal-token")" = "glpat-SELFTESTPERSONAL0001" ]; then
+  ok "N13. refresh for cjpoll/ with a dead token -> refused (Fix: create one as the bot), only \`api user\` ran, token unchanged"
+else bad "N13. personal refresh" "rc=${RC} err='${ERR}' args='$(cat "${TMP}/glab2.args" 2>/dev/null)'"; fi
+rm -f "${TMP}/glab2.args"
+OUT="$(cd "${NR}" && PATH="${RB2}:${PATH}" "${WRAPPER}" refresh 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"
+if [ "${RC}" = 1 ] && [[ "${ERR}" == *"PENDING"* ]] && [ ! -e "${TMP}/glab2.args" ]; then
+  ok "N14. refresh for a namespace whose bot is not named -> refused, glab never called"
+else bad "N14. pending refresh" "rc=${RC} err='${ERR}'"; fi
 
 # DND-1647: no gh/glab call may have fallen through past its stub.
 if fsg_verify; then ok "no gh/glab call fell through past its stub (DND-1647)"

@@ -26,6 +26,20 @@ PASS=0; FAIL=0
 ok()  { printf '  ok    %s\n' "$1"; PASS=$((PASS+1)); }
 bad() { printf '  FAIL  %s\n        %s\n' "$1" "$2"; FAIL=$((FAIL+1)); }
 
+# DND-1936: the GitLab bot is a function of origin's (host, namespace). A
+# fixture identity map (synthetic names) and an empty fixture overlay, so the
+# suite never reads this machine's own overlay or the tracked map.
+WORK_BOT="synthetic-work-bot" PERS_BOT="synthetic-personal-bot"
+export ATHENA_FORGE_IDENTITIES_FILE="${TMP}/forge-identities.json"
+cat > "${ATHENA_FORGE_IDENTITIES_FILE}" <<EOF
+{"kind":"athena-forge-identities","schema":1,"identities":[
+ {"host":"gitlab.com","namespace":"example-group","bot":"${WORK_BOT}","token_file":"/fixture/work-token","refresh":"group_service_account"},
+ {"host":"gitlab.com","namespace":"cjpoll","bot":"${PERS_BOT}","token_file":"/fixture/personal-token","refresh":"self_rotate"},
+ {"host":"gitlab.com","namespace":"pending-ns","bot":null,"pending":"synthetic: not named yet","token_file":"/fixture/pending-token","refresh":"self_rotate"}]}
+EOF
+export ATHENA_PRIVATE_ROOT="${TMP}/empty-overlay"; mkdir -p "${ATHENA_PRIVATE_ROOT}/overlay"; chmod 700 "${ATHENA_PRIVATE_ROOT}"
+printf '{"kind":"athena-private-overlay","schema":1}\n' > "${ATHENA_PRIVATE_ROOT}/athena-overlay.json"
+
 CASE_N=0
 setup_case() {
   CASE_N=$((CASE_N+1))
@@ -41,7 +55,8 @@ setup_case() {
 #                  installation token ALWAYS returns (no authenticated user).
 #                  This single shim is both the healthy case AND the trap.
 #   gh_broken    : any call dies naming the missing App ID file (creds absent).
-#   glab_healthy : `api user` resolves to the athena-amby service account.
+#   glab_healthy : `api user` resolves to the work namespace's bot.
+#   glab_personal: `api user` resolves to the personal (cjpoll/) bot.
 #   glab_broken  : the token file is missing.
 make_shim() {
   local mode="$1" path="${SHIM_DIR}/wrapper-${1}"
@@ -59,7 +74,9 @@ case "\$mode" in
     echo "gh-athena: could not authenticate." >&2
     exit 3 ;;
   glab_healthy)
-    echo '{"username":"athena-amby","name":"Athena","bot":true,"state":"active"}'; exit 0 ;;
+    echo '{"username":"${WORK_BOT}","name":"Athena","bot":true,"state":"active"}'; exit 0 ;;
+  glab_personal)
+    echo '{"username":"${PERS_BOT}","name":"Athena","bot":false,"state":"active"}'; exit 0 ;;
   glab_wrong_identity)
     # authenticates fine, but as the OWNER, not the service account.
     echo '{"username":"cjpoll","name":"Cody","bot":false,"state":"active"}'; exit 0 ;;
@@ -163,14 +180,17 @@ else bad "github subdomain classified as github" "rc=${RC} out='${OUT}' argv='$(
 echo
 echo "-- the preflight: GitLab (the per-forge asymmetry) -------------------------"
 
-# 3d. The same alias tolerance on the GitLab side: gitlab.com-work is gitlab.com.
+# 3d. An ssh-alias host (gitlab.com-work) is still classified as GitLab, so it
+#     never falls through to the unmanaged pass. Since DND-1936 the bot is keyed
+#     on the host the remote names, and an alias is not a key the identity map
+#     holds: it REFUSES, naming the host it searched, and probes no wrapper.
 setup_case
 run_preflight "git@gitlab.com-work:example-group/example-app.git" "/nonexistent/gh" "$(make_shim glab_healthy)"
-if [[ "${RC}" == 0 && -z "${OUT}" ]] && grep -q 'api user' "${ARGV}"; then
-  ok "gitlab ssh-alias host (gitlab.com-work): classified as gitlab, passes via 'api user'"
-else bad "gitlab alias host classified as gitlab" "rc=${RC} out='${OUT}' argv='$(cat "${ARGV}")'"; fi
+if [[ "${RC}" != 0 ]] && [[ "${ERR}" == *"gitlab.com-work/example-group"* ]] && [[ "${ERR}" == *"Fix:"* ]] && [[ ! -s "${ARGV}" ]]; then
+  ok "gitlab ssh-alias host (gitlab.com-work): classified as gitlab, refused by the identity map (no wrapper probe)"
+else bad "gitlab alias host classified as gitlab and refused" "rc=${RC} err='${ERR}' argv='$(cat "${ARGV}")'"; fi
 
-# 4. GitLab is the OPPOSITE of GitHub: the athena-amby service-account PAT DOES
+# 4. GitLab is the OPPOSITE of GitHub: a GitLab bot's PAT DOES
 #    resolve to an authenticated user, so `api user` succeeding IS the correct
 #    health probe here. A healthy GitLab wrapper passes silently, and the argv
 #    proves the probe was `api user` — the asymmetry with case 3 is deliberate.
@@ -187,21 +207,51 @@ else bad "healthy gitlab: passes silently via 'api user'" "rc=${RC} out='${OUT}'
 #    the refresh itself.
 setup_case
 run_preflight "git@gitlab.com:example-group/example-app.git" "/nonexistent/gh" "$(make_shim glab_broken)"
-if [[ "${RC}" != 0 ]] && [[ "${ERR}" == *"Fix: the athena-amby token needs refreshing, which is OWNER-GATED"* ]] \
+if [[ "${RC}" != 0 ]] && [[ "${ERR}" == *"Fix: the ${WORK_BOT} token (/fixture/work-token) needs refreshing, which is OWNER-GATED"* ]] \
    && [[ "${ERR}" == *"escalate to your admiral"* ]] && [[ "${ERR}" != *"glab-athena refresh"* ]]; then
   ok "gitlab broken: refuses with a Fix: line that escalates (never 'run the refresh')"
 else bad "gitlab broken: refuses with an escalate Fix: line, no self-refresh" "rc=${RC} err='${ERR}'"; fi
 
-# 5b. GitLab authenticates, but as the OWNER not the athena-amby service account
+# 5b. GitLab authenticates, but as the OWNER not the namespace's bot
 #     (a token file holding the owner's PAT, or an empty file glab falls back
 #     from). A check that accepted "some user authenticated" would pass here and
 #     let MRs be opened as the owner — the exact failure this guard exists to
 #     stop. The preflight must REFUSE, asserting the resolved identity IS Athena.
 setup_case
 run_preflight "git@gitlab.com:example-group/example-app.git" "/nonexistent/gh" "$(make_shim glab_wrong_identity)"
-if [[ "${RC}" != 0 ]] && [[ "${ERR}" == *"Fix:"* ]] && [[ "${ERR}" == *"athena-amby"* ]]; then
-  ok "gitlab authenticates as the owner, not athena-amby: refuses"
+if [[ "${RC}" != 0 ]] && [[ "${ERR}" == *"Fix:"* ]] && [[ "${ERR}" == *"${WORK_BOT}"* ]]; then
+  ok "gitlab authenticates as the owner, not the namespace's bot: refuses"
 else bad "gitlab wrong identity: refuses" "rc=${RC} err='${ERR}'"; fi
+
+# 5b-ii. DND-1936: the expected bot follows origin's namespace. A cjpoll/
+#     remote expects the personal bot and passes with it ...
+setup_case
+run_preflight "https://gitlab.com/cjpoll/custom.git" "/nonexistent/gh" "$(make_shim glab_personal)"
+if [[ "${RC}" == 0 && -z "${OUT}" && -z "${ERR}" ]] && grep -q 'api user' "${ARGV}"; then
+  ok "cjpoll/ remote, personal bot answers: passes silently"
+else bad "cjpoll/ remote passes with the personal bot" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+#     ... and REFUSES when the work bot answers for it (a token file holding the
+#     other bot's token), and the other way round.
+setup_case
+run_preflight "https://gitlab.com/cjpoll/custom.git" "/nonexistent/gh" "$(make_shim glab_healthy)"
+if [[ "${RC}" != 0 ]] && [[ "${ERR}" == *"${PERS_BOT} bot for gitlab.com/cjpoll"* ]] && [[ "${ERR}" == *"Fix:"* ]]; then
+  ok "cjpoll/ remote, the WORK bot answers: refuses, names the personal bot"
+else bad "cjpoll/ remote refuses the work bot" "rc=${RC} err='${ERR}'"; fi
+setup_case
+run_preflight "git@gitlab.com:example-group/example-app.git" "/nonexistent/gh" "$(make_shim glab_personal)"
+if [[ "${RC}" != 0 ]] && [[ "${ERR}" == *"${WORK_BOT} bot for gitlab.com/example-group"* ]]; then
+  ok "work remote, the PERSONAL bot answers: refuses, names the work bot"
+else bad "work remote refuses the personal bot" "rc=${RC} err='${ERR}'"; fi
+#     A namespace with no entry, a differently cased one, and a bot not named
+#     yet all refuse before any probe.
+for rem in "https://gitlab.com/someone-else/app.git|NO ENTRY" "https://gitlab.com/CJPoll/custom.git|differs only in case" \
+           "https://gitlab.com/pending-ns/app.git|synthetic: not named yet" "https://gitlab.com/custom.git|names no <namespace>/<project>"; do
+  setup_case
+  run_preflight "${rem%%|*}" "/nonexistent/gh" "$(make_shim glab_healthy)"
+  if [[ "${RC}" != 0 ]] && [[ "${ERR}" == *"${rem#*|}"* ]] && [[ "${ERR}" == *"Fix:"* ]] && [[ ! -s "${ARGV}" ]]; then
+    ok "identity miss '${rem%%|*}': refuses (${rem#*|}), probes no wrapper"
+  else bad "identity miss '${rem%%|*}' refused" "rc=${RC} err='${ERR}' argv='$(cat "${ARGV}")'"; fi
+done
 
 # 5c. A FAILED lookup must never look like a clean pass (repo doctrine). No
 #     origin remote and no override → the forge cannot be resolved, so a PR

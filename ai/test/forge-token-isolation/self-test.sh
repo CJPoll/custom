@@ -139,13 +139,23 @@ export FAKE_REC="${REC}"
 # rec_get <key> : a value from the fake's record ('' when the fake never ran).
 rec_get() { [ -f "${REC}" ] && sed -n "s/^$1=//p" "${REC}" | head -n1; }
 
+# DND-1936: glab-athena picks the bot from the project's namespace, so every
+# call runs in a fixture checkout of a project whose namespace the fixture map
+# gives a bot with the default token file. No private overlay is read.
+PROJ="${TMP}/proj"; git init -q "${PROJ}"; git -C "${PROJ}" remote add origin https://gitlab.com/example-group/example-app.git
+IDMAP="${TMP}/forge-identities.json"
+printf '{"kind":"athena-forge-identities","schema":1,"identities":[{"host":"gitlab.com","namespace":"example-group","bot":"synthetic-iso-bot","token_file":"~/.claude/gitlab-athena-token","refresh":"group_service_account"}]}\n' > "${IDMAP}"
+IDOV="${TMP}/empty-overlay"; mkdir -p "${IDOV}/overlay"; chmod 700 "${IDOV}"
+printf '{"kind":"athena-private-overlay","schema":1}\n' > "${IDOV}/athena-overlay.json"
+
 # run_glab <env assignments...> -- <glab-athena args...>
 run_glab() {
   local envs=()
   while [ "$#" -gt 0 ] && [ "$1" != -- ]; do envs+=("$1"); shift; done
   shift
   rm -f "${REC}"
-  OUT="$(cd "${TMP}" && env -i PATH="${BASE_PATH}" HOME="${FHOME}" TMPDIR="${TMPD}" FAKE_REC="${REC}" \
+  OUT="$(cd "${PROJ}" && env -i PATH="${BASE_PATH}" HOME="${FHOME}" TMPDIR="${TMPD}" FAKE_REC="${REC}" \
+    ATHENA_FORGE_IDENTITIES_FILE="${IDMAP}" ATHENA_PRIVATE_ROOT="${IDOV}" \
     "${envs[@]}" "${GLAB_WRAPPER}" "$@" 2>"${TMP}/err")"; RC=$?
   ERR="$(cat "${TMP}/err")"
 }

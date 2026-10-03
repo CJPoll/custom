@@ -21,13 +21,15 @@
 # failure and push the captain into the exact bare-`gh` fallback this guard
 # exists to prevent. `--check` is the health probe; `api user` is not.
 #
-# GitLab is the opposite: the athena-amby *service account* PAT DOES resolve to
-# an authenticated user, so `glab-athena api user` succeeding IS the correct
-# health probe there. The asymmetry is deliberate and per-forge.
+# GitLab is the opposite: a GitLab bot's PAT DOES resolve to an authenticated
+# user, so `glab-athena api user` succeeding IS the correct health probe there,
+# checked against the bot the project's namespace maps to (DND-1936). The
+# asymmetry is deliberate and per-forge.
 #
 # Test seams (used only by ai/test/forge-preflight/self-test.sh; never in prod):
 #   GH_ATHENA_BIN / GLAB_ATHENA_BIN   path to the wrapper (default: sibling script)
 #   FORGE_PREFLIGHT_REMOTE            remote URL (default: `git remote get-url origin`)
+#   ATHENA_FORGE_IDENTITIES_FILE / ATHENA_PRIVATE_ROOT   fixture identity map halves
 #
 # Exit codes: 0 healthy / not-a-managed-forge (nothing to assert) · 1 refused.
 
@@ -73,7 +75,7 @@ GLAB_ATHENA="${GLAB_ATHENA_BIN:-$SELF_DIR/glab-athena}"
 
 # jq is required for the GitLab identity assertion below. Fail loudly HERE with
 # an actionable remedy rather than fail-closing later with a misleading
-# "the athena-amby token needs refreshing" message that would not fix a missing jq.
+# "the bot's token needs refreshing" message that would not fix a missing jq.
 command -v jq >/dev/null 2>&1 || {
   echo "forge-preflight: jq not found, but it is needed to verify the forge identity." >&2
   echo "Fix: install jq (it is already a hard dependency of gh-athena/glab-athena)." >&2
@@ -120,8 +122,8 @@ case "$host" in
   github.com|*.github.com|github.com-*)
     # Probe with --check ONLY. See "THE TRAP" above.
     # LIMITATION (asymmetric with the GitLab branch, which asserts the identity
-    # IS athena-amby): a GitHub App *installation* token cannot fetch the `/app`
-    # slug, so `--check` proves the wrapper reaches an installation but NOT that
+    # IS the bot its namespace maps to): a GitHub App *installation* token
+    # cannot fetch the `/app` slug, so `--check` proves the wrapper reaches an installation but NOT that
     # the installed App is athena-harness specifically. If a DIFFERENT App's
     # id/key were placed at ~/.claude/github-athena-*, this would pass green
     # while PRs were authored by that other bot. Closing this needs a JWT-signed
@@ -143,30 +145,52 @@ case "$host" in
     exit 1
     ;;
   gitlab.com|*.gitlab.com|gitlab.com-*)
-    # GitLab SA PAT resolves to a real user, so `api user` IS the health probe
+    # GitLab bot PATs resolve to a real user, so `api user` IS the health probe
     # (the opposite of GitHub — see THE TRAP). But a readable token file alone
     # proves nothing: it could hold the owner's PAT, another account's token, or
     # be empty (glab may then fall back to the owner's saved login). So assert
-    # the resolved identity IS the athena-amby service account and active — the
-    # same test the wrapper's own `refresh` applies — not merely that SOME user
-    # authenticated. Otherwise the preflight could pass while MRs are still
-    # opened as the owner, the exact failure this exists to stop.
+    # the resolved identity IS the bot this project's namespace maps to, and
+    # active — the same test the wrapper's own `refresh` applies — not merely
+    # that SOME user authenticated.
+    #
+    # Which bot (DND-1936): gitlab.com hosts a work group and the personal
+    # cjpoll/ namespace, each with its own bot, so the expected username comes
+    # from origin's (host, top-level namespace) through the identity map glab-athena
+    # itself reads (ai/lib/forge-identity.sh). A key that resolves to no bot
+    # (no entry, a malformed or aliased host, a bot not named yet, an
+    # unreadable map) is a refusal: the wrapper would refuse the same call.
+    fid_lib="$SELF_DIR/../lib/forge-identity.sh"
+    # shellcheck source=../lib/forge-identity.sh
+    if ! { [ -r "$fid_lib" ] && . "$fid_lib"; }; then
+      echo "forge-preflight: REFUSED — cannot load $fid_lib, so which GitLab bot this repo's MRs must carry is unknown." >&2
+      echo "Fix: run forge-preflight from a full ~/dev/custom checkout (ai/bin and ai/lib side by side)." >&2
+      exit 1
+    fi
+    fid_rc=0; fid_resolve_url "$remote" || fid_rc=$?
+    if [ "$fid_rc" != 0 ]; then
+      {
+        echo "forge-preflight: REFUSED — no Athena GitLab bot resolves for origin ('$remote'), so"
+        echo "glab-athena would refuse every MR write here: $FID_STATE: $FID_WHY."
+        echo "Fix: $FID_FIX"
+      } >&2
+      exit 1
+    fi
+    expect="$FID_BOT"
     if out="$("$GLAB_ATHENA" api user 2>&1)" \
-       && printf '%s' "$out" | jq -e '.username=="athena-amby" and .state=="active"' >/dev/null 2>&1; then
-      exit 0   # healthy AND is Athena → silent
+       && printf '%s' "$out" | jq -e --arg u "$expect" '.username==$u and .state=="active"' >/dev/null 2>&1; then
+      exit 0   # healthy AND is this namespace's bot → silent
     fi
     {
       echo "forge-preflight: REFUSED — the glab-athena wrapper does not authenticate as the"
-      echo "active athena-amby service account, so any MR opened now would be silently"
+      echo "active $expect bot for $FID_HOST/$FID_NS, so any MR opened now would be silently"
       echo "attributed to the wrong identity (the DND-203 failure). The wrapper reported:"
       printf '  %s\n' "$out"
-      echo "Fix: the athena-amby token needs refreshing, which is OWNER-GATED (the refresh mints it"
-      echo "  with the owner's glab session)."
+      echo "Fix: the $expect token ($FID_TOKEN_FILE) needs refreshing, which is OWNER-GATED"
+      echo "  (only the owner renews it, in their own terminal)."
       echo "  Do NOT fall back to bare \`glab\` — do not work around this; escalate to your admiral"
       echo "  with the command + error and wait (athena:github -> \"When a forge write can't be done"
-      echo "  as Athena\"). Only the owner refreshes it, in their own terminal (the guard denies it"
-      echo "  in every Claude Code session); afterwards re-verify with"
-      echo "  \`~/dev/custom/ai/bin/glab-athena api user\`."
+      echo "  as Athena\"). The guard denies the renewal in every Claude Code session; afterwards"
+      echo "  re-verify with \`~/dev/custom/ai/bin/glab-athena api user\` from this repo."
     } >&2
     exit 1
     ;;
