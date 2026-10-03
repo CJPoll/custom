@@ -539,6 +539,12 @@ the admiral's state log, then run, with `--dry-run` first:
 - a stamp kept across a park:
   `mark-in-progress --ref <TICKET> --backfill --restart --at <re-dispatch time>`.
 
+`--restart` refuses an `--at` earlier than the ticket's latest local
+`ticket.dispatched` with `backfill` false, and its `Fix:` names that event's
+time (DND-1877). The printed line says what it checked against, or that it
+could not check (no store, or no event on this machine). The check sees only
+this machine's telemetry.
+
 `--backfill` leaves the status alone. The rows DND-1838 found (DND-1095,
 DND-1438) and their exact commands are on that ticket.
 

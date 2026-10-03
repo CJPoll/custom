@@ -89,14 +89,19 @@ module MarkInProgress
       --restart     with --backfill: replace an existing stamp with --at, the
                     re-dispatch time of a ticket whose stamp was kept across a
                     park. The line printed names the stamp it discarded.
-      --dry-run     print what would be written; write nothing
+                    An --at earlier than the ticket's latest local
+                    ticket.dispatched (backfill false) is refused (exit 2),
+                    naming that event (DND-1877). The line says what it
+                    checked against, or that it could not check.
+      --dry-run    print what would be written; write nothing
       --help        this text
 
     After a Notion write it also records one local ticket.dispatched
     telemetry event (ai/contracts/athena-telemetry.md); that never changes
     the exit code or this output.
 
-    Exit: 0 written (or dry run), 2 usage, 3 Notion or the overlay could not be
+    Exit: 0 written (or dry run), 2 usage (a --restart --at that predates a
+    recorded dispatch included), 3 Notion or the overlay could not be
     read or written, or the ticket or its property is missing.
   TXT
 
@@ -160,14 +165,53 @@ module MarkInProgress
       "overlay/#{DispatchTrackers::OVERLAY_FILE}.json (ai/contracts/athena-private-overlay.md -> Keys in use)."
   end
 
+  # What the local telemetry store gave for a ticket's ticket.dispatched
+  # events. status: :ok, :ok_empty (looked, none), :incomplete (some day file
+  # unreadable) or :no_store (could not look); reason says why.
+  Recorded = Struct.new(:status, :events, :reason, keyword_init: true)
+
+  # DOMAIN. --backfill --restart --at T claims T is the ticket's re-dispatch.
+  # A non-backfill ticket.dispatched recorded for the ticket after T is a real
+  # dispatch the stamp would predate, so T cannot be it (DND-1877). Backfill
+  # events are typed times, not dispatches, and are not checked against.
+  # -> the clause the stdout line carries, which keeps "checked" and "could
+  # not check" apart; or raises BadUsage naming the later event and its Fix.
+  def restart_check(ref, at, recorded)
+    real = recorded.events.reject { |e| e.dig("attrs", "backfill") == true }
+    latest = real.filter_map { |e| [Time.iso8601(e["at"]), e["at"]] rescue nil }.max_by(&:first)
+    if latest && latest.first > Time.iso8601(at)
+      raise BadUsage, "--restart --at #{at} predates #{ref}'s recorded dispatch at #{latest.last} " \
+                      "(a local ticket.dispatched, backfill false), so it cannot be the re-dispatch time. " \
+                      "Fix: pass --at #{latest.last}, the latest recorded dispatch."
+    end
+    partial = recorded.status == :incomplete ? " (partial: #{recorded.reason})" : ""
+    return "checked against its latest recorded dispatch, #{latest.last}#{partial}" if latest
+    return "no recorded dispatch of #{ref} to check against" if %i[ok ok_empty].include?(recorded.status)
+
+    "could not check against a recorded dispatch: #{recorded.reason}"
+  end
+
+  # EFFECTS. The ticket's local ticket.dispatched events. Never raises: a
+  # store that cannot be read is :no_store with the reason.
+  def recorded_dispatches(ref)
+    require_relative "../../../lib/athena_telemetry"
+    r = AthenaTelemetry.read(events: ["ticket.dispatched"], unit: ref)
+    Recorded.new(status: r.status, events: r.events, reason: r.reason)
+  rescue ScriptError, StandardError => e
+    Recorded.new(status: :no_store, events: [], reason: "the telemetry store could not be read (#{e.class})")
+  end
+
   ZONED_RE = /T.*(Z|[+-]\d\d:?\d\d)\z/.freeze
 
+  # A sub-second --at keeps its milliseconds, so a recorded event's own time
+  # (ticket.dispatched carries ms) passes the restart check as given.
   def parse_at(text)
     unless text.match?(ZONED_RE)
       raise BadUsage, "--at needs a time with a zone (e.g. 2026-09-30T02:41:00Z). Fix: pass one."
     end
 
-    Time.iso8601(text).utc.iso8601
+    t = Time.iso8601(text).utc
+    t.subsec.zero? ? t.iso8601 : t.iso8601(3)
   rescue ArgumentError
     raise BadUsage, "--at #{text.inspect} is not an ISO 8601 time. Fix: pass e.g. 2026-09-30T02:41:00Z."
   end
@@ -176,7 +220,10 @@ module MarkInProgress
   # call(method, path, body) -> Hash (raising NextMissionNotion::ReadError), or
   # raising Refused when its token is missing. work: -> DispatchTrackers::Resolution,
   # called only for a non-DND ref. -> exit code.
-  def run(argv, transport_for:, now:, work: -> { DispatchTrackers::Overlay.work }, out: $stdout, err: $stderr)
+  # dispatches: ->(ref) -> Recorded, the ticket's local ticket.dispatched
+  # events (read only for --restart).
+  def run(argv, transport_for:, now:, work: -> { DispatchTrackers::Overlay.work },
+          dispatches: ->(ref) { recorded_dispatches(ref) }, out: $stdout, err: $stderr)
     opts = StrictArgv.parse(argv, { "--ref" => :value, "--at" => :value, "--dry-run" => :switch,
                                     "--backfill" => :switch, "--restart" => :switch })
     ref = opts["--ref"]
@@ -201,6 +248,7 @@ module MarkInProgress
     end
 
     at = opts["--at"] ? parse_at(opts["--at"]) : now.utc.iso8601
+    checked = restart ? restart_check(ref, at, dispatches.call(ref)) : nil
     transport = transport_for.call(tracker)
     page = find(transport, tracker, Integer(ref.split("-", 2).last, 10), ref)
     p = plan(ref, page, at, status: !backfill, tracker: tracker, restart: restart)
@@ -210,7 +258,7 @@ module MarkInProgress
     end
     status_note = backfill ? "Status unchanged" : "Status #{STATUS}"
     out.puts "#{ref}: #{status_note}; #{tracker.property} #{stamp_note(p, page)}" \
-             "#{opts['--dry-run'] ? ' [dry run]' : ''}"
+             "#{checked ? "; #{checked}" : ''}#{opts['--dry-run'] ? ' [dry run]' : ''}"
     err.puts "#{PROG}: #{ref} #{p[:skipped]}" if p[:skipped]
     err.puts "#{PROG}: #{ref} #{p[:note]}" if p[:note]
     0

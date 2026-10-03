@@ -81,6 +81,16 @@ def run(argv, notion, work: WORK)
   [code, out.string, err.string]
 end
 
+$store_n = 0
+def fresh_store
+  $store_n += 1
+  ENV["ATHENA_TELEMETRY_DIR"] = File.join(TELEMETRY_ROOT, "s#{$store_n}")
+end
+
+def dispatched
+  AthenaTelemetry.read(events: ["ticket.dispatched"], env: ENV)
+end
+
 # --- stamps the first move to In Progress, with the status, in one write.
 fresh = FakeNotion.new(page(nil))
 code, out, = run(["--ref", "DND-1318"], fresh)
@@ -138,7 +148,10 @@ check("a stamped re-dispatch from Attention Given keeps its stamp (no park, no r
   attn_kept.patches.first[2]["properties"].keys == ["Status"]
 end
 
-# --- DND-1838: correcting a stamp that was kept across a park.
+# --- DND-1838: correcting a stamp that was kept across a park. A fresh store:
+#     the runs above recorded DND-1318 dispatches at NOW, after these --at
+#     times, which DND-1877 refuses.
+fresh_store
 fix = FakeNotion.new(page("2026-09-28T01:00:00.000Z", status: "Done"))
 code, out, = run(["--ref", "DND-1318", "--backfill", "--restart", "--at", "2026-09-30T04:00:00Z"], fix)
 check("DND-1838 --backfill --restart --at overwrites a kept stamp, status untouched") do
@@ -332,16 +345,6 @@ check("an unknown flag is a usage error") { code == 2 && err.include?("--bogus")
 
 # --- DND-1476: one ticket.dispatched event after a successful write, into a
 #     temp store. Synthetic refs only (DND-9001, ZQ-12).
-$store_n = 0
-def fresh_store
-  $store_n += 1
-  ENV["ATHENA_TELEMETRY_DIR"] = File.join(TELEMETRY_ROOT, "s#{$store_n}")
-end
-
-def dispatched
-  AthenaTelemetry.read(events: ["ticket.dispatched"], env: ENV)
-end
-
 class PatchFails < FakeNotion
   def call(method, path, body = nil)
     res = super
@@ -404,6 +407,71 @@ r = dispatched
 check("T3e DND-1838 a restart that discarded nothing gives restart=true and no previous_stamp") do
   r.events.size == 1 &&
     r.events.first["attrs"] == { "tracker" => "dnd", "first_dispatch" => false, "backfill" => true, "restart" => true }
+end
+
+# --- DND-1877: --backfill --restart --at T must not predate the ticket's own
+#     latest recorded (non-backfill) dispatch. Fixture stores only; synthetic refs.
+def record_dispatch(ref, at, backfill: false)
+  AthenaTelemetry.emit("ticket.dispatched", at: Time.iso8601(at), unit: ref,
+                                            attrs: { "tracker" => "dnd", "first_dispatch" => false,
+                                                     "backfill" => backfill, "restart" => false })
+end
+
+fresh_store
+record_dispatch("DND-9001", "2026-10-03T07:03:31Z")
+early = FakeNotion.new(page("2026-09-30T23:49:00.000Z", status: "Done"))
+code, out, err = run(["--ref", "DND-9001", "--backfill", "--restart", "--at", "2026-10-01T07:04:00Z"], early)
+check("R1 DND-1877 a --restart --at before a later recorded dispatch is refused (exit 2) and writes nothing") do
+  code == 2 && early.patches.empty? && out.empty?
+end
+check("R1 DND-1877 the refusal names the later event's time and a Fix: using it") do
+  err.include?("2026-10-03T07:03:31") && err.include?("Fix:") && err.include?("--at 2026-10-03T07:03:31")
+end
+check("R1 DND-1877 a refusal records no event") { dispatched.events.size == 1 }
+earlydry = FakeNotion.new(page("2026-09-30T23:49:00.000Z", status: "Done"))
+code, _o, err = run(["--ref", "DND-9001", "--backfill", "--restart", "--at", "2026-10-01T07:04:00Z", "--dry-run"],
+                    earlydry)
+check("R2 DND-1877 a dry run is refused the same way") { code == 2 && err.include?("Fix:") && earlydry.patches.empty? }
+
+same = FakeNotion.new(page("2026-09-30T23:49:00.000Z", status: "Done"))
+code, out, = run(["--ref", "DND-9001", "--backfill", "--restart", "--at", "2026-10-03T07:03:31Z"], same)
+check("R3 DND-1877 --at equal to the latest recorded dispatch is written") do
+  code == 0 && same.patches.first[2].dig("properties", "In Progress at", "date", "start") == "2026-10-03T07:03:31Z"
+end
+check("R3 DND-1877 the line says what it checked against") do
+  out.include?("checked against") && out.include?("2026-10-03T07:03:31")
+end
+record_dispatch("DND-9003", "2026-10-03T07:03:31.500Z")
+ms = FakeNotion.new(page("2026-09-30T23:49:00.000Z", status: "Done"))
+code, _o, err = run(["--ref", "DND-9003", "--backfill", "--restart", "--at", "2026-10-03T07:03:31Z"], ms)
+fixed_at = err[/--at (\S+), the latest/, 1]
+code2, = run(["--ref", "DND-9003", "--backfill", "--restart", "--at", fixed_at.to_s], ms)
+check("R3b DND-1877 a sub-second event: the Fix's own --at is accepted and stamped with its milliseconds") do
+  code == 2 && code2 == 0 &&
+    ms.patches.first[2].dig("properties", "In Progress at", "date", "start") == "2026-10-03T07:03:31.500Z"
+end
+later = FakeNotion.new(page("2026-09-30T23:49:00.000Z", status: "Done"))
+code, = run(["--ref", "DND-9001", "--backfill", "--restart", "--at", "2026-10-03T08:00:00Z"], later)
+check("R4 DND-1877 --at after the latest recorded dispatch is written") { code == 0 && later.patches.size == 1 }
+
+fresh_store
+record_dispatch("DND-9001", "2026-10-03T07:03:31Z", backfill: true)
+record_dispatch("DND-9002", "2026-10-03T07:03:31Z")
+other = FakeNotion.new(page("2026-09-30T23:49:00.000Z", status: "Done"))
+code, out, = run(["--ref", "DND-9001", "--backfill", "--restart", "--at", "2026-10-01T07:04:00Z"], other)
+check("R5 DND-1877 a later backfill event, or another ticket's event, is not checked against") do
+  code == 0 && other.patches.size == 1
+end
+check("R5 DND-1877 with no event to check against, the line says so") do
+  out.include?("no recorded dispatch of DND-9001 to check against")
+end
+
+fresh_store
+nostore = FakeNotion.new(page("2026-09-30T23:49:00.000Z", status: "Done"))
+code, out, = run(["--ref", "DND-9001", "--backfill", "--restart", "--at", "2026-10-01T07:04:00Z"], nostore)
+check("R6 DND-1877 with no telemetry store it writes, and says it could not check") do
+  code == 0 && nostore.patches.size == 1 && out.include?("could not check") &&
+    !out.include?("no recorded dispatch")
 end
 
 fresh_store
