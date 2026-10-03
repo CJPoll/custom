@@ -1884,8 +1884,8 @@ DND1796_REPO="$(cd "${ROOT}/../../.." && pwd)"
 # chain file added later). The manifest's unconditional owner-approval-policy surface
 # holds the chain beside the classifier and the owner verifiers. This list names what the
 # fixture KEEPS held (the classifier, its manifest, the owner verifiers, and the merge-role,
-# forge-identity, forge-auth, private-overlay and harness-gate neighbours the cases do not
-# edit); every other pattern of that surface, so any chain file added later, is unheld.
+# forge-identity, forge-auth, private-overlay and harness-gate neighbours, and the
+# harness-gate libraries, none of which the cases edit); every other pattern of that surface, so any chain file added later, is unheld.
 FIXTURE_KEEP_HELD='**/athena/owner_approvals/action_class.ex
 **/athena/owner_approvals/action_class_test.exs
 ai/blast-radius/**
@@ -2101,7 +2101,7 @@ jq -e '[.surfaces[].patterns[]?] | (index("ai/bin/blast-radius") != null) and (i
 jq -e '[.surfaces[].patterns[]?] | index("ai/lib/integration-receipt.sh") | not' "${TMP}/lb11-real.json" >/dev/null \
   && ok "lb11 a real chain file is unheld in the fixture" || bad "lb11 the fixture kept a real chain file held"
 
-jq -e --arg keep "$FIXTURE_KEEP_HELD" '($keep | split("\n")) as $k | [.surfaces[].patterns[]?] as $all | $k | all(. as $e | $all | index($e))' \
+jq -e --arg keep "$FIXTURE_KEEP_HELD" '($keep | split("\n")) as $k | [.surfaces[] | select(.class == "owner-approval-policy" and (has("content") | not)) | .patterns[]?] as $all | $k | all(. as $e | $all | index($e))' \
   "${DND1796_REPO}/ai/blast-radius/surfaces.json" >/dev/null \
   && ok "lb11 every kept-held entry is still a pattern of the manifest" \
   || bad "lb11 FIXTURE_KEEP_HELD names a pattern the manifest no longer holds. Fix: drop or rename the stale entry in FIXTURE_KEEP_HELD in this file."
