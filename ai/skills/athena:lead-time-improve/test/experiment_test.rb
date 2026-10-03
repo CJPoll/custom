@@ -1723,7 +1723,7 @@ end
 check("the tracked registry is well formed (ai/config/lead-time-series-breaks.json)") do
   path = File.expand_path("../../../config/lead-time-series-breaks.json", __dir__)
   b, why = X.series_breaks(JSON.parse(File.read(path)))
-  why.nil? && b.map { |x| x["ticket"] } == %w[DND-1501 DND-1809 DND-1819 DND-1838]
+  why.nil? && b.map { |x| x["ticket"] } == %w[DND-1501 DND-1809 DND-1819 DND-1838 DND-1904]
 end
 
 # ── store ───────────────────────────────────────────────────────────────────

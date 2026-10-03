@@ -24,6 +24,12 @@
       "commit": "e8e19fc7e498eed692a431d845e49c3bd793348b",
       "phases": ["implement"],
       "what": "a re-dispatch from Parked restarts the dispatch stamp, and after a recorded restart implement ends at the first gate run at or after it: implement reads measured (was invalid) and excludes the parked span"
+    },
+    {
+      "ticket": "DND-1904",
+      "commit": "f5f0a7c1770e12b74bdab2cfa7bd55f6193870cf",
+      "phases": ["implement"],
+      "what": "a later landing of an already-landed ticket starts implement at its follow-up ticket.dispatched, else at the previous landing, not the first dispatch stamp"
     }
   ]
 }
