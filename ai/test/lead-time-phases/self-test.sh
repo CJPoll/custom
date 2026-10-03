@@ -432,8 +432,9 @@ has "the header reports foreign beside the rows" "${OUT}" "3 row(s) of 3 in the 
 has "foreign landings are named" "${OUT}" "foreign: 2 (DND-9101, DND-9103; out of the phase stats and biggest)"
 lacks "no phase n/a reason is the foreign one" "${OUT}" "worked on another machine (no local"
 run "${TEL_LAPTOP}" --summary --repo gen_saas --json
-JSON_OR="$(printf '%s' "${OUT}" | /usr/bin/ruby -rjson -e 'j = JSON.parse($stdin.read); i = j.dig("phases", "implement"); puts [j["rows"], j["foreign"], i["n"], i["n_na"], j.dig("totals", "lead", "n")].join(",")')"
-eq "--json: 3 rows, 2 foreign, implement over the 1 local row, lead over all 3" "${JSON_OR}" "3,2,1,0,3"
+JSON_OR="$(printf '%s' "${OUT}" | /usr/bin/ruby -rjson -e 'j = JSON.parse($stdin.read); i = j.dig("phases", "implement"); puts [j["rows"], j["foreign"], i["n"], i["n_na"], j.dig("totals", "lead", "n"), j.dig("totals", "lead", "n_na")].join(",")')"
+# DND-1615: gen_saas declares post-merge CI, and one of the 3 landings ended at the merge (no run found), so its lead is n/a, not a shorter lead.
+eq "--json: 3 rows, 2 foreign, implement over the 1 local row, lead over the 2 with a post-merge run, 1 n/a" "${JSON_OR}" "3,2,1,0,2,1"
 # The miss: no store is could not look, never foreign.
 STATE="${TMP}/state-origin-none"
 ROWS="${TMP}/rows-gs.json" run "${TEL_NONE}" --ingest --repo gen_saas
