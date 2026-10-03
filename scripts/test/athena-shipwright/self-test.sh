@@ -115,6 +115,18 @@ ok()   { printf '  ok    %s\n' "$1"; PASS=$((PASS+1)); }
 bad()  { printf '  FAIL  %s\n' "$1"; printf '        %s\n' "${2:-}"; FAIL=$((FAIL+1)); }
 case_() { printf '\n%s\n' "$1"; }
 
+# DND-1676: a call to an undefined helper is a failure, not a printed warning.
+# Bash reports it as "command not found" and carries on, so a case that called
+# a helper defined further down ran without the guarantee it claimed and the
+# suite stayed green. Subshells and command substitutions inherit this handler,
+# so the marker file sees every call.
+UNDEFINED_CALLS="${TMP}/undefined-calls"
+command_not_found_handle() {
+  printf '%s: %s: command not found\n' "${BASH_SOURCE[1]:-self-test}" "$1" >&2
+  printf '%s (line %s)\n' "$1" "${BASH_LINENO[0]:-?}" >>"${UNDEFINED_CALLS}"
+  return 127
+}
+
 # A fresh repo with one committed file.
 #
 # The repo lives in its own case directory and every fixture the suite itself
@@ -660,6 +672,11 @@ run_runner() { # run_runner <repo> [env...] ; echoes rc, out/err beside the repo
     "$RUNNER" >"${a}/runner.out" 2>"${a}/runner.err"
   echo $?
 }
+
+# DND-1676: defined with the other runner helpers, before any case calls it.
+# The runner keys records on a second-resolution ts. Two ticks in one second
+# share a record path, so wait for the next second where a case compares records.
+next_second() { local s; s="$(date +%s)"; for _ in $(seq 1 30); do [ "$(date +%s)" != "$s" ] && return 0; sleep 0.1; done; }
 
 # A probe stub that records WHERE it ran, WHICH lane branch it was on, and WHAT
 # state directory it was handed. "Where/which" is the whole point of these
@@ -2142,9 +2159,6 @@ case_ 'athena-shipwright-run.sh — a WEDGED tick leaves a record and alerts ONC
 wedge_msgs() { find "${ALERTS}" -maxdepth 1 -type f -name '*-shipwright-wedged.md' 2>/dev/null | sort; }
 wedge_count() { wedge_msgs | grep -c . || true; }
 newest_wedged() { find "$(sd "$1")/runs" -maxdepth 1 -name '*.wedged' 2>/dev/null | sort | tail -n1; }
-# The runner keys records on a second-resolution ts. Two ticks in one second
-# share a record path, so wait for the next second where a case compares records.
-next_second() { local s; s="$(date +%s)"; for _ in $(seq 1 30); do [ "$(date +%s)" != "$s" ] && return 0; sleep 0.1; done; }
 arm_wedge() { mkdir -p "$(sd "$1")"; printf '%s\n' "$2" >"$(sd "$1")/consecutive-failures"; }
 
 # Headline (fail-first): a counter at the threshold. The tick exits 75, spawns
@@ -2643,6 +2657,10 @@ fi
 # DND-1667: no git call may have fallen through past a git stub.
 if fsg_verify; then ok "no git call fell through past its stub (DND-1667)"
 else bad "no git call fell through past its stub (DND-1667)" "see the forge-stub-guard FAIL above"; fi
+
+# DND-1676: no case may have called an undefined helper.
+if [ ! -s "${UNDEFINED_CALLS}" ]; then ok "no case called an undefined command (DND-1676)"
+else bad "no case called an undefined command (DND-1676)" "called: $(tr '\n' ';' <"${UNDEFINED_CALLS}")"; fi
 
 # ---------------------------------------------------------------------------
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
