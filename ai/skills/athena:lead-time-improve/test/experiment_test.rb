@@ -651,7 +651,7 @@ end
 check("layout_fields: a commit adding features/x.feature names it as unclassified, holding nothing") do
   f = X.layout_fields(Source.ok([[3, 0, "features/x.feature"], [4, 1, "lib/d.rb"]]))
   f == { "revert_deletes_tests" => [], "revert_unclassified" => ["features/x.feature"] } &&
-    X.hold("revert", f).nil?
+    X.hold("revert", f.merge("revert_inline_tests" => [])).nil?
 end
 
 check("layout_fields: a plain source change names nothing") do
@@ -673,7 +673,7 @@ check("unclassified_text: names the paths; nil for none; n/a for unknown or a mi
 end
 
 check("hold: revert with revert_deletes_tests non-empty is held, naming the tests") do
-  X.hold("revert", { "revert_deletes_tests" => ["a/test/t.sh"] }) == { "tests" => ["a/test/t.sh"] }
+  X.hold("revert", { "revert_deletes_tests" => ["a/test/t.sh"], "revert_inline_tests" => [] }) == { "tests" => ["a/test/t.sh"] }
 end
 
 check("hold: revert with _na is held (fail closed)") do
@@ -681,7 +681,11 @@ check("hold: revert with _na is held (fail closed)") do
 end
 
 check("hold: revert with [] is not held") do
-  X.hold("revert", { "revert_deletes_tests" => [] }).nil?
+  X.hold("revert", { "revert_deletes_tests" => [], "revert_inline_tests" => [] }).nil?
+end
+
+check("hold: a record with the tests list but no inline field is held (could not look), never none") do
+  X.hold("revert", { "revert_deletes_tests" => [] }) == { "could_not_look" => "the record carries no revert_inline_tests list" }
 end
 
 check("hold: revert with neither field is held (could not look), never read as []") do
@@ -720,6 +724,28 @@ end
 
 check("inline_self_test_lines: a ruby self-test function takes its body and end (and the dispatch line), not run_check") do
   FirstParty.inline_self_test_lines(RUBY_TOOL) == [1, 2, 3, 4, 5, 11]
+end
+
+check("inline_self_test_lines: a bash self_test() function takes its body and the closing brace") do
+  FirstParty.inline_self_test_lines("self_test() {\n  echo a\n  echo b\n}\necho after\n") == [1, 2, 3, 4]
+end
+
+check("inline_self_test_lines: a bash case branch takes its body up to the ;;") do
+  text = "case \"$1\" in\n  --self-test)\n    echo a\n    ;;\n  *) echo run ;;\nesac\n"
+  FirstParty.inline_self_test_lines(text) == [2, 3, 4]
+end
+
+check("inline_self_test_lines: an Elixir defp run_self_test takes its body") do
+  FirstParty.inline_self_test_lines("defp run_self_test do\n  :ok\nend\n\ndefp run, do: :x\n") == [1, 2, 3]
+end
+
+check("inline_self_test_lines: a one-line opener with no body is only itself") do
+  FirstParty.inline_self_test_lines("x = 1\nexit(ARGV.include?(\"--self-test\") ? 0 : 1)\ny = 2\n") == [2]
+end
+
+check("file_additions: a repo that is not on this machine is could not look, never none") do
+  require_relative "../lib/experiment_git"
+  LeadTimeExperimentGit.file_additions("/no/such/repo", LANDING, "ai/bin/t").could_not_look?
 end
 
 check("inline_self_test_lines: a tool with no self-test has none") do

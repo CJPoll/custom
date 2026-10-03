@@ -777,7 +777,7 @@ module LeadTimeExperiment
   # revert_inline_tests_na with the reason when a reading could not look.
   # Never [] for unknown.
   def inline_fields(readings)
-    readings.sort.each do |path, src|
+    readings.sort_by(&:first).each do |path, src|
       return { "revert_inline_tests_na" => "#{path}: #{src.reason}" } if src.could_not_look?
     end
     hits = readings.select do |_, src|
@@ -787,14 +787,14 @@ module LeadTimeExperiment
     { "revert_inline_tests" => hits.keys.sort }
   end
 
-# The inline fields for one commit: from its numstat Source, reading each
-# candidate file through the block (path -> Source, XG.file_additions).
-# numstat could not look: _na with that reason, so nothing reads as none.
-def inline_fields_from(numstat_src)
-  return { "revert_inline_tests_na" => numstat_src.reason } if numstat_src.could_not_look?
+  # The inline fields for one commit: from its numstat Source, reading each
+  # candidate file through the block (path -> Source, XG.file_additions).
+  # numstat could not look: _na with that reason, so nothing reads as none.
+  def inline_fields_from(numstat_src)
+    return { "revert_inline_tests_na" => numstat_src.reason } if numstat_src.could_not_look?
 
-  inline_fields(inline_candidates(numstat_src.items).to_h { |path| [path, yield(path)] })
-end
+    inline_fields(inline_candidates(numstat_src.items).to_h { |path| [path, yield(path)] })
+  end
 
   # ── unclassified additions (DND-1634) ───────────────────────────────────
   # Observability only: these fields never reach `hold`, so they hold
@@ -846,13 +846,14 @@ end
     return { "could_not_look" => "the record carries no revert_deletes_tests list" } unless tests.is_a?(Array)
 
     # DND-1577: a case added inside a tool's own --self-test is a test too.
-    # `fields` without the inline keys is read as having none; scripts/experiment
-    # always supplies them (it reads the commit for a record that lacks them).
+    # Neither inline key (or a non-list) is could not look, never none.
     inline_na = fields["revert_inline_tests_na"]
     return { "could_not_look" => inline_na.to_s } if inline_na
 
     inline = fields["revert_inline_tests"]
-    tests += inline if inline.is_a?(Array)
+    return { "could_not_look" => "the record carries no revert_inline_tests list" } unless inline.is_a?(Array)
+
+    tests += inline
     tests = tests.uniq.sort
     tests.empty? ? nil : { "tests" => tests }
   end

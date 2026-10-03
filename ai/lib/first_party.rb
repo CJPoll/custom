@@ -124,9 +124,9 @@ module FirstParty
   INLINE_SELF_TEST_RE = /(?<![\w-])--self-test(?![\w-])/.freeze
 
   # A function that holds the suite: `def run_self_test`, `function self_test`,
-  # `self_test() {`. Its body is a self-test block even when the `--self-test`
+  # `self_test() {`, an Elixir `defp run_self_test`. Its body is a self-test block even when the `--self-test`
   # token sits elsewhere in the file (the dispatch line).
-  SELF_TEST_DEF_RE = /\A\s*(?:(?:def|function)\s+\w*self[_-]?test|\w*self_test\w*\s*\(\s*\))/i.freeze
+  SELF_TEST_DEF_RE = /\A\s*(?:(?:defp?|function)\s+\w*self[_-]?test|\w*self_test\w*\s*\(\s*\))/i.freeze
 
   # The line closing a block, taken into it: end, fi, done, esac, }, ), ;;.
   BLOCK_CLOSER_RE = /\A\s*(?:end|fi|done|esac|\}|\)|;;)(?![\w-])/.freeze

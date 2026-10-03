@@ -77,8 +77,8 @@ HELP = <<~TXT
            it on the repo's main. It also stores the test paths the commit
            added lines to (revert_deletes_tests), or why git could not
            tell, the tools whose inline --self-test block gained lines
-           (revert_inline_tests, DND-1577; or _na), and the added paths it could classify as neither source
-           nor test (revert_unclassified, DND-1634: a test-like layout
+           (revert_inline_tests, DND-1577; or _na), and the added paths
+           it could classify as neither source nor test (revert_unclassified, DND-1634: a test-like layout
            with no test word, such as features/, __mocks__/, fixtures/
            or a *.feature file); record and every revert line name them.
            They hold nothing. The baseline is the last K=10 comparable
@@ -547,7 +547,8 @@ module Record
     trailer!(change, change_path, commit, repo, metric)
     cross = change == repo.name ? {} : { "change_repo" => change }.merge(Live.resolve(state, change, change_path, commit, live_at!(change, change_path, commit)))
     src = XG.numstat(change_path, commit)
-tests = X.layout_fields(src).merge(X.inline_fields_from(src) { |file| XG.file_additions(change_path, commit, file) })
+    inline = X.inline_fields_from(src) { |file| XG.file_additions(change_path, commit, file) }
+    tests = X.layout_fields(src).merge(inline)
     row = build(repo, metric, opts["--kind"], commit, hypothesis, now, rows, cross).merge(tests)
     Setup.append(Setup.store(state)) { |existing| admit!(X.fold(existing), row) }
     xtext = X.cross_text(row)
@@ -724,18 +725,18 @@ tests = X.layout_fields(src).merge(X.inline_fields_from(src) { |file| XG.file_ad
 
   # What a plain revert of the commit would delete (DND-1549).
   # Plus its unclassified additions (DND-1634), named or n/a.
-def describe_tests(tests)
-  paths = (tests["revert_deletes_tests"].to_a + tests["revert_inline_tests"].to_a).uniq.sort
-  out = if tests["revert_deletes_tests_na"]
-          "; revert_deletes_tests n/a (#{tests['revert_deletes_tests_na']}): a revert verdict on it is held"
-        elsif tests["revert_inline_tests_na"]
-          "; revert_inline_tests n/a (#{tests['revert_inline_tests_na']}): a revert verdict on it is held"
-        elsif paths.empty? then ""
-        else "; a plain revert would delete test additions in #{paths.join(', ')}"
-        end
-  note = X.unclassified_text(tests)
-  note ? "#{out}; #{note}" : out
-end
+  def describe_tests(tests)
+    paths = (tests["revert_deletes_tests"].to_a + tests["revert_inline_tests"].to_a).uniq.sort
+    out = if tests["revert_deletes_tests_na"]
+            "; revert_deletes_tests n/a (#{tests['revert_deletes_tests_na']}): a revert verdict on it is held"
+          elsif tests["revert_inline_tests_na"]
+            "; revert_inline_tests n/a (#{tests['revert_inline_tests_na']}): a revert verdict on it is held"
+          elsif paths.empty? then ""
+          else "; a plain revert would delete test additions in #{paths.join(', ')}"
+          end
+    note = X.unclassified_text(tests)
+    note ? "#{out}; #{note}" : out
+  end
 
   def describe_baseline(b)
     out = if b["na_reason"] then "n/a (#{b['na_reason']})"
@@ -1046,31 +1047,31 @@ module Judge
     yield path
   end
 
-# The record's revert_deletes_tests, revert_inline_tests (DND-1577) and
-# revert_unclassified (DND-1634) lists; each one missing is computed now from
-# ONE numstat read (plus the inline self-test reads) with the same adapter:
-# for a record written before DND-1549, DND-1577 or DND-1634 (no field), and
-# for one whose git could not look at record time (_na), so a one-off git
-# failure does not hold the revert for good. Still unknown stays _na, which
-# X.hold holds. X.hold reads the tests and inline fields; the unclassified
-# ones feed only the line's text.
-def layout_fields(exp, repo, res)
-  tests = exp["revert_deletes_tests"].is_a?(Array)
-  inline = exp["revert_inline_tests"].is_a?(Array)
-  unclassified = exp["revert_unclassified"].is_a?(Array)
-  return exp if tests && inline && unclassified
+  # The record's revert_deletes_tests, revert_inline_tests (DND-1577) and
+  # revert_unclassified (DND-1634) lists; each one missing is computed now from
+  # ONE numstat read (plus the inline self-test reads) with the same adapter:
+  # for a record written before DND-1549, DND-1577 or DND-1634 (no field), and
+  # for one whose git could not look at record time (_na), so a one-off git
+  # failure does not hold the revert for good. Still unknown stays _na, which
+  # X.hold holds. X.hold reads the tests and inline fields; the unclassified
+  # ones feed only the line's text.
+  def layout_fields(exp, repo, res)
+    tests = exp["revert_deletes_tests"].is_a?(Array)
+    inline = exp["revert_inline_tests"].is_a?(Array)
+    unclassified = exp["revert_unclassified"].is_a?(Array)
+    return exp if tests && inline && unclassified
 
-  src, inl = in_change_repo(exp, repo, res) do |path|
-    numstat = XG.numstat(path, exp["commit"])
-    [numstat, inline ? exp.slice("revert_inline_tests") : X.inline_fields_from(numstat) { |file| XG.file_additions(path, exp["commit"], file) }]
+    src, read = in_change_repo(exp, repo, res) do |path|
+      numstat = XG.numstat(path, exp["commit"])
+      [numstat, X.inline_fields_from(numstat) { |file| XG.file_additions(path, exp["commit"], file) }]
+    end
+    # in_change_repo hands back a could-not-look Source when the change repo
+    # cannot be resolved; the inline read is then unknown for the same reason.
+    read ||= X.inline_fields_from(src)
+    (tests ? exp.slice("revert_deletes_tests") : X.deletes_tests_fields(src))
+      .merge(inline ? exp.slice("revert_inline_tests") : read)
+      .merge(unclassified ? exp.slice("revert_unclassified") : X.unclassified_fields(src))
   end
-  # in_change_repo hands back a could-not-look Source when the change repo
-  # cannot be resolved; the inline read is then unknown for the same reason.
-  inl ||= X.inline_fields_from(src)
-  (tests ? exp.slice("revert_deletes_tests") : X.deletes_tests_fields(src))
-    .merge(inline ? exp.slice("revert_inline_tests") : inl)
-    .merge(unclassified ? exp.slice("revert_unclassified") : X.unclassified_fields(src))
-end
 
   # Under the lock: only experiments whose status is still the one judged
   # from (another judge may have settled one meanwhile), and only a changed
