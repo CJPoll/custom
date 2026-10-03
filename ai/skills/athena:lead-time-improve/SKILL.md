@@ -262,10 +262,8 @@ certainty. A declared series break on the phase inside it does too
 checks `--metric na_share`, which reads breaks only: no trailer confounds
 instrumentation. For instrumentation, SETTLING means it would read
 confounded if it landed now: not a target this run, though nothing blocks
-it. Read SETTLING as a pending change on the phase:
-
-A phase is a change target only when settling's `target` (`--json`) is true,
-or its line says "change target: yes".
+it. A phase is a change target only when settling's `target` (`--json`) is
+true, or its line says "change target: yes". Read the verdict as follows:
 
 - **CLEAN**: the phase is a change target.
 - **SETTLING**: not a target this run. The action is `no action` ("<phase>
