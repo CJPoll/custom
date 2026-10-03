@@ -69,8 +69,9 @@ FULL = [
 NO_RECEIPT = S.empty("no receipt")
 NO_VERDICTS = S.empty("no verdicts")
 
-def anchors(l, events, receipt: NO_RECEIPT, verdicts: NO_VERDICTS)
-  L::Anchors.from(landing: l, events: events, receipt: receipt, verdicts: verdicts)
+def anchors(l, events, receipt: NO_RECEIPT, verdicts: NO_VERDICTS, dispatches: nil)
+  extra = dispatches ? { dispatches: dispatches } : {}
+  L::Anchors.from(landing: l, events: events, receipt: receipt, verdicts: verdicts, **extra)
 end
 
 # ── Phases.compute ─────────────────────────────────────────────────────────
@@ -1428,6 +1429,128 @@ VS12 = [ev("critic.round", "2026-10-01T03:00:00Z", duration_s: 30.0, attrs: { "v
 s12 = fixture { L::Phases.compute(anchors(late, S.ok(VS12))) }
 check("V12 standalone, a first gate run before the dispatch stamp stays invalid") do
   s12.dig("verify", "invalid") == true && s12.dig("implement", "invalid") == true
+end
+
+# ── DND-1904: a later landing's implement starts at its follow-up dispatch ──
+# A ticket that lands twice. Stamp T0 (10-01 01:00), first landing L1 (10-01
+# 05:00), follow-up dispatch D2 (10-02 01:00), first gate G2 (10-02 02:00),
+# second landing L2 (10-02 05:00). The second row's implement must not hold
+# the first landing's span (T0 -> L1) or the idle gap (L1 -> D2).
+L1 = "2026-10-01T05:00:00Z"
+D2 = "2026-10-02T01:00:00Z"
+G2 = "2026-10-02T02:00:00Z"
+L2 = "2026-10-02T05:00:00Z"
+def second_landing(start: "2026-10-01T01:00:00Z", after: L1)
+  landing(start: start, landed: L2).merge("after" => after && t(after))
+end
+
+def follow_up(at, first_dispatch: false)
+  ev("ticket.dispatched", at, attrs: { "tracker" => "dnd", "first_dispatch" => first_dispatch })
+end
+
+G2_RUN = ev("harness_gate.run", G2, duration_s: 60.0, attrs: { "ok" => true })
+l2 = second_landing
+a2 = fixture { anchors(l2, S.ok([follow_up(D2), G2_RUN])) }
+ph_l2 = fixture { L::Phases.compute(a2) }
+check("D1 a later landing's implement = first gate - its follow-up dispatch, not the first stamp") do
+  ph_l2.dig("implement", "s") == (t(G2) - t(D2)).to_i
+end
+check("D1 the dispatch anchor names the follow-up ticket.dispatched") do
+  a2["dispatch"].source == "follow-up ticket.dispatched #{D2}" && a2["dispatch"].at == t(D2)
+end
+full_l2 = [follow_up(D2), G2_RUN,
+           ev("critic.round", "2026-10-02T03:00:00Z", duration_s: 30.0, attrs: { "verdict" => "pass" }),
+           ev("integration_gate.run", "2026-10-02T04:00:00Z", duration_s: 300.0, attrs: { "exit_code" => 0 })]
+ph_full = fixture { L::Phases.compute(anchors(l2, S.ok(full_l2))) }
+check("D1 the five phases telescope to landed - implement start") do
+  L::PHASES.all? { |p| ph_full[p]["s"].is_a?(Integer) } && ph_full.values.sum { |c| c["s"] } == (t(L2) - t(D2)).to_i
+end
+
+a2_none = fixture { anchors(l2, S.ok([G2_RUN])) }
+check("D2 no follow-up event: implement = first gate - previous landing, source names it") do
+  L::Phases.compute(a2_none).dig("implement", "s") == (t(G2) - t(L1)).to_i &&
+    a2_none["dispatch"].source == "previous landing #{L1} (no local follow-up dispatch)"
+end
+
+in_flight = ev("ticket.dispatched", "2026-10-01T03:00:00Z", attrs: { "tracker" => "dnd", "first_dispatch" => false })
+a2_flight = fixture { anchors(l2, S.ok([in_flight, G2_RUN])) }
+check("D3 a dispatch before the previous landing is not in span: falls back to the previous landing") do
+  a2_flight["dispatch"].at == t(L1) && a2_flight["dispatch"].source.start_with?("previous landing")
+end
+
+park_resume = [follow_up("2026-10-02T03:00:00Z"), follow_up(D2), G2_RUN]
+check("D4 two follow-up dispatches in span: the earliest anchors implement") do
+  fixture { anchors(l2, S.ok(park_resume)) }["dispatch"].at == t(D2)
+end
+
+restart_l2 = second_landing(start: "2026-10-02T01:30:00Z")
+a2_restart = fixture { anchors(restart_l2, S.ok([follow_up(D2), G2_RUN])) }
+check("D5 a DND-1838 restart stamp later than the follow-up dispatch wins") do
+  a2_restart["dispatch"].at == t("2026-10-02T01:30:00Z") && a2_restart["dispatch"].source.start_with?("dispatch stamp") &&
+    L::Phases.compute(a2_restart).dig("implement", "s") == (t(G2) - t("2026-10-02T01:30:00Z")).to_i
+end
+
+first = landing
+a_first = fixture { anchors(first, S.ok([follow_up(D2), G2_RUN] + FULL)) }
+check("D6 a first landing (no after) is unchanged: anchored at the stamp whatever dispatch events exist") do
+  a_first["dispatch"].at == t("2026-10-01T01:00:00Z") && a_first["dispatch"].source == "dispatch stamp" &&
+    a_first["dispatch"].to_h_json == { "at" => "2026-10-01T01:00:00Z", "source" => "dispatch stamp" }
+end
+
+other_unit = ev("ticket.dispatched", D2, unit: "DND-9002", attrs: { "first_dispatch" => false })
+check("D7 another unit's dispatch is not this ticket's follow-up") do
+  fixture { anchors(l2, S.ok([other_unit, G2_RUN])) }["dispatch"].at == t(L1)
+end
+
+sep = fixture { anchors(l2, S.ok([G2_RUN]), dispatches: S.ok([follow_up(D2)])) }
+check("D8 the follow-up is read from the dispatch events when given apart from the phase events") do
+  sep["dispatch"].at == t(D2)
+end
+
+# The ledger row: the first row has no new key, the later one records the moved span.
+ingested = t("2026-10-03T00:00:00Z")
+row_first = fixture do
+  L::Ledger.improve_row(repo: "custom", landing: first, anchors: anchors(first, S.ok(FULL)), counters: {},
+                        telemetry_status: :ok, ingested_at: ingested, origin: L::Origin.local("x"))
+end
+row_l2 = fixture do
+  L::Ledger.improve_row(repo: "custom", landing: l2, anchors: a2, counters: {}, telemetry_status: :ok,
+                        ingested_at: ingested, origin: L::Origin.local("x"))
+end
+check("D9 a first landing's row has no implement_inherited_s key") { !row_first.key?("implement_inherited_s") }
+check("D9 a later landing's row records the moved span (implement start - stamp) beside the stamp") do
+  row_l2["implement_inherited_s"] == (t(D2) - t("2026-10-01T01:00:00Z")).to_i && row_l2["start"] == "2026-10-01T01:00:00Z"
+end
+
+# Summary: inherited_s is the sum of moved spans and leaves sum_s; code_s is untouched.
+def code_row(code, inherited, implement)
+  { "repo" => "custom", "origin" => "local", "code_s" => code, "implement_inherited_s" => inherited,
+    "phases" => { "implement" => { "s" => implement }, "verify" => { "s" => 0 }, "queue" => { "s" => 0 },
+                  "integrate" => { "s" => 0 }, "merge" => { "s" => 0 } } }.compact
+end
+inh = fixture { L::Stats.unattributed([code_row(1000, 600, 300), code_row(500, nil, 450), code_row(900, 200, 700)]) }
+check("D10 inherited_s is the sum of moved spans") { inh["inherited_s"] == 800 }
+check("D10 sum_s leaves the moved span out: only the real gap (100 + 50 + 0) stays") { inh["sum_s"] == 150 }
+check("D10 code_s is the owner's code total, unchanged") { inh["code_s"] == 2400 }
+none_inh = fixture { L::Stats.unattributed([code_row(500, nil, 450)]) }
+check("D10 no later landing in the window: inherited_s is 0, sum_s as before") do
+  none_inh["inherited_s"] == 0 && none_inh["sum_s"] == 50
+end
+no_code = fixture { L::Stats.unattributed([{ "origin" => "local", "code_s" => nil, "phases" => {} }]) }
+check("D10 no row with code_s: inherited_s is null, never 0") { no_code["inherited_s"].nil? }
+
+# Rows already in the ledger are frozen: --rejoin adds a gated head and keeps implement.
+old_row = row_l2.merge("phases" => row_l2["phases"].merge("implement" => { "s" => 90_000 }),
+                       "anchors" => row_l2["anchors"].merge("dispatch" => { "at" => "2026-10-01T01:00:00Z", "source" => "dispatch stamp" }))
+old_row.delete("implement_inherited_s")
+rejoin_fresh = fixture { L::Ledger.rejoined(old_row, row_l2) }
+check("D11 --rejoin keeps the original implement cell, its dispatch anchor and no inherited key") do
+  rejoin_fresh.dig("phases", "implement", "s") == 90_000 && !rejoin_fresh.key?("implement_inherited_s") &&
+    rejoin_fresh.dig("anchors", "dispatch", "source") == "dispatch stamp" &&
+    rejoin_fresh.dig("phases", "verify") == row_l2.dig("phases", "verify")
+end
+check("D11 an original row with no implement cell is replaced as the fresh row stands") do
+  L::Ledger.rejoined({ "phases" => {} }, row_l2) == row_l2
 end
 
 if $failures.empty?

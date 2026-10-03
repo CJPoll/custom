@@ -30,7 +30,13 @@
 # run means no gate ran before it, so verify is a measured 0; two
 # neighbouring shapes are n/a with a reason naming them. Never 0 for a
 # missing input, never negative. Anchors are floored to whole seconds BEFORE subtraction, so the
-# five phases telescope: their sum equals landed - dispatch exactly.
+# five phases telescope: their sum equals landed - the implement start
+# exactly. The implement start is the dispatch stamp for a ticket's first
+# landing. For a later landing of an already-landed ticket (DND-1904) it is
+# max(stamp, S): S is the earliest ticket.dispatched for the unit after the
+# previous landing, else the previous landing itself, so the earlier landing's
+# span is not counted twice. code_s still starts at the stamp; the difference
+# is the row's implement_inherited_s, summed as unattributed.inherited_s.
 #
 # A source the IO side read is a Source: status :ok (found), :empty (looked,
 # nothing for this key) or :could_not_look (with a reason). "could not look"
@@ -457,12 +463,14 @@ module LeadTimePhases
                                                            with_critic: with_critic)
     def missing(reason) = Anchor.new(at: nil, reason: reason)
 
-    # events/receipt/verdicts are Sources. -> {anchor name => Anchor}
-    def from(landing:, events:, receipt:, verdicts:)
+    # events/receipt/verdicts are Sources. dispatches: the Source the
+    # follow-up dispatch is read from (DND-1904), default the events.
+    # -> {anchor name => Anchor}
+    def from(landing:, events:, receipt:, verdicts:, dispatches: events)
       run = last_ok_run(landing, events)
       integ = integrate(landing, events, receipt, run)
       {
-        "dispatch" => dispatch(landing),
+        "dispatch" => dispatch(landing, dispatches),
         "gate_first" => gate_first(landing, events),
         "critic_pass" => critic_pass(landing, events, verdicts, integ, run),
         "integrate_start" => integ[0],
@@ -472,11 +480,43 @@ module LeadTimePhases
       }
     end
 
-    def dispatch(landing)
-      return found(landing["start"], "dispatch stamp") if landing["start"]
+    # Where implement starts (DND-1904). A first landing (no "after"): the
+    # dispatch stamp. A later landing of a ticket that already landed starts
+    # at max(stamp, S): S is the earliest ticket.dispatched for the unit in
+    # the landing's span (the follow-up's real start), else the previous
+    # landing. The time before the previous landing is that landing's row's;
+    # the stamp stays the owner's code_s start, so the moved span is reported
+    # as unattributed.inherited_s, never dropped.
+    def dispatch(landing, dispatches = nil)
+      if landing["start"]
+        stamp = found(landing["start"], "dispatch stamp")
+        return landing["after"] ? later_landing(landing, dispatches, stamp) : stamp
+      end
       return missing(no_unit(landing, "unticketed landing: no dispatch stamp")) unless landing["ticket"]
 
       missing("dispatch stamp: #{landing['start_na'] || "no stamp for #{landing['ticket']}"}")
+    end
+
+    def later_landing(landing, dispatches, stamp)
+      follow = dispatches ? Match.for_unit(dispatches.items, landing, "ticket.dispatched").map { |e| Match.at(e) }.min : nil
+      floor_at, source = if follow
+                           [Util.floor(follow), "follow-up ticket.dispatched #{Util.iso(Util.floor(follow))}"]
+                         else
+                           [Util.floor(landing["after"]),
+                            "previous landing #{Util.iso(Util.floor(landing['after']))} (no local follow-up dispatch)"]
+                         end
+      return stamp if stamp.at >= floor_at
+
+      found(floor_at, source)
+    end
+
+    # Whole seconds a later landing's implement start moved past its stamp
+    # (DND-1904), or nil for a first landing or one with no stamp.
+    def inherited_s(landing, anchors)
+      start = anchors["dispatch"]&.at
+      return nil unless landing["after"] && landing["start"] && start
+
+      (start - Util.floor(landing["start"])).to_i
     end
 
     # A landing with no ticket: unticketed, or its ticket could not be read.
@@ -1033,6 +1073,22 @@ module LeadTimePhases
       :replace
     end
 
+    # The row --rejoin writes (DND-1904): the fresh row, with the implement
+    # phase, its dispatch anchor and implement_inherited_s kept as the
+    # original ledgered them. A rejoin adds a gated head; it never re-derives
+    # implement, so a row ingested before DND-1904 keeps its first-stamp start.
+    def rejoined(old, fresh)
+      kept = old.dig("phases", "implement")
+      return fresh unless kept.is_a?(Hash)
+
+      row = fresh.merge("phases" => (fresh["phases"] || {}).merge("implement" => kept))
+      row = row.merge("anchors" => row["anchors"].merge("dispatch" => old["anchors"]["dispatch"])) if
+        row["anchors"].is_a?(Hash) && old["anchors"].is_a?(Hash) && old["anchors"].key?("dispatch")
+      return row.except("implement_inherited_s") unless old.key?("implement_inherited_s")
+
+      row.merge("implement_inherited_s" => old["implement_inherited_s"])
+    end
+
     # True when a phase, counter or top_checks the original measured is null
     # in the fresh row.
     def loses_measurement?(old, fresh)
@@ -1055,7 +1111,14 @@ module LeadTimePhases
         .merge("phase_flow" => Origin.foreign?(origin) ? nil : Phases.flow(anchors), "phases" => phases,
                "anchors" => anchors.transform_values(&:to_h_json),
                "telemetry" => telemetry_status.to_s)
+        .merge(inherited_field(landing, anchors))
         .merge(counters)
+    end
+
+    # DND-1904: the span a later landing's implement start moved past its
+    # stamp. A first landing's row has no such key.
+    def inherited_field(landing, anchors)
+      (s = Anchors.inherited_s(landing, anchors)) ? { "implement_inherited_s" => s } : {}
     end
 
     def watch_row(repo:, landing:, ingested_at:)
@@ -1363,11 +1426,19 @@ module LeadTimePhases
     # leaves its time here, so a future anchor gap shows as a number instead
     # of vanishing. n_na: rows with no code_s (unticketed, no stamp). Sums
     # are null, never 0, when no row has code_s.
+    # inherited_s (DND-1904): over the same rows, the span a later landing's
+    # implement start moved past its stamp (the earlier landing's time, already
+    # in that row). It is code time no phase holds on purpose, so it is
+    # reported apart and sum_s leaves it out: sum_s + inherited_s = code minus
+    # the measured phases.
     def unattributed(rows)
       coded = rows.select { |r| r["code_s"].is_a?(Numeric) }
-      gaps = coded.map { |r| r["code_s"] - PHASES.sum { |p| (s = r.dig("phases", p, "s")).is_a?(Numeric) ? s : 0 } }
+      inherited = coded.map { |r| r["implement_inherited_s"].is_a?(Numeric) ? r["implement_inherited_s"] : 0 }
+      gaps = coded.zip(inherited).map do |r, inh|
+        r["code_s"] - inh - PHASES.sum { |p| (s = r.dig("phases", p, "s")).is_a?(Numeric) ? s : 0 }
+      end
       { "sum_s" => coded.empty? ? nil : gaps.sum, "code_s" => coded.empty? ? nil : coded.sum { |r| r["code_s"] },
-        "n" => coded.size, "n_na" => rows.size - coded.size }
+        "inherited_s" => coded.empty? ? nil : inherited.sum, "n" => coded.size, "n_na" => rows.size - coded.size }
     end
 
     # How many rows each anchor map measured (DND-1501). A row ingested

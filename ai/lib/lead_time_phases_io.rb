@@ -87,7 +87,7 @@ module LeadTimePhasesIO
           next line unless verdict == :replace
 
           old << line
-          "#{JSON.generate(fresh)}\n"
+          "#{JSON.generate(LeadTimePhases::Ledger.rejoined(row, fresh))}\n"
         end
         write_replaced(f, out, old, archive) unless old.empty?
         outcomes

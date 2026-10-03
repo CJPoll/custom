@@ -63,6 +63,9 @@ HELP = <<~TXT
 
   Standalone-PASS flow (a clean critic PASS stood before integration-gate):
     implement  dispatch stamp -> first harness_gate.run or gate.run for the ticket
+               (a later landing of a ticket that already landed starts at
+               max(stamp, the unit's earliest ticket.dispatched after the
+               previous landing, else the previous landing): DND-1904)
                (after a restart from a park that a local ticket.dispatched
                records, the first gate run at or after the stamp: DND-1838)
     verify     first gate run -> last critic PASS before integration-gate
@@ -185,6 +188,9 @@ HELP = <<~TXT
                    measured code_s, code minus the measured phases,
                    summed; n/a phases leave their time here, so an anchor
                    gap shows as a number. n_na counts rows with no code_s.
+                   inherited_s (DND-1904) is the time a later landing's
+                   implement start moved past its stamp; sum_s leaves it
+                   out, so sum_s + inherited_s = code minus the phases.
                    flows: the local rows per phase_flow (with_critic,
                    standalone, unrecorded = no phase_flow: ingested
                    before DND-1501, or a watch row).
@@ -416,6 +422,9 @@ module Ingest
     no_common = LeadTimePhases::Source.could_not_look(common_why.to_s)
     events = LeadTimePhases.scope_events(LeadTimePhases.only_events(all_events, LeadTimePhases::EVENTS),
                                          common ? io::Git.repo_label(common) : repo.name)
+    # A follow-up dispatch (DND-1904) is any repo's ticket.dispatched for the
+    # unit: mark-in-progress writes it from the coordinating checkout.
+    dispatches = LeadTimePhases.only_events(all_events, %w[ticket.dispatched])
     landings = landings.map { |l| join_push(l, events, common) }
     decl = LeadTimePhases::TailCI.declare(repo.idle_workflow, repo.name)
     landings = LeadTimePhases::Ledger.lead_in_ci(landings, decl)
@@ -425,7 +434,8 @@ module Ingest
     landings.map do |l|
       receipt, verdicts = head_sources(l, common, no_common)
       timing = timing_source(l, timings)
-      anchors = LeadTimePhases::Anchors.from(landing: l, events: events, receipt: receipt, verdicts: verdicts)
+      anchors = LeadTimePhases::Anchors.from(landing: l, events: events, receipt: receipt, verdicts: verdicts,
+                                             dispatches: dispatches)
       counters = LeadTimePhases::Counters.compute(landing: l, events: events, timings: timing)
       gate_split = LeadTimePhases::Counters.verify_gate_runs(landing: l, events: events, anchors: anchors)
       evidence = LeadTimePhases::Origin.local_evidence(l, receipt: receipt, verdicts: verdicts, timings: timing)
@@ -578,6 +588,7 @@ module Summary
   def print_unattributed(u, flows)
     of = u["n_na"].positive? ? " (#{u['n_na']} row(s) with no code time left out)" : ""
     puts "  unattributed: #{fmt(u['sum_s'])} of #{fmt(u['code_s'])} code time over #{u['n']} row(s)#{of}"
+    puts "  inherited: #{fmt(u['inherited_s'])} of an earlier landing's time, left out of later landings' implement"
     puts "  flows: #{flows.map { |k, n| "#{k} #{n}" }.join(', ')}"
   end
 
