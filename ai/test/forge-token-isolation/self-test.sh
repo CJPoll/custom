@@ -218,6 +218,14 @@ is_token_refusal && never_reached_a_user \
   && ok "5. a token with a control character -> refused" \
   || bad "5. control-character token refused" "rc=${RC} who=$(rec_get who) err='${ERR}'"
 
+# DND-1936: a token path that passes -r but cannot be read (a directory) used
+# to end the wrapper under set -e with no REFUSING line and no Fix:.
+mkdir -p "${TMP}/dir-token"
+run_glab GITLAB_ATHENA_TOKEN_FILE="${TMP}/dir-token" -- api user
+is_token_refusal && never_reached_a_user && [[ "${ERR}" == *"synthetic-iso-bot token"* ]] \
+  && ok "5b. a token path that cannot be read (a directory) -> refused with Fix:, naming the bot; never a silent exit" \
+  || bad "5b. unreadable token path refused" "rc=${RC} who=$(rec_get who) err='${ERR}'"
+
 echo
 echo "--- glab-athena: a healthy call runs glab with the owner's config unreachable ---"
 run_glab -- api user

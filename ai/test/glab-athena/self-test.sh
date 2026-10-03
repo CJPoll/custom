@@ -210,6 +210,14 @@ R="$(new_repo notoken 'git@gitlab.com:example-group/example-app.git')"
 is_refusal && [[ "${ERR}" == *"token file"* ]] && [[ "${ERR}" == *"refresh"* ]] \
   && ok "14. a missing token file -> refused (never falls back to the owner), says not to refresh" \
   || bad "14. missing token refused" "rc=${RC} out='${OUT}' err='${ERR}'"
+# DND-1936: a token path that passes -r but cannot be read (a directory) used
+# to end the wrapper under set -e with no REFUSING line and no Fix:.
+mkdir -p "${TMP}/dir-token"
+( cd "${R}" && GITLAB_ATHENA_TOKEN_FILE="${TMP}/dir-token" GLAB_ATHENA_GIT_DRY_RUN=1 "${WRAPPER}" git push origin HEAD ) \
+  >"${TMP}/out" 2>"${TMP}/err"; RC=$?; OUT="$(cat "${TMP}/out")"; ERR="$(cat "${TMP}/err")"
+is_refusal && [[ "${ERR}" == *"token file ${TMP}/dir-token"* ]] \
+  && ok "14b. a token path that cannot be read (a directory) -> refused with Fix:, never a silent exit" \
+  || bad "14b. unreadable token path refused" "rc=${RC} out='${OUT}' err='${ERR}'"
 
 echo
 echo "--- NEGATIVE: what must pass untouched ---"
