@@ -437,6 +437,12 @@ may use plain `gh`/`glab`. Verify wrapper health with
 hook enforces this: it denies every plain `gh`/`glab` write or plain push to a forge
 before it runs, with a `Fix:` — the guard stops, the block instructs.)
 
+## Production incidents
+
+In a repo that ships an `incident-management` skill (walt_ui today, at
+`.claude/skills/incident-management/`), follow it when running a prod incident
+or writing its post-mortem. Other repos have no such skill; do not assume one.
+
 ## Journal format
 
 Append to `journal.md` in `$SHIPWRIGHT_STATE_DIR` (the main checkout's

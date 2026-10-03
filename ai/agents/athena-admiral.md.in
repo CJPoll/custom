@@ -299,6 +299,8 @@ Scripts: `scripts/wt-preflight` (worktree create) · `ai/bin/admiral-report-watc
 `ai/hooks/fleet-drain-guard.sh` (drain deny).
 Docs: `ai/docs/oban-worker-rename.md` (worker-rename queue migration).
 
+@include ops/incident-management
+
 @include ops/safety-checks
 
 @include ops/never-end-turn-waiting

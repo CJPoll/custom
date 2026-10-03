@@ -16,6 +16,7 @@ blocks:
   ops/fleet-coordination:     [architect, admiral]
   ops/forge-identity:         [shipwright, captain, admiral]
   ops/harness-ia:             [shipwright, architect]
+  ops/incident-management:    [admiral, shipwright]
   ops/never-end-turn-waiting: [architect, captain, admiral, shipwright]
   ops/safety-checks:          [architect, admiral, captain, shipwright]
 
