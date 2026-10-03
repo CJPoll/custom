@@ -3976,6 +3976,7 @@ def self_test
     #   - every file under ai/agent-bin, ai/agent-env and ai/git-hooks;
     #   - every file under ai/lib, ai/bin, scripts/wt-lib and a skill's scripts/ or bin/ whose
     #     name says forge, merge, receipt, seal, agent or push;
+    #   - every ai/config/*.json a held owner-approval-policy file names (DND-1905: the bar a guard reads);
     #   - every ai/lib file a held owner-approval-policy file loads (a `$(dirname …)/../lib/X`,
     #     `BASH_SOURCE`, `__dir__` or `${x%/*}` path, or a require_relative), so a guard's new
     #     library is a candidate whatever its name (DND-1873's glab guard was found by a reviewer).
@@ -4006,6 +4007,12 @@ def self_test
             candidates << lib if File.file?(File.join(repo_root, lib))
           end
         end
+        # DND-1905: a config or data file a held enforcer reads its bar from (a literal ai/config/X.json,
+        # or ../config/X.json from the guard's own directory) is a candidate, so loosening it cannot read COLD.
+        line.scan(%r{(?:ai/|\.\./)config/([A-Za-z0-9_.-]+\.json)}) do |(name)|
+          cfg = "ai/config/#{name}"
+          candidates << cfg if File.file?(File.join(repo_root, cfg))
+        end
         line.scan(/require_relative\s+["']([^"']+)["']/) do |(rel)|
           rel = "#{rel}.rb" unless rel.end_with?(".rb")
           lib = File.expand_path(rel, File.join(repo_root, File.dirname(f))).delete_prefix("#{repo_root}/")
@@ -4029,7 +4036,7 @@ def self_test
     candidates += gate_list.select { |g| File.file?(File.join(repo_root, g)) }
     candidates = candidates.reject { |f| f.include?("/test/") || f.end_with?(".md") }.uniq.sort
     anchors = %w[ai/bin/harness-gate ai/hooks/forge-identity-guard.sh ai/hooks/merge-role-guard.sh ai/agent-bin/git ai/lib/forge-git-passthrough.sh
-                 ai/bin/receipt-seal ai/lib/gh-outbound-scan.sh]
+                 ai/bin/receipt-seal ai/lib/gh-outbound-scan.sh ai/config/main-content-checks.json]
     check.call("policy: the enforcer walk finds the known enforcers (an empty walk would pass for nothing)",
                (anchors - candidates).empty?,
                "missing=#{(anchors - candidates).inspect} candidates=#{candidates.inspect}. Fix: the enforcer walk in ai/bin/blast-radius --self-test no longer sees a known enforcer; repair the walk, never shrink it.")

@@ -598,6 +598,9 @@ auth guard that keeps the owner's forge credentials from agents
 (`ai/hooks/forge-auth-guard.sh`), and what they load to decide a call is a
 merge, a push or a forge write (`ai/lib/forge-api-scan.sh`,
 `ai/lib/forge-cli-isolation.sh`, `ai/lib/forge-write-class.awk`),
+the red-main content declaration the merge guard reads its bar from
+(`ai/config/main-content-checks.json`, DND-1905: loosening it switches
+stop-the-line off for a repo),
 `ai/bin/gh-athena`, `ai/bin/glab-athena`,
 `locked-merge`,
 `ai/bin/main-health` and `ai/lib/main-health.sh` (the push guard's fix-push

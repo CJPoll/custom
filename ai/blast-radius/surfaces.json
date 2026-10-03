@@ -37,7 +37,7 @@
   "surfaces": [
     {
       "class": "owner-approval-policy",
-      "why": "merging changes WHAT NEEDS THE OWNER'S APPROVAL (KEEP 6): the owner approval grant allowlist, the approval table, or the classifier and verifiers that enforce them, and the receipt chain a merge or push to main is accepted on (integration-gate and its shim, the receipt reader and seal, the merge and push guards and what they load, the merge role guard that keeps merging with the admiral, the forge identity guard hook and the agent PATH git, gh and glab wrappers that refuse a forge write or push not made as Athena with what they load and the session env that puts them on PATH, the forge auth guard that keeps the owner's forge credentials from agents, locked-merge, gh-athena and glab-athena, main-health and the critic verdict producer, and the declared merge gate ai/bin/harness-gate with the libraries it loads to discover its checks, read their bar from what landed or fail a check, and the tool scope table check-bin-help reads; athena:merge-boarding names each). No owner approval grant class covers this surface. The owner's verified click (--owner-approval click:<delivery_id>, ai/lib/owner_click.rb, which reads the owner's id through the private overlay resolver, held with it) clears it like any other hold: owner decision, Cody, 2026-10-02 (DND-1784), \"Gate accepts a verified owner click, without hesitation.\"",
+      "why": "merging changes WHAT NEEDS THE OWNER'S APPROVAL (KEEP 6): the owner approval grant allowlist, the approval table, or the classifier and verifiers that enforce them, and the receipt chain a merge or push to main is accepted on (integration-gate and its shim, the receipt reader and seal, the merge and push guards and what they load, and read their bar from (the red-main content declaration ai/config/main-content-checks.json, DND-1905), the merge role guard that keeps merging with the admiral, the forge identity guard hook and the agent PATH git, gh and glab wrappers that refuse a forge write or push not made as Athena with what they load and the session env that puts them on PATH, the forge auth guard that keeps the owner's forge credentials from agents, locked-merge, gh-athena and glab-athena, main-health and the critic verdict producer, and the declared merge gate ai/bin/harness-gate with the libraries it loads to discover its checks, read their bar from what landed or fail a check, and the tool scope table check-bin-help reads; athena:merge-boarding names each). No owner approval grant class covers this surface. The owner's verified click (--owner-approval click:<delivery_id>, ai/lib/owner_click.rb, which reads the owner's id through the private overlay resolver, held with it) clears it like any other hold: owner decision, Cody, 2026-10-02 (DND-1784), \"Gate accepts a verified owner click, without hesitation.\"",
       "patterns": [
         "**/athena/owner_approvals/action_class.ex",
         "**/athena/owner_approvals/action_class_test.exs",
@@ -52,6 +52,7 @@
         "ai/lib/receipt_seal.rb",
         "ai/bin/receipt-seal",
         "ai/lib/gh-merge-guard.sh",
+        "ai/config/main-content-checks.json",
         "ai/lib/glab-merge-guard.sh",
         "ai/hooks/merge-role-guard.sh",
         "ai/lib/merge_role.rb",
