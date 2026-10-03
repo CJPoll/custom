@@ -1276,6 +1276,9 @@ def run_agent_stash_env(path: settings_path, main: nil, root: REPO_DIR,
       err.puts "#{tag}: COULD NOT MEASURE — this is not a pass. The agent PATH line the " \
                "#{AgentStashEnv::ENV_FILE} script must run could not be read as landed."
       Landed.unreadable_lines("agent PATH line (#{AgentStashEnv::ENV_SCRIPT_REL})", e.probes).each { |l| err.puts l }
+      err.puts "  Fix: if a probe says #{AgentStashEnv::ENV_SCRIPT_REL} does not exist or runs no line, origin/main " \
+               "lost the script that delivers the wrapper: restore it on main. Until it lands, the owner runs " \
+               "`#{File.join(main, 'scripts/setup-hooks')} --remove-env` and restarts sessions."
       return EXIT_UNMEASURED
     end
   end

@@ -577,7 +577,7 @@ case "$ACTION" in
     # shellcheck source=ai/test/lib/landed-fixture.bash
     . "${REPO_DIR}/ai/test/lib/landed-fixture.bash"
     fix="${tmp}/fixture"
-    landed_fixture "$REPO_DIR" "$fix" scripts/setup-hooks ai/bin/check-hooks-registered ai/lib/landed.rb ai/lib/strict_argv.rb ai/lib/agent_stash_env.rb ai/hooks \
+    landed_fixture "$REPO_DIR" "$fix" scripts/setup-hooks ai/bin/check-hooks-registered ai/lib/landed.rb ai/lib/strict_argv.rb ai/lib/agent_stash_env.rb ai/agent-env/session-env.sh ai/hooks \
       || { echo "  FAIL could not build the fixture repo"; echo "SELF-TEST FAILED"; exit 1; }
     if [ "$REGISTRY" != "${REPO_DIR}/ai/hooks/registry.json" ]; then
       cp "$REGISTRY" "${fix}/ai/hooks/registry.json"
@@ -1131,9 +1131,10 @@ PY4
       || { echo "  FAIL install-env moved the install time without adding ATHENA_AGENT_BIN: $(cat "$envs")"; ok=0; }
     # The fixture repo's origin/main is this tree, so the checker's landed env
     # bar is the one install-env just wrote. Its values must match: ACTIVE, or
-    # (the fixture carries no hook script, wrapper or CLAUDE_ENV_FILE script) the
-    # values-match FAIL that names only runtime problems. Never DRIFT, INACTIVE,
-    # not-landed or could-not-measure.
+    # (the fixture carries no hook script or wrapper) the values-match FAIL
+    # that names only runtime problems. Never DRIFT, INACTIVE, not-landed or
+    # could-not-measure. The fixture lands ai/agent-env/session-env.sh, because
+    # the checker reads the agent PATH line as landed (DND-1861).
     chk="$(HOOKS_SETTINGS_FILE="$envs" "$CHECKER" 2>&1 || true)"
     if grep -q -e "agent-stash env: ACTIVE" -e "agent-stash env: FAIL — the settings values match" <<<"$chk"; then
       echo "  ok   check-hooks-registered reads the installed env's values as matching the landed env"
