@@ -374,9 +374,9 @@ module MergeRole
     remote_opt = nil
     skip = nil
     ended = false
-    args.each do |a|
-      return nil if push_help?(a, pos, skip, ended)
+    return nil if push_help?(args)
 
+    args.each do |a|
       if skip
         remote_opt = a if skip == "--repo"
         skip = nil
@@ -396,11 +396,12 @@ module MergeRole
                cfg_unresolved: cfg)
   end
 
-  # `git push -h` / `--help` before any refspec prints usage and exits before it
-  # reads a remote or sends a ref; an option's separate value (`-o -h`) and
-  # anything after `--` or a refspec is not help.
-  def push_help?(arg, positionals, skip, ended)
-    !ended && skip.nil? && positionals.empty? && %w[-h --help].include?(arg)
+  # `git push -h` / `--help` as the FIRST argument prints usage and exits before
+  # it reads a remote or sends a ref. Stricter than git, on purpose: git also
+  # reads help after other options, but git accepts abbreviated long options
+  # (`--push-op -h` makes -h a value), so help behind any other word is checked.
+  def push_help?(args)
+    %w[-h --help].include?(args.first)
   end
 
   # The branch a push refspec writes on the remote: :current for HEAD/@, the

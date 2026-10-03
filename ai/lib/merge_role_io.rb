@@ -81,8 +81,12 @@ module MergeRoleIO
   end
 
   # The repo's remote names: [] only when `git remote` ran and printed none,
-  # nil when it failed (a failed read is never "no remote").
+  # nil when it failed (a failed read is never "no remote"), and nil for a repo
+  # whose shared config says bare: a linked worktree of a bare origin is not
+  # scratch work.
   def remotes(dir)
+    return nil unless git(dir, "config", "--bool", "--get", "core.bare").to_s != "true"
+
     git(dir, "remote")&.split
   end
 
