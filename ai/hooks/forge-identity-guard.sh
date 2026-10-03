@@ -206,13 +206,13 @@ api_method() {
       if (!seen) { if (x == "api") seen = 1; continue }
       if (x == "-X" || x == "--method") { v = $(i + 1); gsub(/["'"'"']/, "", v); m = v; i++; continue }
       if (x ~ /^--method=/) { m = substr(x, 10); continue }
+      if (x ~ /^--(jq|template|preview|cache|output|header|field|raw-field|form|input|repo|hostname)=/) continue
+      if (x ~ /^-[HRqtpfF]./) continue
       if (x ~ /^-[A-Za-z]*X/ && x !~ /^--/) {
         v = x; sub(/^-[A-Za-z]*X=?/, "", v)
         if (v == "") { v = $(i + 1); gsub(/["'"'"']/, "", v); i++ }
         m = v; continue
       }
-      if (x ~ /^--(jq|template|preview|cache|output|header|field|raw-field|form|input|repo|hostname)=/) continue
-      if (x ~ /^-[HRqtpfF]./) continue
       if (x == "-q" || x == "--jq" || x == "-t" || x == "--template" || x == "-p" || x == "--preview" || x == "--cache" || x == "--output" || x == "-H" || x == "--header" || x == "-f" || x == "-F" || x == "--field" || x == "--raw-field" || x == "--form" || x == "--input" || x == "-R" || x == "--repo" || x == "--hostname") { i++; continue }
     }
     sub(/[^A-Za-z].*/, "", m)
@@ -233,9 +233,11 @@ api_ref_write() {
     *) return 0 ;;
   esac
   # DND-1886: the lexical reading (any -X<word> in the segment, last wins) can
-  # take an option's value for the method. It still denies where it names a
-  # write the option-aware reading above does not, so no verdict changes; the
-  # option-aware reading only decides WHICH rule owns the deny and its Fix.
+  # take an option's value for the method. It denies where it names a write
+  # the option-aware reading above does not, so a GET/HEAD/no-method reading
+  # never allows what the lexical one denied. The option-aware reading decides
+  # which rule owns the deny and its Fix (the generic api-write rule denies a
+  # non-GET/HEAD method either way).
   _lex=$(printf '%s' "$_s" | sed -nE "s/(^|.*[[:space:]])(-[[:alpha:]]*X|--method)(=|[[:space:]]+)?[\"']?([[:alpha:]]+).*/\4/p" | tr '[:lower:]' '[:upper:]')
   case "$_lex" in
     GET|HEAD|"") ;;

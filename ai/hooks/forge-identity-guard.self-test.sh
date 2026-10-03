@@ -232,6 +232,9 @@ check_text "4e2. ...the deny is the ref-write one, naming the guarded push path"
 run "$(bash_json 'gh api --method PATCH repos/o/r/git/refs/heads/main -f sha=abc -q -XGET')"
 check "4e3. --method PATCH + -q -XGET on git/refs" deny
 check_text "4e4. ...the deny is the ref-write one" 'creates or moves a ref'
+run "$(bash_json 'gh api -X POST repos/o/r/git/refs -f sha=abc -qXGET')"
+check "4e6. -X POST + attached -qXGET (the jq filter XGET) on git/refs" deny
+check_text "4e7. ...the deny is the ref-write one" 'creates or moves a ref'
 run "$(bash_json 'gh api -X GET repos/o/r/git/refs/heads/main --jq -XPATCH')"
 check "4e5. verdict unchanged: -X GET + --jq -XPATCH is still denied" deny
 
