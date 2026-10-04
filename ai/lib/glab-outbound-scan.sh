@@ -28,6 +28,15 @@
 #                                 given), or one a method-override header or a
 #                                 `_method` field could turn into a write.
 #
+# glab fills placeholders (:branch, :fullpath, :group, :id, :namespace, :repo,
+# :user, :username) in the endpoint and in a typed -F value AFTER this scan
+# (DND-2009). So an api write is REFUSED (exit 3, Fix:) when its endpoint, path
+# or query, holds one anywhere but a whole project segment of :id or :fullpath
+# (projects/:id/…, which the visibility read passes to glab as is, so glab
+# fills it the same way), whatever the visibility: a fill can move where the
+# call routes. A typed -F value holding one is REFUSED when a target is not
+# PRIVATE. -f, --form and --input are never filled.
+#
 # The argv is read the way glab reads it (DND-1976). pflag gives a flag that
 # takes a value the next word even when it starts with `-`: `-l -t -d X` is
 # label `-t`, description X, and `release create v1 --ref -n -F <file>` is ref
@@ -57,7 +66,14 @@
 # (DND-2006). For `api`, the project or group the
 # endpoint's second segment names (`projects/<ref>/…`, `groups/<ref>/…`, read
 # verbatim, so `:id` resolves as glab resolves it), and a `target_project_id`
-# field.
+# field. <ref> must be spelled plainly: decoded, no empty, . or .. segment
+# (DND-2009). glab sends an endpoint holding :// to that URL's own host,
+# whatever the scheme's case and whatever --hostname says: only
+# http(s)://gitlab.com/api/v4/… (scheme and host case-folded) names a project,
+# and http(s)://gitlab.com/api/graphql is GraphQL; any other full URL is an
+# unknown target. Only the bare endpoint `graphql` is GraphQL otherwise, as
+# glab tests it. MR and issue URLs and -R values read their scheme and host
+# without case too.
 #
 # Visibility is read from the API as Athena (this runs after the wrapper's
 # isolation): `glab api projects/<ref>` (or groups/<ref>) -> .visibility.
@@ -71,8 +87,9 @@
 #                        as PUBLIC instead; this refusal is stricter.
 #   no nameable target   scanned as PUBLIC, said on stderr: a positional URL
 #                        with no /-/ path, a GraphQL mutation (its target is
-#                        inside the query), or an api write outside projects/
-#                        and groups/ (snippets, user, …).
+#                        inside the query), an api write outside projects/
+#                        and groups/ (snippets, user, …), or a full URL to a
+#                        host other than gitlab.com.
 # The text is scanned unless EVERY target reads private.
 #
 # Residuals, stated: `mr create --fill` / `--fill-commit-body` / `--signoff`
@@ -81,7 +98,9 @@
 # loaded from a recovery file), the CONTENT of release asset files (their paths
 # are scanned as positionals), other commands (snippets, wiki, label and repo
 # descriptions, release update), names that are not free text (labels,
-# milestones), a glab flag that changed whether it takes a value since the
+# milestones), the text of an api endpoint's PATH (only its ?query is scanned;
+# a path segment can name a file or wiki page), a glab flag that changed
+# whether it takes a value since the
 # pinned version, a value no pattern describes, and the waiver. The scanner
 # run is the one beside the glab-athena invoked.
 #
@@ -135,11 +154,12 @@ glos_shown() { printf '%s' "${1%%[?#]*}"; }
 # the caller's `targets`; a URL with no /-/ path adds "?" (no nameable target).
 glos_positional() {
   local w="$1" rest host p
-  case "$w" in
+  # glab reads the scheme and host without case (DND-2009).
+  case "${w,,}" in
     http://* | https://*) ;;
     *) return 0 ;;
   esac
-  rest="${w#*://}"; host="${rest%%/*}"; p="${rest#*/}"
+  rest="${w#*://}"; host="${rest%%/*}"; host="${host,,}"; p="${rest#*/}"
   if [ "$p" = "$rest" ] || [[ "$p" != */-/* ]] || [ -z "$host" ]; then
     targets+=("?:the URL '$(glos_shown "$w")' names no project this guard can parse")
   else
@@ -188,15 +208,17 @@ glos_target_vis() {
       r="${t#api:}"; host="${r%%|*}"; path="${r#*|}"
       if [ -n "$host" ]; then glos_read_vis "$path" api --hostname "$host" "$path"; else glos_read_vis "$path" api "$path"; fi
       return 0 ;;
-    http://* | https://*)
+    # The scheme and host are read without case, as glab reads them (DND-2009).
+    [Hh][Tt][Tt][Pp]://* | [Hh][Tt][Tt][Pp][Ss]://*)
       r="${t#*://}"; host="${r%%/*}"; path="${r#*/}"; if [ "$path" = "$r" ]; then path=""; fi ;;
-    ssh://*)
-      r="${t#ssh://}"; host="${r%%/*}"; host="${host#*@}"; host="${host%%:*}"; path="${r#*/}"; if [ "$path" = "$r" ]; then path=""; fi ;;
+    [Ss][Ss][Hh]://*)
+      r="${t#*://}"; host="${r%%/*}"; host="${host#*@}"; host="${host%%:*}"; path="${r#*/}"; if [ "$path" = "$r" ]; then path=""; fi ;;
     *@*:*)
       r="${t#*@}"; host="${r%%:*}"; path="${r#*:}" ;;
     *)
       path="$t" ;;
   esac
+  host="${host,,}"
   path="${path%/}"; path="${path%%/-/*}"; path="${path%.git}"
   if ! [[ "$path" =~ ^[0-9]+$ || "$path" =~ ^[A-Za-z0-9_.][A-Za-z0-9_.-]*(/[A-Za-z0-9_.][A-Za-z0-9_.-]*)+$ ]]; then
     ots_refuse 3 "COULD NOT LOOK: '$(glos_shown "$t")' does not name a project this guard can read (OWNER/REPO, GROUP/NAMESPACE/REPO, a project id, a project URL or a git URL), so its visibility is unknown. Fix: pass -R <group>/<project>, then retry."
@@ -209,33 +231,106 @@ glos_target_vis() {
   return 0
 }
 
+# The placeholders glab fills (glab 1.92.1, internal/commands/api/api.go,
+# placeholderRE): in the whole endpoint, path and query, and in a typed -F
+# value; never in -f, --form or --input. A name counts when the next character
+# is not [A-Za-z0-9_] (Go's \b); glab's regex has no boundary before the colon.
+GLOS_PLACEHOLDERS="branch fullpath group id namespace repo user username"
+
+# glos_has_placeholder <text> : true when glab would fill a placeholder in it.
+# The letters are spelled out, not a range, so no locale can widen the class.
+glos_has_placeholder() {
+  local s="$1" n rest
+  for n in $GLOS_PLACEHOLDERS; do
+    rest="$s"
+    while [[ "$rest" == *":$n"* ]]; do
+      rest="${rest#*":$n"}"
+      case "${rest:0:1}" in
+        [abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_]) ;;
+        *) return 0 ;;
+      esac
+    done
+  done
+  return 1
+}
+
+# glos_unescape <segment> : the segment %-decoded the way fas_path decodes it
+# (up to three rounds), with no dot-segment applied. Call it only on text
+# fas_path has already accepted, which rules out every escape printf would
+# misread.
+glos_unescape() {
+  local p="$1" n
+  for n in 1 2 3; do
+    [[ "$p" == *%* ]] || break
+    p="$(printf '%b' "${p//%/\\x}")"
+  done
+  printf '%s' "$p"
+}
+
 # glos_api_target <endpoint> : adds the endpoint's target to the caller's
-# `targets`, or nothing for a GraphQL read (a query with no mutation).
+# `targets`, or nothing for a GraphQL read (a query with no mutation), and sets
+# GLOS_API_HOST to the host the request goes to ("" for gitlab.com, "?" for
+# one this guard does not resolve). Exits 3 when the endpoint cannot be read.
+#   graphql (exactly, as glab tests it)   GraphQL: a mutation is unknown
+#   a full URL (any endpoint holding ://) glab sends it to that URL's host,
+#                                         whatever the scheme's case and
+#                                         whatever --hostname says. Only
+#                                         http(s)://gitlab.com (scheme and host
+#                                         case-folded) is resolved:
+#                                         /api/graphql is GraphQL, /api/v4/… is
+#                                         read below. Anything else is unknown.
+#   [/][api/v4/]projects/<ref>[/…]        the project <ref>, read verbatim
+#   [/][api/v4/]groups/<ref>[/…]          the group <ref>
+#   anything else                         unknown
+# An unknown target is scanned as PUBLIC, said on stderr. <ref> must be
+# spelled plainly (DND-2009): decoded, it holds no empty, . or .. segment, and
+# the endpoint, normalized, still routes under it. The endpoint holds no
+# placeholder glab fills, except a whole <ref> of :id or :fullpath under
+# projects/ (glab fills each as one segment, and the visibility read passes the
+# same text, so glab fills it the same way): a fill can move where the call
+# routes, so any other is REFUSED whatever the visibility.
 glos_api_target() {
-  local ep="$1" shown path lower r host="" root rest ref dec want sc
+  local ep="$1" shown path lower r ph host="" root rest ref dec want scheme auth
   shown="$(glos_shown "$ep")"
+  GLOS_API_HOST=""
   if ! path="$(fas_path "$ep" api v4)"; then
     ots_refuse 3 "the endpoint '$shown' cannot be normalized (a backslash, a control character, or a malformed or nested %-escape), so the outbound scan cannot tell which project it writes to. Fix: spell the endpoint plainly (projects/<id or url-encoded path>/…)."
   fi
   lower="${path,,}"
-  # glab sends ONLY the bare endpoint `graphql` to the GraphQL API; any other
-  # path ending in graphql (a wiki slug, a repository file) is a REST write.
-  if [ "$lower" = graphql ]; then
-    if fas_graphql_scan mutation; then sc=0; else sc=$?; fi
-    case "$sc" in
-      0) targets+=("?:a GraphQL mutation names its target inside the query") ;;
-      1) ;;
-      *) ots_refuse 3 "the outbound scan cannot tell whether this GraphQL call writes: $FAS_WHY. Fix: $FAS_HOW." ;;
-    esac
-    return 0
+  r="${ep%%[?#]*}"
+  # Placeholders: the path with a leading projects/:id or projects/:fullpath
+  # set aside (only a lower-case, plain prefix qualifies), and the query.
+  ph="$r"
+  if [[ "$ph" =~ ^(([A-Za-z][A-Za-z0-9+.-]*://[^/]*)?/?(api/v4/)?projects/)(:id|:fullpath)(/.*)?$ ]]; then
+    ph="${BASH_REMATCH[1]}${BASH_REMATCH[5]}"
   fi
-  r="$ep"
-  case "$r" in
-    http://* | https://*) r="${r#*://}"; host="${r%%/*}"; r="${r#"$host"}" ;;
-  esac
-  r="${r#/}"
-  if [[ "${r,,}" == api/v4/* ]]; then r="${r:7}"; fi
-  r="${r%%[?#]*}"
+  if glos_has_placeholder "$ph" || { [[ "$ep" == *[?#]* ]] && glos_has_placeholder "${ep#*[?#]}"; }; then
+    glos_refuse_placeholder "$shown"
+  fi
+  if [[ "$ep" == *://* ]]; then
+    if ! [[ "$r" =~ ^([A-Za-z][A-Za-z0-9+.-]*)://([^/]*)(.*)$ ]]; then
+      GLOS_API_HOST="?"
+      targets+=("?:the endpoint '$shown' holds :// but is not a URL this guard can read"); return 0
+    fi
+    scheme="${BASH_REMATCH[1],,}" auth="${BASH_REMATCH[2],,}" r="${BASH_REMATCH[3]}"
+    if { [ "$scheme" != https ] && [ "$scheme" != http ]; } || [ "$auth" != gitlab.com ]; then
+      GLOS_API_HOST="?"
+      targets+=("?:the endpoint '$shown' is a full URL to a host other than gitlab.com"); return 0
+    fi
+    if [ "$r" = /api/graphql ]; then glos_api_graphql; return 0; fi
+    if [[ "$r" != /api/v4/* ]]; then
+      targets+=("?:the endpoint '$shown' is a gitlab.com URL outside /api/v4/, so it names no project"); return 0
+    fi
+    r="${r#/api/v4/}"
+  else
+    # glab sends ONLY the bare endpoint `graphql` to the GraphQL API; any other
+    # path ending in graphql (a wiki slug, a repository file) is a REST write.
+    if [ "$ep" = graphql ]; then glos_api_graphql; return 0; fi
+    r="${r#/}"
+    if [[ "${r,,}" == api/v4/* ]]; then r="${r:7}"; fi
+    if [ -n "$FAS_HOSTNAME" ] && [ "${FAS_HOSTNAME,,}" != gitlab.com ]; then host="$FAS_HOSTNAME"; fi
+  fi
+  GLOS_API_HOST="$host"
   root="${r%%/*}"; rest="${r#*/}"; ref="${rest%%/*}"
   if [ "$root" = "$r" ] || [ -z "$ref" ]; then
     targets+=("?:the endpoint '$shown' names no project or group"); return 0
@@ -247,20 +342,42 @@ glos_api_target() {
   if ! dec="$(fas_path "$ref")" || [ -z "$dec" ]; then
     ots_refuse 3 "the project segment '$ref' of the endpoint '$shown' cannot be normalized. Fix: spell the endpoint plainly (projects/<id or url-encoded path>/…)."
   fi
+  case "/$(glos_unescape "$ref")/" in
+    *//* | */./* | */../*)
+      ots_refuse 3 "the project segment '$ref' of the endpoint '$shown' does not spell its project plainly (decoded, it holds an empty, . or .. segment), so the outbound scan cannot tell which project it writes to. Fix: spell the endpoint plainly (projects/<id or url-encoded path>/…, with no . or .. segment, escaped or not)." ;;
+  esac
   want="${root,,}/${dec,,}"
   if [ "$lower" != "$want" ] && [[ "$lower" != "$want"/* ]]; then
     ots_refuse 3 "the endpoint '$shown' does not route to the project it spells ('$ref'), so the outbound scan cannot tell which project it writes to. Fix: spell the endpoint plainly, with no . or .. segments (projects/<id or url-encoded path>/…)."
   fi
-  if [ -n "$FAS_HOSTNAME" ]; then host="$FAS_HOSTNAME"; fi
-  if [ "$host" = gitlab.com ]; then host=""; fi
   targets+=("api:$host|${root,,}/$ref")
   return 0
+}
+
+# glos_api_graphql : a GraphQL call adds an unknown target when its query holds
+# a mutation, and nothing when it is a read. Exits 3 when the query cannot be
+# read.
+glos_api_graphql() {
+  local sc
+  if fas_graphql_scan mutation; then sc=0; else sc=$?; fi
+  case "$sc" in
+    0) targets+=("?:a GraphQL mutation names its target inside the query") ;;
+    1) ;;
+    *) ots_refuse 3 "the outbound scan cannot tell whether this GraphQL call writes: $FAS_WHY. Fix: $FAS_HOW." ;;
+  esac
+  return 0
+}
+
+# glos_refuse_placeholder <shown endpoint> : exits 3 for an endpoint that holds
+# a placeholder glab fills after this scan.
+glos_refuse_placeholder() {
+  ots_refuse 3 "the endpoint '$1' (path or query) holds a placeholder glab fills after this scan (:branch, :fullpath, :group, :id, :namespace, :repo, :user, :username), so neither the text sent nor the project it routes to is what was scanned. Only a whole project segment of :id or :fullpath (projects/:id/…) is read as glab fills it. Fix: write the value out in full, or use projects/:id/… for the current directory's project."
 }
 
 # glos_api <offset of the first word after `api`> <args after api...> : fills
 # the caller's text and file arrays and `targets` for an api write.
 glos_api() {
-  local off="$1" k ep host=""
+  local off="$1" k ep
   shift
   FAS_API_VALUED="$FAS_GLAB_API_VALUED" FAS_API_BOOL="$FAS_GLAB_API_BOOL"
   FAS_API_SVALUED="$FAS_GLAB_API_SVALUED" FAS_API_SBOOL="$FAS_GLAB_API_SBOOL"
@@ -272,15 +389,25 @@ glos_api() {
   ots_api_collect GLOS_ARGV "$off" api v4 || return 0
   [ "$((${#texts[@]} + ${#fsrc[@]}))" -gt 0 ] || return 0
 
+  # glab fills a placeholder in a typed -F value AFTER this scan (DND-2009):
+  # the scanned text would not be the text sent (a branch named after a work
+  # ticket, say). Refused in glos_guard when a target is not PRIVATE.
+  for k in "${!FAS_FKIND[@]}"; do
+    if [ "${FAS_FKIND[$k]}" = typed ] && glos_has_placeholder "${FAS_FVAL[$k]}"; then
+      GLOS_API_FILLED="the typed field '${FAS_FKEY[$k]}' (-F)"; break
+    fi
+  done
+  GLOS_API_HOST=""
   for ep in "${FAS_POS[@]}"; do glos_api_target "$ep"; done
   # A merge request created in one project can target another (a fork's MR
-  # into its upstream): that project is a target too.
-  if [ -n "$FAS_HOSTNAME" ] && [ "$FAS_HOSTNAME" != gitlab.com ]; then host="$FAS_HOSTNAME"; fi
+  # into its upstream): that project is a target too, on the host the
+  # endpoint goes to.
   for k in "${!FAS_FKEY[@]}"; do
     if [ "${FAS_FKEY[$k]}" = target_project_id ]; then
-      case "${FAS_FKIND[$k]}" in
-        file | formfile) targets+=("?:the target_project_id field is read from a file") ;;
-        *) targets+=("api:$host|projects/${FAS_FVAL[$k]}") ;;
+      case "${FAS_FKIND[$k]}:$GLOS_API_HOST" in
+        file:* | formfile:*) targets+=("?:the target_project_id field is read from a file") ;;
+        *:\?) targets+=("?:the target_project_id field names a project on a host this guard does not resolve") ;;
+        *) targets+=("api:$GLOS_API_HOST|projects/${FAS_FVAL[$k]}") ;;
       esac
     fi
   done
@@ -292,6 +419,7 @@ glos_api() {
 # Returns 0, or exits 1 (HITS) or 3 (cannot judge).
 glos_guard() {
   GLOS_ARGV=("$@")
+  GLOS_API_FILLED=""
   OTS_TOOL=glab-athena OTS_DEST=project OTS_WHAT="glab command"
   local -a argv=("$@") path=() targets=() texts=() tlab=() fsrc=() fidx=() fpre=() flab=() fnoun=() fflag=() pos=()
   local -A fbase=()
@@ -379,5 +507,8 @@ glos_guard() {
     if [ "$GLOS_VIS" != private ]; then public=1; fi
   done
   [ -n "$public" ] || return 0
+  if [ -n "$GLOS_API_FILLED" ]; then
+    ots_refuse 3 "$GLOS_API_FILLED holds a placeholder glab fills after this scan (:branch, :fullpath, :group, :id, :namespace, :repo, :user, :username), so the text sent to this PUBLIC (or unknown) project is not the text scanned. Fix: send the value with -f (raw; glab does not fill it), or write it out in full."
+  fi
   ots_scan_all GLOS_ARGV
 }

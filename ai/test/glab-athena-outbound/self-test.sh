@@ -392,6 +392,72 @@ if refused_hit && read_was "api projects/4242"; then ok "api target_project_id i
 gla api projects/:id/merge_requests/5/notes
 if [ "${RC}" = 0 ] && sent && [[ "${CALLS}" != *"api projects/:id"$'\n'* ]] && [ "$(grep -c . <<<"${CALLS}")" = 1 ]; then ok "an api GET is untouched (no visibility read)"; else bad "api GET" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 
+echo "--- DND-2009: full-URL scheme and host, placeholders glab fills, plain spelling ---"
+# The cwd's project and synth-group%2Fpriv read PRIVATE; synth-group%2Fpub and
+# everything else read PUBLIC. Each regression case was SENT by the code before
+# DND-2009.
+reset_vis
+vis default private
+vis "synth-group%2Fpub" public
+vis "synth-group%2Fpriv" private
+vis 4242 private
+# refused3 <needle> : exit 3, nothing sent, a Fix:, and <needle> in the message.
+refused3() { [ "${RC}" = 3 ] && ! sent && [[ "${OUT}" == *"REFUSED"* ]] && [[ "${OUT}" == *"Fix:"* ]] && [[ "${OUT}" == *"$1"* ]] && no_literal; }
+
+# Gap 1: the scheme and host of a full URL. glab sends a full-URL endpoint to
+# its own host, whatever the scheme's case and whatever --hostname says.
+gla mr note "HTTPS://gitlab.com/synth-group/pub/-/merge_requests/1" -m "x${TOKEN}"
+if refused_hit && read_was "api projects/synth-group%2Fpub"; then ok "DND-2009 regression: an upper-case-scheme MR URL names its project"; else bad "DND-2009 regression: HTTPS:// MR URL" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+gla mr note "https://GitLab.COM/synth-group/pub/-/merge_requests/1" -m "x${TOKEN}"
+if refused_hit && read_was "api projects/synth-group%2Fpub" && [[ "${CALLS}" != *"--hostname"* ]]; then ok "DND-2009: an MR URL's host is case-folded"; else bad "DND-2009: GitLab.COM MR URL" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+gla api -X POST --hostname gitlab.com "https://public.example/api/v4/projects/4242/issues/3/notes" -f "body=x${TOKEN}"
+if refused_hit && [[ "${OUT}" == *"public.example"* ]] && [[ "${OUT}" == *"scanning as PUBLIC"* ]]; then ok "DND-2009 regression: a full URL's own host decides, not --hostname"; else bad "DND-2009 regression: full URL vs --hostname" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+gla api -X POST "HTTPS://public.example/api/graphql" -f "query=query { project(fullPath: \"x${TOKEN}\") { id } }"
+if refused_hit && [[ "${OUT}" == *"scanning as PUBLIC"* ]]; then ok "DND-2009 regression: a full URL to another host is never a GraphQL read"; else bad "DND-2009 regression: other-host graphql" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+gla api -X POST "HTTPS://GitLab.com/api/v4/projects/synth-group%2Fpriv/issues/3/notes" -f "body=x${TOKEN}"
+if [ "${RC}" = 0 ] && sent && read_was "api projects/synth-group%2Fpriv" && [[ "${CALLS}" != *"--hostname"* ]]; then ok "DND-2009: an upper-case gitlab.com URL reads its project's visibility"; else bad "DND-2009: HTTPS://GitLab.com api" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+gla api -X POST "https://gitlab.com/projects/synth-group%2Fpriv/issues/3/notes" -f "body=x${TOKEN}"
+if refused_hit && [[ "${OUT}" == *"scanning as PUBLIC"* ]]; then ok "DND-2009: a gitlab.com URL outside /api/v4/ names no project"; else bad "DND-2009: URL without api/v4" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+
+# Gap 2: glab fills :branch, :fullpath, :group, :id, :namespace, :repo, :user
+# and :username after the scan.
+gla api -X POST projects/synth-group%2Fpub/issues/3/notes -F "body=:branch"
+if refused3 "placeholder"; then ok "DND-2009 regression: a typed -F value glab fills is refused (PUBLIC)"; else bad "DND-2009 regression: -F :branch" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+gla api -X POST "projects/synth-group%2Fpub/issues/3/notes?body=on%20:namespace" -f "x=y"
+if refused3 "placeholder"; then ok "DND-2009 regression: a placeholder in the endpoint query is refused (PUBLIC)"; else bad "DND-2009 regression: query :namespace" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+gla api -X POST projects/synth-group%2Fpriv/issues/:branch/notes -f "body=clean"
+if refused3 "placeholder"; then ok "DND-2009 regression: a placeholder in the endpoint path is refused, even to a PRIVATE project"; else bad "DND-2009 regression: path :branch" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+vis ":namespace" private
+gla api -X POST projects/:namespace/:repo/issues/3/notes -f "body=x${TOKEN}"
+if refused3 "placeholder"; then ok "DND-2009 regression: a project segment glab fills across a / is refused"; else bad "DND-2009 regression: :namespace/:repo" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+gla api -X POST "projects/:id/issues/3/notes?x=:repo" -f "body=clean"
+if refused3 "placeholder"; then ok "DND-2009: projects/:id still refuses a placeholder in its query"; else bad "DND-2009: :id + query :repo" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+gla api -X POST "https://public.example/api/v4/projects/:branch/notes" -f "body=clean"
+if refused3 "placeholder"; then ok "DND-2009: a placeholder in a full URL to another host is refused"; else bad "DND-2009: other-host :branch" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+gla api -X POST projects/synth-group%2Fpub/issues/3/notes -F "body=:username"
+if refused3 "placeholder"; then ok "DND-2009: -F :username is refused (PUBLIC)"; else bad "DND-2009: -F :username" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+gla api -X POST projects/synth-group%2Fpub/issues/3/notes -F "body=:idle" -f "x=:branch"
+if [ "${RC}" = 0 ] && sent; then ok "DND-2009: :idle is no placeholder, and -f (raw) is never filled"; else bad "DND-2009: :idle / -f" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+gla api -X POST projects/synth-group%2Fpriv/issues/3/notes -F "body=:branch"
+if [ "${RC}" = 0 ] && sent; then ok "DND-2009: a typed placeholder to a PRIVATE project passes"; else bad "DND-2009: -F :branch private" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+gla api -X POST projects/:fullpath/issues/3/notes -f "body=clean"
+if [ "${RC}" = 0 ] && sent && read_was "api projects/:fullpath"; then ok "DND-2009: projects/:fullpath is read as glab fills it"; else bad "DND-2009: :fullpath" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+
+# Gap 3: the project segment is spelled plainly (no ., .. or empty segment,
+# decoded or not).
+vis "synth-group%2F..%2Fpriv" private
+gla api -X POST "projects/synth-group%2F..%2Fpriv/issues/3/notes" -f "body=x${TOKEN}"
+if refused3 "plainly"; then ok "DND-2009 regression: an escaped .. in the project segment is refused"; else bad "DND-2009 regression: %2F..%2F" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+vis "synth-group%2F.%2Fpriv" private
+gla api -X POST "projects/synth-group%2F.%2Fpriv/issues/3/notes" -f "body=x${TOKEN}"
+if refused3 "plainly"; then ok "DND-2009 regression: an escaped . in the project segment is refused"; else bad "DND-2009 regression: %2F.%2F" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+vis "synth-group%2F%2Fpriv" private
+gla api -X POST "projects/synth-group%2F%2Fpriv/issues/3/notes" -f "body=x${TOKEN}"
+if refused3 "plainly"; then ok "DND-2009 regression: an empty segment in the project segment is refused"; else bad "DND-2009 regression: %2F%2F" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+gla api -X POST "api/v4/projects/synth-group%2Fpriv/issues/3/notes" -f "body=x${TOKEN}"
+if [ "${RC}" = 0 ] && sent && read_was "api projects/synth-group%2Fpriv"; then ok "DND-2009: a plain api/v4/ prefix still names its project"; else bad "DND-2009: api/v4 prefix" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+reset_vis
+
 echo "--- commands outside the list pass untouched ---"
 gla mr view 5
 if [ "${RC}" = 0 ] && sent && [ "$(grep -c . <<<"${CALLS}")" = 1 ]; then ok "mr view untouched"; else bad "mr view" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
