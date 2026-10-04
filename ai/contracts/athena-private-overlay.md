@@ -354,10 +354,10 @@ of `pr create|new|edit|comment|review|merge|close|reopen`,
 and every field, `--input` body and endpoint query of a `gh api` write (REST
 or a GraphQL mutation), before gh runs; a squash merge's subject and body
 become a commit made on the server, where no pre-push hook runs. It runs after
-gh-athena's merge guard, as glab-athena's does, so the guard's refusals read
-nothing first. An api write the scan cannot classify (a flag outside gh's api
-table, an endpoint it cannot normalize, a GraphQL query it cannot read) is
-refused (exit 3). Which flags carry text is listed in the
+gh-athena's merge guard, as glab-athena's does, so the scan reads nothing
+before the guard decides. An api write the scan cannot classify (a flag
+outside gh's api table, an endpoint it cannot normalize or that does not spell
+its repository plainly, a GraphQL query it cannot read) is refused (exit 3). Which flags carry text is listed in the
 header of `ai/lib/gh-outbound-scan.sh`. The argv is read the way gh reads it,
 with a table of every flag of each of these commands and whether it takes a
 value, built from gh's own help and pinned to one gh version
@@ -375,7 +375,11 @@ absent, the repository gh falls back to: `GH_REPO`, otherwise the current
 directory's. The resolution is `ai/lib/gh-target-repo.sh`'s. A non-empty
 `-R`, or the `GH_REPO` gh falls back to, that is not in a form gh reads
 (`[HOST/]OWNER/REPO`, a URL or a git address) is refused (exit 3, COULD NOT
-LOOK). A visibility that cannot be read, or a URL that cannot be
+LOOK). An api write's targets are the repository its endpoint names
+instead, as the scan header's api paragraph lists them
+(`repos/{owner}/{repo}` is the repository gh falls back to, resolved the same
+way); a GraphQL mutation or any other endpoint names none and is scanned as
+PUBLIC. A visibility that cannot be read, or a URL that cannot be
 parsed, counts as PUBLIC. HITS refuse (exit 1); a scanner exit 1 that does
 not report HITS is a failure (exit 3), never a result. COULD NOT MEASURE
 refuses (exit 3), except where the overlay is ABSENT and the machine is
@@ -424,7 +428,8 @@ PUBLIC or read as private.
   today. It leaves a record, not an alert.
 - gh-athena's forge path does not scan `gh pr create --fill`, an editor or
   `--web` body, the content of release asset files, or other commands
-  (`gh gist`, repository or label descriptions, release upload). A CLI
+  (`gh gist`, `gh repo edit`, `gh label`, `gh release upload`; the same text
+  sent through `gh api` is scanned). A CLI
   whose flags differ from its pinned table is read by the table until the
   table is regenerated. `ai/bin/cli-flag-table --check` names the drift only
   on a machine running the pinned version; its self-test fails where a table

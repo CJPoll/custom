@@ -5,7 +5,10 @@
 #
 #   * fas_path       — an API endpoint normalised the way the CLI + forge would
 #                      route it. Used by ai/lib/gh-merge-guard.sh (gh-athena,
-#                      DND-728) and ai/lib/glab-merge-guard.sh (glab-athena).
+#                      DND-728), ai/lib/glab-merge-guard.sh (glab-athena), and
+#                      both outbound scans (ai/lib/glab-outbound-scan.sh,
+#                      ai/lib/gh-outbound-scan.sh), which also use the other
+#                      two.
 #   * fas_parse_api  — a table-driven `<cli> api` argv parser: method, fields,
 #                      field files, --input, --form, headers, endpoints. The
 #                      flag table is the caller's (gh and glab differ).

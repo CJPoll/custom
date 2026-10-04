@@ -70,7 +70,7 @@ ai/skills/athena:inbox/lib/names.sh	guard
 ai/skills/athena:inbox/lib/routed.sh	guard	
 ai/skills/athena:inbox/lib/thinking.sh	guard	
 scripts/wt-lib/push.sh	guard	
-ai/lib/forge-api-scan.sh	library	sourced by ai/lib/gh-merge-guard.sh, ai/lib/glab-merge-guard.sh and ai/lib/glab-outbound-scan.sh (DND-1938); returns status codes with a why and a how, and each guard composes the exit-3 refusal that carries Fix:
+ai/lib/forge-api-scan.sh	library	sourced by ai/lib/gh-merge-guard.sh, ai/lib/glab-merge-guard.sh, ai/lib/glab-outbound-scan.sh (DND-1938) and ai/lib/gh-outbound-scan.sh (DND-2007); returns status codes with a why and a how, and each guard composes the exit-3 refusal that carries Fix:
 ai/lib/main-health.sh	library	the red-main marker reader and push-argv parse (DND-1482), sourced by ai/bin/main-health and ai/lib/forge-git-passthrough.sh; returns a status with MH_WHY/MH_NOTE, and each caller composes the refusal that carries Fix:
 ai/lib/harness-alert-send.sh	library	the shared harness-alerts send-and-confirm (DND-1513), sourced by every harness-alerts sender; returns a status with the reason on stderr, and each caller prints the Fix: for its own retry path
 ai/lib/integration-receipt.sh	library	sourced by ai/lib/gh-merge-guard.sh, ai/lib/glab-merge-guard.sh (DND-1845) and athena:merge-boarding's integration-gate and locked-merge (DND-969); returns a status with IR_KIND/IR_WHY/IR_HOW, and each caller composes the refusal that carries Fix:

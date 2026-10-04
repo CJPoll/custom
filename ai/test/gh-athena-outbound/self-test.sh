@@ -582,6 +582,13 @@ gha --verbose api -X POST repos/synth-owner/pub/issues -f "body=clean"
 if [ "${RC}" = 3 ] && [[ "${OUT}" != *"stub: SENT"* ]] && [[ "${OUT}" == *"Fix:"* ]]; then ok "a flag before api is refused"; else bad "flag before api" "rc=${RC} ${OUT}"; fi
 gha api -X POST 'repos/synth-owner/pub/issues%zz' -f "body=clean"
 if [ "${RC}" = 3 ] && [[ "${OUT}" != *"stub: SENT"* ]] && [[ "${OUT}" == *"Fix:"* ]]; then ok "an endpoint that cannot be normalized is refused"; else bad "bad endpoint" "rc=${RC} ${OUT}"; fi
+for ep in "repos/synth-owner/priv/../../synth-owner/pub/issues" "repos/synth-owner/./pub/issues" \
+  "repos/synth-owner%2Fpub/x/issues" "repos//synth-owner/pub/issues"; do
+  gha api -X POST "${ep}" -f "body=x${TOKEN}"
+  if [ "${RC}" = 3 ] && [[ "${OUT}" != *"stub: SENT"* ]] && [[ "${OUT}" == *"does not route to the repository it spells"* ]] && [[ "${OUT}" == *"Fix:"* ]]; then ok "refused: an endpoint that does not spell its repository (${ep})"; else bad "spelled ${ep}" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+done
+gha api -X POST "/api/v3/repos/synth-owner/pub/issues" -f "body=x${TOKEN}"
+if api_refused; then ok "a leading /api/v3 endpoint is read as its repository"; else bad "api/v3 prefix" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 rm -f "${STUB_VIS}".synth-owner_*
 
 # DND-1647: no gh/glab call may have fallen through past its stub.

@@ -41,8 +41,10 @@
 # An `api` argv is read with gh's api flag table (FAS_GH_API_* in
 # ai/lib/forge-api-scan.sh, the one the merge guard reads) and the shared
 # collector (ots_api_collect). A flag the table lacks, an endpoint that cannot
-# be normalized, or a GraphQL call whose query cannot be read is REFUSED (exit
-# 3, Fix:): an api write the scan cannot classify never passes. Its targets are
+# be normalized or does not spell its repository plainly (a ., .. or empty
+# segment, or an escaped / in repos/<owner>/<repo>), or a GraphQL call whose
+# query cannot be read is REFUSED (exit 3, Fix:): an api write the scan cannot
+# classify never passes. Its targets are
 # gos_api_target's: repos/<owner>/<repo>/… names <owner>/<repo>, and
 # repos/{owner}/{repo}/… (or :owner/:repo) names GH_REPO, else the current
 # directory's repo, as gh fills them. A GraphQL mutation (its target is inside
@@ -80,8 +82,9 @@
 # visibility cannot be read, or a URL it cannot parse, counts as PUBLIC.
 # Visibility: `gh repo view [<repo>] --json visibility`, as the App.
 #
-# This runs after the merge guard (ai/bin/gh-athena, DND-2007), so the guard's
-# refusals read nothing first, and the guard reads no stdin before the copy.
+# This runs after the merge guard (ai/bin/gh-athena, DND-2007), so it reads
+# nothing before the guard decides (the guard's api refusals stay read-free),
+# and the guard reads no stdin before the copy.
 #
 # Residuals, stated: a field or --input FILE that changes between the merge
 # guard's read of a GraphQL query and this scan's copy of it (gh sends the
@@ -214,6 +217,8 @@ gos_api_target() {
     targets+=("?:the endpoint '$shown' names no repository (repos/<owner>/<repo>/…)"); return 0
   fi
   o="${s[1]}" rp="${s[2]}"
+  gos_api_spelled "$ep" "${s[0]}/$o/$rp" \
+    || ots_refuse 3 "the endpoint '$shown' does not route to the repository it spells (a ., .. or empty segment, or an escaped /), so the outbound scan cannot tell which repository it writes to. Fix: spell the endpoint plainly (repos/<owner>/<repo>/…)."
   case "$o:$rp" in
     "{owner}:{repo}" | ":owner::repo") targets+=("${GH_REPO:-}"); return 0 ;;
   esac
@@ -222,6 +227,29 @@ gos_api_target() {
   fi
   targets+=("$hosted$o/$rp")
   return 0
+}
+
+# gos_api_spelled <endpoint> <normalized repos/<owner>/<repo>> : true when the
+# endpoint's own first three path segments (after any scheme and host, and a
+# leading api/ and v3/), each %-decoded on its own, are exactly that prefix.
+# fas_path applies `.` and `..` and decodes an escaped `/`; neither gh nor
+# GitHub need agree, so a prefix reached that way is not trusted.
+gos_api_spelled() {
+  local r="${1%%[?#]*}" want="$2" seg dec n=0 got=""
+  local -a raw=()
+  if [[ "$r" =~ ^[A-Za-z][A-Za-z0-9+.-]*://[^/]*(.*)$ ]]; then r="${BASH_REMATCH[1]}"; fi
+  r="${r#/}"
+  IFS=/ read -ra raw <<<"$r"
+  if [ "${#raw[@]}" -gt 0 ] && [ "${raw[0],,}" = api ]; then raw=("${raw[@]:1}"); fi
+  if [ "${#raw[@]}" -gt 0 ] && [ "${raw[0],,}" = v3 ]; then raw=("${raw[@]:1}"); fi
+  for seg in "${raw[@]}"; do
+    [ "$n" -lt 3 ] || break
+    case "$seg" in "" | . | ..) return 1 ;; esac
+    dec="$(fas_path "$seg")" || return 1
+    case "$dec" in "" | */*) return 1 ;; esac
+    got+="${got:+/}$dec"; n=$((n + 1))
+  done
+  [ "$got" = "$want" ]
 }
 
 # gos_api <args after the word api...> : fills the caller's text and file
