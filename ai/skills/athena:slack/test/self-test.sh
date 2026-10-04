@@ -523,7 +523,7 @@ run_bin read-channel "${ENG_CHANNEL}" --limit 5
 if [[ "${OUT}" == *"newperson"* ]] && [[ "$(calls_of users.list)" == "1" ]]; then
   ok "users cache: an unknown id triggers exactly one refresh"
 else bad "users cache: an unknown id triggers exactly one refresh" \
-  "out='${OUT}' users.list=$(calls_of users.list)"; fi
+  "rc=${RC} out='${OUT}' users.list=$(calls_of users.list) err='${ERR}'"; fi
 
 # 25. read-channel prints oldest-first. conversations.history returns newest
 #     first, and a transcript in that order reads as a conversation backwards.
