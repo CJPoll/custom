@@ -1,0 +1,208 @@
+#!/usr/bin/env bash
+#
+# gh-flag-table — generate, or check, the pinned gh flag table that
+# gh-athena's outbound scan parses argv with (DND-1976).
+#
+# The scan must read an argv the way gh's flag parser (pflag) reads it. pflag
+# gives a flag that takes a value the NEXT word, even one that starts with `-`:
+# `gh pr create -l -t -b X` is label `-t`, body X. A parse that does not know
+# -l takes a value reads `-t` as the title and never scans X. So the scan
+# carries a table of every flag of every command it judges, and whether each
+# one takes a value. This tool builds that table from the installed gh:
+#
+#   * the flags: the FLAGS and INHERITED FLAGS sections of `gh <cmd> --help`;
+#   * the aliases: its ALIASES section (`gh pr new` is `gh pr create`);
+#   * whether a flag takes a value: `gh <cmd> --help --<flag>`. pflag parses
+#     every flag before cobra shows help, so a flag that needs a value fails
+#     with "flag needs an argument", and one that does not shows the help.
+#     No command runs. The probes run with no token, an empty gh config dir
+#     and stdin from /dev/null, so even a command that did run could not
+#     authenticate.
+#
+# The table is pinned: ai/lib/gh-flag-table.sh records the gh version it was
+# built from, and is committed. It is never read from gh at run time.
+#
+# Usage:
+#   gh-flag-table --help     this text
+#   gh-flag-table --print    print the table for the installed gh
+#   gh-flag-table --write    write it to ai/lib/gh-flag-table.sh (beside this tool)
+#   gh-flag-table --check    compare the committed table with the installed gh
+#
+# Exit codes:
+#   0  printed, written, or (--check) the committed table matches
+#   1  --check: the committed table differs from the installed gh (same version)
+#   2  --check: not compared (no gh, or a gh version other than the pinned one)
+#   3  the table could not be built (gh missing, a help or probe it cannot read)
+#   64 usage
+#
+# Environment (test seams):
+#   GH_FLAG_TABLE_GH    the gh binary to read (default: the first gh on PATH
+#                       that is not the agent PATH wrapper in ai/agent-bin)
+#   GH_FLAG_TABLE_FILE  the committed table to write or check
+#                       (default: ai/lib/gh-flag-table.sh)
+
+set -uo pipefail
+
+HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd -P)"
+TABLE="${GH_FLAG_TABLE_FILE:-$(cd "${HERE}/../lib" && pwd -P)/gh-flag-table.sh}"
+
+# The commands gh-athena's outbound scan judges. An alias is found from each
+# command's own help, never listed here.
+COMMANDS=(
+  "issue close" "issue comment" "issue create" "issue edit" "issue reopen"
+  "pr close" "pr comment" "pr create" "pr edit" "pr merge" "pr reopen" "pr review"
+  "release create" "release edit"
+)
+
+die() { local rc="$1"; shift; printf 'gh-flag-table: %s\n' "$*" >&2; exit "$rc"; }
+
+usage() { sed -n '2,/^set -uo/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'; }
+
+# resolve_gh : echoes the gh to read.
+resolve_gh() {
+  if [ -n "${GH_FLAG_TABLE_GH:-}" ]; then
+    [ -x "${GH_FLAG_TABLE_GH}" ] || die 3 "GH_FLAG_TABLE_GH=${GH_FLAG_TABLE_GH} is not an executable. Fix: point it at a gh binary, or unset it."
+    printf '%s\n' "${GH_FLAG_TABLE_GH}"; return 0
+  fi
+  # The agent PATH wrapper (any checkout's ai/agent-bin, or ATHENA_AGENT_BIN)
+  # refuses a probe it reads as a write (`gh api --help --field`), so it is
+  # skipped for the real gh behind it.
+  local agent_bin c dir
+  agent_bin="$(readlink -f "${ATHENA_AGENT_BIN:-/nonexistent}" 2>/dev/null || true)"
+  while IFS= read -r c; do
+    [ -n "$c" ] || continue
+    dir="$(dirname "$(readlink -f "$c")")"
+    case "$dir" in */ai/agent-bin) continue ;; esac
+    if [ -n "$agent_bin" ] && [ "$dir" = "$agent_bin" ]; then continue; fi
+    printf '%s\n' "$c"; return 0
+  done < <(type -ap gh 2>/dev/null)
+  return 1
+}
+
+# gh_version <gh> : echoes the bare version (2.96.0).
+gh_version() {
+  local v
+  v="$("$1" --version 2>/dev/null | sed -n '1s/^gh version \([0-9][0-9.]*\).*/\1/p')"
+  [ -n "$v" ] || return 1
+  printf '%s\n' "$v"
+}
+
+# run_gh <args...> : gh with no credentials and no prompts. Prints output; returns its exit.
+run_gh() {
+  env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN -u GH_HOST -u GH_REPO \
+    GH_CONFIG_DIR="${SCRATCH}/config" HOME="${SCRATCH}/home" GH_NO_UPDATE_NOTIFIER=1 GH_PROMPT_DISABLED=1 \
+    NO_COLOR=1 "$GH" "$@" </dev/null 2>&1
+}
+
+# table_for <cmd words> : echoes " <kind>:<short>:<long> ... " for one command.
+# Exits 3 on anything it cannot read.
+table_for() {
+  local cmd="$1" help line sect="" short long out rc kind entries=()
+  # shellcheck disable=SC2086
+  help="$(run_gh $cmd --help)" || die 3 "\`gh $cmd --help\` failed: $(head -c 300 <<<"$help"). Fix: check that $GH runs, then retry."
+  while IFS= read -r line; do
+    case "$line" in
+      "") sect=""; continue ;;
+      FLAGS | "INHERITED FLAGS") sect=flags; continue ;;
+      ALIASES) sect=aliases; continue ;;
+      [A-Z]*) sect=""; continue ;;
+    esac
+    [ "$sect" = flags ] || continue
+    # A flag line is indented 2..8 spaces; a wrapped description line is
+    # indented to the description column, far deeper.
+    if [[ "$line" =~ ^\ {2,8}(-([A-Za-z0-9]),\ )?--([A-Za-z0-9][A-Za-z0-9-]*)(\ |$) ]]; then
+      short="${BASH_REMATCH[2]}"; long="${BASH_REMATCH[3]}"
+    elif [[ "$line" =~ ^\ {2,8}-([A-Za-z0-9])(\ |,|$) ]]; then
+      die 3 "\`gh $cmd --help\` lists a short-only flag (-${BASH_REMATCH[1]}), which this tool cannot probe. Fix: extend gh-flag-table to probe a short-only flag."
+    else
+      continue
+    fi
+    # shellcheck disable=SC2086
+    out="$(run_gh $cmd --help "--$long")"; rc=$?
+    if [[ "$out" == *"flag needs an argument"* ]]; then kind=v
+    elif [ "$rc" = 0 ]; then kind=b
+    else die 3 "the probe \`gh $cmd --help --$long\` neither showed help nor said the flag needs an argument (exit $rc): $(head -c 300 <<<"$out"). Fix: read how this gh reports a flag's value, then extend the probe."
+    fi
+    entries+=("$kind:$short:$long")
+  done <<<"$help"
+  [ "${#entries[@]}" -gt 0 ] || die 3 "\`gh $cmd --help\` lists no flags this tool can read. Fix: check the help's FLAGS section format against the parser in gh-flag-table."
+  printf ' %s ' "${entries[*]}"
+}
+
+# render : prints the whole table file for the installed gh.
+render() {
+  local ver cmd t a
+  local -A tables=()
+  ver="$(gh_version "$GH")" || die 3 "could not read the version of $GH (\`gh --version\`). Fix: check that it is GitHub's gh."
+  for cmd in "${COMMANDS[@]}"; do
+    t="$(table_for "$cmd")" || exit 3
+    tables["$cmd"]="$t"
+  done
+  ALIASES=()
+  for cmd in "${COMMANDS[@]}"; do
+    # shellcheck disable=SC2086
+    while IFS= read -r a; do
+      [ -n "$a" ] && [ "$a" != "$cmd" ] && ALIASES+=("$a|$cmd")
+    done < <(run_gh $cmd --help | sed -n '/^ALIASES$/,/^$/s/^ *gh \(.*[^ ]\) *$/\1/p')
+  done
+  printf '# shellcheck shell=bash\n'
+  printf '# gh-flag-table.sh — GENERATED by ai/bin/gh-flag-table from gh %s. Do not\n' "$ver"
+  printf '# edit by hand: after a gh upgrade, run `ai/bin/gh-flag-table --write`.\n'
+  printf '# Sourced by ai/lib/gh-outbound-scan.sh (DND-1976), never run.\n'
+  printf '#\n'
+  printf '# GFT_FLAGS[<command>] holds one entry per flag, <kind>:<short>:<long>:\n'
+  printf '#   v  takes a value: pflag gives it the next word, even one starting with -\n'
+  printf '#   b  takes none: a switch, set by its name alone (or --name=value)\n'
+  printf '# GFT_ALIAS[<alias>] is the command it names.\n'
+  printf "GFT_GH_VERSION='%s'\n" "$ver"
+  printf 'declare -gA GFT_FLAGS=(\n'
+  for cmd in "${COMMANDS[@]}"; do printf "  ['%s']='%s'\n" "$cmd" "${tables[$cmd]}"; done
+  printf ')\n'
+  printf 'declare -gA GFT_ALIAS=(\n'
+  for a in "${ALIASES[@]}"; do printf "  ['%s']='%s'\n" "${a%%|*}" "${a#*|}"; done
+  printf ')\n'
+}
+
+MODE=""
+for arg in "$@"; do
+  case "$arg" in
+    --help | -h) usage; exit 0 ;;
+    --print | --write | --check)
+      [ -z "$MODE" ] || die 64 "give one mode, not $MODE and $arg. Fix: run \`gh-flag-table --help\`."
+      MODE="$arg" ;;
+    *) die 64 "unknown argument '$arg'. Fix: run \`gh-flag-table --help\`." ;;
+  esac
+done
+[ -n "$MODE" ] || die 64 "no mode given. Fix: pass --print, --write or --check (\`gh-flag-table --help\`)."
+
+if ! GH="$(resolve_gh)"; then
+  [ "$MODE" = --check ] && die 2 "not compared: no gh on PATH. Fix: none needed where gh is absent; install gh to check the table."
+  die 3 "no gh on PATH (the agent wrapper in ai/agent-bin is skipped). Fix: install gh, or set GH_FLAG_TABLE_GH."
+fi
+SCRATCH="$(mktemp -d)" || die 3 "mktemp failed. Fix: make \$TMPDIR (or /tmp) writable."
+trap 'rm -rf "$SCRATCH"' EXIT
+mkdir -p "$SCRATCH/config" "$SCRATCH/home"
+
+case "$MODE" in
+  --print) render ;;
+  --write)
+    new="$(render)" || exit 3
+    printf '%s\n' "$new" > "$TABLE" || die 3 "could not write $TABLE. Fix: make it writable."
+    printf 'gh-flag-table: wrote %s\n' "$TABLE" ;;
+  --check)
+    have="$(gh_version "$GH")" || die 3 "could not read the version of $GH. Fix: check that it is GitHub's gh."
+    [ -r "$TABLE" ] || die 3 "the committed table $TABLE is missing or unreadable. Fix: run \`ai/bin/gh-flag-table --write\`."
+    pinned="$(sed -n "s/^GFT_GH_VERSION='\(.*\)'$/\1/p" "$TABLE")"
+    [ -n "$pinned" ] || die 3 "$TABLE has no GFT_GH_VERSION line. Fix: regenerate it with \`ai/bin/gh-flag-table --write\`."
+    if [ "$have" != "$pinned" ]; then
+      die 2 "not compared: the table is pinned to gh $pinned and $GH is gh $have. Fix: on the machine that ships a gh upgrade, run \`ai/bin/gh-flag-table --write\` and commit the table."
+    fi
+    new="$(render)" || exit 3
+    if [ "$new" = "$(cat "$TABLE")" ]; then
+      printf 'gh-flag-table: OK: %s matches gh %s\n' "$TABLE" "$have"
+      exit 0
+    fi
+    diff <(cat "$TABLE") <(printf '%s\n' "$new") >&2
+    die 1 "DRIFT: $TABLE differs from what gh $have reports (diff above). Fix: run \`ai/bin/gh-flag-table --write\`, review the diff, and commit it."
+    ;;
+esac

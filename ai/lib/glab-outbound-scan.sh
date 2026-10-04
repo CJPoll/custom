@@ -36,8 +36,18 @@
 # next word even when it starts with `-`: `-l -t -d X` is label `-t`,
 # description X to glab, while this parse reads `-d` as the title. So when a
 # command carries any text flag, every word this parse reads as positional is
-# scanned too: X is scanned either way. A file or stdin is copied once into a
-# private file, scanned, and handed to glab in its place.
+# scanned too: X is scanned either way. Text is not the only thing such a flag
+# can hand on: `release create v1 --ref -n -F <file>` is notes `-F` to this
+# parse, and notes read from <file> to glab (--ref takes -n). So after a flag
+# this parse does not know, a value given as its own word that names a file or
+# repo flag (-F, --notes-file, -R, --repo, --target-project) is REFUSED with a
+# Fix (DND-1976; both rules are ai/lib/outbound-text-scan.sh's, shared with
+# gh-athena, which reads gh's argv with a pinned flag table instead). This
+# parse keeps no pinned glab table: glab's help names no value types, and its
+# flags differ across the glab versions in use (`--target-project` is not in
+# glab 1.92), so a pinned table would refuse a flag one machine has. A
+# file or stdin is copied once into a private file, scanned, and handed to glab
+# in its place.
 #
 # The TARGET is every project the write can reach: each -R/--repo value
 # (before or after the command path; OWNER/REPO, GROUP/NS/REPO, a full URL or a
@@ -94,17 +104,6 @@ glos_long_of() {
     a) echo assets-links ;;
     *) echo "$1" ;;
   esac
-}
-
-# glos_upload_name <path or -> : the file name a multipart upload of <path>
-# carries, for its scanned copy. Stdin and a name with no usable last segment
-# get a fixed name.
-glos_upload_name() {
-  local b="${1##*/}"
-  case "$1:$b" in
-    -:* | *: | *:. | *:..) b=upload ;;
-  esac
-  printf '%s' "$b"
 }
 
 # glos_shown <endpoint or URL> : the text without its ?query or #fragment, for
@@ -240,57 +239,17 @@ glos_api_target() {
 # glos_api <offset of the first word after `api`> <args after api...> : fills
 # the caller's text and file arrays and `targets` for an api write.
 glos_api() {
-  local off="$1" method write k ep host="" graphql=""
+  local off="$1" k ep host=""
   shift
   FAS_API_VALUED="$FAS_GLAB_API_VALUED" FAS_API_BOOL="$FAS_GLAB_API_BOOL"
   FAS_API_SVALUED="$FAS_GLAB_API_SVALUED" FAS_API_SBOOL="$FAS_GLAB_API_SBOOL"
   if ! fas_parse_api "$@"; then
     ots_refuse 3 "'$FAS_UNKNOWN' is not a \`glab api\` flag the outbound scan knows (glab 1.112), so it cannot tell which text this call sends. Fix: drop the flag (glab rejects an unknown flag anyway)."
   fi
-  method="$FAS_METHOD"
-  if [ -z "$method" ]; then
-    if [ "$FAS_NPARAMS" -gt 0 ] || [ -n "$FAS_INPUT" ]; then method=POST; else method=GET; fi
-  fi
-  write=1
-  case "$method" in GET | HEAD) write=0 ;; esac
-  if [ "$FAS_OVERRIDE" = 1 ]; then write=1; fi
-  for k in "${FAS_FKEY[@]}"; do if [ "$k" = _method ]; then write=1; fi; done
-  [ "$write" = 1 ] || return 0
-
-  for k in "${!FAS_FKIND[@]}"; do
-    case "${FAS_FKIND[$k]}" in
-      file | formfile)
-        fsrc+=("${FAS_FVAL[$k]#@}"); fidx+=($((off + FAS_FIDX[k])))
-        fpre+=("${FAS_FPRE[$k]}${FAS_FKEY[$k]}=@"); flab+=(field-file); fnoun+=(field); fflag+=("-F ${FAS_FKEY[$k]}=@<path>")
-        # A --form file is a multipart upload, named after the path glab is
-        # handed: the copy keeps the source's file name.
-        if [ "${FAS_FKIND[$k]}" = formfile ]; then fbase[$((${#fsrc[@]} - 1))]="$(glos_upload_name "${FAS_FVAL[$k]#@}")"; fi ;;
-      *)
-        texts+=("${FAS_FKEY[$k]}=${FAS_FVAL[$k]}"); tlab+=(field) ;;
-    esac
-  done
-  if [ -n "$FAS_INPUT" ]; then
-    fsrc+=("$FAS_INPUT"); fidx+=($((off + FAS_INPUT_IDX))); fpre+=("$FAS_INPUT_PRE")
-    flab+=(input); fnoun+=(body); fflag+=(--input)
-  fi
-  for ep in "${FAS_POS[@]}"; do
-    if [[ "$ep" == *[?#]* ]]; then texts+=("$ep"); tlab+=(endpoint); fi
-    if ep="$(fas_path "$ep" api v4)" && [ "${ep,,}" = graphql ]; then graphql=1; fi
-  done
+  # What a write is, which fields it sends, and the GraphQL copy step are
+  # shared with gh-athena (ai/lib/outbound-text-scan.sh, DND-1976).
+  ots_api_collect GLOS_ARGV "$off" api v4 || return 0
   [ "$((${#texts[@]} + ${#fsrc[@]}))" -gt 0 ] || return 0
-
-  # A GraphQL call is judged by reading its query, and a pipe or stdin can be
-  # read once: every file is copied first, and both the mutation check and glab
-  # read the copy.
-  if [ -n "$graphql" ] && [ "${#fsrc[@]}" -gt 0 ]; then
-    FAS_FILES=()
-    for k in "${!fsrc[@]}"; do
-      ots_copy "${fnoun[$k]}" "${fflag[$k]}" "graphql-$k${fbase[$k]:+/${fbase[$k]}}" "${fsrc[$k]}"
-      fsrc[k]="$OTS_COPY"
-      GLOS_ARGV[${fidx[$k]}]="${fpre[$k]}$OTS_COPY"
-      if [ "${flab[$k]}" = input ]; then FAS_INPUT="$OTS_COPY"; else FAS_FILES+=("$OTS_COPY"); fi
-    done
-  fi
 
   for ep in "${FAS_POS[@]}"; do glos_api_target "$ep"; done
   # A merge request created in one project can target another (a fork's MR
@@ -371,8 +330,21 @@ glos_guard() {
 
   if [ "$group" != api ]; then
     OTS_WHAT="$group $verb"
+    # Rule 2 (ai/lib/outbound-text-scan.sh): after an unknown flag, which may
+    # take the next word, a value given as its own word that names a file or
+    # repo flag is refused: `release create v1 --ref -n -F <file>` is notes
+    # `-F` to this parse, and to glab (--ref takes -n) notes read from <file>.
+    local ft_letters="${fs}R" ft_longs="$fl$tg --repo "
     while [ "$i" -lt "$n" ]; do
       a="${argv[$i]}"
+      if [ -n "$after_unknown" ] && [ "$((i + 1))" -lt "$n" ] && ots_names_flag "${argv[$((i + 1))]}" "$ft_letters" "$ft_longs"; then
+        case "$a" in
+          -R | --repo) ots_refuse_flag_value "$a" "${argv[$((i + 1))]}" ;;
+          --*=*) ;;
+          --*) if [[ "$tl$fl$tg" == *" $a "* ]]; then ots_refuse_flag_value "$a" "${argv[$((i + 1))]}"; fi ;;
+          -?) if [[ "$ts$fs" == *"${a:1:1}"* ]]; then ots_refuse_flag_value "$a" "${argv[$((i + 1))]}"; fi ;;
+        esac
+      fi
       case "$a" in
         --)
           for a in "${argv[@]:$((i + 1))}"; do pos+=("$a"); glos_positional "$a"; done
@@ -432,12 +404,5 @@ glos_guard() {
     if [ "$GLOS_VIS" != private ]; then public=1; fi
   done
   [ -n "$public" ] || return 0
-
-  local k
-  for k in "${!texts[@]}"; do ots_scan_text "${tlab[$k]}" "${tlab[$k]}" "text-$k" "${texts[$k]}"; done
-  for k in "${!fsrc[@]}"; do
-    ots_copy_scan "${flab[$k]}" "${fnoun[$k]}" "${fflag[$k]}" "file-$k${fbase[$k]:+/${fbase[$k]}}" "${fsrc[$k]}"
-    GLOS_ARGV[${fidx[$k]}]="${fpre[$k]}$OTS_COPY"
-  done
-  return 0
+  ots_scan_all GLOS_ARGV
 }

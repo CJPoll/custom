@@ -377,6 +377,7 @@ ai/lib/outbound_scan_sources.rb	library	git/overlay/file adapter required by ai/
 ai/lib/gh-outbound-scan.sh	guard
 ai/lib/glab-outbound-scan.sh	guard
 ai/lib/outbound-text-scan.sh	guard
+ai/lib/gh-flag-table.sh	no-fail-path	generated data sourced by ai/lib/gh-outbound-scan.sh (DND-1976): it defines the pinned gh flag table and runs nothing; ai/bin/gh-flag-table builds and checks it, and the scan refuses a flag the table lacks with a Fix:
 ai/lib/outbound_tree_check.rb	guard
 ai/lib/outbound_mark.rb	library	git/filesystem probe required by ai/bin/check-outbound-tree (DND-699); returns :marked, :unmarked or :unknown, and the check prints the verdict that carries Fix:
 ai/git-hooks/outbound-pre-push.sh	guard

@@ -6,6 +6,12 @@
 # Now the title/body/body-file of pr/issue writes to a PUBLIC target is scanned
 # by ai/bin/outbound-scan before gh runs.
 #
+# DND-1976: the argv is read the way gh's pflag reads it, with the pinned flag
+# table. Before that, an unknown flag swallowed the next flag word
+# (`pr create -l -t -b X`: gh sends body X, the guard read `-t` as the title)
+# and X went out unscanned. The DND-1976 sections pin that, and the sweep to
+# the pr/issue aliases and release text.
+#
 # Hermetic: a stub gh on PATH (it records every call; `repo view` answers the
 # visibility from a fixture), the App token from a fixture cache (no mint, no
 # network), a fixture overlay under mktemp -d with synthetic patterns, a fake
@@ -59,13 +65,14 @@ case "$*" in
     if [ -s "${STUB_VIS}" ]; then cat "${STUB_VIS}"; exit 0; fi
     echo "stub: no visibility" >&2; exit 1 ;;
   "alias list"*) exit 0 ;;
-  "pr create"*|"pr comment"*|"pr edit"*|"pr review"*|"issue "*)
+  "pr create"*|"pr new"*|"pr comment"*|"pr edit"*|"pr review"*|"pr close"*|"pr reopen"*|"issue "*|"release "*)
     # Echo the body file's content the way gh would read it, so a replaced
     # stdin body file is observable.
     prev=""; for a in "$@"; do
-      if [ "$prev" = "--body-file" ] || [ "$prev" = "-F" ]; then printf 'stub-body:'; cat "$a"; fi
+      case "$prev" in --body-file|-F|--notes-file) printf 'stub-body:'; cat "$a" ;; esac
       case "$a" in
         --body-file=*) printf 'stub-body:'; cat "${a#--body-file=}" ;;
+        --notes-file=*) printf 'stub-body:'; cat "${a#--notes-file=}" ;;
         -F?*) printf 'stub-body:'; cat "${a#-F}" ;;
       esac
       prev="$a"
@@ -137,8 +144,6 @@ gha pr create "-F${TMP}/body-hit.md"
 if [ "${RC}" = 1 ] && not_sent "pr create" && no_literal; then ok "refused: -F/path"; else bad "refused: -F/path" "rc=${RC} ${OUT}"; fi
 OUT="$(cd "${WORK}" && : > "${STUB_LOG}" && printf 'clean via -F-\n' | "${WRAPPER}" pr create -F- 2>&1)"; RC=$?; CALLS="$(cat "${STUB_LOG}")"
 if [ "${RC}" = 0 ] && sent "pr create" && [[ "${OUT}" == *"stub-body:clean via -F-"* ]]; then ok "-F- is replaced by the scanned copy"; else bad "-F-" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
-gha pr create -db "x${TOKEN}"
-if [ "${RC}" = 3 ] && not_sent "pr create" && [[ "${OUT}" == *"short-flag cluster"* ]] && [[ "${OUT}" == *"Fix:"* ]]; then ok "a cluster hiding -b is refused"; else bad "cluster" "rc=${RC} ${OUT}"; fi
 gha pr create -d --body "clean"
 if [ "${RC}" = 0 ] && sent "pr create"; then ok "a lone boolean short flag passes"; else bad "lone short flag" "rc=${RC} ${OUT}"; fi
 gha pr create --body "x${TOKEN}" --body "clean"
@@ -291,6 +296,86 @@ if [ "${RC}" = 3 ] && not_sent "pr create" && [[ "${OUT}" == *"this machine must
 echo "--- an unreadable body file is refused ---"
 gha pr create --body-file "${TMP}/no-such-file"
 if [ "${RC}" = 3 ] && not_sent "pr create" && [[ "${OUT}" == *"is not readable"* ]] && [[ "${OUT}" == *"Fix:"* ]]; then ok "unreadable body file"; else bad "unreadable body file" "rc=${RC} ${OUT}"; fi
+
+echo "--- DND-1976: an unknown flag swallowed the next flag, and its text went out unscanned ---"
+# gh gives a valued flag the next word even when it starts with `-`, so
+# `-l -t -b X` is label `-t`, body X. The old parse did not know -l took a
+# value, read `-t` as the title (its value `-b`) and X as a positional: X was
+# never scanned, and gh sent it as the body.
+echo PUBLIC > "${STUB_VIS}"
+gha pr create -l -t -b "x${TOKEN}"
+if [ "${RC}" = 1 ] && not_sent "pr create" && [[ "${OUT}" == *"label=synth-token"* ]] && no_literal; then
+  ok "DND-1976 regression: pr create -l -t -b <planted> is scanned and refused"
+else
+  bad "DND-1976 regression: pr create -l -t -b <planted>" "rc=${RC} calls=[${CALLS}] ${OUT}"
+fi
+for argv in "pr create -a -t -b x${TOKEN}" "pr create -H -t --body x${TOKEN}" "pr create --label -t --body=x${TOKEN}" \
+  "pr edit 5 --add-label -t -b x${TOKEN}" "pr comment 5 -R synth-owner/pub -b x${TOKEN}" \
+  "pr merge 5 --squash --match-head-commit -t -b x${TOKEN}" "issue create -l -t -b x${TOKEN}" \
+  "issue edit 7 --add-label -t -b x${TOKEN}" "issue close 7 -r -t -c x${TOKEN}"; do
+  # shellcheck disable=SC2086
+  gha ${argv}
+  if [ "${RC}" = 1 ] && [[ "${OUT}" != *"stub: SENT"* ]] && [[ "${OUT}" == *"label=synth-token"* ]] && no_literal; then ok "refused: ${argv%%x${TOKEN}}"; else bad "refused: ${argv%%x${TOKEN}}" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+done
+
+echo "--- DND-1976: a value that is a file or target flag of the command is refused, not guessed ---"
+gha pr create -l -F "${TMP}/body-hit.md"
+if [ "${RC}" = 3 ] && not_sent "pr create" && [[ "${OUT}" == *"looks like a flag"* ]] && [[ "${OUT}" == *"Fix:"* ]]; then ok "a label value that is -F refused"; else bad "label -F" "rc=${RC} ${OUT}"; fi
+gha pr create --label -R synth-owner/pub -b "clean"
+if [ "${RC}" = 3 ] && not_sent "pr create" && [[ "${OUT}" == *"looks like a flag"* ]]; then ok "a label value that is -R refused"; else bad "label -R" "rc=${RC} ${OUT}"; fi
+gha pr create "--label=-F" -b "clean"
+if [ "${RC}" = 0 ] && sent "pr create"; then ok "an attached value is never another flag"; else bad "attached -F value" "rc=${RC} ${OUT}"; fi
+
+echo "--- DND-1976: every word the flag table cannot classify is refused ---"
+gha pr create --no-such-flag -b "x${TOKEN}"
+if [ "${RC}" = 3 ] && not_sent "pr create" && [[ "${OUT}" == *"--no-such-flag"* ]] && [[ "${OUT}" == *"Fix:"* ]] && no_literal; then ok "an unknown long flag refused"; else bad "unknown long flag" "rc=${RC} ${OUT}"; fi
+gha pr create -Z -b "x${TOKEN}"
+if [ "${RC}" = 3 ] && not_sent "pr create" && [[ "${OUT}" == *"-Z"* ]] && [[ "${OUT}" == *"Fix:"* ]]; then ok "an unknown short flag refused"; else bad "unknown short flag" "rc=${RC} ${OUT}"; fi
+gha pr create -h -b "x${TOKEN}"
+if [ "${RC}" = 0 ] && [[ "${OUT}" != *"outbound-scan:"* ]] && [[ "${CALLS}" != *"repo view"* ]]; then ok "-h (pflag shows the help, nothing runs) is not scanned"; else bad "-h" "rc=${RC} ${OUT}"; fi
+gha pr create -b "x${TOKEN}" -h
+if [ "${RC}" = 0 ] && [[ "${OUT}" != *"outbound-scan:"* ]]; then ok "-h after the body: still the help"; else bad "-h after" "rc=${RC} ${OUT}"; fi
+echo PRIVATE > "${STUB_VIS}"
+echo PUBLIC > "${STUB_VIS}.synth-owner_pub"
+gha pr --repo synth-owner/pub create -b "x${TOKEN}"
+if [ "${RC}" = 1 ] && not_sent "pr create" && [[ "${CALLS}" == *"repo view synth-owner/pub"* ]] && no_literal; then ok "a -R between the group and the verb is a target (cobra reads it)"; else bad "-R before verb" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+gha -R synth-owner/pub pr create -b "x${TOKEN}"
+if [ "${RC}" = 1 ] && not_sent "pr create" && [[ "${CALLS}" == *"repo view synth-owner/pub"* ]]; then ok "a -R before the command path is a target"; else bad "-R before path" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+rm -f "${STUB_VIS}".synth-owner_*
+echo PUBLIC > "${STUB_VIS}"
+gha pr -d create -b "x${TOKEN}"
+if [ "${RC}" = 3 ] && not_sent "pr create" && [[ "${OUT}" == *"before the command path"* ]] && [[ "${OUT}" == *"Fix:"* ]]; then ok "another flag between the group and the verb refused"; else bad "flag before verb" "rc=${RC} ${OUT}"; fi
+gha --verbose pr create -b "x${TOKEN}"
+if [ "${RC}" = 3 ] && not_sent "pr create" && [[ "${OUT}" == *"Fix:"* ]]; then ok "another flag before the command path refused"; else bad "flag before path" "rc=${RC} ${OUT}"; fi
+gha -R -F pr create -b "clean"
+if [ "${RC}" = 3 ] && not_sent "pr create" && [[ "${OUT}" == *"looks like a flag"* ]]; then ok "a -R before the path whose value looks like a flag refused"; else bad "-R -F prepath" "rc=${RC} ${OUT}"; fi
+
+echo "--- DND-1976: pflag's own spellings are read exactly ---"
+gha pr create -db "x${TOKEN}"
+if [ "${RC}" = 1 ] && not_sent "pr create" && no_literal; then ok "-db X: -d is a switch, X is the body"; else bad "-db X" "rc=${RC} ${OUT}"; fi
+gha pr create "-dbx${TOKEN}"
+if [ "${RC}" = 1 ] && not_sent "pr create" && no_literal; then ok "-dbVALUE: the body is attached"; else bad "-dbVALUE" "rc=${RC} ${OUT}"; fi
+gha pr create "-t=x${TOKEN}"
+if [ "${RC}" = 1 ] && not_sent "pr create" && no_literal; then ok "-t=VALUE"; else bad "-t=VALUE" "rc=${RC} ${OUT}"; fi
+gha pr create -dF "${TMP}/body-hit.md"
+if [ "${RC}" = 1 ] && not_sent "pr create" && [[ "${OUT}" == *"body-file:1 label=synth-token"* ]]; then ok "-dF <file>: the body file is scanned"; else bad "-dF file" "rc=${RC} ${OUT}"; fi
+gha pr create -l bug -t "a title" -b "a clean body" -d
+if [ "${RC}" = 0 ] && sent "pr create" && [[ "${OUT}" == *"CLEAN mode=text"* ]]; then ok "a clean create with valued and boolean flags is sent"; else bad "clean create" "rc=${RC} ${OUT}"; fi
+
+echo "--- DND-1976 sweep: the aliases and release text ---"
+for argv in "pr new -b x${TOKEN}" "issue new -t x${TOKEN}" "pr merge 5 -A x${TOKEN}" \
+  "release create v1 --notes x${TOKEN}" "release create v1 -n x${TOKEN}" "release create v1 -t x${TOKEN}" \
+  "release new v1 -n x${TOKEN}" "release edit v1 --notes=x${TOKEN}" "release edit v1 --tag x${TOKEN}" \
+  "release create v1 -n clean x${TOKEN}"; do
+  # shellcheck disable=SC2086
+  gha ${argv}
+  if [ "${RC}" = 1 ] && [[ "${OUT}" != *"stub: SENT"* ]] && [[ "${OUT}" == *"label=synth-token"* ]] && no_literal; then ok "refused: ${argv%%x${TOKEN}}"; else bad "refused: ${argv%%x${TOKEN}}" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+done
+gha release create v1 -F "${TMP}/body-hit.md"
+if [ "${RC}" = 1 ] && [[ "${OUT}" != *"stub: SENT"* ]] && [[ "${OUT}" == *"notes-file:1 label=synth-token"* ]]; then ok "release -F <file> refused"; else bad "release -F" "rc=${RC} ${OUT}"; fi
+OUT="$(cd "${WORK}" && : > "${STUB_LOG}" && printf 'clean notes\n' | "${WRAPPER}" release create v1 --notes-file - 2>&1)"; RC=$?; CALLS="$(cat "${STUB_LOG}")"
+if [ "${RC}" = 0 ] && [[ "${OUT}" == *"stub-body:clean notes"* ]] && [[ "${CALLS}" != *"--notes-file -"* ]]; then ok "release notes from stdin reach gh as the scanned copy"; else bad "release stdin" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+rm -f "${STUB_VIS}".synth-owner_*
 
 # DND-1647: no gh/glab call may have fallen through past its stub.
 if fsg_verify; then ok "no gh/glab call fell through past its stub (DND-1647)"

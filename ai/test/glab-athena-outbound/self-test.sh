@@ -230,6 +230,25 @@ fi
 gla release create v1 --notes-file "${TMP}/no-such-file"
 if [ "${RC}" = 3 ] && ! sent && [[ "${OUT}" == *"is not readable"* ]] && [[ "${OUT}" == *"Fix:"* ]]; then ok "an unreadable notes file refused"; else bad "unreadable file" "rc=${RC} ${OUT}"; fi
 
+echo "--- DND-1976: after an unknown flag, a value that names a file or repo flag is refused ---"
+# glab (pflag) gives --ref the next word, so `--ref -n -F <file>` is notes read
+# from <file>; this parse reads `-F` as the notes text and <file> as a
+# positional, so the file went out unscanned.
+gla release create v1 --ref -n -F "${TMP}/body-hit.md"
+if [ "${RC}" = 3 ] && ! sent && [[ "${OUT}" == *"looks like a flag"* ]] && [[ "${OUT}" == *"Fix:"* ]] && no_literal; then
+  ok "DND-1976 regression (glab): release create --ref -n -F <file> is refused"
+else
+  bad "DND-1976 regression (glab): release create --ref -n -F <file>" "rc=${RC} calls=[${CALLS}] ${OUT}"
+fi
+gla release create v1 -r -N --notes-file "${TMP}/body-hit.md"
+if [ "${RC}" = 3 ] && ! sent && [[ "${OUT}" == *"looks like a flag"* ]]; then ok "-r -N --notes-file <file> refused"; else bad "-r -N --notes-file" "rc=${RC} ${OUT}"; fi
+gla mr note 5 --unique -m -R synth-group/pub
+if [ "${RC}" = 3 ] && ! sent && [[ "${OUT}" == *"looks like a flag"* ]]; then ok "an unknown flag, then -m -R <repo>, refused"; else bad "-m -R" "rc=${RC} ${OUT}"; fi
+gla release create v1 --ref main -n "clean" -F "${TMP}/body-clean.md"
+if [ "${RC}" = 0 ] && sent; then ok "an unknown flag with a plain value, then text and a file, is sent"; else bad "plain unknown value" "rc=${RC} ${OUT}"; fi
+gla mr create --draft -t "clean title" -d "x${TOKEN}"
+if refused_hit; then ok "a switch before a text flag is not refused, and the text is scanned"; else bad "switch then text" "rc=${RC} ${OUT}"; fi
+
 echo "--- the target is every project the write can reach ---"
 vis default private
 vis "synth-group%2Fpub" public

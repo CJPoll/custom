@@ -25,6 +25,26 @@
 #   exit 1 without HITS, other     REFUSED, exit 3: a scanner failure is never
 #                                  read as a result
 #
+# How an argv is read (DND-1976). gh and glab both parse flags with pflag, and
+# pflag gives a flag that takes a value the NEXT word, even one that starts
+# with `-`: `-l -t -b X` is label `-t`, body X. A parse that does not know -l
+# takes a value reads `-t` as the title, and X goes out unscanned. Two rules,
+# shared by both guards, close that class:
+#
+#   1. A word the parse cannot place is scanned or refused, never dropped.
+#      gh-athena parses with a pinned table of every flag of every command it
+#      judges (ai/lib/gh-flag-table.sh, ots_pflag_parse), so an unknown flag
+#      is REFUSED. glab's help does not say which flags take a value, so
+#      glab-athena's parse lets an unknown flag take nothing; every positional
+#      is then scanned whenever the command carries text, so text a swallowed
+#      flag hands on is scanned either way.
+#   2. A flag value given as its own word that, read as a flag, names one of
+#      the command's FILE or TARGET flags (`--label -F <file>`, `-l -R <repo>`)
+#      is REFUSED: under the other reading that file is sent unscanned, or that
+#      repository decides the visibility. gh-athena applies it to every value
+#      but text (a drifted table); glab-athena to a value that follows an
+#      unknown flag. The attached form (`--label=-F`) is never ambiguous.
+#
 # The caller sets:
 #   OTS_TOOL   the wrapper's name, the prefix of every line (gh-athena)
 #   OTS_WHAT   the command being judged, for messages ("pr create")
@@ -143,5 +163,209 @@ ots_copy() {
     cat -- "$src" > "$f" || ots_refuse 3 "could not copy the $noun file $src for the outbound scan. Fix: pass a readable regular file and retry."
   fi
   OTS_COPY="$f"
+  return 0
+}
+
+# ---- reading an argv (DND-1976) --------------------------------------------
+
+# ots_flag_shaped <word> : true when pflag would read <word> as a flag (`-x…`,
+# `--x…`). A lone `-` (stdin) and `--` are not.
+ots_flag_shaped() { [[ "$1" =~ ^--?[A-Za-z0-9] ]]; }
+
+# ots_names_flag <word> <short letters> <" --long --long "> : true when <word>,
+# read as a flag, names one of the given flags: `--long` or `--long=…`, or a
+# single-dash cluster with one of the letters anywhere before an `=` (pflag
+# may read any letter of a cluster as a flag).
+ots_names_flag() {
+  local w="$1" letters="$2" longs="$3" c
+  ots_flag_shaped "$w" || return 1
+  if [[ "$w" == --* ]]; then
+    [[ "$longs" == *" ${w%%=*} "* ]]; return
+  fi
+  c="${w#-}"; c="${c%%=*}"
+  [ -n "$letters" ] && [[ "$c" == *["$letters"]* ]]
+}
+
+# ots_refuse_flag_value <flag> <value> : rule 2 of the header.
+ots_refuse_flag_value() {
+  ots_refuse 3 "the value of $1 in this $OTS_WHAT is \`$2\`, which looks like a flag that names a file or a repository. pflag may read it either way, and under one reading that file is sent, or that repository targeted, without the outbound scan. Fix: attach the value to its flag (\`$1=$2\`) if you meant it, or give $1 a real value."
+}
+
+# ots_pflag_parse <table> <offset> <args...> : reads <args> the way pflag
+# reads them, with <table> the command's flags (" <v|b>:<short>:<long> … ",
+# the GFT_FLAGS format of ai/lib/gh-flag-table.sh). Returns 1 on a word it
+# cannot place (an unknown flag, `--=x`, `---x`), naming it in OTS_UNKNOWN.
+# Otherwise returns 0 and sets, per value-taking flag occurrence, in order:
+#   OTS_FN   its long name (no dashes)
+#   OTS_FV   its value
+#   OTS_FI   <offset> + the index of the word that holds the value
+#   OTS_FP   the text before the value in that word ("" when the value is
+#            its own word; `--body-file=`, `-F`, `-dF`, `-F=` when attached)
+#   OTS_FS   1 when the value is its own word, else 0
+# and OTS_PO / OTS_POI, every positional and its index (everything after `--`
+# included). OTS_HELP is 1 when the argv asks for help with an undefined -h,
+# which pflag answers without running the command. The pflag rules: `--name=v`; `--name v` (v taken even when it
+# starts with `-`); `-abc` letter by letter, where a value-taking letter takes
+# the rest of the word (`-tX`, `-t=X`), or the next word when it is last; a
+# switch letter followed by `=` takes the rest as its value (`-d=true`); a
+# lone `-` is positional.
+ots_pflag_parse() {
+  local table="$1" off="$2"; shift 2
+  local -a args=("$@")
+  local n=$# i=0 a name long j sh c rest
+  OTS_FN=() OTS_FV=() OTS_FI=() OTS_FP=() OTS_FS=() OTS_PO=() OTS_POI=() OTS_UNKNOWN="" OTS_HELP=""
+  while [ "$i" -lt "$n" ]; do
+    a="${args[$i]}"
+    if [ "$a" = "--" ]; then
+      for ((j = i + 1; j < n; j++)); do OTS_PO+=("${args[$j]}"); OTS_POI+=($((off + j))); done
+      break
+    fi
+    case "$a" in
+      --*)
+        name="${a#--}"
+        if [ -z "$name" ] || [[ "$name" == [-=]* ]]; then OTS_UNKNOWN="$a"; return 1; fi
+        long="${name%%=*}"
+        ots_table_long "$table" "$long" || { OTS_UNKNOWN="--$long"; return 1; }
+        if [[ "$name" == *=* ]]; then
+          if [ "$OTS_K" = v ]; then ots_pflag_rec "$long" "${name#*=}" $((off + i)) "--$long=" 0; fi
+        elif [ "$OTS_K" = v ]; then
+          i=$((i + 1)); ots_pflag_rec "$long" "${args[$i]-}" $((off + i)) "" 1
+        fi ;;
+      -?*)
+        sh="${a#-}"; j=0
+        while [ "$j" -lt "${#sh}" ]; do
+          c="${sh:$j:1}"; rest="${sh:$((j + 1))}"
+          if ! ots_table_short "$table" "$c"; then
+            # pflag answers an undefined -h with the help and stops: the
+            # command never runs, so nothing is sent.
+            if [ "$c" = h ]; then OTS_HELP=1; return 0; fi
+            OTS_UNKNOWN="-$c (in '$a')"; return 1
+          fi
+          if [ "${#rest}" -ge 2 ] && [ "${rest:0:1}" = "=" ]; then
+            if [ "$OTS_K" = v ]; then ots_pflag_rec "$OTS_L" "${rest:1}" $((off + i)) "-${sh:0:$((j + 1))}=" 0; fi
+            break
+          elif [ "$OTS_K" = b ]; then
+            j=$((j + 1)); continue
+          elif [ -n "$rest" ]; then
+            ots_pflag_rec "$OTS_L" "$rest" $((off + i)) "-${sh:0:$((j + 1))}" 0; break
+          else
+            i=$((i + 1)); ots_pflag_rec "$OTS_L" "${args[$i]-}" $((off + i)) "" 1; break
+          fi
+        done ;;
+      *) OTS_PO+=("$a"); OTS_POI+=($((off + i))) ;;
+    esac
+    i=$((i + 1))
+  done
+  return 0
+}
+
+ots_pflag_rec() { OTS_FN+=("$1"); OTS_FV+=("$2"); OTS_FI+=("$3"); OTS_FP+=("$4"); OTS_FS+=("$5"); }
+
+# ots_table_long <table> <long> / ots_table_short <table> <letter> : 0 when
+# the table has the flag, with OTS_K its kind (v|b) and OTS_L its long name.
+# Matched word by word, never as a pattern: the name comes from argv.
+ots_table_long() {
+  local e
+  for e in $1; do
+    if [ "${e#*:*:}" = "$2" ]; then OTS_K="${e%%:*}"; OTS_L="$2"; return 0; fi
+  done
+  return 1
+}
+ots_table_short() {
+  local e rest
+  for e in $1; do
+    rest="${e#*:}"
+    if [ "${rest%%:*}" = "$2" ]; then OTS_K="${e%%:*}"; OTS_L="${rest#*:}"; return 0; fi
+  done
+  return 1
+}
+
+# ---- api writes (DND-1938; forge-neutral since DND-1976) --------------------
+# glab-athena's api scan uses these. gh-athena does not scan `gh api`: its
+# scan runs before the merge guard, and an api scan must run after it, as
+# glab-athena's does (the order is ai/bin/gh-athena's).
+
+# ots_upload_name <path or -> : the file name a multipart upload of <path>
+# carries, for its scanned copy. Stdin and a name with no usable last segment
+# get a fixed name.
+ots_upload_name() {
+  local b="${1##*/}"
+  case "$1:$b" in
+    -:* | *: | *:. | *:..) b=upload ;;
+  esac
+  printf '%s' "$b"
+}
+
+# ots_api_collect <argv array name> <offset of the first word after `api`>
+# <leading segment to drop…> : after fas_parse_api (ai/lib/forge-api-scan.sh,
+# which the caller sources) has parsed an `api` call. Returns 1 when the call
+# is not a write. A write is any method but GET/HEAD (the CLIs default to
+# POST when fields or --input are given), or one a method-override header or
+# a `_method` field could turn into a write. For a write, appends every field
+# (inline text to the caller's texts/tlab; an @file, @- or --input to its
+# fsrc/fidx/fpre/flab/fnoun/fflag/fbase) and the endpoint itself when it has a
+# ?query or #fragment, and sets OTS_API_GRAPHQL to 1 when an endpoint is the
+# bare `graphql`. A GraphQL call is judged by reading its query, and a pipe or
+# stdin can be read once: so every file of one is copied first, the copy
+# replaces it in the argv, and both the mutation check and the CLI read it.
+ots_api_collect() {
+  local -n _argv="$1"
+  local off="$2" method write k ep
+  shift 2
+  OTS_API_GRAPHQL=""
+  method="$FAS_METHOD"
+  if [ -z "$method" ]; then
+    if [ "$FAS_NPARAMS" -gt 0 ] || [ -n "$FAS_INPUT" ]; then method=POST; else method=GET; fi
+  fi
+  write=1
+  case "$method" in GET | HEAD) write=0 ;; esac
+  if [ "$FAS_OVERRIDE" = 1 ]; then write=1; fi
+  for k in "${FAS_FKEY[@]}"; do if [ "$k" = _method ]; then write=1; fi; done
+  [ "$write" = 1 ] || return 1
+
+  for k in "${!FAS_FKIND[@]}"; do
+    case "${FAS_FKIND[$k]}" in
+      file | formfile)
+        fsrc+=("${FAS_FVAL[$k]#@}"); fidx+=($((off + FAS_FIDX[k])))
+        fpre+=("${FAS_FPRE[$k]}${FAS_FKEY[$k]}=@"); flab+=(field-file); fnoun+=(field); fflag+=("-F ${FAS_FKEY[$k]}=@<path>")
+        # A --form file is a multipart upload, named after the path the CLI is
+        # handed: the copy keeps the source's file name.
+        if [ "${FAS_FKIND[$k]}" = formfile ]; then fbase[$((${#fsrc[@]} - 1))]="$(ots_upload_name "${FAS_FVAL[$k]#@}")"; fi ;;
+      *)
+        texts+=("${FAS_FKEY[$k]}=${FAS_FVAL[$k]}"); tlab+=(field) ;;
+    esac
+  done
+  if [ -n "$FAS_INPUT" ]; then
+    fsrc+=("$FAS_INPUT"); fidx+=($((off + FAS_INPUT_IDX))); fpre+=("$FAS_INPUT_PRE")
+    flab+=(input); fnoun+=(body); fflag+=(--input)
+  fi
+  for ep in "${FAS_POS[@]}"; do
+    if [[ "$ep" == *[?#]* ]]; then texts+=("$ep"); tlab+=(endpoint); fi
+    if ep="$(fas_path "$ep" "$@")" && [ "${ep,,}" = graphql ]; then OTS_API_GRAPHQL=1; fi
+  done
+
+  if [ -n "$OTS_API_GRAPHQL" ] && [ "${#fsrc[@]}" -gt 0 ]; then
+    FAS_FILES=()
+    for k in "${!fsrc[@]}"; do
+      ots_copy "${fnoun[$k]}" "${fflag[$k]}" "graphql-$k${fbase[$k]:+/${fbase[$k]}}" "${fsrc[$k]}"
+      fsrc[k]="$OTS_COPY"
+      _argv[${fidx[$k]}]="${fpre[$k]}$OTS_COPY"
+      if [ "${flab[$k]}" = input ]; then FAS_INPUT="$OTS_COPY"; else FAS_FILES+=("$OTS_COPY"); fi
+    done
+  fi
+  return 0
+}
+
+# ots_scan_all <argv array name> : scans every collected field: the caller's
+# texts/tlab, and fsrc/fidx/fpre/flab/fnoun/fflag/fbase, each file copied once
+# and replaced in the argv by its scanned copy. Exits 1 (HITS) or 3; returns 0.
+ots_scan_all() {
+  local -n _sargv="$1"
+  local k
+  for k in "${!texts[@]}"; do ots_scan_text "${tlab[$k]}" "${tlab[$k]}" "text-$k" "${texts[$k]}"; done
+  for k in "${!fsrc[@]}"; do
+    ots_copy_scan "${flab[$k]}" "${fnoun[$k]}" "${fflag[$k]}" "file-$k${fbase[$k]:+/${fbase[$k]}}" "${fsrc[$k]}"
+    _sargv[${fidx[$k]}]="${fpre[$k]}$OTS_COPY"
+  done
   return 0
 }
