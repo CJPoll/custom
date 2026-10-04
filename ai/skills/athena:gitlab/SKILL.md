@@ -227,6 +227,59 @@ which); it never means the push failed). Handle a 1, a 4, and a refusal by
 **athena:github** → *When a forge write can't be done as
 Athena*.
 
+## Fork MR pipelines
+
+**The rule: never run a fork MR's pipeline in the parent project.** By
+GitLab default a fork MR's pipeline runs in the fork, on the fork's runners
+and without the parent's variables. A Developer+ member of the parent can
+run it in the parent instead, and then the fork's code and the fork's own
+`.gitlab-ci.yml` run on the parent's runners. The parent's `workflow: rules:`
+do not apply, because the fork's CI file is the one that runs. The bot is a
+Developer+ member and acts on untrusted input, so this is never its call.
+
+`glab-athena` and the agent PATH `glab` refuse it, exit 3 with a `Fix:`
+(DND-1942, `ai/lib/glab-fork-pipeline-guard.sh`). They refuse any call that
+creates, runs, retries or plays a pipeline or job of an MR whose
+`source_project_id` is not its `target_project_id`:
+
+- `glab ci run` (or its alias `ci create`) on an MR ref
+  (`refs/merge-requests/<iid>/head|merge|train`), or `ci run --mr` for a
+  branch that a fork MR has as its source branch; `ci run-trig` on an MR ref;
+- `glab ci retry` / `ci trigger` of a job in such a pipeline (give the numeric
+  job id, or `-p <pipeline id>` with a job name);
+- `glab schedule run`, `create` or `update` on such a ref;
+- `glab release create --ref` on such a ref, and `glab api` writes to
+  `repository/branches`, `repository/tags` or `releases` with one: a branch
+  or tag made from a fork MR's head puts the fork's code, its CI file
+  included, on a ref that runs pipelines here;
+- `glab api` writes to `projects/:id/merge_requests/<iid>/pipelines`,
+  `projects/:id/pipeline` or `…/trigger/pipeline` with an MR ref,
+  `projects/:id/jobs/<id>/retry|play`, `projects/:id/pipelines/<id>/retry`,
+  `projects/:id/pipeline_schedules…` and merge-train boarding
+  (`projects/:id/merge_trains/merge_requests/<iid>`);
+- a GraphQL call carrying a pipeline or job mutation (use the REST route).
+
+The ids are read from the API. An MR, job, pipeline or schedule that cannot
+be read, or an endpoint or ref the guard cannot parse, is refused as `COULD
+NOT LOOK`, never allowed. A ref you name must be an MR ref (judged as that
+MR) or an existing branch or tag of the project, read by its exact name; a
+commit sha or any other ref is `COULD NOT LOOK`, because GitLab keeps a fork
+MR's commits in the parent and a sha can name them. To build from a commit,
+push a branch as Athena first and name the branch.
+
+A refusal is not an error to route around. Do not retry it with plain `glab`,
+`curl`, another ref or the web UI. If a fork contribution must be tested
+here, report it to your admiral with the MR, and leave the decision to Cody.
+
+**The residual no wrapper can close is Cody clicking "Run pipeline" (or
+retry/play) on a fork MR in the web UI.** The rule for that click is the
+same: never. The other residuals, each a way the wrappers do not see, are
+named in the lib's header: a fork commit pushed to a parent ref with
+`glab-athena git push` or a REST commit, an interactive `ci view`/`ci
+status` retry, a merge of a fork MR into a merge train, a client that is not
+glab, and a route or mutation GitLab adds later. None of them is a reason to
+try; each is the same never.
+
 ## Merging (athena-admiral only)
 
 **The rule:** a merge pins the MR's exact head SHA, the MR's head pipeline

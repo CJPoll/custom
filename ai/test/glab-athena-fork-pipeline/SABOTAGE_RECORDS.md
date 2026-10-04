@@ -1,0 +1,90 @@
+# Fork MR pipeline refusal: sabotage records (DND-1942)
+
+The suite is `ai/test/glab-athena-fork-pipeline/self-test.sh` (a stub `glab`
+on PATH, no network). It runs `ai/bin/glab-athena`, the agent PATH glab
+(`ai/agent-bin/glab`) with the routed marker built by hand, and the two
+chained, as in an agent session.
+
+## Old vs new (fail-first)
+
+Recorded 2026-10-03 against fb24dc1c (origin/main when the branch was cut;
+the unfixed wrappers), through the suite's own seam
+`AGENT_FORGE_ROOT_UNDER_TEST=<checkout of fb24dc1c>`, with the first
+round's 64 cases:
+
+- `16 passed, 48 failed`.
+  - Red: every refusal case, in all three fronts, and the two read
+    assertions (the MR list read for the current branch; `-R` naming the
+    project read), because the old wrappers read nothing.
+  - Green: every pass-through case (a same-project MR pipeline, a branch
+    ref, a branch job, `ci list`, a GET, `schedule run` on a branch).
+  - The incident shape, the first case: `exit 0, want 3; out: stub: ran api
+    -X POST projects/7000001/merge_requests/11/pipelines`, with !11 a fork
+    MR (source project 8000002, target 7000001). A fork MR's pipeline was
+    created in the parent with no check.
+
+`ai/test/glab-athena-merge-guard/self-test.sh` changed with this: its MR
+fixture now carries `source_project_id` and `target_project_id`, and N13 (an
+MR pipeline), R5f and R5g (a manual job play/trigger) now stage the MR or job
+the fork check reads, and expect reads. On the fixed code: `ALL CASES PASS`.
+
+## Review round (code-reviewer and adr-reviewer)
+
+The review found five ways through the first round's guard and one false
+denial. Each now has a case. Against the first round's code (e6bfff0d), the
+final suite is `69 passed, 10 failed`; the red cases:
+
+- `ci create`, glab's alias of `ci run` (glab 1.92.1 `run.go`,
+  `Aliases: create`), on an MR ref and with `--mr`: ran unjudged.
+- `ci run --mr -b OWNER:BRANCH`: glab lists MRs by the BRANCH part
+  (`mrutils.resolveOwnerAndBranch`); the guard listed `OWNER:BRANCH`, found
+  none, and allowed it.
+- `;` in the query string: a server that splits parameters on `;` reads a
+  `ref` the guard did not.
+- A branch, tag or release made from a fork MR ref (`repository/branches`,
+  `repository/tags`, `releases`, `release create --ref`): it puts the fork's
+  code and CI file on a parent ref, whose pipeline then runs here.
+- A branch named `fix-merge-requests-list` was refused as COULD NOT LOOK (a
+  substring match). It now passes; it reads the branch and no MR.
+- `schedule update --update-variable` was refused as an unknown flag (update
+  has its own variable flags).
+
+On the fixed code: `79 passed, 0 failed`.
+
+## Critic round (athena-diff-critic BLOCK on 62525e38)
+
+The critic found the branch, tag and release routes still passed a ref that
+was not spelled as an MR ref: a fork MR's head commit sha, which GitLab keeps
+in the parent, made a parent branch or tag of the fork's code with no read.
+The rule is now deny by default: a ref the caller names must be an MR ref
+(judged) or an existing branch or tag of the project, read by its exact name;
+anything else is COULD NOT LOOK. A ref GitLab itself recorded on a job,
+pipeline or schedule is judged only in its MR form.
+
+The same round found two vacuous assertions: "a branch ref reads nothing" and
+"that branch reads nothing" reset the fixtures before reading the log, so
+they could not fail. They now read the log first.
+
+Against the review round's code (62525e38), the final suite is `80 passed, 6
+failed`: the sha branch, the keep-around tag, `release create --ref <sha>`,
+`ci run -b <sha>`, a ref that is no branch or tag, and "a branch ref reads
+only that branch". On the fixed code: `86 passed, 0 failed`.
+
+## Mutations
+
+Each applied alone to the fixed code, the suite run, then reverted:
+
+| Mutation | Suite |
+|---|---|
+| M1 a fork MR (source != target) never refuses | 54 passed, 32 failed |
+| M2 a failed API read is not refused at the read | 83 passed, 3 failed |
+| M3 a `ref` in the query string is ignored | 85 passed, 1 failed |
+| M4 the agent wrapper's routed path skips the check | 82 passed, 4 failed |
+| M5 `ci run --mr` skips the MR list | 77 passed, 9 failed |
+| M6 `api … jobs/<id>/retry|play` skips the job read | 83 passed, 3 failed |
+| M7 a caller's ref skips the branch-or-tag read | 80 passed, 6 failed |
+
+M2 first SURVIVED: a failed read leaves no JSON, so the next check refused
+anyway with "is not !11", and the cases asserted only `COULD NOT LOOK`. The
+unreadable-object cases now assert the read failure itself (`COULD NOT LOOK:
+could not read !11`), and M2 is caught.
