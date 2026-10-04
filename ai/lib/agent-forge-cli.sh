@@ -27,10 +27,12 @@
 #      glab-athena-cfg.XXXXXXXX); the token variable (GH_TOKEN / GITLAB_TOKEN)
 #      is one token; the host variable is github.com / gitlab.com; and, for
 #      gh, the dir holds no hosts.yml. Then the CLI cannot read the owner's
-#      stored login, and its identity is the token. Routed: exec the real CLI.
+#      stored login, and its identity is the token. Routed: exec the real CLI,
+#      after the fork MR pipeline refusal for glab (afc_fork_guard).
 #   4. Otherwise the argv is judged by ai/lib/forge-write-class.awk, the
 #      classifier ai/hooks/forge-identity-guard.sh uses too. A read: exec the
-#      real CLI. A write: REFUSED, exit 1, with a Fix: naming the Athena route.
+#      real CLI, after the same fork refusal for glab. A write: REFUSED,
+#      exit 1, with a Fix: naming the Athena route.
 #      A classifier that cannot run: REFUSED (deny by default).
 #
 # RESIDUAL (it is not a sandbox). Defeated by: a caller that builds the routed
@@ -144,15 +146,29 @@ afc_classify() {
   AFC_VERDICT="$out"
 }
 
+# afc_fork_guard <argv...> : for glab, the fork MR pipeline refusal (DND-1942,
+# ai/lib/glab-fork-pipeline-guard.sh), with its reads on the real glab and the
+# caller's identity. Exits 3 on a refusal; a lib that cannot load refuses.
+afc_fork_guard() {
+  [ "$AFC_TOOL" = glab ] || return 0
+  local lib
+  lib="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/glab-fork-pipeline-guard.sh"
+  GLFP_TOOL='glab (agent wrapper)' GLFP_GLAB="$AFC_REAL"
+  # shellcheck source=glab-fork-pipeline-guard.sh
+  [ -r "$lib" ] && . "$lib" && declare -F glfp_guard >/dev/null \
+    || afc_refuse "\`glab …\`: cannot load $lib, so whether this call runs a fork MR's pipeline is unknown. Fix: restore ai/lib/glab-fork-pipeline-guard.sh in the checkout that holds ai/agent-bin. $AFC_ESC" 3
+  glfp_guard "$@"
+}
+
 afc_main() {
   local who route grp verb reads
   if [ "$#" -eq 1 ] && [ "$1" = --help ]; then afc_help; exit 0; fi
   if ! afc_resolve_real; then
     afc_refuse "\`$AFC_TOOL …\`: no real $AFC_TOOL on PATH after the wrapper $AFC_SELF (PATH=$PATH). Fix: put the directory holding the real $AFC_TOOL on PATH after ai/agent-bin; a shim that execs this wrapper must have a real $AFC_TOOL after the wrapper on PATH." 127
   fi
-  if afc_routed; then exec "$AFC_REAL" "$@"; fi
+  if afc_routed; then afc_fork_guard "$@"; exec "$AFC_REAL" "$@"; fi
   afc_classify "$@"
-  [ "$AFC_VERDICT" = READ ] && exec "$AFC_REAL" "$@"
+  if [ "$AFC_VERDICT" = READ ]; then afc_fork_guard "$@"; exec "$AFC_REAL" "$@"; fi
   IFS=$'\t' read -r _ grp verb reads <<<"$AFC_VERDICT"
   if [ "$AFC_TOOL" = gh ]; then who='GitHub records it as the machine owner, not athena-harness[bot]'; route=gh-athena
   else who='GitLab records it as the machine owner, not the Athena bot for the project'\''s namespace (ai/config/forge-identities.json + the private overlay)'; route=glab-athena; fi
