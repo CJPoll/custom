@@ -57,11 +57,12 @@
 #            refuse.
 #   deploy   none: Docker's default seccomp and masked /proc. Its jobs only
 #            drive the mounted docker socket.
-#   untagged ["seccomp:unconfined", "apparmor:unconfined"], for rootless
+#   untagged (-) ["seccomp:unconfined", "apparmor:unconfined"], for rootless
 #            BuildKit as a job image (the runbook); /proc stays masked.
 #   other    none: Docker's defaults, since the kit knows no need for it.
-# A re-run keeps an existing entry; one whose security_opt differs from its
-# role's is named with a Fix: line.
+# A re-run keeps an existing entry; one named by --runner whose security_opt
+# differs from its role's is named with a Fix: line. Entries not named by
+# --runner are not checked.
 #
 # The socket is /run/user/<the user's uid>/docker.sock, from its rootless dockerd
 # (setup-gitlab-runner-docker). The builds dir comes from setup-gitlab-runner-user;
@@ -76,9 +77,11 @@
 # three: they are project settings and the DND-1942 harness refusal. The deploy
 # socket is the same power over the deploy user, reached only by
 # protected-branch jobs. The ci security_opt adds a second residual, on the same
-# grounds: ci job code can create user namespaces and mount /proc in its own
-# rootless daemon's containers. Host-only /proc (sysrq-trigger, kcore,
-# /proc/sys writes) stays refused, because the job's root is a subuid on the host.
+# grounds: seccomp:unconfined lifts Docker's whole default filter for ci job
+# code, so it can create user namespaces and mount /proc inside its job
+# container, and reach calls such as keyctl, bpf and userfaultfd. Host-only
+# /proc (sysrq-trigger, kcore, /proc/sys writes) stays refused, because the
+# job's root is a subuid on the host. A narrow seccomp profile is DND-2005.
 #
 # Example (ci and deploy as two users; each token from its `POST user/runners`):
 #   sudo scripts/setup-gitlab-runner --user gitlab-runner-personal --runner personal-ci:ci
@@ -200,7 +203,7 @@ for i in "${!R_NAMES[@]}"; do
       warn "kept runner ${R_NAMES[$i]} (${R_TAGS[$i]}) has no builds_dir: it predates the runner contract (DND-1973), so its jobs get no docker socket or same-path builds dir. Fix: delete its [[runners]] block from ${CONFIG} and re-run with its token on stdin"
     fi
     if ! grk_security_opt_matches "${R_TAGS[$i]}" "${R_NAMES[$i]}" <<<"${EXISTING_CFG}"; then
-      so_got="$(grk_config_entry_security_opt "${R_NAMES[$i]}" <<<"${EXISTING_CFG}" || true)"
+      so_got="$(grk_config_entry_security_opt "${R_NAMES[$i]}" <<<"${EXISTING_CFG}")" || so_got="<entry not found>"
       so_want="$(grk_role_security_opt "${R_TAGS[$i]}")"
       if [ -n "${so_want}" ]; then so_fix="set its [runners.docker] line to: security_opt = ${so_want}"
       else so_fix="delete its [runners.docker] security_opt line (role ${R_TAGS[$i]} gets Docker's defaults)"; fi

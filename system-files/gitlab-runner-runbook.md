@@ -66,7 +66,7 @@ no longer holds for `security_opt`: an unknown tag gets Docker's defaults.
 |---|---|---|
 | `ci` | `["seccomp:unconfined", "apparmor:unconfined", "systempaths=unconfined"]` | tool-sandbox runs `bwrap --unshare-all ... --proc /proc`. Docker's default seccomp refuses the user namespace, and the masked `/proc` paths make the kernel refuse the proc mount (DND-1998). |
 | `deploy` | none: Docker's default seccomp, masked `/proc` | Its jobs only drive the mounted socket (`docker build`; buildx's buildkitd is a sibling container the daemon starts). |
-| untagged | `["seccomp:unconfined", "apparmor:unconfined"]` | Rootless BuildKit as a job image nests a user namespace (the invariants above). `/proc` stays masked. |
+| untagged (`-`) | `["seccomp:unconfined", "apparmor:unconfined"]` | Rootless BuildKit as a job image nests a user namespace (the invariants above). `/proc` stays masked. |
 | other | none: Docker's defaults | The kit knows no need for it. Deny by default. |
 
 Where AppArmor is not loaded, `apparmor:unconfined` changes nothing; it keeps
@@ -74,14 +74,17 @@ bwrap's and BuildKit's mounts working on a host where AppArmor is loaded. The
 `ci` and `deploy` values match what the live runners were set to by hand on
 2026-10-04 (DND-1998, DND-1999), so a rebuild reproduces them.
 
-Residual, named. A `ci` job can create user namespaces and mount `/proc` in
-its own rootless daemon's containers. That is accepted on the grounds of the
-residual above: the `ci` user holds no deploy secret. Host-only `/proc` stays
-refused, because the job's root is a subuid on the host. Measured on the live
-`ci` runner: writes to `/proc/sysrq-trigger` and `/proc/sys/kernel/sysrq` are
-denied, and `/proc/kcore` cannot be opened. A narrow seccomp profile for `ci`
-(Docker's default plus `unshare`, `clone`, `clone3`, `mount`, `umount2`,
-`pivot_root`) is later hardening, not this change.
+Residual, named. `seccomp:unconfined` lifts Docker's whole default filter for
+`ci` job code, not only the calls bwrap needs. A job can create user
+namespaces and mount `/proc` inside its job container, and can reach calls such
+as `keyctl`, `bpf`, `perf_event_open` and `userfaultfd`. That is accepted on
+the grounds of the residual above: the `ci` user holds no deploy secret.
+Host-only `/proc` stays refused, because the job's root is a subuid on the
+host. Measured on the live `ci` runner: writes to `/proc/sysrq-trigger` and
+`/proc/sys/kernel/sysrq` are denied, and `/proc/kcore` cannot be opened. A
+narrow seccomp profile for `ci` (Docker's default plus `unshare`, `clone`,
+`clone3`, `mount`, `umount2`, `pivot_root`) closes the gap; it is tracked as
+DND-2005.
 
 A re-run keeps an existing entry, as below. If the kept entry's
 `security_opt` is not its role's, `setup-gitlab-runner` names it with a

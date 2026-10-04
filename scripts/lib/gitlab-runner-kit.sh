@@ -134,12 +134,15 @@ grk_role_gets_db_tmpfs() { [ "${1-}" = "ci" ]; }
 #               tool-sandbox runs bwrap --unshare-all ... --proc /proc in ci
 #               jobs: Docker's default seccomp refuses the user namespace, and
 #               the masked /proc paths make the kernel refuse a fresh proc
-#               mount. Residual: ci job code can create user namespaces and
-#               mount /proc in its own rootless daemon. Accepted because the ci
+#               mount. Residual: seccomp:unconfined lifts Docker's whole
+#               default filter for ci job code (user namespaces and /proc
+#               mounts inside the job container, and also keyctl, bpf,
+#               perf_event_open, userfaultfd, ...). Accepted because the ci
 #               user holds no deploy secret, and host-only /proc stays refused
-#               (the job's root is the runner user's subuid on the host).
-#               Where AppArmor is not loaded the entry is a no-op; it keeps bwrap's
-#               mounts working on a host where it is.
+#               (the job's root is the runner user's subuid on the host). A
+#               narrow profile (default + the calls bwrap needs) is DND-2005.
+#               Where AppArmor is not loaded the entry is a no-op; it keeps
+#               bwrap's mounts working on a host where it is.
 #   deploy      none: Docker's default seccomp and masked /proc. Deploy jobs
 #               only drive the mounted daemon socket (docker build; buildx's
 #               buildkitd is a sibling container the daemon starts).
@@ -159,13 +162,16 @@ grk_role_security_opt() {
 
 # grk_config_entry_security_opt NAME < CONFIG -> the security_opt value of the
 # [[runners]] entry named NAME, all whitespace removed; nothing when it sets
-# none. A # comment line is not a setting. Exit 1 when no entry is named NAME,
-# so a missing entry never reads as "sets none".
+# none. A # comment line, or a # comment after the value, is not a setting.
+# Exit 1 when no entry is named NAME, so a missing entry never reads as "sets
+# none". It reads one line: a hand-written multi-line array reads as "[" and
+# so never matches a role. That false warning is loud and safe; do not loosen
+# the comparison to silence it.
 grk_config_entry_security_opt() {
   awk -v want="$1" '
     /^[[:space:]]*\[\[runners\]\]/ { cur = ""; next }
     /^[[:space:]]*name[[:space:]]*=/ { s = $0; sub(/^[^"]*"/, "", s); sub(/".*$/, "", s); cur = s; if (cur == want) seen = 1; next }
-    cur == want && /^[[:space:]]*security_opt[[:space:]]*=/ { s = $0; sub(/^[^=]*=/, "", s); gsub(/[[:space:]]/, "", s); print s; exit }
+    cur == want && /^[[:space:]]*security_opt[[:space:]]*=/ { s = $0; sub(/^[^=]*=/, "", s); sub(/#[^"]*$/, "", s); gsub(/[[:space:]]/, "", s); print s; exit }
     END { exit seen ? 0 : 1 }'
 }
 
