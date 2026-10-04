@@ -78,9 +78,10 @@ not retry it, and do not reach for `gh api`: the guard refuses API merges and
 ref writes too. `~/dev/custom` lands by a fast-forward push of the gated
 head through `~/dev/custom/ai/bin/forge-push`, which runs `gh-athena git push`
 for a github.com origin and `glab-athena git push` for a gitlab.com one, from
-forge-git's one host table (DND-1995; the guard's header names that path).
-Never name the wrapper by hand: after the GitLab cutover (DND-1947) a
-hand-written `gh-athena git push` no longer reaches origin as Athena. That push is the merge
+forge-git's host table (DND-1995; the guard's header names that path).
+Never name the wrapper by hand: `gh-athena`'s route covers github.com only,
+so on a gitlab.com origin a `gh-athena git push` does not push as Athena.
+forge-push makes the step the same on either host. That push is the merge
 step, so it takes the same lock `locked-merge` does
 (`~/.local/state/athena/custom-merge.lock`, *Landing onto a moving main*).
 The landing, as Cody confirmed it (2026-10-01):
@@ -96,7 +97,8 @@ The landing, as Cody confirmed it (2026-10-01):
    lands with no re-gate. Run *Merge one at a time*'s migration-version
    check first; a collision is a semantic conflict, so go to step 4. Push the rebased head
    fast-forward (`~/dev/custom/ai/bin/forge-push -C <worktree> origin
-   <sha>:main`), still under the lock, then release it. The pushed SHA is not the reported one; the clean
+   <sha>:main`), still under the lock, then release it. The pushed SHA is
+   not the reported one; the clean
    rebase carries the reported head's gate and verdict. The wrapper
    forge-push runs (gh-athena or glab-athena) checks that at the push
    (DND-1690): in a repo that declares a gate it refuses a
@@ -112,6 +114,12 @@ The landing, as Cody confirmed it (2026-10-01):
    --to <the head>`. If it names an installer and nothing authorizes you to
    run it (step 5), do not push: release the lock, hold the landing, and
    report the install as the step awaiting authorization.
+
+   **Later (2026-10-04, DND-1995):** this step pushed with `gh-athena git
+   push origin <sha>:main`. Superseded by forge-push, which picks the
+   wrapper by origin's host, because custom's origin moves to gitlab.com
+   (DND-1947) and a hand-named `gh-athena` push does not reach it as
+   Athena.
 4. A **conflicted** rebase, textual or semantic, is the one case that needs
    a full re-gate: release the lock, resolve the conflict, run `integration-gate --with-critic` on the
    new head, and start again.

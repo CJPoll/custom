@@ -54,7 +54,9 @@ SKIP = %r{(/test/|self-test|\.md\z|\.json\z|\.jsonl\z|\.tsv\z|\.yml\z|\.txt\z)}
 NET = PUSH ? "push" : "(?:fetch|pull|ls-remote)"
 # A command word position: line start, after ; & | ( ! { $( or a keyword, or
 # after a `timeout N` / `env` / VAR=value prefix.
-SH = /(?:^|[;&|(!{]|\$\(|\bthen\s|\bdo\s|\belse\s)\s*(?:(?:timeout(?:\s+-\S+)*\s+\d+\S*|env|[A-Za-z_][A-Za-z0-9_]*=\S*)\s+)*git(?:\s+(?:-C\s+\S+|-c\s+\S+|-q|--\S+))*\s+#{NET}\b/
+POS = '(?:^|[;&|(!{]|\$\(|\bthen\s|\bdo\s|\belse\s|\bif\s|\bwhile\s|\buntil\s|\bexec\s)'
+PREFIX = '(?:(?:timeout(?:\s+-\S+)*\s+\d+\S*|env|command|nice(?:\s+-n\s*-?\d+)?|[A-Za-z_][A-Za-z0-9_]*=\S*)\s+)*'
+SH = /#{POS}\s*#{PREFIX}git(?:\s+(?:-C\s+\S+|-c\s+\S+|-q|--\S+))*\s+#{NET}\b/
 # `ls-remote --get-url` prints the configured URL (insteadOf applied) and
 # exits; it opens no transport, so it is a local config read, not a remote one.
 SH_LOCAL = /\bgit(?:\s+(?:-C\s+[^\s;&|()]+|-c\s+[^\s;&|()]+|-q|--[^\s;&|()]+))*\s+ls-remote(?:\s+-[^\s;&|()]+)*\s+--get-url(?=\s|$|\))/
@@ -65,7 +67,10 @@ ROUTED = PUSH ? /FORGE_PUSH|forge_push/ : /FORGE_GIT|forge_git/
 # position, then `git`, its global options, then `push`; in Ruby, an argv
 # that names the wrapper, "git" and "push" (split over up to three lines).
 WRAP = "(?:gh|glab)-athena"
-SH_WRAP = /(?:^|[;&|(!{]|\$\(|\bthen\s|\bdo\s|\belse\s|exec\s)\s*(?:(?:timeout(?:\s+-\S+)*\s+\d+\S*|env|[A-Za-z_][A-Za-z0-9_]*=\S*)\s+)*\S*#{WRAP}\s+git(?:\s+(?:-C\s+\S+|-c\s+\S+|-\S+))*\s+push\b/
+# The command word may also be a variable holding the wrapper ("$GHA",
+# "${bin_dir}/${wrapper}"): any variable command word followed by `git … push`
+# is a hand-routed push, since forge-push takes no `git` word.
+SH_WRAP = /#{POS}\s*#{PREFIX}(?:\S*#{WRAP}|\S*\$\{?[A-Za-z_][A-Za-z0-9_]*\}?)\s+git(?:\s+(?:-C\s+\S+|-c\s+\S+|-\S+))*\s+push\b/
 RB_WRAP = /(?:gh_athena|glab_athena|"[^"\s]*#{WRAP}")\s*,\s*"git"\s*,[^\]]*?"push"/m
 
 # Does an argv match START on the window's first line (so each split argv is
@@ -78,7 +83,7 @@ end
 # A command substitution inside double quotes ("$(git … fetch)") is code, not
 # text: open it up before the quoted strings are blanked.
 def dequote(line)
-  line = line.gsub(/"([^"\s]*#{WRAP})"/, '\\1') if PUSH
+  line = line.gsub(/"([^"\s]*#{WRAP})"/, '\\1').gsub(/"(\$[^"\s]*)"/, '\\1') if PUSH
   line.gsub('"$(', '$(').gsub(')"', ')').gsub(/"(?:[^"\\]|\\.)*"/, "Q").gsub(/'[^']*'/, "Q").gsub(/`[^`]*`/, "Q")
 end
 

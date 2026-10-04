@@ -10,7 +10,9 @@
 # is git@gitlab.com:..., and a push that names gh-athena no longer reaches it
 # as Athena. This tool asks ai/bin/forge-git for the route (`forge-git --route
 # <url>`), so the host table exists once and a read and a push of the same
-# remote always take the same route:
+# remote always take the same route. (The cron runners' athena_fetch_origin_main,
+# in scripts/athena-*-run.sh, still holds its own copy of the table for its
+# fetch; reported in DND-1995, since the coordinator owns those scripts.)
 #
 #   git@github.com:*  https://github.com/*   -> ai/bin/gh-athena git -C <dir> push ...
 #   git@gitlab.com:*  https://gitlab.com/*   -> ai/bin/glab-athena git -C <dir> push ...
@@ -27,10 +29,11 @@
 # is routed by what the push really reaches; push URLs on two forges are
 # refused. Any other word is taken as the URL itself, as git takes it.
 #
-# Refused before any push (exit 64): --repo (it names the remote away from the
-# positional word), and an option whose value is a separate word (-o, and
-# --push-option / --receive-pack / --exec or a prefix of one): pass the value
-# attached (--push-option=<v>).
+# The push arguments are read with git push's own grammar (fg_push_argv, the
+# wrappers' shared passthrough, DND-1843), so the routed word is the one git
+# pushes to. A URL literal is routed after git's pushInsteadOf / insteadOf
+# rewrite. Refused before any push (exit 64): --repo (it names the remote away
+# from the positional word), and any argument git push itself would reject.
 #
 # Exit codes: the wrapper's own exit code (its refusals are exit 3 with a
 # Fix:), or
@@ -68,8 +71,8 @@ Route (the host table in ai/bin/forge-git; forge-git --route <url>):
   anything else (ssh://, a host alias,     refused, exit 3
     another host, a local path)
 
-Refused (exit 64): --repo; -o or --push-option / --receive-pack / --exec with
-the value as a separate word (pass --opt=value); push URLs on two forges.
+Refused: --repo, or an argument git push would reject (exit 64); push URLs
+on two forges (exit 3).
 
 Example (a lane landing on main):
   forge-push -C <lane> origin HEAD:main
@@ -101,26 +104,23 @@ HERE="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 FORGE_GIT="${FORGE_PUSH_FORGE_GIT:-${HERE}/forge-git}"
 [ -x "${FORGE_GIT}" ] || die 64 "${FORGE_GIT} is missing or not executable, so no route can be chosen" "run forge-push from a full ~/dev/custom checkout (ai/bin/forge-git beside it)."
 
-# The remote word: the first non-option argument. git also accepts a unique
-# prefix of a long option, so a prefix of a value-taking option is refused like
-# the option itself.
-VALUE_OPTS="--push-option --receive-pack --exec"
-REMOTE_WORD=""
-for a in "$@"; do
-  case "${a}" in
-    --) die 64 "'--' in the push arguments" "drop the '--'; name the remote as the first non-option argument." ;;
-    --repo|--repo=*|--rep|--rep=*)
-      die 64 "push ${a%%=*} names the remote apart from the positional word, which the route would not see" "name the remote as the first non-option argument: forge-push -C <dir> <remote> <refspec>." ;;
-    -o) die 64 "push option '-o' takes its value as the next word, which would hide the remote" "pass it attached (-o<value>) or as --push-option=<value>." ;;
-    --*=*|-*)
-      if [[ "${a}" == --* && "${a}" != *=* && ${#a} -ge 4 ]]; then
-        for o in ${VALUE_OPTS}; do
-          [[ "${o}" == "${a}"* ]] && die 64 "push option '${a}' takes its value as the next word, which would hide the remote" "pass it as ${o}=<value>."
-        done
-      fi ;;
-    *) REMOTE_WORD="${a}"; break ;;
+# The remote word, read with git push's own grammar: fg_push_argv in the
+# wrappers' shared passthrough (DND-1843), so a bundled short option (-fo <v>),
+# an abbreviation (--e <v>) or a `--` is read exactly as git reads it, and the
+# word routed here is the word git pushes to.
+# shellcheck source=../lib/forge-git-passthrough.sh
+. "${HERE}/../lib/forge-git-passthrough.sh" 2>/dev/null && declare -F fg_push_argv >/dev/null \
+  || die 64 "cannot load fg_push_argv from ${HERE}/../lib/forge-git-passthrough.sh, so the push's remote cannot be read" "run forge-push from a full ~/dev/custom checkout (ai/bin and ai/lib side by side)."
+fg_push_argv "$@"
+[ -z "${FG_PA_BAD}" ] \
+  || die 64 "'${FG_PA_BAD}' is no option of git push, an abbreviation that matches more than one, or an option missing its value or given one it does not take" "spell the option as git push --help names it, with its value attached (--opt=value)."
+for o in "${FG_PA_OPTS[@]}"; do
+  case "${o}" in
+    --repo|--repo=*)
+      die 64 "push --repo names the remote apart from the positional word, which the route would not see" "name the remote as the first non-option argument: forge-push -C <dir> <remote> <refspec>." ;;
   esac
 done
+REMOTE_WORD="${FG_PA_POS[0]-}"
 
 if [ -z "${REMOTE_WORD}" ]; then
   branch="$(git -C "${DIR}" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
@@ -143,7 +143,18 @@ else
     .|*/*|*:*) ;;
     *) die 64 "'${REMOTE_WORD}' is neither a remote of '${DIR}' nor a URL or path, so no route can be chosen" "check 'git -C ${DIR} remote -v'; name a configured remote, or pass the URL." ;;
   esac
-  URLS="${REMOTE_WORD}"
+  # A URL literal: git rewrites it by url.<base>.pushInsteadOf (longest
+  # prefix) else url.<base>.insteadOf before it pushes, so route by the
+  # rewritten URL, as the passthrough resolves it.
+  URLS="" best=0
+  while read -r key prefix; do
+    base="${key#url.}"; base="${base%.pushinsteadof}"
+    if [ -n "${prefix}" ] && [[ "${REMOTE_WORD}" == "${prefix}"* ]] && [ "${#prefix}" -gt "${best}" ]; then
+      best="${#prefix}"; URLS="${base}${REMOTE_WORD#"${prefix}"}"
+    fi
+  done < <(git -C "${DIR}" config --get-regexp '^url\..*\.pushinsteadof$' 2>/dev/null || true)
+  [ -n "${URLS}" ] || URLS="$(git -C "${DIR}" ls-remote --get-url "${REMOTE_WORD}" 2>/dev/null)" \
+    || die 64 "git could not expand '${REMOTE_WORD}' to the URL it pushes to" "check 'git -C ${DIR} config --get-regexp ^url\\.'."
   KEY="'${REMOTE_WORD}'"
 fi
 
@@ -152,7 +163,15 @@ seen=0
 while IFS= read -r url; do
   [ -n "${url}" ] || continue
   seen=$((seen + 1))
-  r="$("${FORGE_GIT}" --route "${url}" 2>/dev/null)" || r=""
+  # forge-git prints only the route on exit 0, and only its refusal (exit 3)
+  # or failure (any other code) on stderr. A failure to look is never read as
+  # a refusal of the URL.
+  r="$("${FORGE_GIT}" --route "${url}" 2>&1)"; rrc=$?
+  case "${rrc}" in
+    0) ;;
+    3) r="" ;;
+    *) die 64 "${FORGE_GIT} --route '${url}' failed (exit ${rrc}), so the route could not be read: ${r}" "run '${FORGE_GIT} --route ${url}' by hand and fix what it reports; a route forge-git could not compute is never read as a refusal." ;;
+  esac
   case "${r}" in
     gh-athena|glab-athena) ;;
     local)

@@ -192,10 +192,16 @@ runs the wrapper for origin's host (`gh-athena git push` for github.com,
 GIT_TERMINAL_PROMPT=0 ~/dev/custom/ai/bin/forge-push -C <your lane> origin HEAD:main
 ```
 
-Never name the wrapper by hand (DND-1995): after the GitLab cutover
-(DND-1947) a `gh-athena git push` no longer reaches origin as Athena. An
-origin forge-push does not route (ssh://, a host alias, another host) is
-refused, exit 3, with a `Fix:`: journal it and leave the commits local.
+Never name the wrapper by hand: `gh-athena`'s route covers github.com
+only, so on a gitlab.com origin a `gh-athena git push` does not push as
+Athena. An origin forge-push does not route (ssh://, a host alias, another
+host) is refused, exit 3, with a `Fix:`: journal it and leave the commits
+local.
+
+**Later (2026-10-04, DND-1995):** this step pushed with `gh-athena git -c
+credential.helper= -c url.https://github.com/.insteadOf=git@github.com: push
+origin HEAD:main`. Superseded by forge-push, because custom's origin moves to
+gitlab.com (DND-1947) and that recipe does not reach it as Athena.
 
 The refspec matters because your HEAD is a per-invocation `shipwright/run-*`
 or `leadtime/run-*` branch: a bare push would advance that branch on the remote instead of

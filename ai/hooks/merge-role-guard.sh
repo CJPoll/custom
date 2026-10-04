@@ -22,8 +22,10 @@
 #   * agent_type athena-shipwright, ONLY a push to a protected branch run
 #     inside a cron lane of this hook's own repo
 #     (<common dir>/shipwright-lanes/run-* or leadtime-lanes/run-*): the cron
-#     lane's documented `gh-athena git ... push origin HEAD:main`
-#     (athena:shipwright-lane -> Sync up).
+#     lane's documented `forge-push -C <lane> origin HEAD:main`
+#     (athena:shipwright-lane -> Sync up; merge_role.rb reads forge-push
+#     -C <dir> <args> as git -C <dir> push <args>, DND-1995), or the same
+#     push through a wrapper (`gh-athena git ... push origin HEAD:main`).
 # Everyone else is denied: athena-captain, athena-architect, general-purpose,
 # claude, Explore, a hand-spawned shipwright, a headless `claude -p --agent X`
 # for any X but the admiral, a `--agent X` session whose mode the guard cannot

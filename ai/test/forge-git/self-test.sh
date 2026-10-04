@@ -268,9 +268,48 @@ expect64p "no -C is refused" origin HEAD:main
 expect64p "a non-repository -C is refused" -C "${TMP}/nowhere" origin HEAD:main
 expect64p "a leading 'push' word is refused (the arguments are git push's own)" -C "${r}" push origin HEAD:main
 expect64p "--repo is refused (it names the remote apart from the routed word)" -C "${r}" --repo=git@github.com:o/r.git HEAD:main
-expect64p "-o with its value as the next word is refused" -C "${r}" -o ci.skip origin HEAD:main
-expect64p "an abbreviated --push-option with a separate value is refused" -C "${r}" --push-opt ci.skip origin HEAD:main
+expect64p "--repo as a separate word is refused" -C "${r}" --repo git@github.com:o/r.git HEAD:main
+expect64p "an option git push does not have is refused" -C "${r}" --no-such-option origin HEAD:main
+expect64p "an ambiguous abbreviation is refused (--re: --repo or --receive-pack)" -C "${r}" --re x origin HEAD:main
 expect64p "a word that is neither a remote nor a URL is refused" -C "${r}" nosuchremote HEAD:main
+
+# git's own grammar reads the remote (fg_push_argv): a value-taking option
+# takes the next word, bundled (-fo <v>) or abbreviated (--e <v>, --push-opt
+# <v>), so the routed remote is the one git pushes to. A github remote named
+# beside a gitlab origin must route to gh-athena, never by the value word.
+r="${TMP}/push-grammar"; mkrepo "${r}" "git@gitlab.com:cjpoll/custom.git"
+git -C "${r}" remote add github "git@github.com:CJPoll/custom.git"
+for args in "-o origin github HEAD:main" "-fo origin github HEAD:main" "-vfoorigin github HEAD:main" \
+            "--push-opt origin github HEAD:main" "--e origin github HEAD:main" "-- github HEAD:main"; do
+  reset_logs
+  # shellcheck disable=SC2086
+  STUB_RC=0 "${FP}" -C "${r}" ${args} >/dev/null 2>&1
+  [ "$(cat "${TMP}/routed.log")" = "gh-athena git -C ${r} push ${args}" ] \
+    && ok "push: '${args}' routes by the remote git reads (github), not the option's value" \
+    || bad "push: grammar '${args}'" "routed=[$(cat "${TMP}/routed.log")]"
+done
+
+# A URL literal is routed after git's pushInsteadOf rewrite: a gitlab.com
+# word that pushInsteadOf sends to github.com routes to gh-athena.
+git -C "${r}" config url.git@github.com:.pushInsteadOf git@gitlab.com:
+reset_logs; STUB_RC=0 "${FP}" -C "${r}" git@gitlab.com:cjpoll/custom.git HEAD:main >/dev/null 2>&1
+[ "$(cat "${TMP}/routed.log")" = "gh-athena git -C ${r} push git@gitlab.com:cjpoll/custom.git HEAD:main" ] \
+  && ok "push: a URL word routes by its pushInsteadOf rewrite (what git pushes to)" \
+  || bad "push: pushInsteadOf URL word" "routed=[$(cat "${TMP}/routed.log")]"
+git -C "${r}" config --unset url.git@github.com:.pushInsteadOf
+
+# A forge-git that cannot compute the route is a failure to look (exit 64,
+# naming it), never a refusal of the URL (exit 3).
+cat > "${TMP}/fg-broken" <<'EOF'
+#!/usr/bin/env bash
+echo "forge-git: something broke" >&2
+exit 64
+EOF
+chmod +x "${TMP}/fg-broken"
+reset_logs; err="$(STUB_RC=0 FORGE_PUSH_FORGE_GIT="${TMP}/fg-broken" "${FP}" -C "${r}" origin HEAD:main 2>&1 >/dev/null)"; rc=$?
+[ "${rc}" = 64 ] && [ ! -s "${TMP}/routed.log" ] && grep -q 'something broke' <<<"${err}" && grep -q 'could not be read' <<<"${err}" && grep -q 'Fix:' <<<"${err}" \
+  && ok "push: a forge-git failure (exit 64) is reported as could-not-look with its message, never as a refused URL" \
+  || bad "push: broken forge-git" "rc=${rc} routed=[$(cat "${TMP}/routed.log")] err=${err}"
 
 r="${TMP}/push-url"; mkrepo "${r}" "git@github.com:CJPoll/custom.git"
 git -C "${r}" remote set-url --push origin "git@gitlab.com:cjpoll/custom.git"
@@ -407,6 +446,7 @@ cat > "${ALLOW}" <<'EOF'
 ai/bin/harness-gate	git.call("-C", root, "fetch", "-q", "origin")	self-test fixture: fetches a local bare origin it built
 ai/bin/harness-gate	git.call("-C", fixture, "fetch", "-q", "origin")	self-test fixture: fetches a local bare origin it built
 ai/bin/tool-propose	["git", "-C", "/repo", "fetch"]	a deny-list test vector; never run
+ai/bin/forge-push	ls-remote --get-url	--get-url only expands the URL by config (insteadOf) and reaches no remote
 scripts/athena-shipwright-run.sh	timeout 120 git -C "${dir}" fetch --quiet origin main ;;	the local-path branch of athena_fetch_origin_main; forge URLs route above it (scripts/test/runner-fetch-route)
 scripts/athena-leadtime-run.sh	timeout 120 git -C "${dir}" fetch --quiet origin main ;;	the local-path branch of athena_fetch_origin_main; forge URLs route above it (scripts/test/runner-fetch-route)
 scripts/mr-review	git fetch origin || {	the owner's interactive review tool; no agent runs it
@@ -431,6 +471,7 @@ ai/bin/admiral-eval	"git", "--version"	the eval sandbox's own self-test: its 3-l
 ai/bin/admiral-eval	"git", "push", "origin", "main"	the eval sandbox's self-test: asserts the sandbox BLOCKS this push
 ai/bin/blast-radius	cgit.call("push", "-q", bare	self-test fixture: pushes PR head refs into a local bare repo it built
 ai/bin/block-optimize	["git", "-C", s, "push"]	a deny-list test vector; never run
+ai/bin/forge-push	exec "${WRAPPER}" git -C "${DIR}" push "$@"	forge-push itself: the one exec of the wrapper its route picked
 ai/bin/harness-gate	git.call("-C", root, "push"	self-test fixture: pushes to a local bare origin it built
 ai/bin/harness-gate	git.call("-C", other, "push"	self-test fixture: pushes to a local bare origin it built
 ai/bin/harness-gate	git.call("-C", fixture, "push"	self-test fixture: pushes to a local bare origin it built
@@ -500,6 +541,11 @@ git -C "${LANE}" push origin HEAD:main || die 3 "push failed" "Fix: retry"
 echo "Fix: push with ~/dev/custom/ai/bin/gh-athena git push origin HEAD"
 exec ~/dev/custom/ai/bin/glab-athena git -C "${D}" push -u origin HEAD
 "${FORGE_PUSH}" -C "${LANE}" origin HEAD:main
+if git -C "${LANE}" push origin HEAD:main; then :; fi
+command git push origin HEAD
+nice -n 19 git push origin HEAD
+"${bin_dir}/${wrapper}" git push "$@"
+"$GHA" git -c x=y push origin HEAD
 EOF
 cat > "${SCAN_FX}/ai/lib/pushish.rb" <<'EOF'
 argv = [Cmd.forge_push, "-C", dir, "origin", "HEAD"]
@@ -512,10 +558,10 @@ warn "Fix: `gh-athena git push origin HEAD` then retry"
 EOF
 git -C "${SCAN_FX}" add -A
 scan="$(/usr/bin/ruby "${HERE}/plain_git_scan.rb" "${SCAN_FX}" "${TMP}/empty-allow.tsv" --push 2>&1)"; rc=$?
-want="ai/bin/pushish:2: ai/bin/pushish:3: ai/bin/pushish:5: ai/lib/pushish.rb:3: ai/lib/pushish.rb:6:"
+want="ai/bin/pushish:2: ai/bin/pushish:3: ai/bin/pushish:5: ai/bin/pushish:7: ai/bin/pushish:8: ai/bin/pushish:9: ai/bin/pushish:10: ai/bin/pushish:11: ai/lib/pushish.rb:3: ai/lib/pushish.rb:6:"
 got="$(grep '^PLAIN' <<<"${scan}" | sed -E 's/^PLAIN ([^:]+:[0-9]+:).*/\1/' | tr '\n' ' ' | sed 's/ $//')"
 [ "${rc}" -eq 1 ] && [ "${got}" = "${want}" ] \
-  && ok "the push scanner finds a quoted wrapper path, a plain push with || die, an exec'd wrapper, a split Ruby argv naming the wrapper, a plain Ruby argv; skips messages and forge-push" \
+  && ok "the push scanner finds a quoted wrapper path, a plain push with || die, an exec'd wrapper, if/command/nice forms, a wrapper held in a variable, a split Ruby argv naming the wrapper, a plain Ruby argv; skips messages and forge-push" \
   || bad "push scanner fixture" "rc=${rc} want=[${want}] got=[${got}] scan=${scan}"
 if fsg_verify; then ok "no git call fell through past the tripwire (DND-1667)"
 else bad "no git call fell through past the tripwire (DND-1667)" "see the forge-stub-guard FAIL above"; fi

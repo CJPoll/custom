@@ -1359,7 +1359,15 @@ if [ "$1" = git ]; then shift; exec git "$@"; fi
 if [ "$1 $2" = "pr create" ]; then echo "https://github.com/example/gen_saas/pull/41"; exit 0; fi
 exit 64
 EOF
-chmod +x "$TMP/pfake/gh" "$TMP/pfake/gh-athena"
+# The product lane pushes through ai/bin/forge-push (DND-1995), which refuses
+# the temp origin's local path; this stand-in logs the push and makes it.
+cat >"$TMP/pfake/forge-push" <<'EOF'
+#!/usr/bin/env bash
+printf 'forge-push %s\n' "$*" >>"$PFAKE_LOG"
+[ "$1" = -C ] || exit 64
+d="$2"; shift 2; exec git -C "$d" push "$@"
+EOF
+chmod +x "$TMP/pfake/gh" "$TMP/pfake/gh-athena" "$TMP/pfake/forge-push"
 
 # product_case — a case whose override lists custom (improve) and gen_saas
 # (improve), with gen_saas a clone of its own temp origin.
@@ -1376,7 +1384,7 @@ glanes() { printf '%s/checkouts/gen_saas/.git/leadtime-lanes' "$1"; }
 prun() { # <case> [VAR=val ...] — run_runner with the product fakes and the override
   local c="$1"; shift
   run_runner "$c" ATHENA_LEADTIME_CONFIG="$c/override.json" LEADTIME_GH="$TMP/pfake/gh" LEADTIME_GH_ATHENA="$TMP/pfake/gh-athena" \
-    LEADTIME_PRODUCT_FORGE=github LEADTIME_PRODUCT_BOOTSTRAP= PFAKE_LOG="$c/pfake.log" PFAKE_HEAD="$c/pfake.head" "$@"
+    LEADTIME_FORGE_PUSH="$TMP/pfake/forge-push" LEADTIME_PRODUCT_FORGE=github LEADTIME_PRODUCT_BOOTSTRAP= PFAKE_LOG="$c/pfake.log" PFAKE_HEAD="$c/pfake.head" "$@"
 }
 
 # No improve repo other than custom: behaviour identical to today. The whole
@@ -1453,7 +1461,7 @@ rc="$(prun "$c")"
 run="$(newest "$c" run)"
 if [ "$rc" = 0 ] && grep -q 'outcome=ok exit=0' "$run" && grep -q '^product_lane: repo=gen_saas awaiting landing on PR #41' "$run" \
    && [ "$(jq -r 'select(.event=="opened") | .pr' "$(sd "$c")/product-prs.jsonl")" = 41 ] \
-   && [ ! -e "$(sd "$c")/consecutive-failures" ] && grep -q 'push -u origin HEAD' "$c/pfake.log"; then
+   && [ ! -e "$(sd "$c")/consecutive-failures" ] && grep -q '^forge-push -C .* -u origin HEAD$' "$c/pfake.log"; then
   ok "a pushed commit on an open PR: not STRANDED, exit 0, recorded in product-prs.jsonl, not counted"
 else
   bad "product pr" "rc=$rc run=$(cat "$run" 2>/dev/null) pr=$(cat "$c/pr.out" 2>/dev/null) err=$(cat "$c/runner.err")"

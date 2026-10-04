@@ -102,8 +102,9 @@ is_local_path() {
 }
 
 # route_of URL -> prints gh-athena, glab-athena or local; returns 1 (printing
-# nothing) for a URL no route takes. THE host table: forge-git's reads and
-# ai/bin/forge-push's pushes (through --route) both use it (DND-1995).
+# nothing) for a URL no route takes. forge-git's reads and ai/bin/forge-push's
+# pushes (through --route) both use this table (DND-1995). The cron runners'
+# athena_fetch_origin_main (scripts/athena-*-run.sh) still holds a copy.
 route_of() {
   local url="$1"
   [ -n "${url}" ] || return 1
@@ -125,7 +126,7 @@ refuse_route() {
 if [ "${1-}" = --route ]; then
   [ $# -eq 2 ] || die 64 "--route takes exactly one URL" "pass forge-git --route <url>."
   [ -n "$2" ] || die 64 "--route was given an empty URL" "pass the remote's URL (git remote get-url <name>)."
-  route_of "$2" || refuse_route "'$2'" "<repository>"
+  route_of "$2" || refuse_route "'$2'" "<your repository>"
   exit 0
 fi
 
