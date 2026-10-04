@@ -8,7 +8,7 @@
 # links no ~/dev/custom, the Dockerfile builds FROM the job's exact image and
 # runs the same setup.sh, and setup.sh pins one apt snapshot, exact package
 # versions and a sha256-checked git tarball. Functional only
-# (DND-1222): reads one file, no network, no docker, no timing.
+# (DND-1222): reads those three files, no network, no docker, no timing.
 # Each rule has a miss case: a mutated copy of the file must fail the checker.
 
 set -u
@@ -89,6 +89,15 @@ mutate_in setup "malformed snapshot fails"       "SNAPSHOT"            's/^SNAPS
 mutate_in setup "empty source checksum fails"    "GIT_SHA256"          's/^GIT_SHA256=.*/GIT_SHA256=/'
 mutate_in setup "dropped checksum step fails"    "sha256sum -c"        's/| sha256sum -c --quiet -/| true/'
 mutate_in setup "floating source version fails"  "GIT_VERSION"         's/^GIT_VERSION=.*/GIT_VERSION=latest/'
+mutate_in setup "base sources kept fails"        "remove the base image" 's#^rm -f /etc/apt/sources.list /etc/apt/sources.list.d/\*$#true#'
+mutate_in setup "one-line moving source fails"   "one-line"            's#^\(rm -f /etc/apt/sources.list .*\)$#\1\necho "deb https://deb.debian.org/debian trixie main" > /etc/apt/sources.list#'
+mutate_in setup "extra sources file fails"       "other sources"       's#^\(rm -f /etc/apt/sources.list .*\)$#\1\ncp /x /etc/apt/sources.list.d/extra.list#'
+mutate_in setup "extra unpinned package fails"   "exactly"             's/"\${PACKAGES\[@\]}"; then$/"${PACKAGES[@]}" vim; then/'
+mutate_in setup "glob version fails"             "name=exact-version"  's/^  jq=.*/  jq=1.7*/'
+mutate_in setup "snapshot reassigned fails"      "exactly once"        's/^\(SNAPSHOT=.*\)$/\1\nSNAPSHOT=latest/'
+mutate_in setup "checksum reassigned fails"      "exactly once"        's/^\(GIT_SHA256=.*\)$/\1\nGIT_SHA256=$(curl -s x)/'
+mutate_in dockerfile "second FROM fails"         "exactly one FROM"    '$a FROM debian:latest'
+mutate "before_script ~/dev/custom link fails"   "dev/custom"          's#^  script:$#  before_script:\n    - ln -sfn "$CI_PROJECT_DIR" /home/ci/dev/custom\n  script:#'
 
 # A missing image file is an error, not a pass.
 out="$(/usr/bin/ruby "${CHECK}" "${CI_FILE}" "${TMP}/absent.Dockerfile" "${SETUP}" 2>&1)"

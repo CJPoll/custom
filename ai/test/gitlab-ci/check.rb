@@ -75,6 +75,15 @@ all_vars.compact.each do |vars|
   end
 end
 
+# Every string in the parsed file, keys included (comments are not values).
+yaml_strings = lambda do |node|
+  case node
+  when Hash then node.flat_map { |k, v| [k.to_s] + yaml_strings.call(v) }
+  when Array then node.flat_map { |v| yaml_strings.call(v) }
+  else [node.to_s]
+  end
+end
+
 gate = jobs["harness-gate"]
 if gate.nil?
   errors << "harness-gate: job is missing"
@@ -94,13 +103,16 @@ else
   elsif gate_i && setup_i > gate_i
     errors << "harness-gate: `#{SETUP_CMD}` must run before ai/bin/harness-gate"
   end
-  # No ~/dev/custom link: a checkout there marks the machine as an inbox tenant.
-  errors << "harness-gate: script must not link a checkout at ~/dev/custom (dev/custom); the CI container is not an inbox tenant" if scripts.any? { |s| s.include?("dev/custom") }
+  # No ~/dev/custom link anywhere in the file (job, default or hidden
+  # before_script): a checkout there marks the machine as an inbox tenant.
+  errors << "harness-gate: the CI file must not link a checkout at ~/dev/custom (dev/custom); the CI container is not an inbox tenant" if yaml_strings.call(doc).any? { |v| v.include?("dev/custom") }
 
   # The Dockerfile builds the same image the job runs.
   if File.file?(dockerfile)
     dtext = File.read(dockerfile)
-    from = dtext[/^FROM\s+(\S+)/, 1]
+    froms = dtext.scan(/^FROM\s+(\S+)/i).flatten
+    errors << "Dockerfile: must have exactly one FROM (a later stage would be the image), got #{froms.size}" unless froms.size == 1
+    from = froms.first
     errors << "Dockerfile: FROM must be exactly the job's image #{img.inspect}, got #{from.inspect}" unless from == img
     errors << "Dockerfile: must COPY setup.sh and RUN it (the same setup as the job)" unless dtext.match?(/^COPY\s+setup\.sh\s+(\S+)\s*$/) && dtext.match?(/^RUN\s+#{Regexp.escape(dtext[/^COPY\s+setup\.sh\s+(\S+)/, 1].to_s)}\s*$/)
   else
@@ -111,13 +123,26 @@ end
 # setup.sh pins every input: one snapshot, exact package versions, a checked git.
 if File.file?(setup)
   stext = File.read(setup)
+  # Each pin is assigned exactly once: a later reassignment would win.
+  %w[SNAPSHOT GIT_VERSION GIT_SHA256 PACKAGES].each do |var|
+    n = stext.scan(/^\s*#{var}=/).size
+    errors << "setup.sh: #{var} must be assigned exactly once, got #{n}" unless n == 1
+  end
+  # apt reads only the snapshot: the base image's sources are removed, and no
+  # other source is written.
+  errors << "setup.sh: must remove the base image's apt sources (`rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*`) so apt reads only snapshot.debian.org" unless stext.match?(%r{^rm -f /etc/apt/sources\.list /etc/apt/sources\.list\.d/\*$})
+  errors << "setup.sh: apt must read only snapshot.debian.org; a one-line `deb ` source is not allowed" if stext.match?(/\bdeb(-src)?[ \t]+[^\n]*https?:/)
+  srcs = stext.scan(%r{/etc/apt/sources\.list(?:\.d/[^\s"']*)?}).uniq
+  extra = srcs - ["/etc/apt/sources.list", "/etc/apt/sources.list.d/*", "/etc/apt/sources.list.d/snapshot.sources"]
+  errors << "setup.sh: apt must read only snapshot.debian.org; it writes other sources #{extra.inspect}" unless extra.empty?
+  errors << "setup.sh: the install must name exactly \"${PACKAGES[@]}\" (no extra, unpinned package)" unless stext.match?(/install -y -qq --no-install-recommends "\$\{PACKAGES\[@\]\}"; then$/)
   snap = stext[/^SNAPSHOT=(\S+)$/, 1].to_s
   errors << "setup.sh: SNAPSHOT must be a snapshot.debian.org timestamp (YYYYMMDDTHHMMSSZ), got #{snap.inspect}" unless snap.match?(/\A\d{8}T\d{6}Z\z/)
   uris = stext.scan(/^URIs:\s*(\S+)$/).flatten
   errors << "setup.sh: apt must read only snapshot.debian.org at ${SNAPSHOT}, got #{uris.inspect}" if uris.empty? || uris.any? { |u| !u.match?(%r{\Ahttps://snapshot\.debian\.org/archive/[a-z-]+/\$\{SNAPSHOT\}\z}) }
   pkgs = stext[/^PACKAGES=\(\n(.*?)^\)/m, 1].to_s.lines.map(&:strip).reject { |l| l.empty? || l.start_with?("#") }
   errors << "setup.sh: PACKAGES is empty" if pkgs.empty?
-  pkgs.reject { |p| p.match?(/\A[a-z0-9][a-z0-9.+-]*=[0-9][^\s=]*\z/) }.each do |p|
+  pkgs.reject { |p| p.match?(/\A[a-z0-9][a-z0-9.+-]*=[0-9][0-9A-Za-z.+~:-]*\z/) }.each do |p|
     errors << "setup.sh: package #{p.inspect} must be pinned as name=exact-version"
   end
   errors << "setup.sh: GIT_VERSION must be an exact x.y.z release" unless stext.match?(/^GIT_VERSION=\d+\.\d+\.\d+$/)

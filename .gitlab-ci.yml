@@ -16,7 +16,12 @@
 # seccomp=unconfined and systempaths=unconfined, so bubblewrap can create user
 # namespaces and mount /proc (the tool-sandbox suites). Measured 2026-10-04 in
 # dockerfiles/ci-harness/Dockerfile's image with those two options: 194 of 194
-# checks pass. Under docker's defaults the tool-sandbox suites fail.
+# checks pass. Without either, the three tool-sandbox suites fail.
+# Where the runner gets them: the live `ci` runner had both set by hand on
+# 2026-10-04; the committed runner kit (scripts/lib/gitlab-runner-kit.sh) sets
+# only seccomp until DND-1999 adds systempaths. Until DND-1999 lands, a runner
+# rebuilt from the kit fails those three suites, so do not make this job a
+# required check before then.
 
 workflow:
   rules:

@@ -56,7 +56,7 @@ module HarnessTools
     ["dockerfiles/", :out,
      "container image build inputs: run as root inside a docker build or the " \
      "GitLab CI job's container (DND-1998), never from an agent's Bash call on " \
-     "this machine"],
+     "this machine: dockerfiles/ci-harness/setup.sh refuses to run as non-root"],
   ].freeze
 
   # tools: in-scope repo-relative paths. out_of_scope: {path => reason}.

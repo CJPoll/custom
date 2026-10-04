@@ -461,6 +461,17 @@ fi
 # sets env_end; load_elf_binary sets start_code only after). However long that
 # state lasts (a preempted walk), it is "cannot tell yet", never "no".
 fake_proc 4210 1000 1000 '' fake "${UID}" 0
+# The settle round's pause is a forked sleep(1) (DND-1998). One that cannot
+# run is exit 3, could not look, with a Fix: -- never a quiet "no".
+GAWK_BIN="$(command -v gawk)"
+SO="$(env PATH=/nonexistent "${GAWK_BIN}" -b -f "${SCAN}" -v mode=tag -v needle=t1 -v uid="${UID}" -v since=0 -v settle_s=0.2 \
+      -v root="${TMP}/fakeproc" "${TMP}/fakeproc/4210" 2>"${TMP}/scan.err")"; SRC=$?
+SE="$(cat "${TMP}/scan.err")"
+if [ "${SRC}" -eq 3 ] && [ -z "${SO}" ] && grep -q 'Fix:' <<<"${SE}"; then
+  ok "S15 a settle pause that cannot run: exit 3 with a Fix:, never 'no'"
+else
+  bad "S15 a settle pause that cannot run: exit 3 with a Fix:, never 'no'" "rc=${SRC} out=${SO} err=${SE}"
+fi
 scan_fake 4210
 if [ "${SRC}" -eq 4 ] && [ -z "${SO}" ] && grep -q 'pid 4210 .*UNKNOWN' <<<"${SE}"; then
   ok "S15 equal bounds mid-exec (start_code 0) that never settle: UNKNOWN, exit 4, never 'no'"
