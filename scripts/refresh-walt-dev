@@ -2,6 +2,9 @@
 # Refresh the local walt_ui dev stack after a merge to main:
 #   git pull (ff-only) in ~/dev/walt_ui, then `rebuild app` and run migrations.
 # Safe to run repeatedly; serialized by a lock so overlapping triggers queue.
+# Owner-run: no cron, hook or harness tool calls it (checked 2026-10-04,
+# DND-1977), so its pull keeps plain git and the owner's own credentials. A
+# harness caller added later must route the pull through ai/bin/forge-git.
 set -uo pipefail
 LOCK=/tmp/refresh-walt-dev.lock
 exec 9>"$LOCK"; flock 9

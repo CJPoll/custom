@@ -328,7 +328,7 @@ if [ "$ERRORED" -eq 1 ]; then
   {
     echo "confirm-merged: COULD NOT DETERMINE — no probe confirmed the merge and one errored: $REASONS"
     echo "  Fix: this is NOT proof the merge failed. Do NOT move the ticket to Done / DM / tear down."
-    echo "  Re-run after \`git fetch\` (or pass --fetch), or once the forge is reachable; if under a"
+    echo "  Re-run with --fetch (it fetches through ai/bin/forge-git, Athena's forge route), or once the forge is reachable; if under a"
     echo "  merge train, wait and re-verify on the current head rather than trusting the '✓ Merged!' line."
   } >&2
   exit 3

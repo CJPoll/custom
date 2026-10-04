@@ -408,7 +408,7 @@ module LeadTimeProductIO
     branch = P.branch_name(rl.name, phase, t.strftime("%Y%m%dT%H%M%SZ"))
     fetched = Git.fetch_main(rl.path)
     base = Git.rev(rl.path, "refs/remotes/origin/main") or
-      raise CouldNotLook.new("#{rl.name} has no origin/main, so there is no base for a lane", "run 'git -C #{rl.path} fetch origin main' and check the remote.")
+      raise CouldNotLook.new("#{rl.name} has no origin/main, so there is no base for a lane", "run '#{Cmd.forge_git} -C #{rl.path} fetch origin main' (Athena's forge route) and check the remote.")
     out, code = Git.call(rl.path, "worktree", "add", "-q", "-b", branch, rl.lane, base)
     raise P::Error.new("could not cut #{rl.lane} on #{branch}: #{out.strip}", "read git's reason; a branch-name collision is never forced.") unless code.zero?
 

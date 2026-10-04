@@ -1,6 +1,6 @@
 ---
 name: athena:shipwright-lane
-description: How an athena-shipwright provisions its own short-lived git lane (cron per-invocation lane vs. a directly-spawned named worktree/branch), syncs it down from origin/main before mining, commits through the path-limited commit wrapper, and syncs the result back up (cron fast-forward vs. a direct-spawn PR) — including the SSH-denied cron fallback and the refspec mechanics needed because HEAD is never `main`. Use whenever an athena-shipwright starts a run, is about to commit, or is about to sync down/up.
+description: How an athena-shipwright provisions its own short-lived git lane (cron per-invocation lane vs. a directly-spawned named worktree/branch), syncs it down from origin/main before mining, commits through the path-limited commit wrapper, and syncs the result back up (cron fast-forward vs. a direct-spawn PR) — including the forge-git fetch through Athena's route and the refspec mechanics needed because HEAD is never `main`. Use whenever an athena-shipwright starts a run, is about to commit, or is about to sync down/up.
 ---
 
 # athena:shipwright-lane
@@ -72,8 +72,13 @@ Two consequences to carry:
 In your worktree, get current with the remote before you change anything:
 
 ```
-git fetch origin main && git rebase --autostash FETCH_HEAD
+~/dev/custom/ai/bin/forge-git -C "$PWD" fetch origin main && git rebase --autostash FETCH_HEAD
 ```
+
+`forge-git` reads origin through Athena's forge route: `gh-athena git` for a
+github.com origin, `glab-athena git` for a gitlab.com one, over HTTPS with the
+bot's token (DND-1977). A cron session has no ssh-agent, and the owner's SSH
+key is not the lane's to use.
 
 This is also where another machine's shipwright commits land, so pulling
 first is how you avoid duplicating a fix that already exists. If the rebase
@@ -85,22 +90,16 @@ this is usually a no-op that only picks up anything landed since; it stays
 because a directly-spawned run needs it and it is harmless when already
 current.
 
-**SSH-denied fallback (cron runner):** the remote is `git@github.com:...` but
-the headless cron session has no ssh-agent, so a plain `git pull`/`git push`
-dies with `Permission denied (publickey)` — this is an *auth gap*, not a
-conflict, so do not abort/skip on it. Fall back to the repo's already-
-configured `gh` HTTPS credential helper (no config change, no credential
-touched):
+If the `forge-git` fetch fails (its exit is non-zero: an expired bot token,
+the network, or exit 3 for an origin form the route refuses), the sync is
+unavailable: journal the error line and skip this run's edits. Never fall back
+to plain git or to the owner's `gh` credential helper.
 
-```
-git -c credential.helper='!/usr/bin/gh auth git-credential' fetch \
-  https://github.com/CJPoll/custom.git main
-git rebase --autostash FETCH_HEAD
-git update-ref refs/remotes/origin/main FETCH_HEAD   # so status reads true
-```
-
-Only if the HTTPS fallback ALSO fails is the sync genuinely unavailable —
-journal it and skip this run's edits.
+**Later (2026-10-04, DND-1977):** this step ran a plain `git fetch origin
+main`, with an *SSH-denied fallback* through the owner's
+`gh auth git-credential` helper when the cron session had no ssh-agent.
+Superseded by `forge-git`: both reached origin as the owner, and neither works
+against a private gitlab.com origin after the GitLab cutover (DND-1947).
 
 ## Commit only through the wrapper, naming every path
 

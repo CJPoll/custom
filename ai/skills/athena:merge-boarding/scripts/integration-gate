@@ -592,7 +592,9 @@ CRITIC="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../bin" 2>/dev/null && pwd)/c
 TEARDOWN="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../bin" 2>/dev/null && pwd)/teardown-stack"
 # The target's remote is read through Athena's forge route (DND-1977), never the
 # owner's SSH key: admirals, captains and cron lanes run this gate unattended.
-FORGE_GIT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../bin" 2>/dev/null && pwd)/forge-git"
+# Built from the realpath (SELF_DIR), so a call through a symlinked skills
+# directory still finds ai/bin.
+FORGE_GIT="${SELF_DIR}/../../../bin/forge-git"
 
 # DND-1576: record the worktree's stack marker right after the gate ran, while
 # the stack the gate used is still up. A captain's later `docker compose down`
@@ -617,14 +619,21 @@ record_stack_marker() {
 
 fetch_target() {
   [ "$DO_FETCH" -eq 1 ] || return 0
-  local remote
+  local remote ferr frc
   case "$TARGET" in
     */*) remote="${TARGET%%/*}" ;;
     *)   remote="" ;;
   esac
   if [ -n "$remote" ] && grep -qx -- "$remote" <<<"$(git remote)"; then
-    "$FORGE_GIT" -C "$ROOT" fetch "$remote" >/dev/null 2>&1 || \
-      echo "${PROG}: WARN fetch of '${remote}' failed; comparing against the ref as it stands locally." >&2
+    if [ ! -x "$FORGE_GIT" ]; then
+      echo "${PROG}: WARN cannot fetch '${remote}': ${FORGE_GIT} is missing or not executable; comparing against the ref as it stands locally. Fix: run integration-gate from a full ~/dev/custom checkout (ai/skills and ai/bin side by side)." >&2
+      return 0
+    fi
+    frc=0; ferr="$("$FORGE_GIT" -C "$ROOT" fetch "$remote" 2>&1 >/dev/null)" || frc=$?
+    # A refused route (exit 3) or an unresolvable one (64) reads differently
+    # from a network blip only if its own words reach the log.
+    [ "$frc" -eq 0 ] || \
+      echo "${PROG}: WARN fetch of '${remote}' through forge-git failed (exit ${frc}: $(printf '%s' "$ferr" | head -n 1)); comparing against the ref as it stands locally." >&2
   fi
 }
 

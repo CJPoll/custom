@@ -90,7 +90,8 @@ require_relative "private_overlay_resolver"
 #     head. athena:slack -> "Asking the owner for a decision" therefore puts
 #     the value string verbatim in the visible text.
 #   - The carry reads origin's PR head ref over git's own transport. The same
-#     user can redirect that transport (GIT_SSH_COMMAND, url.*.insteadOf) to
+#     user can redirect that transport (GIT_SSH_COMMAND, url.*.insteadOf,
+#     forge-git's FORGE_GIT_GH_ATHENA / FORGE_GIT_GLAB_ATHENA test seams) to
 #     a forge it controls, as it can forge the inbox line itself. The diff
 #     equality does not depend on origin: it is read from local objects.
 module OwnerClick
@@ -106,6 +107,7 @@ module OwnerClick
   GENERATION = ".1"
   OWNER_KEY = ".people.owner.user_id"
   INBOX_STATUS = File.expand_path("../skills/athena:inbox/bin/inbox-status", __dir__)
+  FORGE_GIT = File.expand_path("../bin/forge-git", __dir__)
 
   FIX = "clear an exit 4 with the owner's own click on the decision DM: post it with " \
         "mcp__athena__slack_post, inbox_name set to this project's session inbox " \
@@ -362,7 +364,7 @@ module OwnerClick
     when :error
       [:refused, :unverifiable,
        "origin's head ref for PR ##{pr} could not look: `git ls-remote origin #{names}` failed (#{refs[:detail]})",
-       "make origin readable from this checkout (`git -C #{repo} ls-remote origin #{names}` must succeed), then " \
+       "make origin readable from this checkout through Athena's forge route (`#{FORGE_GIT} -C #{repo} ls-remote origin #{names}` must succeed), then " \
        "re-run. Or #{new_click_fix(info, head)}"]
     when :none
       [:refused, :unverifiable,
@@ -528,11 +530,13 @@ module OwnerClick
     [mb, out, nil]
   end
 
-  # EFFECTS. origin's head ref for PR `pr`, read with `git ls-remote`.
+  # EFFECTS. origin's head ref for PR `pr`, read with `git ls-remote` through
+  # Athena's forge route (ai/bin/forge-git, DND-1977), never the owner's SSH
+  # key: integration-gate reads it unattended.
   # -> {state: :found, shas: {ref => sha}} | {state: :none} |
   # {state: :error, detail:}.
   def origin_pr_head(repo, pr)
-    out, err, st = Open3.capture3({ "GIT_TERMINAL_PROMPT" => "0" }, "timeout", "--kill-after=10", "120", "git", "-C", repo,
+    out, err, st = Open3.capture3({ "GIT_TERMINAL_PROMPT" => "0" }, "timeout", "--kill-after=10", "120", FORGE_GIT, "-C", repo,
                                   "ls-remote", "origin", *pr_refs(pr))
     unless st.success?
       return { state: :error, detail: "exit #{st.exitstatus}: #{err.lines.first.to_s.strip}" }

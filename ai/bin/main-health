@@ -179,13 +179,13 @@ git -C "${REPO}" worktree prune >/dev/null 2>&1 8>&- || true
 timeout 120 "${HERE}/forge-git" -C "${REPO}" fetch -q origin 2>"${STORE}/.fetch-err.$$" 8>&-; frc=$?
 ferr="$(head -n 3 "${STORE}/.fetch-err.$$" 2>/dev/null | tr '\n' ' ')"; rm -f "${STORE}/.fetch-err.$$"
 [ "${frc}" -eq 0 ] \
-  || die 3 "COULD NOT MEASURE: git fetch origin failed (exit ${frc}: ${ferr}); no verdict on a possibly stale ref" "fix the remote or the network (git -C ${REPO} fetch origin), then re-run main-health check."
+  || die 3 "COULD NOT MEASURE: git fetch origin (through forge-git) failed (exit ${frc}: ${ferr}); no verdict on a possibly stale ref" "fix what that error names: the network, the forge wrapper's credentials (ai/bin/forge-preflight), or an origin form forge-git refuses (exit 3). Check by hand with ${HERE}/forge-git -C ${REPO} fetch origin, then re-run main-health check."
 TIP="$(git -C "${REPO}" rev-parse --verify -q 'refs/remotes/origin/main^{commit}' 2>/dev/null)" \
-  || die 3 "COULD NOT MEASURE: refs/remotes/origin/main does not resolve after the fetch" "check that origin has a main branch (git -C ${REPO} ls-remote origin main)."
+  || die 3 "COULD NOT MEASURE: refs/remotes/origin/main does not resolve after the fetch" "check that origin has a main branch (${HERE}/forge-git -C ${REPO} ls-remote origin main)."
 
 grc=0; gate="$(ir_declared_gate_on "${REPO}" "${TIP}")" || grc=$?
 if [ "${grc}" -eq 2 ]; then
-  die 3 "COULD NOT MEASURE: ${TIP} is not in the object store" "git -C ${REPO} fetch origin, then re-run."
+  die 3 "COULD NOT MEASURE: ${TIP} is not in the object store" "${HERE}/forge-git -C ${REPO} fetch origin, then re-run."
 fi
 if [ "${grc}" -ne 0 ] || [ "${gate}" != ai/bin/harness-gate ]; then
   die 2 "origin/main ${TIP} declares no ai/bin/harness-gate (declared: '${gate:-none}'); main-health covers the no-CI harness repo only" "run it on ~/dev/custom. A repo with CI (bin/prep-commit.sh, gen_saas) is checked by its own post-merge CI."

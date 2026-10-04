@@ -206,8 +206,8 @@ lands on main by refspec not branch name: **[[athena:shipwright-lane]]**.
 ## Method
 
 0. **Sync down first.** Get current with the remote before you change
-   anything, abort-not-force on an unclean conflict, and use the SSH-denied
-   cron fallback rather than reading an auth gap as a conflict:
+   anything, abort-not-force on an unclean conflict, and fetch through
+   `ai/bin/forge-git` (Athena's forge route), never plain git:
    **[[athena:shipwright-lane]]** → *Sync down first*.
 1. **Set the cursor and select.** Run `ai/bin/shipwright-artifacts`. It reads
    `cursor.txt` from `$SHIPWRIGHT_STATE_DIR` (else the main checkout's), lists

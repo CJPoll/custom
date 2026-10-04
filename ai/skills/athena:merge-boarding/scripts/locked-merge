@@ -553,7 +553,7 @@ if [ "${FORGE}" = github ]; then
     0) echo "${GMG_LINE_NOTE}" ;;
     1) die 11 "${GMG_LINE_WHY}" "$(gmg_line_fix "${GH_OWNER}" "${GH_REPO}" "${base}" "${B}"), then re-run locked-merge. Nothing was merged." ;;
     *) die 2 "${GMG_LINE_WHY}" \
-         "make the tip's content readable (git fetch origin; fix the declaration if the message names it), then re-run locked-merge. The tip's runs are never the cause (a note, DND-2061); nothing was merged." ;;
+         "make the tip's content readable (${FORGE_GIT} -C ${REPO} fetch origin; fix the declaration if the message names it), then re-run locked-merge. The tip's runs are never the cause (a note, DND-2061); nothing was merged." ;;
   esac
 else
   # GitLab (DND-1943): the tip's CONTENT is forge-free (git and
@@ -577,7 +577,7 @@ ${GMG_CONTENT_DUPS}
   The head ${HEAD_SHA} is not a red-main fix: it must contain ${B} and remove every duplicate." \
          "land only a red-main fix: a head that contains ${B}, removes every duplicate named above, and carries its own INTEGRATION OK receipt (merge origin/${base} into it, fix it, push as Athena, re-gate), then re-run locked-merge. Every other MR waits until that fix lands on ${base}. Nothing was merged." ;;
     *) die 2 "${GMG_LOOK_MARK} whether the origin/${base} tip ${B} is red cannot be told: ${GMG_CONTENT_WHY}" \
-         "make the tip readable (git fetch origin; fix the declaration if the message names it: an undeclared path of a declared product is added to that entry's paths in ~/dev/custom/ai/config/main-content-checks.json, landed on custom main), then re-run locked-merge. Could-not-read is never green; nothing was merged." ;;
+         "make the tip readable (${FORGE_GIT} -C ${REPO} fetch origin; fix the declaration if the message names it: an undeclared path of a declared product is added to that entry's paths in ~/dev/custom/ai/config/main-content-checks.json, landed on custom main), then re-run locked-merge. Could-not-read is never green; nothing was merged." ;;
   esac
 fi
 

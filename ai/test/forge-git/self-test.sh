@@ -114,8 +114,15 @@ STUB_RC=7 "${FG}" -C "${r}" ls-remote origin >/dev/null 2>&1; rc=$?
   && ok "a failed routed read returns the wrapper's exit code, with no fallback attempt" \
   || bad "failed routed read" "rc=${rc} routed=[$(cat "${TMP}/routed.log")]"
 
+r="${TMP}/route-case"; mkrepo "${r}" "git@GitHub.com:CJPoll/custom.git"; reset_logs
+STUB_RC=0 "${FG}" -C "${r}" fetch origin >/dev/null 2>&1
+[ "$(cat "${TMP}/routed.log")" = "gh-athena git -C ${r} fetch origin" ] \
+  && ok "the host is matched case-insensitively (git@GitHub.com: routes through gh-athena)" \
+  || bad "uppercase host" "routed=[$(cat "${TMP}/routed.log")]"
+
 j=0
-for url in "ssh://git@github.com/CJPoll/custom.git" "ssh://git@gitlab.com/cjpoll/custom.git" "git@github.com-work:CJPoll/custom.git"; do
+for url in "ssh://git@github.com/CJPoll/custom.git" "ssh://git@gitlab.com/cjpoll/custom.git" "git@github.com-work:CJPoll/custom.git" \
+           "gh:CJPoll/custom.git" "git@example.com:o/r.git" "https://example.com/o/r.git"; do
   j=$((j + 1)); r="${TMP}/refuse-${j}"; mkrepo "${r}" "${url}"; reset_logs
   err="$(PATH="${TRIP}:${PATH}" "${FG}" -C "${r}" fetch origin 2>&1 >/dev/null)"; rc=$?
   if [ "${rc}" = 3 ] && [ ! -s "${TMP}/routed.log" ] && [ ! -s "${TMP}/plain.log" ] && grep -q 'Fix:' <<<"${err}"; then
@@ -132,6 +139,12 @@ r="${TMP}/local"; mkrepo "${r}" "${bare}"; reset_logs
 [ "${rc}" = 0 ] && [ ! -s "${TMP}/routed.log" ] && git -C "${r}" rev-parse -q --verify refs/remotes/origin/main >/dev/null \
   && ok "a local-path origin fetches with plain git and calls no wrapper" \
   || bad "local-path origin" "rc=${rc} routed=[$(cat "${TMP}/routed.log")]"
+reset_logs
+"${FG}" -C "${r}" fetch --quiet "file://${bare}" main >/dev/null 2>&1; rc1=$?
+"${FG}" -C "${r}" fetch --quiet ../bare.git main >/dev/null 2>&1; rc2=$?
+[ "${rc1}" = 0 ] && [ "${rc2}" = 0 ] && [ ! -s "${TMP}/routed.log" ] \
+  && ok "a file:// URL and a relative path are local too (plain git, no wrapper)" \
+  || bad "file:// and relative path" "rc1=${rc1} rc2=${rc2} routed=[$(cat "${TMP}/routed.log")]"
 
 # ---------------------------------------------------------------------------
 echo "B. refusals and unresolvable keys (exit 64, never plain git)"
@@ -152,6 +165,8 @@ expect64 "a local subcommand is refused" -C "${r}" status
 expect64 "a word that is neither a remote nor a URL is refused" -C "${r}" fetch nosuchremote
 expect64 "fetch --all is refused (several remotes, one route)" -C "${r}" fetch --all
 expect64 "an option whose value is the next word is refused" -C "${r}" fetch --depth 1 origin
+expect64 "an abbreviation of such an option is refused too (git accepts --dep 1)" -C "${r}" fetch --dep 1 origin
+expect64 "a short option whose value is the next word is refused" -C "${r}" fetch -j 2 origin
 nr="${TMP}/noremote"; git init -q -b main "${nr}"; git -C "${nr}" commit -q --allow-empty -m s
 expect64 "a repo with no origin and no named remote is refused" -C "${nr}" fetch
 
@@ -228,36 +243,59 @@ PATH="${TRIP}:${PATH}" bash -c 'cd "$1" && . "$2/scripts/wt-lib/push.sh" && wt_g
   && ok "wt's owner path (no WT_AGENT_PUSH) still pulls with plain git" \
   || bad "wt owner path" "plain=[$(cat "${TMP}/plain.log")] routed=[$(cat "${TMP}/routed.log")]"
 
-# ---------------------------------------------------------------------------
-echo "E. no plain-git origin read in the sources Part D does not drive"
-# Shell: a git command word followed by fetch/pull/ls-remote. Ruby: an argv
-# array or git helper call naming one. Comment lines and message text (a
-# backtick, Fix:, die/warn/echo/note/printf/record) are skipped, and so is a
-# line that runs forge-git itself (FORGE_GIT / forge_git).
-SH_RE='(^|[;&|(!]|\$\(|then |do |timeout [0-9]+ )[[:space:]]*(LC_ALL=C[[:space:]]+)?git([[:space:]]+-C[[:space:]]+[^[:space:]]+)?([[:space:]]+-q|[[:space:]]+--quiet)?[[:space:]]+(fetch|pull|ls-remote)\b'
-RB_RE='"git",[^]]*"(fetch|ls-remote|pull)"|\b(Git\.call|call|git_ok|git_status)\([^)]*"(fetch|ls-remote|pull)"'
-MSG_RE='`|Fix|die |warn|echo |note |printf|record|raise|^[[:space:]]*#'
-for f in \
-  "ai/skills/athena:merge-boarding/scripts/integration-gate" \
-  "ai/skills/athena:merge-boarding/scripts/locked-merge" \
-  "ai/bin/lead-time" \
-  "ai/lib/leadtime_product_io.rb" \
-  "ai/bin/ready-and-idle" \
-  "ai/bin/main-health" \
-  "ai/bin/confirm-merged" \
-  "ai/lib/landed.rb" \
-  "ai/bin/push-actor-check" \
-  "scripts/wt-preflight" \
-  "scripts/wt-lib/merge.sh"; do
-  [ -f "${ROOT}/${f}" ] || { bad "${f} is missing (the list is stale)"; continue; }
-  hits="$(grep -nE -e "${SH_RE}" -e "${RB_RE}" "${ROOT}/${f}" | grep -vE -e "${MSG_RE}" | grep -viF forge_git || true)"
-  if [ -z "${hits}" ]; then
-    ok "${f}: no plain-git fetch/pull/ls-remote"
-  else
-    bad "${f}: plain-git origin read" "${hits}"
-  fi
-done
 
+# ---------------------------------------------------------------------------
+echo "E. no plain-git origin read anywhere in the harness source"
+# The class, not a list: plain_git_scan.rb reads every tracked file under ai/,
+# scripts/ and git-custom/ (its header says how, and what it cannot see). A hit
+# must be one of these owner-run or fixture-only exceptions, each with its
+# reason; a row that no longer matches is stale and fails too.
+ALLOW="${TMP}/allow.tsv"
+cat > "${ALLOW}" <<'EOF'
+ai/bin/harness-gate	git.call("-C", root, "fetch", "-q", "origin")	self-test fixture: fetches a local bare origin it built
+ai/bin/harness-gate	git.call("-C", fixture, "fetch", "-q", "origin")	self-test fixture: fetches a local bare origin it built
+ai/bin/tool-propose	["git", "-C", "/repo", "fetch"]	a deny-list test vector; never run
+scripts/athena-shipwright-run.sh	timeout 120 git -C "${dir}" fetch --quiet origin main ;;	the local-path branch of athena_fetch_origin_main; forge URLs route above it (scripts/test/runner-fetch-route)
+scripts/athena-leadtime-run.sh	timeout 120 git -C "${dir}" fetch --quiet origin main ;;	the local-path branch of athena_fetch_origin_main; forge URLs route above it (scripts/test/runner-fetch-route)
+scripts/mr-review	git fetch origin || {	the owner's interactive review tool; no agent runs it
+scripts/pr-review	if ! git fetch origin; then	the owner's interactive review tool; no agent runs it
+scripts/refresh-walt-dev	git pull --ff-only -q	the owner's walt_ui dev-stack refresh; no harness caller (its header says so)
+scripts/wt-lib/push.sh	git pull "$@"	wt_git_pull's owner path (no WT_AGENT_PUSH); the agent path uses forge-git
+EOF
+scan="$(/usr/bin/ruby "${HERE}/plain_git_scan.rb" "${ROOT}" "${ALLOW}" 2>&1)"; rc=$?
+if [ "${rc}" -eq 0 ]; then
+  ok "class scan: $(head -n 1 <<<"${scan}"); every plain-git read is an allowlisted owner-run or fixture one"
+else
+  bad "class scan (exit ${rc})" "${scan}"
+fi
+
+# The scanner itself: it must SEE the shapes it claims to (a scan that finds
+# nothing because it reads nothing passes vacuously).
+SCAN_FX="${TMP}/scanfx"; mkdir -p "${SCAN_FX}/ai/bin" "${SCAN_FX}/ai/lib"
+git init -q "${SCAN_FX}"
+cat > "${SCAN_FX}/ai/bin/shellish" <<'EOF'
+#!/usr/bin/env bash
+timeout 120 git -C "${REPO}" fetch -q origin || die 3 "git fetch failed" "Fix: retry"
+out="$(GIT_TERMINAL_PROMPT=0 git -c credential.helper= ls-remote origin)"
+echo "Fix: run \`git fetch origin\` by hand"
+"${FORGE_GIT}" -C "${REPO}" fetch -q origin
+EOF
+cat > "${SCAN_FX}/ai/lib/rubyish.rb" <<'EOF'
+out, st = Open3.capture3("timeout", "120", "git", "-C", repo,
+                         "ls-remote", "origin", "refs/heads/main")
+_o, code = Git.call(dir, "fetch", "--quiet", "origin")
+warn "Fix: `git fetch origin` then retry"
+out, st = Open3.capture3(FORGE_GIT, "-C", repo,
+                         "ls-remote", "origin")
+EOF
+git -C "${SCAN_FX}" add -A
+: > "${TMP}/empty-allow.tsv"
+scan="$(/usr/bin/ruby "${HERE}/plain_git_scan.rb" "${SCAN_FX}" "${TMP}/empty-allow.tsv" 2>&1)"; rc=$?
+want="ai/bin/shellish:2: ai/bin/shellish:3: ai/lib/rubyish.rb:1: ai/lib/rubyish.rb:3:"
+got="$(grep '^PLAIN' <<<"${scan}" | sed -E 's/^PLAIN ([^:]+:[0-9]+:).*/\1/' | tr '\n' ' ' | sed 's/ $//')"
+[ "${rc}" -eq 1 ] && [ "${got}" = "${want}" ] \
+  && ok "the scanner finds plain reads (one-liner with || die, env prefix and -c, a split Ruby argv, a helper call) and skips messages and forge-git" \
+  || bad "scanner fixture" "rc=${rc} want=[${want}] got=[${got}] scan=${scan}"
 echo
 echo "${pass} passed, ${fail} failed"
 [ "${fail}" -eq 0 ]

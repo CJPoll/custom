@@ -497,11 +497,11 @@ module Landed
     ["  could not measure the landed #{what}, so no weakening could be detected.",
      "  This is a missing MEASUREMENT, not a clean result. Probed, and what each gave:",
      *probes.map { |ref, outcome| "    #{ref} -> #{outcome}" },
-     "  Fix: give the check a landed bar to compare against: `git fetch origin main` " \
-     "(so #{REF} exists and shares history with HEAD), or `git fetch --unshallow` " \
+     "  Fix: give the check a landed bar to compare against: `#{FORGE_GIT} -C <checkout> fetch origin main` " \
+     "(so #{REF} exists and shares history with HEAD), or `#{FORGE_GIT} -C <checkout> fetch --unshallow` " \
      "in a shallow clone. Run from a branch that descends from origin/main. If the " \
-     "failing probe is `#{LS_REMOTE_PROBE}`, make #{REMOTE} reachable (network, " \
-     "remote URL, credentials) and re-run: the check never falls back to the local ref. " \
+     "failing probe is `#{LS_REMOTE_PROBE}`, make #{REMOTE} reachable through forge-git (network, " \
+     "remote URL form, the forge wrapper's credentials: ai/bin/forge-preflight) and re-run: the check never falls back to the local ref. " \
      "If a probe names a malformed landed file, the bar on main itself is broken: it is " \
      "repaired on main, then this branch rebases onto it."]
   end
@@ -513,7 +513,7 @@ module Landed
      "weakening was measured:",
      "    #{REF} (local) -> #{local}",
      "    #{source} -> #{remote}",
-     "  Fix: `git fetch #{REMOTE}` so #{REF} matches what landed, rebase onto " \
+     "  Fix: `#{FORGE_GIT} -C <checkout> fetch #{REMOTE}` so #{REF} matches what landed, rebase onto " \
      "it, and re-run. A local ref moved by hand (git update-ref) does not move the bar, " \
      "and neither does a hand-set #{PIN_SHA_ENV}: the check compares against origin's " \
      "#{REMOTE_REF} (under harness-gate, as read once at gate start, and still proven " \

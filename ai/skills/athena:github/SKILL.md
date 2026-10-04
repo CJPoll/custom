@@ -194,6 +194,12 @@ Graphite's own GitHub App; no flag or env var gives it a GitHub token
 above, then open each PR with `gh-athena pr create --base <parent-branch>`.
 The bottom branch's parent is the trunk.
 
+**Reading a remote as Athena.** An unattended fetch, pull or ls-remote goes
+through `~/dev/custom/ai/bin/forge-git -C <dir> <fetch|ls-remote|pull> …`
+(DND-1977). It picks gh-athena or glab-athena by the URL of the remote the
+command reaches, runs plain git only for a local path, and refuses any other
+form with a `Fix:`. A plain `git fetch` reaches origin with the owner's SSH key.
+
 ## When a forge write can't be done as Athena
 
 **The owner's standing rule, for every forge (GitHub and GitLab) and every

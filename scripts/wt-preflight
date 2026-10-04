@@ -94,7 +94,9 @@ echo "== 1. refresh local main ($PROJECT) =="
 # LC_ALL=C: the classifier reads git's English messages; a translated locale
 # would drop every lock into the generic branch.
 pull_main() {
-  PULL_OUT=$(LC_ALL=C "$FORGE_GIT" -C "$REPO" pull --ff-only 2>&1); PULL_RC=$?
+  # --no-rebase: the forge wrapper refuses a pull that rebases, and a
+  # pull.rebase=true config would make this one do so.
+  PULL_OUT=$(LC_ALL=C "$FORGE_GIT" -C "$REPO" pull --ff-only --no-rebase 2>&1); PULL_RC=$?
   printf '%s\n' "$PULL_OUT"
 }
 # The lock file git names in its error, or "" when it names none. git prints

@@ -227,6 +227,11 @@ which); it never means the push failed). Handle a 1, a 4, and a refusal by
 **athena:github** → *When a forge write can't be done as
 Athena*.
 
+**Reading a remote as Athena.** An unattended fetch, pull or ls-remote goes
+through `~/dev/custom/ai/bin/forge-git`, which routes a gitlab.com remote to
+`glab-athena git` (**athena:github** → *Pushing as Athena* → *Reading a remote
+as Athena*).
+
 ## Fork MR pipelines
 
 **The rule: never run a fork MR's pipeline in the parent project.** By

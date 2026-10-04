@@ -3596,8 +3596,17 @@ def self_test
     fake_ssh = File.join(tmp, "fake-ssh")
     File.write(fake_ssh, "#!/bin/sh\nfor a in \"$@\"; do last=$a; done\ncd \"$FAKE_SSH_ROOT\" || exit 1\nexec sh -c \"$last\"\n")
     File.chmod(0o755, fake_ssh)
+    # The carry's read goes through ai/bin/forge-git (DND-1977), which sends a
+    # github.com origin to gh-athena. This stand-in for gh-athena records the
+    # call and runs plain git, so the read still lands on the fake ssh
+    # transport above and never on a real forge or the App's token.
+    routed_log = File.join(tmp, "routed.log")
+    fake_gh_athena = File.join(tmp, "fake-gh-athena")
+    File.write(fake_gh_athena, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '#{routed_log}'\n[ \"$1\" = git ] && shift\nexec git \"$@\"\n")
+    File.chmod(0o755, fake_gh_athena)
     click_env = fx_env.merge("ATHENA_INBOX_ROOT" => inbox, "ATHENA_PRIVATE_ROOT" => overlay, "CLAUDE_PROJECT_DIR" => ck,
-                             "GIT_SSH_COMMAND" => fake_ssh, "GIT_SSH_VARIANT" => "simple", "FAKE_SSH_ROOT" => ssh_root)
+                             "GIT_SSH_COMMAND" => fake_ssh, "GIT_SSH_VARIANT" => "simple", "FAKE_SSH_ROOT" => ssh_root,
+                             "FORGE_GIT_GH_ATHENA" => fake_gh_athena)
     did = ->(n) { format("dddddddd-0000-4000-8000-%012d", n) }
     click_line = lambda do |n, value: OwnerClick.ask_value("example/widgets", 42, chd), user: "UFAKE00001",
                               is_owner: true, kind: "slack.interaction", extra: {}|
@@ -4081,6 +4090,11 @@ def self_test
                    out.include?("byte-identical") && out.include?("origin's PR ##{pr} head is #{head}"),
                  "exit=#{code} out=#{out} err=#{err}")
     end
+    routed = File.exist?(routed_log) ? File.read(routed_log) : ""
+    check.call("carry: origin's PR head ref is read through Athena's forge route (forge-git -> gh-athena), " \
+               "never plain git with the owner's SSH key (DND-1977)",
+               routed.include?("ls-remote origin refs/pull/42/head") && routed.include?("ls-remote origin refs/pull/45/head"),
+               "routed=#{routed.inspect}")
     out, err, code = carry.call(b_byte, 36)
     check.call("carry: a one-byte change in the PR's own diff refuses (exit 2), naming both merge-bases and " \
                "both heads, with a Fix: asking for a new click on head B",

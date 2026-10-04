@@ -83,9 +83,11 @@ The landing, as Cody confirmed it (2026-10-01):
 
 1. The report names a head with `INTEGRATION OK` and a critic PASS on it.
    That is the head the merge bar checks.
-2. Under the lock, `git fetch origin`, then rebase that head onto
-   `origin/main` if main moved. Record the fetched `origin/main` SHA: it is
-   the landed range's base in steps 3 and 5.
+2. Under the lock, fetch origin through Athena's forge route
+   (`~/dev/custom/ai/bin/forge-git -C <worktree> fetch origin`, DND-1977;
+   never a plain `git fetch`, which reaches origin with the owner's SSH key),
+   then rebase that head onto `origin/main` if main moved. Record the fetched
+   `origin/main` SHA: it is the landed range's base in steps 3 and 5.
 3. A **clean** rebase (no textual or semantic conflict, *Merge one at a time*)
    lands with no re-gate. Run *Merge one at a time*'s migration-version
    check first; a collision is a semantic conflict, so go to step 4. Push the rebased head
@@ -111,7 +113,8 @@ The landing, as Cody confirmed it (2026-10-01):
 5. **Fast-forward, install, then check `main` after the push**, outside the
    lock, in this order:
    - Fast-forward the main checkout: `git -C ~/dev/custom merge --ff-only
-     origin/main` (after `git fetch origin`). A refusal is reported, never
+     origin/main` (after `~/dev/custom/ai/bin/forge-git -C ~/dev/custom
+     fetch origin`). A refusal is reported, never
      forced (`~/dev/custom/CLAUDE.md` → *Agents work in worktrees, not the
      main checkout* → *Publishing by fast-forward*). Until it is cleared,
      the installers cannot run (exit 3), so hold the health check too.

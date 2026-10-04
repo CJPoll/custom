@@ -14,10 +14,11 @@
 #
 #   git@github.com:*  https://github.com/*   -> ai/bin/gh-athena git ...
 #   git@gitlab.com:*  https://gitlab.com/*   -> ai/bin/glab-athena git ...
-#   any other github.com / gitlab.com form   -> REFUSED, exit 3 (ssh://, a host
-#        alias, a port: the wrappers cannot rewrite it to HTTPS, and plain git
-#        would reach the forge as the owner)
-#   anything else (a local path, a fixture)  -> plain git, which needs no identity
+#   a local path, file://, "."               -> plain git, which needs no identity
+#   anything else                            -> REFUSED, exit 3 (ssh://, an
+#        ~/.ssh/config host alias, a port, another host: the wrappers cannot
+#        rewrite it to HTTPS, and plain git would reach it with the owner's
+#        credentials). The host is matched case-insensitively.
 #
 # The repository is the one git itself reaches: the first argument after the
 # subcommand that is not an option, else the current branch's upstream remote
@@ -57,6 +58,7 @@ Usage:
   forge-git --help
 
   -C <dir>   the repository to run git in (required; never guessed from the cwd).
+             It goes before the subcommand, as with git itself.
 
 Everything from the subcommand on is passed to git unchanged, after -C <dir>.
 The route follows the repository git reaches: the first non-option argument
@@ -66,8 +68,8 @@ A remote name routes by its URL; any other word is the URL.
 Route (by the URL's form):
   git@github.com:*, https://github.com/*   ai/bin/gh-athena git -C <dir> ...
   git@gitlab.com:*, https://gitlab.com/*   ai/bin/glab-athena git -C <dir> ...
-  other github.com / gitlab.com forms      refused, exit 3
-  anything else (a local path)             plain git -C <dir> ...
+  a local path, file://, "."               plain git -C <dir> ...
+  anything else (ssh://, a host alias)     refused, exit 3
 
 Refused (exit 64): push or any other subcommand; --all / --multiple; an option
 whose value is a separate word (pass --opt=value).
@@ -104,15 +106,23 @@ git -C "${DIR}" rev-parse --git-dir >/dev/null 2>&1 \
   || die 64 "'${DIR}' is not a git repository" "pass -C a directory inside the repository whose remote you read."
 
 # The repository word: the first non-option argument after the subcommand.
+# git also accepts a unique prefix of a long option (`--dep 1`), so a prefix of
+# a value-taking option is refused like the option itself.
+VALUE_OPTS="--depth --deepen --shallow-since --shallow-exclude --jobs --upload-pack --server-option --negotiation-tip --refmap --recurse-submodules-default --sort --strategy --strategy-option --exec --filter --submodule-prefix --cleanup"
 REPO_WORD=""
 for a in "${@:2}"; do
   case "${a}" in
     --) die 64 "'--' in a ${SUB} argument list" "drop the '--'; name the remote as the first non-option argument." ;;
     --all|--multiple)
       die 64 "${SUB} ${a} reaches several remotes, which cannot share one route" "fetch each remote by name, one forge-git call each." ;;
-    --depth|--deepen|--shallow-since|--shallow-exclude|-j|--jobs|--upload-pack|-o|--server-option|--negotiation-tip|--refmap|--recurse-submodules-default|--sort|-s|--strategy|-X|--strategy-option|--exec|--filter|--submodule-prefix|--cleanup)
-      die 64 "${SUB} option '${a}' takes its value as the next word, which would hide the repository" "pass it as ${a}=<value>." ;;
-    -*) ;;
+    -j|-o|-s|-X)
+      die 64 "${SUB} option '${a}' takes its value as the next word, which would hide the repository" "pass it attached (${a}<value>) or in its long form with '='." ;;
+    --*=*|-*)
+      if [[ "${a}" == --* && "${a}" != *=* && ${#a} -ge 4 ]]; then
+        for o in ${VALUE_OPTS}; do
+          [[ "${o}" == "${a}"* ]] && die 64 "${SUB} option '${a}' takes its value as the next word, which would hide the repository" "pass it as ${o}=<value>."
+        done
+      fi ;;
     *) REPO_WORD="${a}"; break ;;
   esac
 done
@@ -123,7 +133,7 @@ if [ -z "${REPO_WORD}" ]; then
   REPO_WORD="${REPO_WORD:-origin}"
 fi
 
-if git -C "${DIR}" config --get "remote.${REPO_WORD}.url" >/dev/null 2>&1; then
+if [ "${REPO_WORD}" != . ] && git -C "${DIR}" config --get "remote.${REPO_WORD}.url" >/dev/null 2>&1; then
   URL="$(git -C "${DIR}" remote get-url "${REPO_WORD}" 2>/dev/null)" \
     || die 64 "remote '${REPO_WORD}' in '${DIR}' has no readable URL" "check 'git -C ${DIR} remote -v'."
   KEY="remote '${REPO_WORD}' (${URL})"
@@ -131,22 +141,39 @@ else
   URL="${REPO_WORD}"
   KEY="'${URL}'"
   case "${URL}" in
-    */*|*:*) ;;
+    .|*/*|*:*) ;;
     *) die 64 "'${URL}' is neither a remote of '${DIR}' nor a URL or path, so no route can be chosen" "check 'git -C ${DIR} remote -v'; name a configured remote, or pass the URL." ;;
   esac
 fi
 [ -n "${URL}" ] || die 64 "the route key is empty (${KEY})" "give the remote a URL."
 
+# is_local_path URL: git's own rule. A file:// URL is local; any other
+# scheme:// is remote; a ':' before the first '/' is the scp-like
+# host:path form (remote); anything else is a path.
+is_local_path() {
+  local u="$1" before
+  case "${u}" in
+    file://*) return 0 ;;
+    *://*) return 1 ;;
+    *:*) before="${u%%:*}"; [[ "${before}" == */* ]] ;;
+    *) return 0 ;;
+  esac
+}
+
 HERE="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 export GIT_TERMINAL_PROMPT=0
-case "${URL}" in
+LC_URL="${URL,,}"
+case "${LC_URL}" in
   git@github.com:*|https://github.com/*)
     exec "${FORGE_GIT_GH_ATHENA:-${HERE}/gh-athena}" git -C "${DIR}" "$@" ;;
   git@gitlab.com:*|https://gitlab.com/*)
     exec "${FORGE_GIT_GLAB_ATHENA:-${HERE}/glab-athena}" git -C "${DIR}" "$@" ;;
-  *github.com*|*gitlab.com*)
-    die 3 "${KEY} is a forge URL form the Athena route does not take; refusing rather than reach the forge with the owner's SSH key" \
-      "set the remote to the git@<host>:<owner>/<repo>.git or https://<host>/<owner>/<repo>.git form (git -C '${DIR}' remote set-url <name> <url>)." ;;
   *)
-    exec git -C "${DIR}" "$@" ;;
+    if is_local_path "${URL}"; then
+      # A local repository: no forge, no identity. (git resolves a relative
+      # path against DIR, as it would for the command itself.)
+      exec git -C "${DIR}" "$@"
+    fi
+    die 3 "${KEY} is not a github.com or gitlab.com URL in a form the Athena route takes, nor a local path; refusing rather than reach a remote with the owner's credentials" \
+      "set the remote to the git@<host>:<owner>/<repo>.git or https://<host>/<owner>/<repo>.git form on github.com or gitlab.com (git -C '${DIR}' remote set-url <name> <url>). An ssh:// URL, an ~/.ssh/config host alias, or another host has no Athena route." ;;
 esac
