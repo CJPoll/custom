@@ -1,0 +1,46 @@
+# GitLab CI for custom (DND-1946). One job: the harness gate, server side,
+# on every branch and MR before merge. It adds a run; it never replaces the
+# local gate, the integration receipt or the push refusals.
+#
+# Rules this file holds (ai/test/gitlab-ci/self-test.sh asserts them):
+#   - A fork MR never runs: the runner is the owner's own machine, and a fork
+#     MR is arbitrary code from outside the project.
+#   - No credentials: no CI/CD variables, no secrets, no id_tokens.
+#   - Every job carries the role tag `ci` (never a per-host tag); the runner
+#     does not take untagged jobs.
+
+workflow:
+  rules:
+    # Fork guard: an MR whose source project is not this project never runs.
+    - if: '$CI_MERGE_REQUEST_SOURCE_PROJECT_PATH && $CI_MERGE_REQUEST_SOURCE_PROJECT_PATH != $CI_PROJECT_PATH'
+      when: never
+    # MR pipelines.
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    # A branch with an open MR runs the MR pipeline only (no duplicates).
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    # Branch pipelines for branches with no open MR, main included.
+    - if: '$CI_COMMIT_BRANCH'
+
+default:
+  interruptible: true
+
+harness-gate:
+  stage: test
+  tags: [ci]
+  interruptible: true
+  # Pinned by exact tag and digest: a public Docker Hub image the runner can
+  # pull, Ruby 3.4 (the harness floor, DND-931) with no build step.
+  image: ruby:3.4.10-slim-bookworm@sha256:a53b923c4d7ae2a927f766b3e71a9512d034ebec65931c0c34254de8768e7671
+  variables:
+    # Full history, so a check that reads the landed bar from origin/main can.
+    GIT_DEPTH: "0"
+  script:
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends git jq python3 procps ca-certificates
+    # Harness Ruby executables carry the absolute #!/usr/bin/ruby shebang.
+    - ln -sf "$(command -v ruby)" /usr/bin/ruby
+    - git config --global user.name "ci" && git config --global user.email "ci@localhost" && git config --global init.defaultBranch main
+    # The runner's clone may not create origin/main; the landed bars need it.
+    - git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+    - git rev-parse --verify --quiet refs/remotes/origin/main
+    - ai/bin/harness-gate
