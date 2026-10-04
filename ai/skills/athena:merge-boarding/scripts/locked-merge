@@ -197,7 +197,7 @@ if [ -n "${PR}" ] && [ -n "${MR}" ]; then
 fi
 if [ -n "${MR}" ]; then
   FORGE=gitlab; CH="${MR}"; CH_NAME="MR !${MR}"; CH_FLAG=--mr
-  case "${MR}" in ''|*[!0-9]*) die 2 "--mr must be an MR iid (got '${MR}')" "pass --mr <iid> (the number after ! in the MR's URL)." ;; esac
+  case "${MR}" in ''|0*|*[!0-9]*) die 2 "--mr must be an MR iid, digits with no leading zero (got '${MR}')" "pass --mr <iid> (the number after ! in the MR's URL)." ;; esac
   [ -z "${IDLE_WF}" ] || die 2 "--require-idle-workflow names a GitHub Actions workflow and has no GitLab form" \
     "drop it with --mr; a GitLab idle-pipeline check is not built yet (see athena:merge-boarding -> GitLab path (no merge train))."
 else
@@ -382,8 +382,11 @@ if [ "${FORGE}" = github ]; then
     || die 2 "gh pr view ${PR} returned no state/head/base" "check gh auth; an empty answer is not a PR."
   OPEN_STATE=OPEN
 else
-  pr_json="$(cd "${REPO}" && gl_api "projects/${GL_ENC}/merge_requests/${MR}" 2>/dev/null)" \
-    || die 2 "COULD NOT LOOK: glab api projects/${GL_ENC}/merge_requests/${MR} failed" "check glab auth for gitlab.com and that !${MR} exists in ${GL_PROJECT}; nothing was merged."
+  gl_err="$(mktemp)" || die 2 "COULD NOT LOOK: mktemp failed" "check that \$TMPDIR is writable; nothing was merged."
+  pr_json="$(cd "${REPO}" && gl_api "projects/${GL_ENC}/merge_requests/${MR}" 2>"${gl_err}")"; mr_rc=$?
+  mr_why="$(head -3 "${gl_err}" | tr '\n' ' ')"; rm -f "${gl_err}"
+  [ "${mr_rc}" -eq 0 ] || die 2 "COULD NOT LOOK: glab api projects/${GL_ENC}/merge_requests/${MR} failed (exit ${mr_rc}): ${mr_why}" \
+    "check glab auth for gitlab.com and that !${MR} exists in ${GL_PROJECT}; nothing was merged."
   jq -e --argjson i "${MR}" 'type == "object" and .iid == $i' <<<"${pr_json}" >/dev/null 2>&1 \
     || die 2 "COULD NOT LOOK: the read of !${MR} did not return MR !${MR}: $(head -c 200 <<<"${pr_json}" | tr '\n' ' ')" "check glab auth; an answer for another MR is not this MR. Nothing was merged."
   state="$(jq -r '.state // empty' <<<"${pr_json}")"
@@ -622,7 +625,7 @@ rm -f "${merge_err}"
 [ -z "${merge_red}" ] || die 11 "${GMG_RED_MARK} the merge guard refused ${CH_NAME}: ${base} went red after the check above; its message is above" \
   "land only a red-main fix: a head that contains the red tip the guard names above (not ${B}, which this tool read before the tip moved), removes every duplicate it names, and carries its own INTEGRATION OK receipt; re-run integration-gate on it, then re-run locked-merge. Every other ${CH_NAME%% *} waits until ${base} is green again. Nothing was merged."
 # DND-1907: exit 2 at once, with no confirm retries (they read as exit 4).
-[ -z "${merge_look}" ] || die 2 "${GMG_LOOK_MARK} the merge guard refused ${CH_NAME} because it could not look at ${base}; its message is above" \
+[ -z "${merge_look}" ] || die 2 "${GMG_LOOK_MARK} the merge guard refused ${CH_NAME} because it could not look (at ${base}, or at what its message above names)" \
   "read the guard's own Fix: above, fix what it could not read (${READER} auth, the checkout), then re-run locked-merge. Nothing was merged."
 if [ "${merge_rc}" -ne 0 ]; then
   confirm_landed 3 \

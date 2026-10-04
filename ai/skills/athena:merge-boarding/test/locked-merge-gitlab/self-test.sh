@@ -18,7 +18,9 @@
 # glab-athena stub prints comes from the guard library's own glmg_refuse, with
 # the shared marks from gh-merge-guard.sh, so a format change reaches the
 # stub. The pipeline half of the red-tip judge runs inside the real wrapper
-# (DND-1941); here the stub stands for its refusal.
+# (glmg_tip_gate, DND-1941, not yet on main); here the stub stands for its
+# refusal (contract tests), and the tool refuses outright while the guard the
+# wrapper loads has no such judge (g26, g27).
 #
 # Functional only (DND-1222): the lock wait is shown by an event (a held
 # flock, the tool's flock child), never by a wall-clock sleep.
@@ -60,7 +62,8 @@ echo "$*" >> "${ST}/glab.log"
 [ -e "${ST}/glab_fail" ] && { echo "glab: 401 Unauthorized" >&2; exit 1; }
 ep="${!#}"
 case "${ep}" in
-  projects/*/merge_requests/*) cat "${ST}/mr.json" ;;
+  projects/*/merge_requests/*) [ -e "${ST}/mr_fail" ] && { echo "glab: 404 Not Found" >&2; exit 1; }
+                               cat "${ST}/mr.json" ;;
   projects/*) cat "${ST}/project.json" ;;
   *) echo "glab stub: unexpected endpoint ${ep}" >&2; exit 99 ;;
 esac
@@ -327,10 +330,18 @@ lm; expect g20 2; no_merge g20; names g20 "comes from another project"
 fixture g21; set_mr '.iid=8'
 lm; expect g21 2; no_merge g21; names g21 "did not return MR !7"
 
+# g21b the MR read itself fails (the project read passed): COULD NOT LOOK,
+# with glab's reason; g21c an MR with no target_branch is not an MR.
+fixture g21b; : > "${ST}/mr_fail"
+lm; expect g21b 2; no_merge g21b; names g21b "404 Not Found"
+fixture g21c; set_mr 'del(.target_branch)'
+lm; expect g21c 2; no_merge g21c; names g21c "no state/sha/target_branch"
+
 # g22 argument and origin refusals.
 fixture g22
 run --mr 7 --pr 7 --head "${H}" --repo "${WT}"; expect g22-both 2
 run --mr x7 --head "${H}" --repo "${WT}"; expect g22-bad-mr 2
+run --mr 007 --head "${H}" --repo "${WT}"; expect g22-leading-zero 2
 run --mr 7 --head "${H}" --repo "${WT}" --require-idle-workflow post-merge.yml; expect g22-idle 2
 names g22-idle "GitHub Actions workflow"
 git -C "${WT}" config remote.origin.url "https://github.com/t/t.git"
@@ -387,6 +398,18 @@ else
   echo "  note g27: this checkout's guard has no glmg_tip_gate (DND-1941 absent)"; lm; expect g27-real-guard 2; names g27-real-guard "NO TIP JUDGE"
 fi
 rm -f "${TMP}/lib/glab-merge-guard.sh"; mv "${TMP}/guard.keep" "${TMP}/lib/glab-merge-guard.sh"
+
+# g28 the real guard's flag table reads the exact merge argv g1 recorded the
+# way the tool means it: one --sha that is the head, the project as -R, no
+# flag it does not know (so the guard judges this call, never refuses it as
+# unparseable, and the pin it checks is the gated head).
+fixture g28; lm; expect g28 0
+argv="$(head -1 "${ST}/merge.log")"
+read -ra g28a <<<"${argv}"
+g28o="$( . "${LIB}/gh-merge-guard.sh" >/dev/null 2>&1; . "${LIB}/glab-merge-guard.sh" >/dev/null 2>&1
+  glmg_parse_cli "${g28a[@]}"; printf '%s|%s|%s|%s|%s %s %s' "${GLMG_UNKNOWN}" "${GLMG_SHA_N}" "${GLMG_SHA}" "${GLMG_REPO}" "${GLMG_POS[0]:-}" "${GLMG_POS[1]:-}" "${GLMG_POS[2]:-}")"
+[ "${g28o}" = "|1|${H}|t/proj|mr merge 7" ] && ok "g28 the guard parses the merge argv: pinned head, -R t/proj, mr merge 7" \
+  || bad "g28 the guard reads the merge argv differently" "${g28o} (argv: ${argv})"
 
 # g25 --help documents the GitLab path and exit 12.
 hout="$("${TOOL}" --help 2>/dev/null)"; rc=$?
