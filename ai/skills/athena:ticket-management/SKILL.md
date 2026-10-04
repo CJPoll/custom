@@ -17,7 +17,7 @@ Always refer to a ticket as `<PREFIX>-<number>`, never by raw page id.
 
 | Status | Assignee | Meaning |
 |---|---|---|
-| `Backlog` | leave as-is until scoped | not yet in an athena-admiral's scope; on scope-in, normalize to `Todo` |
+| `Backlog` | leave as-is until scoped | not yet in an athena-admiral's scope; on scope-in, normalize to `Todo`. Not on DND (*When the tracker lacks a status this skill names*) |
 | `Todo` | **Athena** once in scope | in an athena-admiral's scope, queued; no engineer on it yet |
 | `In Progress` | **Athena** | an athena-captain has been dispatched and is actively working it |
 | `Needs Attention` | **Cody** | blocked on what needs Cody (`~/.claude/CLAUDE.md` → *Owner approval policy* → *Asking, and what counts as approval*), chiefly a step only Cody can run — put the exact step in the ticket body |
@@ -495,7 +495,7 @@ Changing one needs a new question-set version there.
 - **File it with `ticket-file`, never a hand-built page** (DND-1669). Write
   the properties you decided to a JSON file of Notion property values
   (`Kind`, `Severity`, `Security`, `Path`, `Area`, `Control`, plus `Found while`,
-  `Epic`, `Status` as they apply), then run
+  `Epic`, `Status` as they apply; DND has no `Backlog`, so `Todo`), then run
   `~/dev/custom/ai/skills/athena:ticket-management/scripts/ticket-file --title "<TITLE>" --body-file <FILE> --properties-file <PROPS> --lines-file <LINES> [--triage-file <TRIAGE>]`.
   It creates the page, writes the body, the advisory and the Jev lines,
   reads the page back and compares. Wire `Depends On`↔`Blocks` once it
@@ -597,8 +597,11 @@ the edit wins.
 ## When the tracker lacks a status this skill names
 
 **The option set is per-tracker, and the statuses above are not guaranteed to
-exist in the one you are on.** The personal DND tracker has no `In Review` and no
-`Ready for Release`; the walt_ui work tracker has both. So the status you are
+exist in the one you are on.** The personal DND tracker has no `In Review`, no
+`Ready for Release` and no `Backlog`; the walt_ui work tracker has the first two.
+So a fleet's DND finding is filed at `Todo`. Measured 2026-10-04: a captain's
+`ticket-file` with `Status` = `Backlog` got a Notion 400 and `NOT FILED`
+(DND-1999 report). So the status you are
 about to set is a *lookup*, and it can miss.
 
 **Resolve the options before you set a status** — read the `Status` property's
