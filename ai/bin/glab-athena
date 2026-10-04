@@ -150,6 +150,9 @@ if [ "${1:-}" = git ]; then
 	# shellcheck source=../lib/forge-git-passthrough.sh
 	. "$LIB"
 	FG_TOOL=glab-athena FG_HOST=gitlab.com FG_BOT=athena-amby
+	# Pinned, never inherited: the caller's environment cannot turn off the
+	# refusal of another forge's host (DND-2000).
+	FG_ROUTE_ONLY=1
 	FG_DRY_RUN="${GLAB_ATHENA_GIT_DRY_RUN:-}"
 	fg_refuse_non_https "$@"
 	TOKEN=""

@@ -599,7 +599,7 @@ is_red_refusal && ok "33c. main RED: a push through a git alias (alias.p=push) i
 # git reads HEAD:main as an scp-style address on host "head". Since DND-2000
 # that host is refused before the red-main check is reached.
 gha "${W}" push --repo origin HEAD:main
-{ is_red_refusal || { is_refusal && [[ "${ERR}" == *"on host head, which is not github.com"* ]]; }; } \
+is_refusal && [[ "${ERR}" == *"on host head, which is not github.com"* ]] \
   && ok "33d. main RED: push --repo origin HEAD:main is refused (HEAD:main is the repository, on host head: DND-2000)" \
   || bad "33d. --repo push refused" "rc=${RC} err='${ERR}'"
 gha "${W}" push origin 'refs/heads/*:refs/heads/*'
@@ -1802,7 +1802,7 @@ is_refusal && [ ! -s "${XF_LOG}" ] && [[ "${ERR}" == *"other.invalid"* ]] && [[ 
   && ok "XF12. \`push ssh://git@other.invalid/…\`: refused, no Athena route serves that host" \
   || bad "XF12. other host refused" "$(xf_diag)"
 xf "${R}" push git@github.com.:o/r.git HEAD:refs/heads/x
-is_refusal && [ ! -s "${XF_LOG}" ] && [[ "${ERR}" == *"github.com."* ]] \
+is_refusal && [ ! -s "${XF_LOG}" ] && [[ "${ERR}" == *"on host github.com., which"* ]] && [[ "${ERR}" == *"does not trust"* ]] \
   && ok "XF13. \`push git@github.com.:…\` (trailing dot): refused; nothing reached ssh" \
   || bad "XF13. trailing-dot github.com refused" "$(xf_diag)"
 # COULD NOT LOOK: a git that cannot resolve the URL (here, a shim failing every
@@ -1840,6 +1840,47 @@ gha "${R}" remote -v
 gha2_rc="${RC}"; gha "${R}" status --short
 [ "${gha2_rc}" = 0 ] && [ "${RC}" = 0 ] && ok "XF18. \`remote -v\` and \`status\` with a gitlab.com origin reach no remote and pass" \
   || bad "XF18. local commands pass" "rc=${RC} err='${ERR}'"
+
+# Review round. The caller's environment cannot switch the refusal off.
+OUT="$(cd "${R}" && FG_ROUTE_ONLY=0 GH_ATHENA_GIT_DRY_RUN=1 "${WRAPPER}" git push git@gitlab.com:g/r.git HEAD 2>"${TMP}/err")"; RC=$?
+ERR="$(cat "${TMP}/err")"
+is_refusal && [[ "${ERR}" == *"glab-athena git"* ]] \
+  && ok "XF19. FG_ROUTE_ONLY=0 in the caller's environment: still refused (the wrapper pins it)" \
+  || bad "XF19. FG_ROUTE_ONLY env bypass" "rc=${RC} out='${OUT}' err='${ERR}'"
+# remote show / prune / set-head judge only the remote they name.
+R5="$(new_repo xf-show 'https://github.com/o/r.git')"
+git -C "${R5}" remote add lab 'git@gitlab.com:g/r.git'
+gha "${R5}" remote show origin; S1="${RC}"
+gha "${R5}" remote show; S2="${RC}"
+gha "${R5}" remote show lab
+[ "${S1}" = 0 ] && [ "${S2}" = 0 ] && is_refusal \
+  && ok "XF20. \`remote show origin\` beside a gitlab.com remote passes; bare \`remote show\` passes; \`remote show lab\` is refused" \
+  || bad "XF20. remote show judges only the named remote" "s1=${S1} s2=${S2} rc=${RC} err='${ERR}'"
+# A remote only -c defines: \`git remote get-url\` says "No such remote", git
+# still reaches it. It resolves from its url / pushurl keys.
+gha "${R5}" -c remote.gh.url=https://github.com/o/r.git fetch gh; S1="${RC}"; O1="${OUT}"
+gha "${R5}" -c remote.lab2.url=git@gitlab.com:g/r.git push lab2 HEAD
+L1=0; is_refusal && [[ "${ERR}" == *"glab-athena git"* ]] && L1=1
+gha "${R5}" -c remote.gh.url=https://github.com/o/r.git -c remote.gh.pushurl=git@gitlab.com:g/r.git push gh HEAD
+[ "${S1}" = 0 ] && [[ "${O1}" == *"cred: granted"* ]] && [ "${L1}" = 1 ] && is_refusal \
+  && ok "XF21. a -c-only remote: github.com fetch gets the grant; a gitlab.com url, or a gitlab.com pushurl on push, is refused" \
+  || bad "XF21. -c-only remote resolved" "s1=${S1} o1='${O1}' l1=${L1} rc=${RC} err='${ERR}'"
+# Spellings of the other host.
+XFS=0; XFM=""
+for u in 'https://github.com@gitlab.com/g/r.git' 'git@GitLab.com:g/r.git' 'athena-forge::https://gitlab.com/g/r.git' 'ssh://git@gitlab.com:22/g/r.git'; do
+  gha "${R5}" push "${u}" HEAD
+  if is_refusal && [[ "${OUT}" != *"dry-run: exec git"* ]]; then XFS=$((XFS + 1)); else XFM="${XFM} ${u}(rc=${RC})"; fi
+done
+[ "${XFS}" = 4 ] && ok "XF22. userinfo, mixed-case, athena-forge:: and ssh://…:22 spellings of gitlab.com: each refused" \
+  || bad "XF22. other-host spellings refused" "missed:${XFM}"
+# archive --remote, separate and abbreviated; a submodule on gitlab.com.
+gha "${R5}" archive --remote git@gitlab.com:g/r.git HEAD; A1=0; is_refusal && A1=1
+gha "${R5}" archive --rem=git@gitlab.com:g/r.git HEAD; A2=0; is_refusal && A2=1
+printf '[submodule "lib"]\n\tpath = lib\n\turl = git@gitlab.com:g/lib.git\n' > "${R5}/.gitmodules"
+gha "${R5}" submodule update --init
+[ "${A1}" = 1 ] && [ "${A2}" = 1 ] && is_refusal \
+  && ok "XF23. \`archive --remote <url>\`, \`archive --rem=<url>\` and \`submodule update\` with a gitlab.com submodule: refused" \
+  || bad "XF23. archive / submodule refused" "a1=${A1} a2=${A2} rc=${RC} err='${ERR}'"
 
 # DND-1667: no git call may have fallen through past its shim.
 if fsg_verify; then ok "no git call fell through past its shim (DND-1667)"

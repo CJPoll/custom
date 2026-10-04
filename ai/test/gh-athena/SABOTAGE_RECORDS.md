@@ -218,8 +218,8 @@ Before the fix, `gh-athena git` judged only URLs on github.com, so a
 gitlab.com remote went out over SSH with the machine owner's key. Cases
 XF1-XF18 were added first. They run git for real with `GIT_SSH_COMMAND`
 set to a recording stub. On the unfixed code (6aac9104), with the agent PATH
-git wrapper off the PATH: `RESULT: 243 passed, 16 failed`, every XF1-XF15
-red, among them:
+git wrapper off the PATH: `RESULT: 243 passed, 16 failed`, every one of
+XF1-XF15 and XF2b red, among them:
 
 ```
   FAIL  XF1. literal gitlab.com push refused
@@ -248,3 +248,10 @@ each mutation adds.
 | M2 a URL word `ls-remote --get-url` cannot resolve reads as the literal word | XF15 |
 | M3 `fg_host_is_route` strips a trailing dot | XF13 |
 | M4 `remote show`/`prune`/`set-head` and `archive --remote` not read | XF7, XF8 |
+
+The review floor found three more paths. XF19-XF23 were added first.
+- An exported `FG_ROUTE_ONLY=0` turned the refusal off, because the wrappers did not set it.
+- `remote show origin` judged every remote, not only origin.
+- A remote that only `-c` config defines (`git remote get-url` exits 2, "No such remote") read as COULD NOT LOOK, though git reaches it.
+
+On bbcd7f15 (a copy, so its 16 baseline reds are there too): `RESULT: 244 passed, 20 failed`. The added reds are XF19, XF20, XF21, and XF13, whose Fix: wording changed. After (the wrappers pin `FG_ROUTE_ONLY=1`; only `remote update` judges every remote; a remote `get-url` cannot see resolves from its `url` / `pushurl` keys): `RESULT: 264 passed, 0 failed`.

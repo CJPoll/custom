@@ -386,7 +386,7 @@ xf "${R2}" push origin HEAD:refs/heads/x
 xf_refused_hub && ok "XF7. a gitlab.com origin with a github.com pushurl: refused" \
   || bad "XF7. github.com pushurl refused" "$(xf_diag)"
 xf "${R2}" push git@gitlab.com.:g/r.git HEAD:refs/heads/x
-is_refusal && [ ! -s "${XF_LOG}" ] && [[ "${ERR}" == *"gitlab.com."* ]] \
+is_refusal && [ ! -s "${XF_LOG}" ] && [[ "${ERR}" == *"on host gitlab.com., which"* ]] && [[ "${ERR}" == *"does not trust"* ]] \
   && ok "XF8. \`push git@gitlab.com.:…\` (trailing dot): refused; nothing reached ssh" \
   || bad "XF8. trailing-dot gitlab.com refused" "$(xf_diag)"
 printf '#!/bin/sh\nfor a in "$@"; do case "$a" in get-url|--get-url) echo "fatal: synthetic" >&2; exit 128 ;; esac; done\nexec %s "$@"\n' \
@@ -402,6 +402,11 @@ R3="$(new_repo xf-own 'git@gitlab.com:g/r.git')"
 gla "${R3}" push origin HEAD
 [ "${RC}" = 0 ] && [[ "${OUT}" == *"cred: granted"* ]] && ok "XF10. a gitlab.com origin still pushes with the grant" \
   || bad "XF10. gitlab.com origin passes" "rc=${RC} out='${OUT}' err='${ERR}'"
+OUT="$(cd "${R3}" && FG_ROUTE_ONLY=0 GLAB_ATHENA_GIT_DRY_RUN=1 "${WRAPPER}" git push git@github.com:o/r.git HEAD 2>"${TMP}/err")"; RC=$?
+ERR="$(cat "${TMP}/err")"
+is_refusal && [[ "${ERR}" == *"gh-athena git"* ]] \
+  && ok "XF11. FG_ROUTE_ONLY=0 in the caller's environment: still refused (the wrapper pins it)" \
+  || bad "XF11. FG_ROUTE_ONLY env bypass" "rc=${RC} out='${OUT}' err='${ERR}'"
 
 # DND-1647: no gh/glab call may have fallen through past its stub.
 if fsg_verify; then ok "no gh/glab call fell through past its stub (DND-1647)"
