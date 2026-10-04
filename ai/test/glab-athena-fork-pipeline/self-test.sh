@@ -76,6 +76,9 @@ answer() {
   exit "$rc"
 }
 all="$*"
+# DND-1938: the outbound scan reads the project's visibility before a write. Answered
+# quietly (not logged as a guard read), as a private project: nothing to scan.
+if [[ "$all" =~ ^api\ (--hostname\ [^\ ]+\ )?projects/[^\ /]+$ ]]; then echo '{"visibility":"private"}'; exit 0; fi
 H='(--hostname [^ ]+ )?'
 if [[ "$all" =~ ^api\ ${H}projects/[^\ /]+/merge_requests/([0-9]+)$ ]]; then answer "mr-${BASH_REMATCH[2]}"; fi
 if [[ "$all" =~ ^api\ ${H}projects/[^\ /]+/jobs/([0-9]+)$ ]]; then answer "job-${BASH_REMATCH[2]}"; fi
@@ -222,7 +225,9 @@ reset_fx; printf '{"id":701,"ref":"refs/merge-requests/11/head"}\n' > "${FX}/sc-
 refused "playing a schedule on a fork MR ref is refused" "${FORKMSG}"
 reset_fx; run_ga api -X POST "projects/${PARENT}/pipeline_schedules" -f ref=refs/merge-requests/11/head -f cron='0 * * * *' -f description=x
 refused "a schedule on a fork MR ref is refused" "${FORKMSG}"
-reset_fx; run_ga api -X POST "projects/${PARENT}/merge_trains/merge_requests/11" -f sha=0123456789012345678901234567890123456789
+# glab-athena's merge guard (DND-1941) judges train boarding and API ref writes
+# first, so these are judged on the agent wrapper alone, where this guard is the check.
+reset_fx; run_ab api -X POST "projects/${PARENT}/merge_trains/merge_requests/11" -f sha=0123456789012345678901234567890123456789
 refused "boarding a fork MR on the merge train is refused" "${FORKMSG}"
 reset_fx; run_ga api graphql -f query='mutation { jobRetry(input: {id: "gid://gitlab/Ci::Build/1"}) { errors } }'
 refused "a GraphQL pipeline or job mutation is refused" "GraphQL"
@@ -288,13 +293,13 @@ refused "ci run --mr -b OWNER:BRANCH lists MRs by the branch part" "${FORKMSG}"
 grep -q 'source_branch=feat&' "${STUB_READS}" && ok "OWNER:BRANCH reads source_branch=BRANCH" || bad "OWNER:BRANCH reads source_branch=BRANCH" "$(cat "${STUB_READS}")"
 reset_fx; run_ga api -X POST "projects/${PARENT}/pipeline?x=1;ref=refs/merge-requests/11/head"
 refused "a ';' in the query string refuses" "${LOOK}"
-reset_fx; run_ga api -X POST "projects/${PARENT}/repository/branches" -f branch=x -f ref=refs/merge-requests/11/head
+reset_fx; run_ab api -X POST "projects/${PARENT}/repository/branches" -f branch=x -f ref=refs/merge-requests/11/head
 refused "a branch made from a fork MR ref is refused" "${FORKMSG}"
-reset_fx; run_ga api -X POST "projects/${PARENT}/repository/tags" -f tag_name=v1 -f ref=refs/merge-requests/11/head
+reset_fx; run_ab api -X POST "projects/${PARENT}/repository/tags" -f tag_name=v1 -f ref=refs/merge-requests/11/head
 refused "a tag made from a fork MR ref is refused" "${FORKMSG}"
 reset_fx; run_ga api -X POST "projects/${PARENT}/releases" -f tag_name=v1 -f ref=refs/merge-requests/11/head
 refused "a release (and its new tag) from a fork MR ref is refused" "${FORKMSG}"
-reset_fx; run_ga api -X POST "projects/${PARENT}/repository/branches" -f branch=x -f ref=main
+reset_fx; run_ab api -X POST "projects/${PARENT}/repository/branches" -f branch=x -f ref=main
 allowed "a branch made from a branch runs"
 reset_fx; run_ga release create v1 --ref refs/merge-requests/11/head --notes x
 refused "release create --ref on a fork MR ref is refused" "${FORKMSG}"
@@ -310,9 +315,9 @@ allowed "schedule update with its own variable flags runs"
 
 echo "== critic round: a ref that is not a branch, a tag or an MR ref"
 SHA=0123456789abcdef0123456789abcdef01234567
-reset_fx; run_ga api -X POST "projects/${PARENT}/repository/branches" -f branch=x -f "ref=${SHA}"
+reset_fx; run_ab api -X POST "projects/${PARENT}/repository/branches" -f branch=x -f "ref=${SHA}"
 refused "a branch made from a commit sha (a fork MR head GitLab keeps here) refuses" "${LOOK}"
-reset_fx; run_ga api -X POST "projects/${PARENT}/repository/tags" -f tag_name=v1 -f "ref=refs/keep-around/${SHA}"
+reset_fx; run_ab api -X POST "projects/${PARENT}/repository/tags" -f tag_name=v1 -f "ref=refs/keep-around/${SHA}"
 refused "a tag made from a keep-around ref refuses" "${LOOK}"
 reset_fx; run_ga release create v1 --ref "${SHA}"
 refused "release create --ref <sha> refuses" "${LOOK}"
@@ -320,10 +325,14 @@ reset_fx; run_ga ci run -b "${SHA}"
 refused "ci run -b <sha> refuses" "${LOOK}"
 reset_fx; run_ga api -X POST "projects/${PARENT}/pipeline" -f ref=nope
 refused "a ref that is no branch or tag refuses" "not, as read, a branch or a tag"
-reset_fx; run_ga api -X POST "projects/${PARENT}/repository/branches" -f branch=x -f ref=v0
+reset_fx; run_ab api -X POST "projects/${PARENT}/repository/branches" -f branch=x -f ref=v0
 allowed "a branch made from a tag runs"
 reset_fx; printf '[{"iid":12,"source_project_id":%s,"target_project_id":%s}]\n' "${PARENT}" "${PARENT}" > "${FX}/mrlist.out"; run_ga ci run --mr -b forker:nope
 allowed "ci run --mr does not need its branch in this project (it only finds the MR)"
+
+echo "== glab-athena: the merge guard judges first (DND-1941)"
+reset_fx; run_ga api -X POST "projects/${PARENT}/repository/branches" -f branch=x -f ref=refs/merge-requests/11/head
+refused "a branch made from a fork MR ref is refused by the merge guard first" "moves a branch"
 
 echo "== agent PATH glab (routed marker built by hand)"
 reset_fx; run_ab api -X POST "projects/${PARENT}/merge_requests/11/pipelines"
