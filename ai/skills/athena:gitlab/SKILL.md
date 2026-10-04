@@ -176,6 +176,15 @@ declares one, it is refused (`NO RECEIPT`, exit 3) unless `integration-gate`
 covers the pushed commit (**athena:github** → *Pushing as Athena*, DND-1690).
 Run the gate; it is not an identity problem to escalate.
 
+The one exception is seeding an empty GitLab project from GitHub (DND-1983).
+From the checkout whose origin is still the GitHub project, run
+`~/dev/custom/ai/bin/glab-athena git seed-mirror --to https://gitlab.com/<ns>/<project>.git`.
+It reads origin's main fresh and pushes exactly that SHA to the project's
+main, fast-forward only. It refuses a red main, any read it cannot make, and
+any checkout whose origin is already on gitlab.com. Branches and tags go
+through `glab-athena git push` as usual. The conditions are in
+`ai/lib/glab-seed-mirror.sh`.
+
 An agent driving `wt` sets `WT_AGENT_PUSH=1` so `wt`'s own pushes take this
 path; see the header of `scripts/wt-lib/push.sh`.
 Graphite does not support GitLab, so an agent stacks with plain branches and
