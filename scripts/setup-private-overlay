@@ -124,7 +124,7 @@ def cmd_init(dry)
   end
   puts "#{PROG}: created #{target} (0700, local git history, no remote). It holds no work values yet."
   puts "#{PROG}: WARNING: the overlay is now PRESENT with ZERO outbound patterns, so every outbound scan " \
-       "reports COULD NOT MEASURE and gh-athena refuses PR/issue writes to public repositories on this machine. " \
+       "reports COULD NOT MEASURE, and gh-athena and glab-athena refuse text writes to public repositories and projects on this machine. " \
        "Fix: add at least one `label<TAB>regex` line to #{File.join(target, 'outbound', 'patterns.tsv')} and " \
        "commit it in the overlay, then run `#{INSTALLER} --install`."
   PO::EXIT[:ok]

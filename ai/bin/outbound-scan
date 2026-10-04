@@ -15,8 +15,8 @@
 #       introduces (a merge: only what differs from every parent), and its
 #       message. Installed as ai/git-hooks/outbound-pre-push.sh.
 #   --tree                                 every tracked file of the current repo.
-#   --text FILE [--label NAME]             one file's lines (gh-athena scans PR and
-#       issue titles and bodies this way before a PUBLIC write).
+#   --text FILE [--label NAME]             one file's lines (gh-athena and glab-athena
+#       scan PR, MR, issue and note text this way before a PUBLIC write).
 #
 # States (each textually distinct; never a bare exit code):
 #   CLEAN (0) · HITS (1) · USAGE (2) · COULD NOT MEASURE (3) ·

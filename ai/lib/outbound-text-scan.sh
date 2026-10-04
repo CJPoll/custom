@@ -120,7 +120,15 @@ ots_scan_text() {
 # once, and a regular file can change between the scan and the CLI's own read.
 # <flag> is the option the caller should pass instead, for a Fix:.
 ots_copy_scan() {
-  local label="$1" noun="$2" flag="$3" key="$4" src="$5" dir f
+  ots_copy "$2" "$3" "$4" "$5"
+  ots_scan "$1" "$OTS_COPY"
+}
+
+# ots_copy <noun> <flag> <key> <path or -> : the copy half of ots_copy_scan,
+# for a caller that must read the text before it decides to scan (a GraphQL
+# query, read once from the copy rather than twice from a pipe).
+ots_copy() {
+  local noun="$1" flag="$2" key="$3" src="$4" dir f
   dir="$(ots_dir)" || exit 3
   f="$dir/$key"
   if [ "$src" = "-" ]; then
@@ -130,5 +138,5 @@ ots_copy_scan() {
     cat -- "$src" > "$f" || ots_refuse 3 "could not copy the $noun file $src for the outbound scan. Fix: pass a readable regular file and retry."
   fi
   OTS_COPY="$f"
-  ots_scan "$label" "$f"
+  return 0
 }

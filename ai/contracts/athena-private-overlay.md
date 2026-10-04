@@ -185,10 +185,10 @@ local commit. It never adds a remote. It ends by reading the root back through
 the resolver, and a root that does not read PRESENT is exit 4.
 
 A fresh overlay is PRESENT with zero patterns, so from that moment every
-outbound scan on the machine is COULD NOT MEASURE and gh-athena refuses public
-writes (*The forge path* below). `--init` prints that consequence and its Fix.
-Commit at least one pattern right after `--init`, before anything else on the
-machine needs gh-athena.
+outbound scan on the machine is COULD NOT MEASURE, and gh-athena and
+glab-athena refuse public writes (*The forge path* below). `--init` prints that
+consequence and its Fix. Commit at least one pattern right after `--init`,
+before anything else on the machine needs either wrapper.
 
 **`--install`** is merge-only and idempotent. It requires a PRESENT overlay
 (ABSENT is exit 3 with a Fix naming `--init`; MALFORMED is exit 4), then:
@@ -234,7 +234,8 @@ DND-699's scanner (`ai/bin/outbound-scan`) refuses a push or a public forge
 write that carries a work-domain value. It reads its bar from the overlay, so
 the bar never lives in the public diff it checks. Rules:
 `ai/lib/outbound_scan.rb`; reads: `ai/lib/outbound_scan_sources.rb`; tests:
-`ai/test/outbound-scan/self-test.sh` and `ai/test/gh-athena-outbound/self-test.sh`.
+`ai/test/outbound-scan/self-test.sh`, `ai/test/gh-athena-outbound/self-test.sh`
+and `ai/test/glab-athena-outbound/self-test.sh`.
 
 **Patterns file.** `<root>/outbound/patterns.tsv`. One pattern per line:
 `<label><TAB><regex>`. Blank lines and lines starting with `#` are skipped. The
@@ -297,7 +298,8 @@ the error's class, never its message, which could quote a pattern.
   content is scanned too, as bytes split on newlines: no file opts out.
   `harness-gate` runs it through `ai/bin/check-outbound-tree` (see *The gate
   check* below).
-- `--text FILE [--label NAME]` — one file's lines (gh-athena's title and body).
+- `--text FILE [--label NAME]` — one file's lines (the text fields gh-athena
+  and glab-athena scan).
 
 **Later (2026-09-28):** the `--tree` bullet said "It is not in `harness-gate`
 yet: the tree still carries work values until DND-704, DND-705 and DND-706
@@ -363,7 +365,19 @@ refuses (exit 3), except where the overlay is ABSENT and the machine is
 known not to be marked (the harness checkout's `hooks/pre-push`, as
 `git rev-parse --git-path` resolves it, holds no outbound hook): there the
 write proceeds with a WARNING that the text went out unscanned, never a CLEAN
-line. A mark that cannot be determined counts as marked.
+line. A mark that cannot be determined counts as marked. These outcome rules,
+and the private copy each field is scanned from, live once, in
+`ai/lib/outbound-text-scan.sh`, for both forge paths.
+
+**The GitLab forge path.** `ai/bin/glab-athena` applies the same outcome rules
+(DND-1938) to MR, issue and incident notes, MR descriptions, merge and squash
+messages, release text and every `glab api` write, before glab runs. Which
+commands, flags and targets it reads, how it reads a project's visibility, and
+its residuals are in the header of `ai/lib/glab-outbound-scan.sh`. It differs
+from gh-athena in two ways, both stricter: an `internal` project is scanned,
+because any signed-in gitlab.com user can read it; and a visibility that cannot
+be read is refused (exit 3, COULD NOT LOOK), never scanned as PUBLIC or read as
+private.
 
 **Residuals, stated.**
 
@@ -371,12 +385,15 @@ line. A mark that cannot be determined counts as marked.
   main checkout's scanner, or move the overlay's `HEAD` to drop a pattern.
 - The waiver is self-granted and is written to a local log that nothing reads
   today. It leaves a record, not an alert.
-- The forge path does not scan `gh pr create --fill`, an editor or `--web`
-  body, `gh api` writes, or other commands (release notes, gists, repository or
-  label descriptions). An unknown flag whose value is a field flag's name
-  (`-l -b -t X`) is read differently by gh and by the guard.
-- gh-athena runs the scanner beside it, so a worktree's gh-athena runs that
-  branch's scanner. Only the pre-push hook pins the landed scanner.
+- gh-athena's forge path does not scan `gh pr create --fill`, an editor or
+  `--web` body, `gh api` writes, or other commands (release notes, gists,
+  repository or label descriptions). An unknown flag whose value is a field
+  flag's name (`-l -b -t X`) is read differently by gh and by the guard.
+  glab-athena's residuals are listed in the header of
+  `ai/lib/glab-outbound-scan.sh`.
+- gh-athena and glab-athena run the scanner beside them, so a worktree's
+  wrapper runs that branch's scanner. Only the pre-push hook pins the landed
+  scanner.
 - No scan catches a value it has no pattern for.
 
 Each bypass raises the cost or leaves a trace; none is impossible.

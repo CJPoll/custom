@@ -183,6 +183,10 @@ for argv in "mr create --title x${TOKEN}" "mr create -t x${TOKEN}" "mr create -t
   "mr comment 5 -m x${TOKEN}" \
   "issue create -t x${TOKEN}" "issue new -d x${TOKEN}" "issue update 3 --description x${TOKEN}" \
   "issue note 3 -m x${TOKEN}" "issue comment 3 --message x${TOKEN}" \
+  "incident note 3 -m x${TOKEN}" "incident comment 3 --message=x${TOKEN}" \
+  "mr create -l -t -d x${TOKEN}" "mr create --label --title --description x${TOKEN}" \
+  "mr update 5 -a -t -d x${TOKEN}" "issue create -l -t -d x${TOKEN}" "release create v1 -a -n -N x${TOKEN}" \
+  "release create v1 --assets-links x${TOKEN}" \
   "release create v1 --notes x${TOKEN}" "release create v1 -N x${TOKEN}" "release create v1 --name x${TOKEN}" \
   "release create v1 -T x${TOKEN}"; do
   # shellcheck disable=SC2086
@@ -240,6 +244,12 @@ gla mr note 5 -R git@gitlab.com:synth-group/pub.git -m "x${TOKEN}"
 if refused_hit && read_was "api projects/synth-group%2Fpub"; then ok "-R as a git URL"; else bad "-R git URL" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 gla mr note 5 -R synth-group/priv -m "x${TOKEN}"
 if [ "${RC}" = 0 ] && sent; then ok "-R to a PRIVATE project is not scanned"; else bad "-R private" "rc=${RC} ${OUT}"; fi
+gla mr create --target-project synth-group/pub -d "x${TOKEN}"
+if refused_hit && read_was "api projects/synth-group%2Fpub"; then ok "mr create --target-project is a target"; else bad "--target-project" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+vis default public
+gla mr create --label -R synth-group/priv -d "x${TOKEN}"
+if refused_hit && read_was "api projects/:id"; then ok "an -R after an unknown flag (maybe its value) also reads the directory's project"; else bad "-R after unknown flag" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+vis default private
 gla mr note https://gitlab.com/synth-group/pub/-/merge_requests/3 -m "x${TOKEN}"
 if refused_hit && read_was "api projects/synth-group%2Fpub"; then ok "an MR URL to a PUBLIC project is scanned from a PRIVATE cwd"; else bad "MR URL" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 gla mr note -R synth-group/priv https://gitlab.com/synth-group/pub/-/merge_requests/3 -m "x${TOKEN}"
@@ -284,6 +294,24 @@ gla api graphql -f "query=mutation { createNote(input: {noteableId: \"gid://gitl
 if refused_hit; then ok "a GraphQL mutation is scanned as PUBLIC"; else bad "graphql mutation" "rc=${RC} ${OUT}"; fi
 gla api graphql -f "query=query { project(fullPath: \"x${TOKEN}\") { id } }"
 if [ "${RC}" = 0 ] && sent; then ok "a GraphQL query (a read) is not scanned"; else bad "graphql query" "rc=${RC} ${OUT}"; fi
+# (A GraphQL query from stdin is refused first by the merge guard, which
+# cannot read it without consuming it; a file is the supported form.)
+printf 'mutation { createNote(input: {body: "x%s"}) { errors } }\n' "${TOKEN}" > "${TMP}/gql-hit.graphql"
+printf 'mutation { createNote(input: {body: "clean"}) { errors } }\n' > "${TMP}/gql-clean.graphql"
+gla api graphql -F "query=@${TMP}/gql-hit.graphql"
+if refused_hit; then ok "a GraphQL mutation read from a file is scanned"; else bad "graphql file" "rc=${RC} ${OUT}"; fi
+gla api graphql -F "query=@${TMP}/gql-clean.graphql"
+if [ "${RC}" = 0 ] && sent && [[ "${OUT}" == *"stub-body:mutation"* ]] && [[ "${CALLS}" != *"${TMP}/gql-clean.graphql"* ]]; then ok "a clean GraphQL mutation reaches glab as the scanned copy"; else bad "graphql file clean" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+for ep in projects/7/wikis/graphql projects/7/repository/files/graphql projects/7/wikis/graphql.md; do
+  gla api -X PUT "${ep}" -f "content=x${TOKEN}"
+  if refused_hit; then ok "a REST path ending in graphql is a REST write: ${ep}"; else bad "REST graphql-suffix ${ep}" "rc=${RC} ${OUT}"; fi
+done
+gla api -X POST "snippets?content=x${TOKEN}"
+if refused_hit && [[ "${OUT}" == *"'snippets' names no project"* ]]; then ok "a query string is scanned and never echoed"; else bad "query echo" "rc=${RC} ${OUT}"; fi
+vis "synth-group%2Fpriv" private
+vis 4242 public
+gla api -X POST projects/synth-group%2Fpriv/merge_requests -f target_project_id=4242 -f "description=x${TOKEN}"
+if refused_hit && read_was "api projects/4242"; then ok "api target_project_id is a target"; else bad "target_project_id" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 gla api projects/:id/merge_requests/5/notes
 if [ "${RC}" = 0 ] && sent && [[ "${CALLS}" != *"api projects/:id"$'\n'* ]] && [ "$(grep -c . <<<"${CALLS}")" = 1 ]; then ok "an api GET is untouched (no visibility read)"; else bad "api GET" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 

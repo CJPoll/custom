@@ -82,8 +82,10 @@ exit 0
 EOF
 cat > "${STUBS}/glab" <<'EOF'
 #!/usr/bin/env bash
-# fixture glab: records every call.
+# fixture glab: answers the visibility read glab-athena's outbound scan makes
+# (DND-1938), records the rest.
 [ "$*" = --help ] && { echo "FIXTURE-GLAB-HELP Usage: glab <command>"; exit 0; }
+[ "$#" = 2 ] && [ "$1" = api ] && [[ "$2" == projects/* ]] && [[ "${2#projects/}" != */* ]] && { echo '{"visibility":"private"}'; exit 0; }
 printf 'REAL-GLAB %s|token=%s|cfg=%s\n' "$*" "${GITLAB_TOKEN:+set}" "${GLAB_CONFIG_DIR##*/}" >> "${LOG}"
 exit 0
 EOF

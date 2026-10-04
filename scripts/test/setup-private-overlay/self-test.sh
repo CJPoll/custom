@@ -167,7 +167,7 @@ if [ "$RC" = 0 ] && [ "$mode" = 700 ] && [ "$ncommits" = 1 ] && [ -z "$remotes" 
    && has "PRESENT root=" "$status" && [ -z "$loose" ] \
    && [ -f "${OVERLAY}/.claude-plugin/marketplace.json" ] && [ -f "${OVERLAY}/plugins/work/.claude-plugin/plugin.json" ] \
    && [ "$(cat "${OVERLAY}/overlay/slack.json")" = "{}" ] && [ -f "${OVERLAY}/README.md" ] \
-   && has "WARNING: the overlay is now PRESENT with ZERO outbound patterns" "$OUT" && has "gh-athena refuses" "$OUT"; then
+   && has "WARNING: the overlay is now PRESENT with ZERO outbound patterns" "$OUT" && has "gh-athena and glab-athena refuse" "$OUT"; then
   ok "6 --init: root 0700, no group/other bits, PRESENT, one local commit, no remote, skeleton layout, zero-pattern WARNING"
 else bad "6 init" "rc=$RC mode=$mode commits=$ncommits remotes=$remotes status=$status loose=$loose out=$OUT"; fi
 

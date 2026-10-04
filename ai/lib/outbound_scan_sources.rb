@@ -13,7 +13,7 @@
 #                  what differs from every parent; see diff_argv and the
 #                  contract's Surfaces), and its message.
 #   tree           every tracked file of the current repo: content and path.
-#   text           one file's lines (gh-athena's title/body scan).
+#   text           one file's lines (gh-athena's and glab-athena's text scan).
 #
 # Every git call on the OVERLAY scrubs the GIT_* variables a hook inherits, so
 # `git -C <overlay>` can never be pointed back at the public repo.
