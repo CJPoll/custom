@@ -474,13 +474,18 @@ check("R6 DND-1877 with no telemetry store it writes, and says it could not chec
     !out.include?("no recorded dispatch")
 end
 
-def store_file(day)
-  File.join(ENV["ATHENA_TELEMETRY_DIR"], "#{day}.jsonl")
+# The writer names the day file by its own write-time date, so read the name
+# back from what it wrote: exactly one file in the fixture store.
+def store_file
+  files = Dir.glob(File.join(ENV["ATHENA_TELEMETRY_DIR"], "*.jsonl"))
+  raise "expected exactly one store file, found #{files.inspect}" unless files.size == 1
+
+  files.first
 end
 
 fresh_store
 record_dispatch("DND-9002", "2026-10-03T07:03:31Z")
-File.open(store_file("2026-10-03"), "a") { |f| f.puts "not json" }
+File.open(store_file, "a") { |f| f.puts "not json" }
 garbled = FakeNotion.new(page("2026-09-30T23:49:00.000Z", status: "Done"))
 code, out, = run(["--ref", "DND-9001", "--backfill", "--restart", "--at", "2026-10-01T07:04:00Z"], garbled)
 check("R7 DND-1877 a malformed line and no event: it says it could not check, never 'no recorded dispatch'") do
@@ -495,16 +500,17 @@ end
 
 fresh_store
 record_dispatch("DND-9001", "2026-10-03T07:03:31Z")
-File.chmod(0o000, store_file("2026-10-03"))
+unread_file = store_file
+File.chmod(0o000, unread_file)
 unread = FakeNotion.new(page("2026-09-30T23:49:00.000Z", status: "Done"))
 begin
   code, out, = run(["--ref", "DND-9001", "--backfill", "--restart", "--at", "2026-10-01T07:04:00Z", "--dry-run"],
                    unread)
 ensure
-  File.chmod(0o600, store_file("2026-10-03"))
+  File.chmod(0o600, unread_file)
 end
 check("R8 DND-1877 an unreadable day file: it says it could not check, naming the file") do
-  code == 0 && out.include?("could not check") && out.include?("2026-10-03.jsonl")
+  code == 0 && out.include?("could not check") && out.include?(File.basename(unread_file))
 end
 
 fresh_store
