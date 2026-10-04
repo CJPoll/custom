@@ -58,8 +58,10 @@
 # can, including its config.toml and runner token. That is accepted only
 # because the ci user holds no deploy secret (the deploy runner is its own user
 # and daemon), only the owner and the bot can push branches, and fork pipelines
-# never run in the parent project (DND-1942). The deploy socket is the same
-# power over the deploy user, reached only by protected-branch jobs.
+# never run in the parent project (DND-1942). This script checks none of these
+# three: they are project settings and the DND-1942 harness refusal. The deploy
+# socket is the same power over the deploy user, reached only by
+# protected-branch jobs.
 #
 # Example (ci and deploy as two users; each token from its `POST user/runners`):
 #   sudo scripts/setup-gitlab-runner --user gitlab-runner-personal --runner personal-ci:ci
@@ -177,6 +179,9 @@ NEW_IDX=()
 for i in "${!R_NAMES[@]}"; do
   if grk_config_has_runner "${R_NAMES[$i]}" <<<"${EXISTING_CFG}"; then
     log "config already has runner ${R_NAMES[$i]} — keeping it (its token is not read)"
+    if grk_role_gets_docker "${R_TAGS[$i]}" && ! grk_config_entry_has_builds_dir "${R_NAMES[$i]}" <<<"${EXISTING_CFG}"; then
+      warn "kept runner ${R_NAMES[$i]} (${R_TAGS[$i]}) has no builds_dir: it predates the runner contract (DND-1973), so its jobs get no docker socket or same-path builds dir. Fix: delete its [[runners]] block from ${CONFIG} and re-run with its token on stdin"
+    fi
   else
     NEW_IDX+=("${i}")
   fi

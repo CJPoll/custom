@@ -39,7 +39,9 @@ deploy image builds):
 the socket is that user's rootless dockerd (`setup-gitlab-runner-docker`).
 `setup-gitlab-runner-user` creates `<builds>` at `0711`, owned by the user;
 `/srv/ci/<user>` (`0710 root:<user>`) keeps other host users out, and `0711`
-lets a job's non-root user reach its checkout. `setup-gitlab-runner` refuses a
+lets a job's non-root user reach its checkout. It does not open the daemon to
+that user: the socket stays the runner user's, so only the job's container root
+can connect, unless the job proxies it (as gen_saas's `as-ci-user` does). `setup-gitlab-runner` refuses a
 `ci` or `deploy` entry when the builds dir is missing or the uid is not a
 number. A deploy runner is created in GitLab with `access_level=ref_protected`
 and a `maximum_timeout` at least its longest job's.
@@ -49,8 +51,11 @@ code control of that daemon, so a job can read anything the `ci` runner user
 can, including its `config.toml` and runner token. That is accepted only
 because the `ci` user holds no deploy secret (the deploy runner is its own user
 and daemon), only the owner and the bot can push branches, and fork pipelines
-never run in the parent project (DND-1942). The deploy socket gives the same
-power over the deploy user, and only protected-branch jobs reach it.
+never run in the parent project (DND-1942). The kit checks none of those three:
+the first is the project's membership and protected-branch settings (owner
+steps), and the last is the harness refusal DND-1942 adds. The deploy socket
+gives the same power over the deploy user, and only protected-branch jobs reach
+it.
 
 An entry written before DND-1973 has no contract, and a re-run keeps it as is.
 To add the contract, delete that `[[runners]]` block from the config and re-run

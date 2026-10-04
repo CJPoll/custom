@@ -22,7 +22,8 @@
 #     job (not `docker build` against a mounted daemon), so no daemon socket is
 #     exposed to jobs.
 #
-# This example is the untagged runner. A `ci` or `deploy` entry (DND-1973)
+# Later (2026-10-04, DND-1973): this example is the untagged runner, and the
+# "NO socket mount" bullet holds for it alone. A `ci` or `deploy` entry
 # also mounts its own user's rootless docker socket and sets builds_dir, and a
 # `ci` entry sets services_tmpfs: system-files/gitlab-runner-runbook.md has the
 # per-role contract and its named residual.

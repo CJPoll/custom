@@ -34,8 +34,10 @@ GRK_SUBID_BASE=1000000000
 GRK_SUBID_SLOTS=4096
 GRK_SUBID_MIN=100000
 GRK_SUBID_MAX=4294901759 # 2^32 - 1 - 65536: the last start a full block fits under
-# The rootless dockerd's socket dir, as the initd files default it
-# (ATHENA_INITD_RUN_USER_DIR): the socket is <dir>/<uid>/docker.sock.
+# The rootless dockerd's socket dir, as the initd files default it: the socket
+# is <dir>/<uid>/docker.sock. The kit writes this default only. An install that
+# overrides ATHENA_INITD_RUN_USER_DIR in a conf.d must edit the socket path in
+# its ci/deploy entries' volumes by hand.
 GRK_RUN_USER_DIR="/run/user"
 # The database service's data dir a ci entry keeps in memory (DND-1973).
 GRK_DB_TMPFS_PATH="/var/lib/postgresql/data"
@@ -100,7 +102,7 @@ grk_builds_dir() { printf '%s/builds\n' "$(grk_ci_dir "$1")"; }
 # a refusal. A uid that is empty, 0 or not a number is an error, never an empty
 # or root path in a volume mount.
 grk_docker_socket() {
-  if [[ ! "${1-}" =~ ^[1-9][0-9]{0,9}$ ]]; then
+  if [[ ! "${1-}" =~ ^[1-9][0-9]{0,9}$ ]] || [ "$1" -gt 4294967294 ]; then
     grk_refuse "runner uid '${1-}' is not a non-root numeric uid, so its docker socket path cannot be named" \
       "check the runner user's /etc/passwd line (getent passwd <user>): its third field must be its numeric uid, not 0"
     return 1
@@ -115,10 +117,22 @@ grk_docker_socket() {
 #               that daemon can mount the job's checkout.
 #   ci          also keeps the database service's data dir in tmpfs
 #               (services_tmpfs cannot be set from .gitlab-ci.yml).
-#   any other   (untagged, or another tag): no socket, no builds_dir, as before.
+#   any other   (untagged, or another tag): only the cache volume; no socket,
+#               no builds_dir.
 # privileged stays false for every role.
 grk_role_gets_docker() { [ "${1-}" = "ci" ] || [ "${1-}" = "deploy" ]; }
 grk_role_gets_db_tmpfs() { [ "${1-}" = "ci" ]; }
+
+# grk_config_entry_has_builds_dir NAME < CONFIG -> 0 when the [[runners]] entry
+# named NAME in the config text on stdin sets builds_dir. A ci or deploy entry
+# without it predates the runner contract (DND-1973).
+grk_config_entry_has_builds_dir() {
+  awk -v want="$1" '
+    /^[[:space:]]*\[\[runners\]\]/ { cur = ""; next }
+    /^[[:space:]]*name[[:space:]]*=/ { s = $0; sub(/^[^"]*"/, "", s); sub(/".*$/, "", s); cur = s; next }
+    cur == want && /^[[:space:]]*builds_dir[[:space:]]*=/ { found = 1 }
+    END { exit found ? 0 : 1 }'
+}
 
 # grk_subid_start NAME -> the deterministic first subordinate id of NAME's block.
 grk_subid_start() {

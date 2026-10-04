@@ -111,7 +111,7 @@ else ok "lib: http, credentialed and pathed urls are refused"; fi
 
 render="$(grk_render_runner alpha-ci ci 1 https://gitlab.com /srv/ci/gitlab-runner-alpha "${TOK_A}" /run/user/2001/docker.sock)"
 for want in '[[runners]]' 'name = "alpha-ci"' 'tags = ["ci"], run_untagged = false' 'limit = 1' \
-            'privileged = false' 'volumes = [' "token = \"${TOK_A}\""; do
+            'privileged = false' "token = \"${TOK_A}\""; do
   case "${render}" in *"${want}"*) ok "lib: a rendered entry has ${want%% =*}" ;; *) bad "lib: a rendered entry has ${want%% =*}" "${render}" ;; esac
 done
 printf '%s\n' "${render}" > "${TMP}/cfg"
@@ -125,7 +125,7 @@ case "$(grk_render_runner walt-ui - 3 https://gitlab.com /srv/ci/gitlab-runner "
 # The runner contract per role (DND-1973): what a job of each role is given.
 eq "lib: the builds dir is /srv/ci/<user>/builds" "$(grk_builds_dir gitlab-runner-alpha)" "/srv/ci/gitlab-runner-alpha/builds"
 eq "lib: a user's rootless docker socket is /run/user/<uid>/docker.sock" "$(grk_docker_socket 2001)" "/run/user/2001/docker.sock"
-for baduid in "" 0 x12 "12 3" -5; do
+for baduid in "" 0 x12 "12 3" -5 4294967295; do
   err="$(grk_docker_socket "${baduid}" 2>&1)" && bad "lib: uid '${baduid}' gives no socket path" "accepted: ${err}"
   case "${err}" in *Fix:*) ok "lib: uid '${baduid}' is refused with Fix:, never an empty socket path" ;; *) bad "lib: uid '${baduid}' is refused with Fix:, never an empty socket path" "${err}" ;; esac
 done
@@ -429,6 +429,17 @@ cfg_before="$(cat "${CFG}")"
 kit setup-gitlab-runner --user gitlab-runner-alpha --runner alpha-ci:ci --runner alpha-ci2:ci:2 "${NOIN}"
 expect_rc "runner alpha: a re-run with the entries present reads no token" 0
 eq "runner alpha: a re-run leaves the config unchanged" "$(cat "${CFG}")" "${cfg_before}"
+case "${ERR}" in *"predates the runner contract"*) bad "runner alpha: kept entries with the contract raise no warning" "${ERR}" ;;
+  *) ok "runner alpha: kept entries with the contract raise no warning" ;; esac
+# A kept ci entry written before DND-1973 (no builds_dir) is named, never kept silently.
+F_CFG_DIR="${ROOT}/home/gitlab-runner-foxtrot/.gitlab-runner"; mkdir -p "${F_CFG_DIR}"
+printf 'concurrent = 1\n\n[[runners]]\n  name = "foxtrot-ci"\n  # tags = ["ci"], run_untagged = false: set on the runner\n  executor = "docker"\n  [runners.docker]\n    volumes = ["/srv/ci/gitlab-runner-foxtrot/cache:/cache"]\n' > "${F_CFG_DIR}/config.toml"
+legacy_before="$(cat "${F_CFG_DIR}/config.toml")"
+kit setup-gitlab-runner --user gitlab-runner-foxtrot --runner foxtrot-ci:ci "${NOIN}"
+expect_rc "runner foxtrot: a re-run over a pre-contract entry still succeeds (it reads no token)" 0
+case "${ERR}" in *foxtrot-ci*"predates the runner contract"*Fix:*) ok "runner foxtrot: the pre-contract entry is named, with Fix:" ;;
+  *) bad "runner foxtrot: the pre-contract entry is named, with Fix:" "${ERR}" ;; esac
+eq "runner foxtrot: the kept entry is left as is" "$(cat "${F_CFG_DIR}/config.toml")" "${legacy_before}"
 
 printf '%s\n' "${TOK_C}" > "${TMP}/tokens-c"
 kit setup-gitlab-runner --user gitlab-runner-alpha --runner alpha-ci:ci --runner alpha-ci3:ci "${TMP}/tokens-c"
