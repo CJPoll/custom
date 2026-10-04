@@ -194,6 +194,24 @@ fci_isolate glab-athena GLAB_CONFIG_DIR
 export GITLAB_TOKEN="$TOKEN" GITLAB_HOST=gitlab.com GLAB_NO_PROMPT=1 GLAB_CHECK_UPDATE=false
 unset TOKEN
 
+# ---- The fork MR pipeline refusal (DND-1942) --------------------------------
+# A call that creates, runs, retries or plays a pipeline or job of an MR whose
+# source_project_id differs from its target_project_id is REFUSED: run in this
+# project, a fork MR's pipeline runs the fork's code on our runners. Ids that
+# cannot be read refuse too (COULD NOT LOOK). The calls judged, and the named
+# residuals, are in ai/lib/glab-fork-pipeline-guard.sh. After isolation, so its
+# reads run as the bot. The agent PATH glab runs the same check.
+GLFP_LIB="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/glab-fork-pipeline-guard.sh"
+[ -r "$GLFP_LIB" ] || {
+	echo "glab-athena: REFUSING: cannot load $GLFP_LIB, so whether this call runs a fork MR's pipeline is unknown." >&2
+	echo "  Fix: run glab-athena from a full ~/dev/custom checkout (ai/bin and ai/lib side by side)." >&2
+	exit 3
+}
+GLFP_TOOL=glab-athena
+# shellcheck source=../lib/glab-fork-pipeline-guard.sh
+. "$GLFP_LIB"
+glfp_guard "$@"
+
 # ---- The merge guard (DND-742) ---------------------------------------------
 # Every merge path must pin the MR's exact head SHA, and the MR's head pipeline
 # must have PASSED on that head: `mr merge`/`mr accept` need --sha <head>;

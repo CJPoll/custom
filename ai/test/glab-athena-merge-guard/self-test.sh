@@ -72,6 +72,7 @@ case "$all" in
 esac
 if [[ "$all" =~ ^api\ (--hostname\ [^\ ]+\ )?projects/[^\ ]+/merge_requests/[0-9]+$ ]]; then answer mrapi "$all"; fi
 if [[ "$all" =~ ^api\ projects/[0-9]+/repository/commits/[0-9a-f]+$ ]]; then answer commit "$all"; fi
+if [[ "$all" =~ ^api\ projects/[^\ ]+/jobs/[0-9]+$ ]]; then answer job "$all"; fi
 if [[ "$all" =~ ^api\ (--hostname\ [^\ ]+\ )?projects/[0-9]+/repository/branches/[^\ ]+$ ]]; then answer branch "$all"; fi
 if [[ "$all" =~ ^api\ (--hostname\ [^\ ]+\ )?projects/[0-9]+/merge_requests/[0-9]+/versions$ ]]; then answer versions "$all"; fi
 # DND-1941: the target tip's own pipelines, and the forge's merge base of the
@@ -136,7 +137,7 @@ reset_fx() { rm -f "${FX}"/* "${STUB_READS}" "${STUB_EXECS}"; rm -rf "${STORE_FX
 
 # mr_json <status> [pipeline sha] [pipeline ref] [head] [iid] -> an MR object.
 mr_json() {
-  printf '{"iid":%s,"project_id":7000001,"sha":"%s","target_branch":"main","web_url":"https://gitlab.com/example-group/example-app/-/merge_requests/%s","head_pipeline":{"id":9000000001,"sha":"%s","ref":"%s","status":"%s"}}\n' \
+  printf '{"iid":%s,"project_id":7000001,"source_project_id":7000001,"target_project_id":7000001,"sha":"%s","target_branch":"main","web_url":"https://gitlab.com/example-group/example-app/-/merge_requests/%s","head_pipeline":{"id":9000000001,"sha":"%s","ref":"%s","status":"%s"}}\n' \
     "${5:-4242}" "${4:-${HEAD_SHA}}" "${5:-4242}" "${2:-${MERGE_SHA}}" "${3:-refs/merge-requests/4242/merge}" "$1"
 }
 # branch_is <sha> : the forge reports <sha> as the tip of the MR's target branch.
@@ -484,7 +485,8 @@ reset_fx; expect_ran N9 "api GET merge_ref" none api "projects/:id/merge_request
 reset_fx; expect_ran N10 "ci status" none ci status
 reset_fx; expect_ran N11 "api PUT MR labels" none api -X PUT "projects/:id/merge_requests/4242" -f "labels=Auto-Deploy"
 reset_fx; expect_ran N12 "mr list" none mr list
-reset_fx; expect_ran N13 "api POST a pipeline for the MR" none api -X POST "projects/:id/merge_requests/4242/pipelines"
+# The fork MR pipeline refusal (DND-1942) reads the MR: a same-project MR runs.
+reset_fx; mr_json success > "${FX}/mrapi.out"; expect_ran N13 "api POST a pipeline for the MR" any api -X POST "projects/:id/merge_requests/4242/pipelines"
 reset_fx; expect_ran N14 "mr create whose title says merge" none mr create --title merge --description "merge accept api" --yes
 reset_fx; expect_ran N15 "help mr merge" none help mr merge
 
@@ -544,8 +546,9 @@ reset_fx; expect_ran R5b "criterion 2: mr update --label (a risk label)" none mr
 reset_fx; expect_ran R5c "criterion 2: mr note" none mr note 4242 --message "gated"
 reset_fx; expect_ran R5d "criterion 2: mr approve" none mr approve 4242
 reset_fx; expect_ran R5e "criterion 2: api POST approve" none api -X POST "projects/:id/merge_requests/4242/approve"
-reset_fx; expect_ran R5f "criterion 2: api POST play a manual job (release deploy)" none api -X POST "projects/:id/jobs/9000000002/play"
-reset_fx; expect_ran R5g "criterion 2: ci trigger a manual job" none ci trigger 9000000003
+# The fork MR pipeline refusal (DND-1942) reads the job: a branch job runs.
+reset_fx; echo '{"id":9000000002,"ref":"main"}' > "${FX}/job.out"; expect_ran R5f "criterion 2: api POST play a manual job (release deploy)" any api -X POST "projects/:id/jobs/9000000002/play"
+reset_fx; echo '{"id":9000000003,"ref":"main"}' > "${FX}/job.out"; expect_ran R5g "criterion 2: ci trigger a manual job" any ci trigger 9000000003
 cd "${REPO_FX}" || exit 2
 
 # Criterion 3: an exit-4 head leaves NO receipt (integration-gate writes one
