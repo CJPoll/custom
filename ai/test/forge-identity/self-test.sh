@@ -254,6 +254,17 @@ R="$(fid_in "${PERS}" fid_resolve_glab_args api "%70rojects/123/notes")"
 expect A11e "a %-encoded route word (hiding projects/) -> BAD KEY" 2 "BAD KEY" "" "%-encoded"
 R="$(fid_in "${PERS}" fid_resolve_glab_args api "projects/${W_NS}%2Fapp/%6derge")"
 expect A11f "%-encoding past the project path -> BAD KEY" 2 "BAD KEY" "" "past its project path"
+# GitLab's own routes encode a file path or a branch name with %2F past the
+# project path (repository/files/:file_path, repository/branches/:branch). The
+# project segment alone picks the bot, so those key on it.
+R="$(fid_in "${PERS}" fid_resolve_glab_args api "projects/:id/repository/files/lib%2Fa.ex?ref=main")"
+expect A11g "a %2F-encoded file path past :id -> origin's bot" 0 FOUND "${P_BOT}" -
+R="$(fid_in "${PERS}" fid_resolve_glab_args api -X DELETE "projects/${W_NS}%2Fapp/repository/branches/feature%2fx")"
+expect A11h "a %2f-encoded branch name past a project path -> that project's bot" 0 FOUND "${W_BOT}" -
+R="$(fid_in "${PERS}" fid_resolve_glab_args api "projects/:id/repository/files/lib%2F..%2Fa.ex")"
+expect A11i "a %2F that hides a '..' segment past the project path -> BAD KEY" 2 "BAD KEY" "" "'..' segment"
+R="$(fid_in "${PERS}" fid_resolve_glab_args api "projects/:id/repository/files/lib%2F%2e%2e%2Fa.ex")"
+expect A11j "any escape but %2F past the project path still -> BAD KEY" 2 "BAD KEY" "" "past its project path"
 R="$(fid_in "${PERS}" fid_resolve_glab_args api "projects/:id/issues")"
 expect A12 "the :id placeholder uses origin" 0 FOUND "${P_BOT}" -
 R="$(fid fid_resolve_url "https://gitlab.com/${W_NS}/../cjpoll/x.git")"

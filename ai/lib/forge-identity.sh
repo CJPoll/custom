@@ -309,8 +309,8 @@ fid_flag_may_take_value() {
 # Sets FID_EP_NS (a namespace it names, or "") and FID_EP_KIND (none |
 # project | group | placeholder | graphql). 0, or 2 (BAD KEY) for an endpoint
 # this cannot key on: a project or group named by a numeric id, a `.` or `..`
-# segment, any %-encoding other than the %2F separators of the project or
-# group path, or an absolute URL. An optional leading api/v4/ is read through.
+# segment (also once a %2F past the project or group path is read as `/`), any
+# %-encoding other than %2F, or an absolute URL. An optional leading api/v4/ is read through.
 # `graphql` names its target inside the query, so it is never keyed here.
 fid_endpoint_key() {
   local ep="$1" kind seg v rest segs=() s
@@ -344,6 +344,19 @@ fid_endpoint_key() {
       return 0 ;;
   esac
   rest="${ep#*/}"; seg="${rest%%/*}"; rest="${rest#"$seg"}"
+  # Past the project or group path only %2F may appear: GitLab's own routes
+  # encode a file path or a branch name that way (repository/files/:file_path,
+  # repository/branches/:branch), and the bot is picked by the segment before
+  # it alone. Decoded, it must still hold no '.' or '..' segment. Any other
+  # escape could spell a route word another way, so it stays a refusal.
+  rest="${rest//%2F//}"; rest="${rest//%2f//}"
+  IFS=/ read -ra segs <<<"$rest"
+  for s in "${segs[@]}"; do
+    case "$s" in
+      .|..) fid_fail 2 "BAD KEY" "the api endpoint '$ep' has a '$s' segment once its %2F separators are read, so the route it reaches is not the one it spells" \
+        "spell the path past ${kind}s/<path> with no '.' or '..' segment. $FID_ESCALATE"; return ;;
+    esac
+  done
   if [[ "$rest" == *%* ]]; then
     fid_fail 2 "BAD KEY" "the api endpoint '$ep' is %-encoded past its $kind path, so the route it reaches is not the one it spells" \
       "spell the route plainly after ${kind}s/<path>. $FID_ESCALATE"; return
