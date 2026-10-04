@@ -323,6 +323,17 @@ reset_fx; run_ga release create v1 --ref "${SHA}"
 refused "release create --ref <sha> refuses" "${LOOK}"
 reset_fx; run_ga ci run -b "${SHA}"
 refused "ci run -b <sha> refuses" "${LOOK}"
+# glab reads --mr as a Go bool: 0/f/F/FALSE/false/False are false, the last one wins.
+reset_fx; run_ga ci run --mr=0 -b "${SHA}"
+refused "ci run --mr=0 -b <sha> is no --mr run, so the sha refuses" "${LOOK}"
+reset_fx; run_ga ci run --mr --mr=false -b "${SHA}"
+refused "ci run --mr --mr=false -b <sha>: the last value wins, the sha refuses" "${LOOK}"
+reset_fx; run_ga ci run --mr=F -b "${SHA}"
+refused "ci run --mr=F -b <sha> refuses" "${LOOK}"
+reset_fx; run_ga ci run --mr=maybe -b feat
+refused "ci run --mr=maybe (not a bool glab reads) refuses" "${LOOK}"
+reset_fx; echo "${FORKLIST}" > "${FX}/mrlist.out"; run_ga ci run --mr=false --mr -b feat
+refused "ci run --mr=false --mr: the last value wins, it is an --mr run" "${FORKMSG}"
 reset_fx; run_ga api -X POST "projects/${PARENT}/pipeline" -f ref=nope
 refused "a ref that is no branch or tag refuses" "not, as read, a branch or a tag"
 reset_fx; run_ab api -X POST "projects/${PARENT}/repository/branches" -f branch=x -f ref=v0

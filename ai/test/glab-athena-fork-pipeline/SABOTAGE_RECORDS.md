@@ -88,3 +88,15 @@ M2 first SURVIVED: a failed read leaves no JSON, so the next check refused
 anyway with "is not !11", and the cases asserted only `COULD NOT LOOK`. The
 unreadable-object cases now assert the read failure itself (`COULD NOT LOOK:
 could not read !11`), and M2 is caught.
+
+## Post-rebase critic round: `--mr` read as a Go bool (2026-10-04)
+
+Defect: the guard set the `--mr` flag for any `--mr=<v>` but the exact string
+`false`, and never cleared it, so `ci run --mr=0 -b <sha>` skipped the
+branch-or-tag read on `-b` and passed a commit sha.
+
+Red before the fix (new cases only, unfixed lib): `88 passed, 4 failed`. First
+failing case: `ci run --mr=0 -b <sha> is no --mr run, so the sha refuses` ->
+`something ran: api --paginate projects/:id/merge_requests?source_branch=0123…`.
+Green after (`glfp_mr_value`: Go bool spellings, last wins, other values refuse):
+`92 passed, 0 failed`.
