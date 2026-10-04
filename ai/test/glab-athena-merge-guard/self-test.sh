@@ -856,6 +856,26 @@ receipt_ran P18 "a green tip: the merge runs and names the tip" "${MERGE_ARGS[@]
 reset_fx; nogate_fx; tip_pipes failed
 receipt_refused P19 "a red tip does not excuse a missing receipt (the receipt is read first)" "NO RECEIPT" "${MERGE_ARGS[@]}"
 
+# The GitLab lock path (DND-1943) makes this exact call and maps the guard's
+# refusal to its exit 11 (MAIN RED) or 2 (COULD NOT LOOK) by the shared
+# classifier gmg_refusal_has_reason. Contract: this guard's refusal, for that
+# argv, is one the classifier reads; a format drift would read as exit 4.
+LOCK_ARGS=(mr merge 4242 -R example-group/example-app --squash --sha "${HEAD_SHA}" --auto-merge=false --yes)
+lock_class() {
+  printf '%s\n' "${ERR}" > "${TMP}/lock-err"
+  ( . "${HERE}/../../lib/gh-merge-guard.sh" >/dev/null 2>&1 || exit 9
+    gmg_refusal_has_reason "${TMP}/lock-err" "$1" )
+}
+reset_fx; green_fx; tip_pipes failed
+tip_refused P20 "the lock tool's argv onto a failed tip -> refused (MAIN RED)" "MAIN RED:" "${LOCK_ARGS[@]}"
+lock_class "MAIN RED:" && ok "P20b. the lock tool's classifier reads it as MAIN RED (its exit 11)" || bad "P20b. MAIN RED classified" "$(detail)"
+reset_fx; green_fx; fx pipes '[]'
+tip_refused P21 "the lock tool's argv onto a tip with no pipeline -> COULD NOT LOOK" "COULD NOT LOOK:" "${LOCK_ARGS[@]}"
+lock_class "COULD NOT LOOK:" && ok "P21b. the lock tool's classifier reads it as COULD NOT LOOK (its exit 2)" || bad "P21b. LOOK classified" "$(detail)"
+! lock_class "MAIN RED:" && ok "P21c. and not as MAIN RED" || bad "P21c. LOOK misread as red" "$(detail)"
+reset_fx; green_fx
+receipt_ran P22 "the lock tool's argv onto a green tip -> runs" "${LOCK_ARGS[@]}"
+
 echo
 echo "--- DND-1941: the tip's CONTENT (ai/config/main-content-checks.json) ---"
 # The declaration is keyed by project path; the GitLab project cjpoll/gen_saas
