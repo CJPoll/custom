@@ -9,6 +9,15 @@
 #   - Every job carries the role tag `ci` (never a per-host tag); the runner
 #     does not take untagged jobs.
 
+# Known state (measured 2026-10-04, DND-1946): in a default unprivileged docker
+# container, 13 of 194 gate checks do not pass. bubblewrap needs unprivileged
+# user namespaces (the tool-sandbox suites), `git hook list` needs a newer git
+# than trixie's, and the proc-scan and process-group suites (suite-reaper,
+# test-slot, telemetry-shell) read host process state. The job stays a full,
+# unweakened gate: no allow_failure, no skipped check. Until the follow-up
+# (make the gate pass in the CI image: a runner that allows user namespaces and
+# a git with `git hook list`) lands, do not make this job a required check.
+
 workflow:
   rules:
     # Fork guard: an MR whose source project is not this project never runs.
