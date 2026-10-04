@@ -17,6 +17,7 @@
 #   ai/                 IN   the harness's agent-callable tools
 #   scripts/            OUT  the owner's personal PATH utilities
 #   git-custom/, hypr/, system-files/, .auto-completions/   OUT  personal config
+#   dockerfiles/        OUT  container image build inputs
 #
 # An executable no entry covers is UNSCOPED, and both checks FAIL on it. A new
 # top-level directory of executables is a scope decision someone has to make,
@@ -52,6 +53,10 @@ module HarnessTools
     ["hypr/", :out, "desktop theme scripts"],
     ["system-files/", :out, "root-installed system files, run by OpenRC"],
     [".auto-completions/", :out, "zsh completion definitions, sourced by compinit"],
+    ["dockerfiles/", :out,
+     "container image build inputs: run as root inside a docker build or the " \
+     "GitLab CI job's container (DND-1998), never from an agent's Bash call on " \
+     "this machine"],
   ].freeze
 
   # tools: in-scope repo-relative paths. out_of_scope: {path => reason}.

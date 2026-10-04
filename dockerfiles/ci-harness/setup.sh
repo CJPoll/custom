@@ -103,24 +103,42 @@ fi
 
 # git, from the release tarball, checked by sha256.
 src="$(mktemp -d)"
-curl -fsSL --retry 3 -o "${src}/git.tar.xz" \
-  "https://mirrors.edge.kernel.org/pub/software/scm/git/git-${GIT_VERSION}.tar.xz"
+if ! curl -fsSL --retry 3 -o "${src}/git.tar.xz" \
+  "https://mirrors.edge.kernel.org/pub/software/scm/git/git-${GIT_VERSION}.tar.xz"; then
+  echo "setup.sh: downloading git-${GIT_VERSION}.tar.xz from kernel.org failed" >&2
+  echo "  Fix: check that https://mirrors.edge.kernel.org is reachable from the runner; retry the job." >&2
+  exit 1
+fi
 if ! echo "${GIT_SHA256}  ${src}/git.tar.xz" | sha256sum -c --quiet -; then
   echo "setup.sh: git-${GIT_VERSION}.tar.xz does not match GIT_SHA256" >&2
   echo "  Fix: take the checksum from kernel.org's signed sha256sums.asc; never install an unchecked tarball." >&2
   exit 1
 fi
 tar -xJf "${src}/git.tar.xz" -C "${src}"
-make -s -C "${src}/git-${GIT_VERSION}" -j"$(nproc)" prefix=/usr/local \
-  NO_TCLTK=1 NO_GETTEXT=1 NO_PERL=1 NO_PYTHON=1 all install >/dev/null
+# prefix=/usr, as on the owner's machine: suites and the tool-sandbox call
+# /usr/bin/git by path, and agent-bin-git's fallback-layout cases assume no git
+# in /usr/local/bin. apt installs no git (asserted below), so nothing collides.
+# contrib/subtree is installed too: Debian's git ships `git subtree`, and the
+# forge-identity suites refuse and pass `git subtree push` / `split` for real.
+build=(-s -j"$(nproc)" prefix=/usr NO_TCLTK=1 NO_GETTEXT=1 NO_PERL=1 NO_PYTHON=1)
+if dpkg-query -W -f='${Status}' git 2>/dev/null | grep -q 'install ok installed'; then
+  echo "setup.sh: apt installed Debian's git, which the source build would overwrite" >&2
+  echo "  Fix: find the package in PACKAGES that depends on git and drop it, or pin a release that does not." >&2
+  exit 1
+fi
+make -C "${src}/git-${GIT_VERSION}" "${build[@]}" all install >/dev/null
+make -C "${src}/git-${GIT_VERSION}/contrib/subtree" "${build[@]}" install >/dev/null
 rm -rf "${src}"
-# Harness suites and the tool-sandbox call /usr/bin/git by path.
-ln -sf /usr/local/bin/git /usr/bin/git
 # `git hook -h` exits 129 by design, so read its usage text, not its status.
 hook_usage="$(git hook -h 2>&1 || true)"
 [[ "${hook_usage}" == *"git hook list"* ]] || {
   echo "setup.sh: the installed git has no \`git hook list\`" >&2
   echo "  Fix: set GIT_VERSION to a release with config-based hooks (2.54.0 or later)." >&2
+  exit 1
+}
+[ -x "$(git --exec-path)/git-subtree" ] || {
+  echo "setup.sh: the installed git has no git-subtree" >&2
+  echo "  Fix: keep the contrib/subtree install step after the git build." >&2
   exit 1
 }
 
