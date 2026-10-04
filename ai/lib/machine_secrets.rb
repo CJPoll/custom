@@ -33,11 +33,13 @@ module MachineSecrets
   # starting with its literal, so the regex engine searches for the literal
   # (measured on this machine's ai-artifacts: 1.1 s, against 8.9 s for one
   # alternation behind a lookbehind). The word boundary is checked on the byte
-  # before each match (content_boundary?).
+  # before each match (content_boundary?). A GitLab token's characters include
+  # '.', because GitLab's routable tokens are dot-segmented (DND-1982), so its
+  # minimum counts the whole token, not only the text before the first '.'.
   CONTENT_PATTERNS = [
     /sk-ant-[A-Za-z0-9_-]{20,}/, /xoxa-[A-Za-z0-9-]{10,}/, /xoxb-[A-Za-z0-9-]{10,}/, /xoxp-[A-Za-z0-9-]{10,}/,
     /ghp_[A-Za-z0-9]{30,}/, /gho_[A-Za-z0-9]{30,}/, /ghs_[A-Za-z0-9]{30,}/, /ghu_[A-Za-z0-9]{30,}/,
-    /github_pat_[A-Za-z0-9_]{30,}/, /glpat-[A-Za-z0-9_-]{20,}/, /glrt-[A-Za-z0-9_-]{20,}/, /ntn_[A-Za-z0-9]{30,}/,
+    /github_pat_[A-Za-z0-9_]{30,}/, /glpat-[A-Za-z0-9_.-]{20,}/, /glrt-[A-Za-z0-9_.-]{20,}/, /ntn_[A-Za-z0-9]{30,}/,
     /AKIA[A-Z0-9]{16}(?![A-Za-z0-9])/, /ASIA[A-Z0-9]{16}(?![A-Za-z0-9])/, /re_[A-Za-z0-9]{20,}/
   ].map(&:freeze).freeze
   PEM_RE = /-----BEGIN [A-Z ]*PRIVATE KEY-----/.freeze

@@ -1706,7 +1706,8 @@ per-user match applies.
   `token_digest`, `token_encrypted` or `encrypted_token` key at the top level
   or in `object_attributes`, or an `object_attributes` string holding one of
   GitLab's documented token prefixes (`glpat-`, `gldt-`, `glrt-`, …) at a
-  word start, followed by at least 20 token characters. This runs before the
+  word start, followed by at least 20 token characters (`[A-Za-z0-9_.-]`:
+  routable tokens are dot-segmented). This runs before the
   project pin, so the anomaly is reported whatever project the body names;
 - a body whose project is not the hook's is refused `project_mismatch`
   (recorded). A group token's body names no project, so it is refused too;

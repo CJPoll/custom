@@ -30,13 +30,18 @@ check() { # <label> <command...>: passes when the command exits 0
   if "$@"; then ok "${label}"; else bad "${label}"; fi
 }
 
-# Synthetic tokens. "glrt" and "-" are joined at runtime.
+# Synthetic tokens. "glrt" and "-" are joined at runtime. They have the shape
+# GitLab mints (DND-1982): a routable token is dot-segmented,
+# glrt-t<n>_<payload>.<version>.<crc>, so '.' is part of every real token.
+# Each tail (the text after the first '.') is distinct, so a leak check can
+# search for the tail alone.
 P_RT="glrt""-"
-TOK_A="${P_RT}SYNTHaaaaaaaaaaaaaaaaaaaaaa1"
-TOK_B="${P_RT}SYNTHbbbbbbbbbbbbbbbbbbbbbb2"
-TOK_C="${P_RT}SYNTHcccccccccccccccccccccc3"
+TOK_A="${P_RT}t3_SYNTHaaaaaaaaaaaaaaaaaaaa.01.0aaaaaaa1"
+TOK_B="${P_RT}t3_SYNTHbbbbbbbbbbbbbbbbbbbb.02.0bbbbbbb2"
+TOK_C="${P_RT}t3_SYNTHcccccccccccccccccccc.03.0ccccccc3"
 NOT_TOK="plainSYNTHdddddddddddddddddddd4"
 ALL_TOK=("${TOK_A}" "${TOK_B}" "${TOK_C}" "${NOT_TOK}")
+tok_tail() { printf '%s' "${1#*.}"; } # the text after the first '.'
 TRANSCRIPT="${TMP}/transcript"; : > "${TRANSCRIPT}"
 
 echo "gitlab-runner-kit self-test (repo: ${SRC})"
@@ -101,9 +106,31 @@ for badspec in alpha-ci "alpha-ci:" "Alpha:ci" "alpha-ci:ci,deploy" "alpha-ci:ci
   case "${err}" in *Fix:*) ok "lib: --runner '${badspec}' refused with Fix:" ;; *) bad "lib: --runner '${badspec}' refused with Fix:" "${err}" ;; esac
 done
 check "lib: a glrt- token shape is accepted" grk_valid_token "${TOK_A}"
+# DND-1982: the shape GitLab mints carries '.'; the brief's acceptance token.
+check "lib: a dot-segmented routable token is accepted" grk_valid_token "${P_RT}t3_AAAAAAAAAAAAAAAAAAAA.01.0aaaaaaaa"
+check "lib: the 20-character minimum counts the dot segments" grk_valid_token "${P_RT}t3_SYNTH.01.0aaaaaaaaaaa"
+check "lib: an undotted (legacy) token is still accepted" grk_valid_token "${P_RT}SYNTHaaaaaaaaaaaaaaaaaaaaaa1"
 if grk_valid_token "${NOT_TOK}" || grk_valid_token "${P_RT}short" || grk_valid_token "${TOK_A} x"; then
   bad "lib: a non-glrt, short, or spaced token is refused"
 else ok "lib: a non-glrt, short, or spaced token is refused"; fi
+n=0
+for badtok in "${TOK_A}." ".${TOK_A}" "${P_RT}.t3_SYNTHaaaaaaaaaaaaaaaaaaaa" "${P_RT}t3_SYNTHaaaaaaaaaa..01.0aaaaaaa1" \
+              "${P_RT}short.01.0a"; do
+  n=$((n + 1))
+  if grk_valid_token "${badtok}"; then bad "lib: an empty dot segment or a short token is refused (case ${n})"
+  else ok "lib: an empty dot segment or a short token is refused (case ${n})"; fi
+done
+# grk_redact consumes the whole token, '.' segments included, and leaves a
+# sentence's trailing period: a '.' with no token character after it is not
+# part of the token.
+red="$(grk_redact "token ${TOK_A}. next")"
+eq "lib: redact replaces a dotted token, keeping a trailing period" "${red}" "token glrt-<not shown>. next"
+case "${red}" in *"$(tok_tail "${TOK_A}")"*) bad "lib: redact leaves no fragment after the token's first '.'" "${red}" ;;
+  *) ok "lib: redact leaves no fragment after the token's first '.'" ;; esac
+red="$(grk_redact "a=${TOK_A},b=${TOK_B}")"
+eq "lib: redact replaces two dotted tokens in one line" "${red}" "a=glrt-<not shown>,b=glrt-<not shown>"
+red="$(grk_redact "x ${P_RT}t3_SYNTHeeee..05..0eeee y")"
+eq "lib: redact also consumes a run of dots inside a token" "${red}" "x glrt-<not shown> y"
 check "lib: https://gitlab.com is a valid url" grk_valid_url https://gitlab.com
 if grk_valid_url http://gitlab.com || grk_valid_url https://u:p@gitlab.com || grk_valid_url https://gitlab.com/x; then
   bad "lib: http, credentialed and pathed urls are refused"
@@ -545,11 +572,18 @@ for t in "${ALL_TOK[@]}"; do
   # every OTHER process's argv is in the log, and must not hold any token.
   if grep -qF -- "${t}" "${ARGV_LOG}"; then leaked="${leaked} argv-log"; fi
 done
+for t in "${TOK_A}" "${TOK_B}" "${TOK_C}"; do
+  # A tail alone is a leak too (DND-1982: a redaction that stops at '.').
+  if grep -qF -- "$(tok_tail "${t}")" "${ARGV_LOG}"; then leaked="${leaked} argv-log-tail"; fi
+done
 [ -z "${leaked}" ] && ok "no token reached any spawned command's argv" || bad "no token reached any spawned command's argv" "${leaked}"
 transcript_hits=0
 while IFS= read -r line; do
   for t in "${ALL_TOK[@]}"; do
     case "${line}" in *"${t}"*) transcript_hits=$((transcript_hits + 1)) ;; esac
+  done
+  for t in "${TOK_A}" "${TOK_B}" "${TOK_C}"; do
+    case "${line}" in *"$(tok_tail "${t}")"*) transcript_hits=$((transcript_hits + 1)) ;; esac
   done
 done < "${TRANSCRIPT}"
 eq "no token reached any stdout or stderr" "${transcript_hits}" "0"

@@ -50,10 +50,14 @@ grk_refuse() { # <problem> <fix>
 }
 
 # grk_redact TEXT -> TEXT with every glrt- token replaced, so a token pasted
-# into the wrong flag is never echoed back by a refusal.
+# into the wrong flag is never echoed back by a refusal. A token is the whole
+# run of token characters, '.' included (GitLab's routable tokens are
+# dot-segmented, DND-1982), ending on a non-'.': a '.' with no token character
+# after it is a sentence's period, and stays (ai/contracts/
+# athena-machine-secrets.md -> Credential patterns).
 grk_redact() {
   local s="${1-}"
-  while [[ "${s}" =~ glrt-[A-Za-z0-9_-]+ ]]; do
+  while [[ "${s}" =~ glrt-[A-Za-z0-9_.-]*[A-Za-z0-9_-] ]]; do
     s="${s/"${BASH_REMATCH[0]}"/glrt-<not shown>}"
   done
   printf '%s' "${s}"
@@ -217,10 +221,14 @@ grk_parse_runner() {
   printf '%s %s %s\n' "${name}" "${tag}" "${limit}"
 }
 
-# grk_valid_token TOKEN -> 0 when TOKEN is a runner authentication token shape.
-# Never prints the token, whatever the outcome.
+# grk_valid_token TOKEN -> 0 when TOKEN is a runner authentication token shape:
+# glrt- then at least 20 characters of non-empty [A-Za-z0-9_-] segments joined
+# by single '.'s. GitLab's routable tokens are dot-segmented
+# (glrt-t<n>_<payload>.<version>.<crc>, DND-1982); an undotted token is the
+# older shape, still accepted. Never prints the token, whatever the outcome.
 grk_valid_token() {
-  [[ "${1-}" =~ ^glrt-[A-Za-z0-9_-]{20,}$ ]]
+  local t="${1-}"
+  [ "${#t}" -ge 25 ] && [[ "${t}" =~ ^glrt-[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*$ ]]
 }
 
 # grk_valid_url URL -> 0 when URL is an https origin (no path, no credentials).
