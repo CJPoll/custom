@@ -364,10 +364,13 @@ repository flag (`--label -F <file>`). Both rules are
 file is copied once, the copy is scanned,
 and gh is handed the copy, so a pipe or a changing file cannot differ from what
 was scanned. The scan runs unless every repository the write can reach
-reads PRIVATE or INTERNAL: each `-R`/`--repo`, the repository of each PR or
-issue URL given positionally, `GH_REPO` when no `-R` is given, and otherwise
-the current directory's. A visibility that cannot be read, or a URL that cannot
-be parsed, counts as PUBLIC. HITS refuse (exit 1); a scanner exit 1 that does
+reads PRIVATE or INTERNAL: each non-empty `-R`/`--repo`, the repository of
+each PR or issue URL given positionally, and, when the last `-R` is empty or
+absent, the repository gh falls back to: `GH_REPO`, otherwise the current
+directory's. The resolution is `ai/lib/gh-target-repo.sh`'s. A `-R` or
+`GH_REPO` value that is not a repository gh can read is refused (exit 3,
+COULD NOT LOOK). A visibility that cannot be read, or a URL that cannot be
+parsed, counts as PUBLIC. HITS refuse (exit 1); a scanner exit 1 that does
 not report HITS is a failure (exit 3), never a result. COULD NOT MEASURE
 refuses (exit 3), except where the overlay is ABSENT and the machine is
 known not to be marked (the harness checkout's `hooks/pre-push`, as
@@ -376,6 +379,13 @@ write proceeds with a WARNING that the text went out unscanned, never a CLEAN
 line. A mark that cannot be determined counts as marked. These outcome rules,
 and the private copy each field is scanned from, live once, in
 `ai/lib/outbound-text-scan.sh`, for both forge paths.
+
+**Later (2026-10-04, DND-2006):** this paragraph said "`GH_REPO` when no `-R`
+is given", so an empty `-R` counted as given. Superseded: gh reads an empty
+`-R` as unset and uses `GH_REPO`, while `gh repo view` with no argument ignores
+`GH_REPO`. From a private checkout, `GH_REPO=<public> gh-athena pr create -R ''
+-b X` read the checkout as PRIVATE and sent X to the public repository
+unscanned.
 
 **Later (2026-10-04, DND-1976):** this paragraph covered only the pr and issue
 commands, and said "A short-flag cluster that could hide one of these fields

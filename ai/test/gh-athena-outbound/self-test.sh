@@ -217,6 +217,90 @@ OUT="$(cd "${WORK}" && : > "${STUB_LOG}" && GH_REPO=synth-owner/pub "${WRAPPER}"
 if [ "${RC}" = 1 ] && not_sent "pr comment" && [[ "${CALLS}" == *"repo view synth-owner/pub"* ]]; then ok "GH_REPO names the target"; else bad "GH_REPO" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 gha pr comment --body "x${TOKEN}" -- https://github.com/synth-owner/pub/pull/3
 if [[ "${CALLS}" == *"repo view synth-owner/pub"* ]]; then ok "a URL after -- is still a target"; else bad "URL after --" "calls=[${CALLS}] ${OUT}"; fi
+
+echo "--- DND-2006: an empty -R is not a target; gh falls back to GH_REPO ---"
+# gh 2.96 (cmdutil.OverrideBaseRepoFunc): an empty -R/--repo value falls back
+# to GH_REPO, then to the checkout. `gh repo view` with no argument ignores
+# GH_REPO (measured 2026-10-04). The guard read `-R ''` as "a -R was given",
+# skipped GH_REPO, and read the checkout's visibility (PRIVATE here) while gh
+# wrote to the PUBLIC GH_REPO: the text went out unscanned.
+# gha_env <VAR=value...> -- <args...> : gha with extra environment.
+gha_env() {
+  local -a envs=()
+  while [ "$1" != -- ]; do envs+=("$1"); shift; done; shift
+  : > "${STUB_LOG}"
+  OUT="$(cd "${WORK}" && env "${envs[@]}" "${WRAPPER}" "$@" 2>&1)"; RC=$?
+  CALLS="$(cat "${STUB_LOG}")"
+}
+gha_env GH_REPO=synth-owner/pub -- pr create -R '' -b "x${TOKEN}"
+if [ "${RC}" = 1 ] && not_sent "pr create" && [[ "${CALLS}" == *"repo view synth-owner/pub --json visibility"* ]] \
+   && [[ "${OUT}" == *"label=synth-token"* ]] && no_literal; then
+  ok "DND-2006 regression: GH_REPO=<public> pr create -R '' -b <planted> is scanned and refused"
+else
+  bad "DND-2006 regression: GH_REPO=<public> pr create -R '' -b <planted>" "rc=${RC} calls=[${CALLS}] ${OUT}"
+fi
+for argv in "pr create --repo= -b" "pr create --repo  -b" "pr comment 3 -R synth-owner/priv -R  -b" \
+  "-R  pr comment 3 -b" "pr -R  comment 3 -b" "issue create -t t -R  -b" "issue comment 7 --repo= -b" \
+  "pr close 5 -R  -c" "pr merge 5 --squash -R  -b" "release create v1 -R  -n"; do
+  # The double space is an empty -R value; split by hand so it survives.
+  words=(); rest="${argv}"
+  while [ -n "${rest}" ]; do
+    w="${rest%% *}"; words+=("${w}")
+    if [ "${w}" = "${rest}" ]; then rest=""; else rest="${rest#* }"; fi
+  done
+  gha_env GH_REPO=synth-owner/pub -- "${words[@]}" "x${TOKEN}"
+  if [ "${RC}" = 1 ] && [[ "${OUT}" != *"stub: SENT"* ]] && [[ "${CALLS}" == *"repo view synth-owner/pub --json visibility"* ]] && no_literal; then
+    ok "GH_REPO is the target: ${argv}"
+  else
+    bad "GH_REPO is the target: ${argv}" "rc=${RC} calls=[${CALLS}] ${OUT}"
+  fi
+done
+gha_env GH_REPO=synth-owner/pub -- pr comment 3 -R synth-owner/priv -b "x${TOKEN}"
+if [ "${RC}" = 0 ] && sent "pr comment" && [[ "${CALLS}" != *"repo view synth-owner/pub"* ]]; then
+  ok "a non-empty -R still wins over GH_REPO (gh's precedence)"
+else
+  bad "-R wins over GH_REPO" "rc=${RC} calls=[${CALLS}] ${OUT}"
+fi
+gha_env GH_REPO=synth-owner/priv -- pr comment 3 -R synth-owner/pub -R '' -b "x${TOKEN}"
+if [ "${RC}" = 1 ] && not_sent "pr comment" && [[ "${CALLS}" == *"repo view synth-owner/pub --json visibility"* ]]; then
+  ok "an earlier -R value is still scanned when a later empty -R hands gh to GH_REPO"
+else
+  bad "earlier -R kept" "rc=${RC} calls=[${CALLS}] ${OUT}"
+fi
+gha pr comment 3 -R '' -b "x${TOKEN}"
+if [ "${RC}" = 0 ] && sent "pr comment" && [[ "${CALLS}" == *"repo view --json visibility"* ]]; then
+  ok "-R '' with no GH_REPO reads the checkout, as gh does"
+else
+  bad "-R '' no GH_REPO" "rc=${RC} calls=[${CALLS}] ${OUT}"
+fi
+gha_env GH_REPO=synth-owner/pub -- pr comment https://github.com/synth-owner/priv/pull/3 -R '' -b "x${TOKEN}"
+if [ "${RC}" = 1 ] && not_sent "pr comment" && [[ "${CALLS}" == *"repo view synth-owner/pub --json visibility"* ]]; then
+  ok "GH_REPO behind an empty -R is a target beside a PR URL"
+else
+  bad "GH_REPO + URL" "rc=${RC} calls=[${CALLS}] ${OUT}"
+fi
+for bogus in "not-a-repo" "a/b/c/d" " " "a b/c"; do
+  gha_env "GH_REPO=${bogus}" -- pr create -R '' -b "clean"
+  if [ "${RC}" = 3 ] && not_sent "pr create" && [[ "${OUT}" == *"COULD NOT LOOK"* ]] && [[ "${OUT}" == *"Fix:"* ]]; then
+    ok "an unresolvable GH_REPO refuses: '${bogus}'"
+  else
+    bad "unresolvable GH_REPO '${bogus}'" "rc=${RC} calls=[${CALLS}] ${OUT}"
+  fi
+done
+gha pr create -R "not-a-repo" -b "clean"
+if [ "${RC}" = 3 ] && not_sent "pr create" && [[ "${OUT}" == *"COULD NOT LOOK"* ]] && [[ "${OUT}" == *"Fix:"* ]]; then
+  ok "an unresolvable -R refuses"
+else
+  bad "unresolvable -R" "rc=${RC} calls=[${CALLS}] ${OUT}"
+fi
+for good in "github.com/synth-owner/pub" "https://github.com/synth-owner/pub" "git@github.com:synth-owner/pub.git"; do
+  gha pr comment 3 -R "${good}" -b "clean"
+  if [ "${RC}" = 0 ] && [[ "${CALLS}" == *"repo view ${good} --json visibility"* ]]; then
+    ok "a -R form gh accepts is read as given: ${good}"
+  else
+    bad "-R form ${good}" "rc=${RC} calls=[${CALLS}] ${OUT}"
+  fi
+done
 rm -f "${STUB_VIS}".synth-owner_*
 echo PUBLIC > "${STUB_VIS}"
 

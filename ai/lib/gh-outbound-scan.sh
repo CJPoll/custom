@@ -47,12 +47,16 @@
 # into a private file, scanned, and handed to gh in its place.
 #
 # The TARGET repository is every repository the write could reach: each
-# -R/--repo value, the owner/repo of every PR or issue URL given positionally
-# (gh acts on the URL's repo, whatever the current directory is), GH_REPO when
-# no -R is given, and the current directory's repo when none of these names
-# one. The text is scanned unless EVERY target reads PRIVATE or INTERNAL; a
-# target whose visibility cannot be read, or a URL it cannot parse, counts as
-# PUBLIC. Visibility: `gh repo view [<repo>] --json visibility`, as the App.
+# non-empty -R/--repo value, the owner/repo of every PR or issue URL given
+# positionally (gh acts on the URL's repo, whatever the current directory is),
+# and the repository gh falls back to when the last -R is empty or absent:
+# GH_REPO, else the current directory's repo (not added beside a URL). An empty
+# -R is not a target: gh then uses GH_REPO (DND-2006; the resolution and its
+# measurement are in ai/lib/gh-target-repo.sh). A -R or GH_REPO value that is
+# not a repository gh can read is REFUSED (exit 3, COULD NOT LOOK). The text
+# is scanned unless EVERY target reads PRIVATE or INTERNAL; a target whose
+# visibility cannot be read, or a URL it cannot parse, counts as PUBLIC.
+# Visibility: `gh repo view [<repo>] --json visibility`, as the App.
 #
 # Residuals, stated: `gh api` writes (scanning them needs the scan to run after
 # the merge guard, as glab-athena's does, which is a change to ai/bin/gh-athena),
@@ -79,6 +83,8 @@ OTS_TOOL=gh-athena OTS_DEST=repository
 # refuses every judged write (below, in gos_guard) rather than reading argv
 # without it.
 GOS_TABLE_OK=""
+# shellcheck source=gh-target-repo.sh
+. "$GOS_LIB_DIR/gh-target-repo.sh"
 # shellcheck source=gh-flag-table.sh
 if . "$GOS_LIB_DIR/gh-flag-table.sh" 2>/dev/null && declare -p GFT_FLAGS GFT_ALIAS >/dev/null 2>&1; then
   GOS_TABLE_OK=1
@@ -140,7 +146,7 @@ gos_guard() {
   OTS_WHAT="gh command"
   local -a argv=("$@") path=() texts=() tlab=() fsrc=() fidx=() fpre=() flab=() fnoun=() fflag=() targets=()
   local -A fbase=()
-  local n=$# i=0 a v w cmd have_r=""
+  local n=$# i=0 a v w cmd
 
   # The command path. cobra finds `pr create` past a -R/--repo and its value
   # (`gh -R X pr create`, `gh pr -R X create`), and pflag then reads that -R
@@ -152,9 +158,9 @@ gos_guard() {
       -R | --repo)
         i=$((i + 1)); v="${argv[$i]-}"
         if ots_flag_shaped "$v"; then OTS_WHAT="gh command"; ots_refuse_flag_value "$a" "$v"; fi
-        targets+=("$v"); have_r=1 ;;
-      --repo=*) targets+=("${a#--repo=}"); have_r=1 ;;
-      -R?*) v="${a#-R}"; targets+=("${v#=}"); have_r=1 ;;
+        targets+=("$v") ;;
+      --repo=*) targets+=("${a#--repo=}") ;;
+      -R?*) v="${a#-R}"; targets+=("${v#=}") ;;
       # cobra answers a help flag with the help and runs nothing.
       -h | --help) return 0 ;;
       -*)
@@ -191,7 +197,10 @@ gos_guard() {
   # Rule 2 of ai/lib/outbound-text-scan.sh, and the sort into text, files and
   # targets.
   ots_collect "${GFT_FLAGS[$cmd]}" "$GOS_TEXT" "$GOS_FILE" " repo "
-  if [ -n "$OTS_HAVE_TARGET" ]; then have_r=1; fi
+  # `targets` now holds every -R/--repo value in argv order, empty ones
+  # included; gtr_resolve (below) turns them into repositories.
+  local -a rvals=("${targets[@]}")
+  targets=()
   if [ -z "$GOS_POS" ]; then
     for w in "${OTS_PO[@]}"; do gos_positional "$w"; done
   fi
@@ -200,8 +209,12 @@ gos_guard() {
   fi
   [ "$((${#texts[@]} + ${#fsrc[@]}))" -gt 0 ] || return 0
 
-  if [ -z "$have_r" ] && [ -n "${GH_REPO:-}" ]; then targets+=("$GH_REPO"); fi
-  [ "${#targets[@]}" -gt 0 ] || targets=("")
+  # -R, then GH_REPO, then the checkout, as gh resolves them (DND-2006).
+  local has_url=0
+  [ "${#targets[@]}" = 0 ] || has_url=1
+  declare -F gtr_resolve >/dev/null || ots_refuse 3 "$GOS_LIB_DIR/gh-target-repo.sh did not load, so the outbound scan cannot tell which repository this $OTS_WHAT reaches. Fix: run gh-athena from a full ~/dev/custom checkout (ai/bin and ai/lib side by side)."
+  gtr_resolve "$has_url" "${rvals[@]}" || ots_refuse 3 "$GTR_WHY"
+  targets+=("${GTR_TARGETS[@]}")
   local t vis public=""
   for t in "${targets[@]}"; do
     if [ "$t" = "?" ]; then

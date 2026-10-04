@@ -57,6 +57,8 @@ cat > "${TMP}/bin/glab" <<'STUB'
 #!/usr/bin/env bash
 [ "${GITLAB_TOKEN:-}" = "glpat-SELFTESTFAKETOKEN0000" ] || { echo "stub: GITLAB_TOKEN not the Athena token" >&2; exit 97; }
 printf '%s\n' "$*" >> "${STUB_LOG}"
+# DND-2006: the repo-override variables glab would read, as glab sees them.
+printf 'GITLAB_REPO=%s GITLAB_HEAD_REPO=%s\n' "${GITLAB_REPO-<unset>}" "${GITLAB_HEAD_REPO-<unset>}" >> "${STUB_LOG}.env"
 args=("$@")
 if [ "${args[0]:-}" = api ] && [ "${args[1]:-}" = --hostname ]; then args=(api "${args[@]:3}"); fi
 if [ "${#args[@]}" = 2 ] && [ "${args[0]}" = api ] && [[ "${args[1]}" =~ ^(projects|groups)/[^/]+$ ]]; then
@@ -293,6 +295,23 @@ gla mr note 5 -R git@gitlab.com:synth-group/pub.git -m "x${TOKEN}"
 if refused_hit && read_was "api projects/synth-group%2Fpub"; then ok "-R as a git URL"; else bad "-R git URL" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 gla mr note 5 -R synth-group/priv -m "x${TOKEN}"
 if [ "${RC}" = 0 ] && sent; then ok "-R to a PRIVATE project is not scanned"; else bad "-R private" "rc=${RC} ${OUT}"; fi
+
+echo "--- DND-2006 sweep: GITLAB_REPO cannot split the read from the write ---"
+# glab 1.92 reads GITLAB_REPO when -R is empty or absent, and so does
+# `glab api projects/:id` (measured 2026-10-04). glab-athena scrubs every
+# GITLAB_* variable before the guard and glab run, so the guard's
+# projects/:id read and glab's write both resolve the checkout. This pins that:
+# with GITLAB_REPO naming a PUBLIC project, neither call sees it.
+: > "${STUB_LOG}.env"
+: > "${STUB_LOG}"
+OUT="$(cd "${WORK}" && GITLAB_REPO=synth-group/pub GITLAB_HEAD_REPO=synth-group/pub "${WRAPPER}" mr note 5 -R '' -m "x${TOKEN}" 2>&1)"; RC=$?
+CALLS="$(cat "${STUB_LOG}")"; ENVS="$(cat "${STUB_LOG}.env")"
+if [ "${RC}" = 0 ] && sent && read_was "api projects/:id" && ! read_was "synth-group%2Fpub" \
+   && [ -n "${ENVS}" ] && [[ "${ENVS}" != *"synth-group"* ]]; then
+  ok "GITLAB_REPO=<public> with -R '': scrubbed, so the read and the write both resolve the checkout"
+else
+  bad "GITLAB_REPO scrubbed" "rc=${RC} calls=[${CALLS}] env=[${ENVS}] ${OUT}"
+fi
 gla mr create --target-project synth-group/pub -d "x${TOKEN}"
 if refused_hit && read_was "api projects/synth-group%2Fpub"; then ok "mr create --target-project is a target"; else bad "--target-project" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 vis default public
