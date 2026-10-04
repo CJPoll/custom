@@ -24,7 +24,10 @@ plain `glab` — there's nothing to misattribute in a GET.
 **Which bot (DND-1936).** gitlab.com hosts two namespaces with two bots, so
 `glab-athena` picks the bot from the project's (host, top-level namespace): from
 `-R`, else an `api projects/<g>%2F<p>/…` endpoint, else the checkout's origin;
-for `glab-athena git`, from the URL the command reaches. The map is
+for `glab-athena git`, from the URL the command reaches. Every other word glab
+reads as a project must name that same namespace, or the call is refused: a
+positional MR or issue URL, `mr create -H/--head`, `-g/--group`, and a `repo`
+command's repository. One call acts on one namespace. The map is
 `ai/config/forge-identities.json` (the personal entry) plus the private
 overlay's `gitlab` `.identities` (work entries). A namespace with no entry, a
 differently cased one, a bot not named yet, or an unreadable map is refused

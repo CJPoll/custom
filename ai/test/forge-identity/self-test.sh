@@ -277,6 +277,52 @@ R="$(fid fid_resolve_url "https://gitlab.com/${W_NS}/../cjpoll/x.git")"
 expect A13 "a '..' segment in a remote -> BAD KEY (the URL reaches another project)" 2 "BAD KEY" "" "'..' path segment"
 R="$(fid fid_resolve_url "https://gitlab.com/${W_NS}/%2e%2e/cjpoll/x.git")"
 expect A14 "an encoded dot in a remote -> BAD KEY" 2 "BAD KEY" "" "encoded dot"
+
+echo
+echo "--- every other word glab reads as a project must name the keyed namespace ---"
+# glab acts on the project of a positional MR/issue URL, of mr create's
+# -H/--head and --target-project, of -g/--group, and of a `repo` command's
+# repository argument. Each is a key source; one that names another namespace
+# than the bot was picked for is BAD KEY, never that bot acting there.
+MRU="https://gitlab.com/${W_NS}/app/-/merge_requests/3"
+R="$(fid_in "${PERS}" fid_resolve_glab_args mr note "${MRU}" -m x)"
+expect P1 "a positional work MR URL from a personal checkout -> BAD KEY, never the personal bot" 2 "BAD KEY" "" "names namespace '${W_NS}'"
+R="$(fid_in "${WORK}" fid_resolve_glab_args mr note https://gitlab.com/cjpoll/custom/-/merge_requests/3 -m x)"
+expect P2 "the reverse: a personal MR URL from a work checkout -> BAD KEY" 2 "BAD KEY" "" "names namespace 'cjpoll'"
+R="$(fid_in "${WORK}" fid_resolve_glab_args mr note "${MRU}" -m x)"
+expect P3 "an MR URL of the keyed namespace -> that bot" 0 FOUND "${W_BOT}" -
+R="$(fid_in "${PERS}" fid_resolve_glab_args mr note -R "${W_NS}/app" "${MRU}" -m x)"
+expect P3b "-R and the MR URL agreeing -> that bot" 0 FOUND "${W_BOT}" -
+R="$(fid_in "${PERS}" fid_resolve_glab_args mr note 3 -m "see https://gitlab.com/${W_NS}/app/-/issues/1 for context")"
+expect P4 "a URL inside a message word is text, not a key" 0 FOUND "${P_BOT}" -
+R="$(fid_in "${PERS}" fid_resolve_glab_args mr create -H "${W_NS}/app" --fill)"
+expect P5 "mr create -H <work>/<p> from a personal checkout -> BAD KEY" 2 "BAD KEY" "" "names namespace '${W_NS}'"
+R="$(fid_in "${PERS}" fid_resolve_glab_args mr create --head="${W_NS}/app" --fill)"
+expect P5b "--head=<work>/<p> -> BAD KEY" 2 "BAD KEY" "" "names namespace '${W_NS}'"
+R="$(fid_in "${PERS}" fid_resolve_glab_args mr create --head 1234 --fill)"
+expect P5c "--head <numeric id> -> BAD KEY (it says nothing about its namespace)" 2 "BAD KEY" "" "numeric id"
+R="$(fid_in "${PERS}" fid_resolve_glab_args mr create -fH "${W_NS}/app")"
+expect P5d "-H combined with a short flag -> BAD KEY" 2 "BAD KEY" "" "combined with other short flags"
+R="$(fid_in "${PERS}" fid_resolve_glab_args mr create "-tRefactor the Handler" -dSYNTH-1)"
+expect P5e "an attached text value holding R/H (-tRefactor ..., -dSYNTH-1) is text, not a project flag" 0 FOUND "${P_BOT}" -
+R="$(fid_in "${PERS}" fid_resolve_glab_args mr create --target-project "${W_NS}/app" --fill)"
+expect P6 "mr create --target-project <work>/<p> -> BAD KEY" 2 "BAD KEY" "" "names namespace '${W_NS}'"
+R="$(fid_in "${PERS}" fid_resolve_glab_args mr list -g "${W_NS}")"
+expect P7 "-g <work group> from a personal checkout -> BAD KEY" 2 "BAD KEY" "" "names namespace '${W_NS}'"
+R="$(fid_in "${PERS}" fid_resolve_glab_args mr list --group=cjpoll/sub)"
+expect P7b "--group=<keyed namespace>/<sub> -> that bot" 0 FOUND "${P_BOT}" -
+R="$(fid_in "${PERS}" fid_resolve_glab_args milestone list --group "${W_NS}%2Fsub")"
+expect P7c "a URL-encoded --group of another namespace (milestone) -> BAD KEY" 2 "BAD KEY" "" "names namespace '${W_NS}'"
+R="$(fid_in "${PERS}" fid_resolve_glab_args mr list -fg "${W_NS}")"
+expect P7d "-g combined with a short flag -> BAD KEY" 2 "BAD KEY" "" "combined with other short flags"
+R="$(fid_in "${PERS}" fid_resolve_glab_args repo view "${W_NS}/app")"
+expect P8 "repo view <work>/<p> -> BAD KEY" 2 "BAD KEY" "" "names namespace '${W_NS}'"
+R="$(fid_in "${PERS}" fid_resolve_glab_args repo view cjpoll/custom)"
+expect P8b "repo view <keyed namespace>/<p> -> that bot" 0 FOUND "${P_BOT}" -
+R="$(fid_in "${PERS}" fid_resolve_glab_args repo fork my-project)"
+expect P8c "repo fork <bare name> (glab reads it in the bot's own namespace) -> BAD KEY" 2 "BAD KEY" "" "bare name"
+R="$(fid_in "${PERS}" fid_resolve_glab_args api -H "Accept: text/plain" "projects/:id/issues")"
+expect P9 "api -H is a header, not a head project" 0 FOUND "${P_BOT}" -
 R="$(fid_in "${PERS}" fid_resolve_glab_args mr list -R "https://u:s3cr3t@gitlab.com/someone-else/x")"
 if [ "$(f_rc)" = 1 ] && [[ "$R" != *s3cr3t* ]]; then ok "A15. a -R URL's credentials never reach a refusal"
 else bad "A15. -R credentials kept out" "got '${R}'"; fi

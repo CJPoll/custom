@@ -524,6 +524,12 @@ glai "${TMP}/norepo-1936" api -X POST "projects/example-group%2Fexample-app/issu
   && [ "$(cat "${IDBIN}/vis.log" 2>/dev/null)" = "token=work args=api projects/example-group%2Fexample-app" ] \
   && ok "N9. api projects/<ns>%2F<p>/... outside a checkout -> that namespace's token, the outbound scan's visibility read included" \
   || bad "N9. endpoint selects the identity" "rc=${RC} out='${OUT}' err='${ERR}' vis='$(cat "${IDBIN}/vis.log" 2>/dev/null)'"
+glai "${PR}" mr note https://gitlab.com/example-group/example-app/-/merge_requests/3 -m x
+[ "${RC}" = 3 ] && [[ "${ERR}" == *"BAD KEY"* ]] && [[ "${ERR}" == *"names namespace 'example-group'"* ]] && [[ "${OUT}" != *STUB-ID* ]] \
+  && ok "N9b. a work MR URL from a cjpoll/ checkout -> refused, glab never runs with the personal token" || bad "N9b. MR URL of another namespace" "rc=${RC} out='${OUT}' err='${ERR}'"
+glai "${WR}" mr note https://gitlab.com/cjpoll/custom/-/merge_requests/3 -m x
+[ "${RC}" = 3 ] && [[ "${ERR}" == *"BAD KEY"* ]] && [[ "${ERR}" == *"names namespace 'cjpoll'"* ]] && [[ "${OUT}" != *STUB-ID* ]] \
+  && ok "N9c. the reverse: a cjpoll/ MR URL from a work checkout -> refused, glab never runs with the work token" || bad "N9c. reverse MR URL" "rc=${RC} out='${OUT}' err='${ERR}'"
 glai "${UR}" mr list
 [ "${RC}" = 3 ] && [[ "${ERR}" == *"NO ENTRY"* ]] && [[ "${OUT}" != *STUB-ID* ]] \
   && ok "N10. glab in a checkout of an unmapped namespace -> refused, glab never runs" || bad "N10. unmapped normal path" "rc=${RC} out='${OUT}' err='${ERR}'"

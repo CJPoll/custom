@@ -337,8 +337,13 @@ gla mr note https://gitlab.com/synth-group/pub/-/merge_requests/3 -m "x${TOKEN}"
 if refused_hit && read_was "api projects/synth-group%2Fpub"; then ok "an MR URL to a PUBLIC project is scanned from a PRIVATE cwd"; else bad "MR URL" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 gla mr note -R synth-group/priv https://gitlab.com/synth-group/pub/-/merge_requests/3 -m "x${TOKEN}"
 if refused_hit; then ok "-R private plus a PUBLIC URL is scanned"; else bad "-R + URL" "rc=${RC} ${OUT}"; fi
+# A positional URL is a key source of the identity map (DND-1936): one that
+# names no project is refused before the scan; the library keeps the scan's
+# own reading covered.
 gla mr note https://gitlab.com/ -m "x${TOKEN}"
-if refused_hit && [[ "${OUT}" == *"scanning as PUBLIC"* ]]; then ok "an unparsable URL is scanned as PUBLIC"; else bad "unparsable URL" "rc=${RC} ${OUT}"; fi
+if [ "${RC}" = 3 ] && ! sent && [[ "${OUT}" == *"BAD KEY"* ]] && [[ "${OUT}" == *"Fix:"* ]]; then ok "an unparsable URL is refused by the identity map"; else bad "unparsable URL (identity)" "rc=${RC} ${OUT}"; fi
+lib_guard mr note https://gitlab.com/ -m "x${TOKEN}"
+if refused_hit && [[ "${OUT}" == *"scanning as PUBLIC"* ]]; then ok "an unparsable URL is scanned as PUBLIC (library)"; else bad "unparsable URL" "rc=${RC} ${OUT}"; fi
 vis "synth-group%2Fmissing" none
 gla mr note 5 -R synth-group/missing -m "clean"
 if [ "${RC}" = 3 ] && ! sent && [[ "${OUT}" == *"COULD NOT LOOK"* ]] && [[ "${OUT}" == *"synth-group/missing"* ]]; then ok "an unreadable -R project refused, named"; else bad "unreadable -R" "rc=${RC} ${OUT}"; fi

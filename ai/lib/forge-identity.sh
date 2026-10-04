@@ -392,21 +392,39 @@ fid_endpoint_key() {
 # (it may be that flag's value); -R combined with other short flags in one word
 # (-yR, -fRx/y); -R and the endpoint disagreeing; an endpoint
 # naming its target by id, double encoding or an absolute URL; `api graphql`
-# with no -R; an origin checkout with another remote on that host that is not
-# this identity (fid_check_other_remotes).
+# with no -R; any other word glab reads as a project naming another namespace
+# (fid_check_project_words); an origin checkout with another remote on that
+# host that is not this identity (fid_check_other_remotes).
 fid_resolve_glab_args() {
-  local repos=() hn="" a v prev="" i=0 n="$#" ep="" key_h key_n src
+  local repos=() hn="" a v prev="" i=0 n="$#" ep="" key_h key_n src c1="" c2="" c2i=-1
   local args=("$@")
   fid_clear
+  # The command path: the first two words that are neither flags nor the value
+  # of -R/--repo/--hostname (`mr create`, `repo view`, `api`).
+  while [ "$i" -lt "$n" ] && [ -z "$c2" ]; do
+    a="${args[$i]}"
+    case "$a" in
+      --) break ;;
+      -R|--repo|--hostname) i=$((i + 1)) ;;
+      -*) ;;
+      *) if [ -z "$c1" ]; then c1="$a"; else c2="$a" c2i="$i"; fi ;;
+    esac
+    i=$((i + 1))
+  done
+  i=0
   while [ "$i" -lt "$n" ]; do
     a="${args[$i]}"
     [ "$a" = -- ] && break
     # glab's flag parser (pflag) reads combined short flags: `-yR x/y` is -y
-    # and -R x/y, `-fRx/y` is -f and -Rx/y. This loop keys only on -R as its
-    # own word, so a combined -R is refused rather than read as some flag.
-    if [[ "$a" != -R* && "$a" =~ ^-[A-Za-z]+R ]]; then
-      fid_fail 2 "BAD KEY" "'$(fid_shown "$a")' may be -R combined with other short flags, which names a project this does not read" \
-        "write -R <namespace>/<project> as its own word (\`mr merge <iid> -y -R <namespace>/<project>\`), and a short flag's value as its own word. $FID_ESCALATE"
+    # and -R x/y, `-fRx/y` is -f and -Rx/y. This loop keys only on -R (and
+    # fid_check_project_words on -H and -g) as its own word, so a combined one
+    # is refused rather than read as some flag. -H is mr create's head
+    # project (an api header elsewhere); -g a group outside api.
+    if fid_combined_project_flag "$a" R \
+      || { [ "$c1" = mr ] && [[ "$c2" =~ ^(create|new)$ ]] && fid_combined_project_flag "$a" H; } \
+      || { [ "$c1" != api ] && fid_combined_project_flag "$a" g; }; then
+      fid_fail 2 "BAD KEY" "'$(fid_shown "$a")' may be a project flag (-R, or -H/-g where glab reads them as a project) combined with other short flags, which names a project this does not read" \
+        "write each short flag as its own word (\`mr merge <iid> -y -R <namespace>/<project>\`), and a short flag's value as its own word. $FID_ESCALATE"
       return
     fi
     case "$a" in
@@ -483,9 +501,137 @@ fid_resolve_glab_args() {
     key_h="$FID_KEY_HOST" key_n="$FID_KEY_NS" src="origin"
     [ -z "$hn" ] || src="origin, with the host from --hostname"
   fi
+  fid_check_project_words "$key_h" "$key_n" "$src" "$c1" "$c2" "$c2i" "${args[@]}" || return
   fid_lookup "$key_h" "$key_n" || { FID_WHY="$FID_WHY (key from $src)"; return "$(fid_rc)"; }
   if [ "${src%%,*}" = origin ]; then
     fid_check_other_remotes || return
+  fi
+  return 0
+}
+
+# fid_combined_project_flag <word> <R|H|g> : true when <word> is a cluster of
+# short flags (`-yR`, `-fRx/y`, `-fg grp`) that may hold the project flag
+# <letter> past its first letter. pflag gives a valued flag the rest of the
+# word, and which short flags are boolean differs per command, so this does
+# not guess: the letter anywhere in the leading run of letters counts when
+# what follows it could be its value. That is nothing (the value is the next
+# word), or a word with no whitespace that for R/H names a project (a `/`,
+# a `:`, or all digits) and for g is any group name. An attached text value
+# such as `-tRefactor the parser` or `-txSYNTH-1` names none, and passes.
+fid_combined_project_flag() {
+  local w="$1" l="$2" run rest k
+  [[ "$w" == -[A-Za-z]* && "$w" != --* && "$w" != "-$l"* ]] || return 1
+  run="${w#-}"; run="${run%%[!A-Za-z]*}"
+  for ((k = 1; k < ${#run}; k++)); do
+    [ "${run:k:1}" = "$l" ] || continue
+    rest="${w:k+2}"
+    [ -z "$rest" ] && return 0
+    [[ "$rest" =~ [[:space:]] ]] && continue
+    case "$l" in
+      g) return 0 ;;
+      *) [[ "$rest" == */* || "$rest" == *:* || "$rest" =~ ^=?[0-9]+$ ]] && return 0 ;;
+    esac
+  done
+  return 1
+}
+
+# fid_check_project_words <key host> <key ns> <key source> <c1> <c2> <c2 index>
+#   <glab args...> : 0 when every other word glab reads as a project names the
+# keyed (host, namespace); else 2 (BAD KEY). Those words, for glab 1.92:
+#   * a positional http(s) URL (an MR or issue URL is acted on as its project;
+#     a word with whitespace is message text, not a URL);
+#   * mr create|new -H/--head (the head project) and --target-project;
+#   * -g/--group outside api (a group is a namespace too);
+#   * a `repo <sub>` command's first positional (its repository; a bare name
+#     is refused, because glab reads it in the bot's own user namespace).
+# A project named by numeric id says nothing about its namespace: refused.
+# Restores FID_KEY_HOST/FID_KEY_NS for the caller.
+fid_check_project_words() {
+  local kh="$1" kn="$2" src="$3" c1="$4" c2="$5" c2i="$6" a v i=0 n what rpos=""
+  shift 6
+  local args=("$@")
+  n="${#args[@]}"
+  [ "$c1" = repo ] && [ "$c2i" -ge 0 ] && rpos=pending
+  while [ "$i" -lt "$n" ]; do
+    a="${args[$i]}" v="" what=""
+    case "$a" in
+      --) break ;;
+      -R|--repo|--hostname) i=$((i + 2)); continue ;;
+      -R?*|--repo=*|--hostname=*) i=$((i + 1)); continue ;;
+    esac
+    if [ "$c1" != api ]; then
+      case "$a" in
+        -g|--group) i=$((i + 1)); v="${args[$i]:-}"; what="group" ;;
+        --group=*) v="${a#--group=}"; what="group" ;;
+        -g?*) v="${a#-g}"; v="${v#=}"; what="group" ;;
+        --target-project) i=$((i + 1)); v="${args[$i]:-}"; what="project" ;;
+        --target-project=*) v="${a#--target-project=}"; what="project" ;;
+      esac
+      if [ -z "$what" ] && [ "$c1" = mr ] && [[ "$c2" =~ ^(create|new)$ ]]; then
+        case "$a" in
+          -H|--head) i=$((i + 1)); v="${args[$i]:-}"; what="project" ;;
+          --head=*) v="${a#--head=}"; what="project" ;;
+          -H?*) v="${a#-H}"; v="${v#=}"; what="project" ;;
+        esac
+      fi
+    fi
+    if [ -z "$what" ]; then
+      shopt -s nocasematch
+      case "$a" in
+        http://*|https://*) [[ "$a" =~ [[:space:]] ]] || { v="$a" what="url"; } ;;
+      esac
+      shopt -u nocasematch
+    fi
+    if [ -z "$what" ] && [ "$rpos" = pending ] && [ "$i" -gt "$c2i" ] && [[ "$a" != -* ]]; then
+      v="$a" what="project"; rpos=done
+      if [[ "$v" != */* ]] && ! [[ "$v" =~ ^[0-9]+$ ]]; then
+        fid_fail 2 "BAD KEY" "\`repo $c2\` names its repository '$(fid_shown "$v")' by a bare name, which glab reads in the bot's own namespace, not $kh/$kn" \
+          "name it as <namespace>/<project> (in $kn), first after \`repo $c2\`. $FID_ESCALATE"; return
+      fi
+    elif [ "$what" = url ] && [ "$rpos" = pending ] && [ "$i" -gt "$c2i" ]; then
+      rpos=done
+    fi
+    if [ -n "$what" ]; then
+      fid_check_one_project_word "$kh" "$kn" "$src" "$what" "$v" || return
+    fi
+    i=$((i + 1))
+  done
+  FID_KEY_HOST="$kh" FID_KEY_NS="$kn"
+  return 0
+}
+
+# fid_check_one_project_word <key host> <key ns> <key source> <group|project|url> <value>
+fid_check_one_project_word() {
+  local kh="$1" kn="$2" src="$3" what="$4" v="$5" h ns shown
+  shown="$(fid_shown "$v")"
+  if [[ "$v" =~ ^[0-9]+$ ]] || [ -z "$v" ]; then
+    fid_fail 2 "BAD KEY" "the $what '${shown}' is empty or a numeric id, which says nothing about its namespace" \
+      "name it by path (<namespace>/<project>, in $kn). $FID_ESCALATE"; return
+  fi
+  case "$what" in
+    url)
+      v="${v%%[?#]*}"; v="${v%%/-/*}"
+      fid_parse_remote "$v" || { FID_WHY="$FID_WHY (the URL argument ${shown})"; return 2; }
+      h="$FID_KEY_HOST" ns="$FID_KEY_NS" ;;
+    group)
+      # milestone --group takes a URL-encoded path: only its %2F separators.
+      v="${v//%2F//}"; v="${v//%2f//}"
+      if [[ "$v" == *://* || "$v" == *%* || "$v" == */ ]]; then
+        fid_fail 2 "BAD KEY" "the group '${shown}' is not a plain <namespace>[/<subgroup>] path" \
+          "pass the group as <namespace>[/<subgroup>]. $FID_ESCALATE"; return
+      fi
+      fid_check_segments "$v" "the group $shown" || return
+      h="$kh" ns="${v%%/*}" ;;
+    project)
+      fid_parse_repo_arg "$v" "" || return
+      h="$FID_KEY_HOST" ns="$FID_KEY_NS"
+      # A bare OWNER/REPO takes the keyed host, as glab does with --hostname.
+      [[ "$v" == *://* || "$v" == *@*:* ]] || h="$kh" ;;
+  esac
+  if [ "${h,,}" != "${kh,,}" ] || [ "$ns" != "$kn" ]; then
+    fid_fail 2 "BAD KEY" "the $what '${shown}' names namespace '$ns' on $h, but the bot is keyed on $kh/$kn (from $src); glab would act there as that bot" \
+      "act on one namespace per call: pass -R <namespace>/<project> for the project the call acts on, and no word naming another. $FID_ESCALATE"
+    return
   fi
   return 0
 }
