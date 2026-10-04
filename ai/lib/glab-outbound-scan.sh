@@ -94,10 +94,35 @@
 #                        host other than gitlab.com.
 # The text is scanned unless EVERY target reads private.
 #
-# Residuals, stated: `mr create --fill` / `--fill-commit-body` / `--signoff`
-# (commit messages, which the pre-push hook scans), an interactive editor
-# (`-d -`, a note with no -m) or --web, `--recover` (a title and description
-# loaded from a recovery file), the CONTENT of release asset files (their paths
+# Text glab builds itself (DND-2014). Some flags make glab write text it
+# builds after this scan, from the server, the git history or a local file, so
+# the scan can never see it. On a target that is not PRIVATE each is REFUSED
+# (exit 3, Fix: pass the text explicitly with --title/--description), even when
+# the command carries no text of its own. Read from glab 1.92.1:
+#   mr create --related-issue/-i   with an empty or absent --title, the
+#                                  issue's title (fetched from the server,
+#                                  possibly a PRIVATE issue in another project)
+#                                  is the MR title; with an empty or absent
+#                                  --source-branch, glab creates a branch named
+#                                  after that title on the target. So it needs
+#                                  a non-empty --title AND --source-branch.
+#   mr create --copy-issue-labels  the related issue's labels
+#   mr create, mr update --fill/-f, --fill-commit-body
+#                                  commit messages and the branch name
+#   mr create, issue create --recover
+#                                  a title and description from glab's recovery
+#                                  file
+#   mr create --signoff            the account's name and email, from the server
+# A switch is on unless its last occurrence is 0, f, F, false, FALSE or False
+# (pflag's ParseBool; any other value makes glab fail, so it reads as on). The
+# scan does not fetch that text to scan it: matching what glab would build
+# (issueutils.IssueFromArg, git.Commits between remote-tracking refs, the
+# recovery file's path) is a second implementation that could drift. What glab
+# still adds and is not refused: `Closes #<iid>` (a number) in the description,
+# and `Draft: ` before the title.
+#
+# Residuals, stated: an interactive editor (`-d -`, a note with no -m) or
+# --web, the CONTENT of release asset files (their paths
 # are scanned as positionals), other commands (snippets, wiki, label and repo
 # descriptions, release update), names that are not free text (labels,
 # milestones), the text of an api endpoint's PATH (only its ?query is scanned;
@@ -223,6 +248,72 @@ glos_positional() {
     targets+=("https://$host/${p%%/-/*}")
   fi
   return 0
+}
+
+# glos_switch_on <long> : true when the last occurrence of the switch --<long>
+# reads as on. pflag's ParseBool takes 1 t T TRUE true True as on and 0 f F
+# FALSE false False as off; any other value is an error and glab sends
+# nothing, so it reads as on here (the stricter reading).
+glos_switch_on() {
+  local k v="" seen=""
+  for k in "${!OTS_BN[@]}"; do
+    if [ "${OTS_BN[$k]}" = "$1" ]; then v="${OTS_BV[$k]}" seen=1; fi
+  done
+  [ -n "$seen" ] || return 1
+  case "$v" in 0 | f | F | false | FALSE | False) return 1 ;; esac
+  return 0
+}
+
+# glos_value <long> : the value of the last occurrence of --<long> (pflag keeps
+# the last), or "" when it is not given. glab treats an empty value as absent.
+glos_value() {
+  local k v=""
+  for k in "${!OTS_FN[@]}"; do
+    if [ "${OTS_FN[$k]}" = "$1" ]; then v="${OTS_FV[$k]}"; fi
+  done
+  printf '%s' "$v"
+}
+
+# glos_authored <command> : sets GLOS_AUTHORED to the flags with which glab
+# builds text itself, after this scan and never seen by it, and GLOS_AUTHORED_WHAT
+# to what that text is. Empty when there are none. Read from glab 1.92.1
+# (internal/commands/mr/create/mr_create.go, mr/update/mr_update.go,
+# issue/create/issue_create.go; DND-2014). See "Text glab builds itself" in the
+# header.
+glos_authored() {
+  local f
+  GLOS_AUTHORED="" GLOS_AUTHORED_WHAT=""
+  case "$1" in
+    "mr create")
+      if [ -n "$(glos_value related-issue)" ] && { [ -z "$(glos_value title)" ] || [ -z "$(glos_value source-branch)" ]; }; then
+        glos_authored_add "--related-issue without a non-empty --title and --source-branch" "the related issue's title, fetched from the server (in the MR title, and in a branch glab creates on the target)"
+      fi
+      for f in copy-issue-labels fill fill-commit-body recover signoff; do
+        if glos_switch_on "$f"; then glos_authored_add "--$f" "$(glos_authored_text "$f")"; fi
+      done ;;
+    "mr update")
+      for f in fill fill-commit-body; do
+        if glos_switch_on "$f"; then glos_authored_add "--$f" "$(glos_authored_text "$f")"; fi
+      done ;;
+    "issue create")
+      if glos_switch_on recover; then glos_authored_add --recover "$(glos_authored_text recover)"; fi ;;
+  esac
+  return 0
+}
+
+glos_authored_add() {
+  GLOS_AUTHORED+="${GLOS_AUTHORED:+, }$1"
+  GLOS_AUTHORED_WHAT+="${GLOS_AUTHORED_WHAT:+; }$2"
+}
+
+glos_authored_text() {
+  case "$1" in
+    copy-issue-labels) printf '%s' "the related issue's labels" ;;
+    fill) printf '%s' "commit messages and the branch name" ;;
+    fill-commit-body) printf '%s' "commit message bodies" ;;
+    recover) printf '%s' "a title and description loaded from glab's recovery file" ;;
+    signoff) printf '%s' "the account's name and email, fetched from the server" ;;
+  esac
 }
 
 # glos_read_vis <display name> <glab args...> : sets GLOS_VIS to public,
@@ -489,7 +580,7 @@ glos_api() {
 # Returns 0, or exits 1 (HITS) or 3 (cannot judge).
 glos_guard() {
   GLOS_ARGV=("$@")
-  GLOS_API_FILLED=""
+  GLOS_API_FILLED="" GLOS_AUTHORED="" GLOS_AUTHORED_WHAT=""
   OTS_TOOL=glab-athena OTS_DEST=project OTS_WHAT="glab command"
   local -a argv=("$@") path=() targets=() texts=() tlab=() fsrc=() fidx=() fpre=() flab=() fnoun=() fflag=() pos=()
   local -A fbase=()
@@ -564,13 +655,16 @@ glos_guard() {
       pos+=("$a")
       [ -z "$GLOS_REF" ] || glos_positional "$GLOS_REF" "$a"
     done
+    glos_authored "$cmd"
     # A flag the table lacks may be a newer text flag whose value this parse
     # reads as a positional: every positional is then text.
     if [ -n "$OTS_POS_TEXT" ] || [ -n "$OTS_SAW_UNKNOWN" ] || [ "$((${#texts[@]} + ${#fsrc[@]}))" -gt 0 ]; then
       for a in "${pos[@]}"; do texts+=("$a"); tlab+=(argument); done
     fi
   fi
-  [ "$((${#texts[@]} + ${#fsrc[@]}))" -gt 0 ] || return 0
+  # A command where glab builds text itself is judged even when it carries
+  # none of its own (DND-2014).
+  [ "$((${#texts[@]} + ${#fsrc[@]}))" -gt 0 ] || [ -n "$GLOS_AUTHORED" ] || return 0
   if [ "$group" != api ] && [ "${#targets[@]}" = 0 ]; then targets+=(""); fi
   [ "${#targets[@]}" -gt 0 ] || return 0
 
@@ -580,6 +674,9 @@ glos_guard() {
     if [ "$GLOS_VIS" != private ]; then public=1; fi
   done
   [ -n "$public" ] || return 0
+  if [ -n "$GLOS_AUTHORED" ]; then
+    ots_refuse 3 "$GLOS_AUTHORED makes glab send text glab builds itself ($GLOS_AUTHORED_WHAT) to this PUBLIC (or unknown) project, after the outbound scan and never seen by it. Fix: pass the text explicitly, so it is scanned: --title \"…\" --description \"…\" (with --related-issue, a non-empty --title and --source-branch <name> too), and drop --fill, --fill-commit-body, --recover, --signoff and --copy-issue-labels."
+  fi
   if [ -n "$GLOS_API_FILLED" ]; then
     ots_refuse 3 "$GLOS_API_FILLED holds a placeholder glab fills after this scan (:branch, :fullpath, :group, :id, :namespace, :repo, :user, :username), so the text sent to this PUBLIC (or unknown) project is not the text scanned. Fix: send the value with -f (raw; glab does not fill it), or write it out in full."
   fi

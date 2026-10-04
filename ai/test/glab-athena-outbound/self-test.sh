@@ -538,6 +538,69 @@ if refused_hit && read_was "api projects/:id" && ! read_was "synth-group%2Fpriv"
 vis default private
 reset_vis
 
+echo "--- DND-2014: text glab builds itself never reaches a PUBLIC project unscanned ---"
+# glab 1.92.1 `mr create` copies the --related-issue's title (fetched from the
+# server, possibly a PRIVATE issue in another project) into the MR title when
+# --title is empty, and into a branch it creates on the target when
+# --source-branch is empty; --copy-issue-labels copies its labels. --fill and
+# --fill-commit-body (mr create, mr update) write commit messages, --recover a
+# saved recovery file, --signoff the account's name and email. The scan never
+# sees any of it, so on a target that is not PRIVATE it is refused.
+refused_authored() { [ "${RC}" = 3 ] && ! sent && [[ "${OUT}" == *"text glab builds itself"* ]] && [[ "${OUT}" == *"Fix:"* ]]; }
+ISSUE_URL="https://gitlab.com/synth-group/priv/-/issues/7"
+for argv in "mr create --related-issue 7 --yes" "mr create -i ${ISSUE_URL} -t T -d D" "mr create -i 7 -s br -d D" \
+  "mr create -i=7 -s br -d D" "mr create --related-issue=${ISSUE_URL} -s br" \
+  "mr create -i 7 -t T -s br -d D --copy-issue-labels" \
+  "mr create --fill --yes" "mr create -f -y" "mr create -fy" "mr create -yf" "mr new --fill -t T" \
+  "mr create -f=true -t T" "mr create --fill=1 -t T" "mr create --fill=bogus -t T" \
+  "mr create --fill=false --fill -t T" "mr create --fill --fill-commit-body --yes" \
+  "mr create -t T -d D --recover" "mr create -t T -d D --signoff" \
+  "mr update 5 --fill --yes" "mr update 5 -fy" "mr update 5 --fill --fill-commit-body -y" \
+  "issue create -t T -d D --recover" "issue new -t T -d D --recover=true" \
+  "-R synth-group/pub mr create --fill --yes"; do
+  # shellcheck disable=SC2086
+  gla ${argv}
+  if refused_authored; then ok "DND-2014 refused: ${argv}"; else bad "DND-2014 refused: ${argv}" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+done
+# An empty -t or -s value is what glab treats as absent (the issue's text fills it).
+gla mr create -i 7 -t "" -s br -d D
+if refused_authored; then ok "DND-2014 refused: an empty --title with --related-issue"; else bad "DND-2014: empty --title" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+gla mr create -i 7 -t T -s "" -d D
+if refused_authored; then ok "DND-2014 refused: an empty --source-branch with --related-issue"; else bad "DND-2014: empty --source-branch" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+# The last occurrence wins, as pflag reads it.
+gla mr create -i 7 -t T -s br -t "" -d D
+if refused_authored; then ok "DND-2014 refused: the last --title is empty"; else bad "DND-2014: last --title empty" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+# The refusal names the flag, and the Fix names the explicit text to pass.
+gla mr create --related-issue 7 --yes
+if [[ "${OUT}" == *"--related-issue"* ]] && [[ "${OUT}" == *"--title"* ]] && [[ "${OUT}" == *"--source-branch"* ]]; then ok "DND-2014: the refusal names --related-issue and the explicit flags to pass"; else bad "DND-2014: refusal wording" "${OUT}"; fi
+# Explicit text passes: every value glab sends was scanned.
+for argv in "mr create -i 7 -t T -s br -d D" "mr create -i ${ISSUE_URL} --title T --source-branch br -d D" \
+  "mr create --related-issue=${ISSUE_URL} -s br -t T -d D" "mr create --fill=false -t T -d D" "mr create -f=0 -t T -d D" "mr create --fill --fill=false -t T -d D" \
+  "mr create --related-issue= -t T -d D" "mr create -t T -d D --recover=false --signoff=false" "mr update 5 --fill=FALSE -t T" \
+  "issue create -t T -d D"; do
+  # shellcheck disable=SC2086
+  gla ${argv}
+  if [ "${RC}" = 0 ] && sent; then ok "DND-2014 explicit text passes: ${argv}"; else bad "DND-2014 explicit: ${argv}" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+done
+# A PRIVATE target is not scanned, so glab may build its own text there; the
+# visibility is still read, and an unreadable one refuses.
+vis default private
+gla mr create --fill --yes
+if [ "${RC}" = 0 ] && sent && read_was "api projects/:id"; then ok "DND-2014: --fill to a PRIVATE project is sent"; else bad "DND-2014: private --fill" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+gla mr create --related-issue 7 --yes
+if [ "${RC}" = 0 ] && sent; then ok "DND-2014: --related-issue to a PRIVATE project is sent"; else bad "DND-2014: private --related-issue" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+vis "synth-group%2Fpub" public
+gla -R synth-group/pub mr create --related-issue 7 --yes
+if refused_authored && read_was "api projects/synth-group%2Fpub"; then ok "DND-2014: -R to a PUBLIC project from a PRIVATE cwd is refused"; else bad "DND-2014: -R public" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+vis default none
+gla mr create --fill --yes
+if [ "${RC}" = 3 ] && ! sent && [[ "${OUT}" == *"COULD NOT LOOK"* ]]; then ok "DND-2014: --fill with an unreadable visibility refuses"; else bad "DND-2014: unreadable --fill" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+reset_vis
+# Library path: the guard itself refuses, not only the wrapper around it.
+lib_guard mr create --related-issue 7 --yes
+if refused_authored; then ok "DND-2014: glos_guard refuses --related-issue"; else bad "DND-2014: lib --related-issue" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+reset_vis
+
 echo "--- commands outside the list pass untouched ---"
 gla mr view 5
 if [ "${RC}" = 0 ] && sent && [ "$(grep -c . <<<"${CALLS}")" = 1 ]; then ok "mr view untouched"; else bad "mr view" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi

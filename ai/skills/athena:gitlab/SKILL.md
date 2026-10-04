@@ -32,10 +32,17 @@ the exact same arguments as `glab`, including `glab-athena api <method> <path>`
 for raw API calls. Examples:
 
 ```sh
-~/dev/custom/ai/bin/glab-athena mr create --fill --yes
+~/dev/custom/ai/bin/glab-athena mr create --title "…" --description "…" --yes
 ~/dev/custom/ai/bin/glab-athena mr note 643 --message "…"
 ~/dev/custom/ai/bin/glab-athena api -X POST "projects/:id/merge_requests/643/approve"
 ```
+
+Pass MR and issue text explicitly. On a project that is not private, the
+wrapper scans every text it sends and refuses (exit 3) a flag that makes glab
+build text itself: `--fill`, `--fill-commit-body`, `--recover`, `--signoff`,
+`--copy-issue-labels`, and `--related-issue` without `--title` and
+`--source-branch`. The list and the reasons are in
+`ai/lib/glab-outbound-scan.sh` → *Text glab builds itself*.
 
 ## Setup
 

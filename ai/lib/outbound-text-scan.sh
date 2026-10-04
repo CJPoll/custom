@@ -216,6 +216,10 @@ ots_refuse_flag_value() {
 #   OTS_FP   the text before the value in that word ("" when the value is
 #            its own word; `--body-file=`, `-F`, `-dF`, `-F=` when attached)
 #   OTS_FS   1 when the value is its own word, else 0
+# and, per switch occurrence (a flag that takes no value), in order:
+#   OTS_BN   its long name (no dashes)
+#   OTS_BV   its value: "true", or the text after `=` (`--fill=false`,
+#            `-f=0`), unparsed (DND-2014)
 # and OTS_PO / OTS_POI, every positional and its index (everything after `--`
 # included). OTS_HELP is 1 when the argv asks for help with an undefined -h,
 # which pflag answers without running the command. The pflag rules: `--name=v`; `--name v` (v taken even when it
@@ -227,7 +231,7 @@ ots_pflag_parse() {
   local mode="$1" table="$2" off="$3"; shift 3
   local -a args=("$@")
   local n=$# i=0 a name long j sh c rest
-  OTS_FN=() OTS_FV=() OTS_FI=() OTS_FP=() OTS_FS=() OTS_PO=() OTS_POI=() OTS_UNKNOWN="" OTS_HELP="" OTS_AMBIG="" OTS_SAW_UNKNOWN=""
+  OTS_FN=() OTS_FV=() OTS_FI=() OTS_FP=() OTS_FS=() OTS_BN=() OTS_BV=() OTS_PO=() OTS_POI=() OTS_UNKNOWN="" OTS_HELP="" OTS_AMBIG="" OTS_SAW_UNKNOWN=""
   case "$mode" in strict | lenient) ;; *) OTS_UNKNOWN="parse mode '$mode'"; return 1 ;; esac
   while [ "$i" -lt "$n" ]; do
     a="${args[$i]}"
@@ -248,9 +252,11 @@ ots_pflag_parse() {
           i=$((i + 1)); continue
         fi
         if [[ "$name" == *=* ]]; then
-          if [ "$OTS_K" = v ]; then ots_pflag_rec "$long" "${name#*=}" $((off + i)) "--$long=" 0; fi
+          if [ "$OTS_K" = v ]; then ots_pflag_rec "$long" "${name#*=}" $((off + i)) "--$long=" 0; else OTS_BN+=("$long"); OTS_BV+=("${name#*=}"); fi
         elif [ "$OTS_K" = v ]; then
           i=$((i + 1)); ots_pflag_rec "$long" "${args[$i]-}" $((off + i)) "" 1
+        else
+          OTS_BN+=("$long"); OTS_BV+=(true)
         fi ;;
       -?*)
         sh="${a#-}"; j=0
@@ -271,9 +277,10 @@ ots_pflag_parse() {
             break
           fi
           if [ "${#rest}" -ge 2 ] && [ "${rest:0:1}" = "=" ]; then
-            if [ "$OTS_K" = v ]; then ots_pflag_rec "$OTS_L" "${rest:1}" $((off + i)) "-${sh:0:$((j + 1))}=" 0; fi
+            if [ "$OTS_K" = v ]; then ots_pflag_rec "$OTS_L" "${rest:1}" $((off + i)) "-${sh:0:$((j + 1))}=" 0; else OTS_BN+=("$OTS_L"); OTS_BV+=("${rest:1}"); fi
             break
           elif [ "$OTS_K" = b ]; then
+            OTS_BN+=("$OTS_L"); OTS_BV+=(true)
             j=$((j + 1)); continue
           elif [ -n "$rest" ]; then
             ots_pflag_rec "$OTS_L" "$rest" $((off + i)) "-${sh:0:$((j + 1))}" 0; break
