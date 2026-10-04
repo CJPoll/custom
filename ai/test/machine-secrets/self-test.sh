@@ -522,26 +522,32 @@ else bad "glrt-: merge_role_io mask redacts a runner token" "${mask_out}"; fi
 
 # ------------------------------------------- dot-segmented GitLab tokens (DND-1982)
 # GitLab mints routable tokens with '.' segments: <prefix>t<n>_<payload>.<version>.<crc>.
-# Each pattern must count the whole token. Synthetic, assembled at runtime;
-# the first segment is shorter than the 20-character minimum, so only a
-# pattern that counts the '.' segments sees the token.
+# Each pattern must count the whole token, and a mask must consume it whole:
+# no fragment after the first '.' may survive. A '.' with no token character
+# after it (a sentence's period) is not part of the token. Synthetic, assembled
+# at runtime; the first segment is shorter than the 20-character minimum, so
+# only a pattern that counts the '.' segments sees the token.
 P_GLPAT="gl""pat-"
 DOT_TAIL="01.0SYNTHtail9"
 SYN_RD="${P_GLRT}t3_SYNTHrd.${DOT_TAIL}"
 SYN_PD="${P_GLPAT}SYNTHpd.${DOT_TAIL}"
 dot_out="$(SRC="${SRC}" R="${SYN_RD}" P="${SYN_PD}" ruby -e '
   require File.join(ENV.fetch("SRC"), "ai/lib/machine_secrets")
+  require File.join(ENV.fetch("SRC"), "ai/lib/merge_role_io")
   m = MachineSecrets
   %w[R P].each do |k|
     v = ENV.fetch(k)
     puts "#{k}.value=#{m.credential_value?(v)}"
     puts "#{k}.content=#{m.credential_content?("token: " + v + "\n")}"
+    puts "#{k}.mask=#{MergeRoleIO.mask("curl " + v + ". next")}"
   end
 ' 2>&1)"
-for want in R.value=true R.content=true P.value=true P.content=true; do
+for want in R.value=true R.content=true "R.mask=curl ***. next" P.value=true P.content=true "P.mask=curl ***. next"; do
   if grep -qxF "${want}" <<<"${dot_out}"; then ok "dotted token: ${want}"
   else bad "dotted token: ${want}" "${dot_out}"; fi
 done
+if grep -qF -- "${DOT_TAIL}" <<<"${dot_out}"; then bad "dotted token: no fragment after the first '.' survives a mask" "${dot_out}"
+else ok "dotted token: no fragment after the first '.' survives a mask"; fi
 
 # ---------------------------------------------------------------- no value, ever
 leaked=0

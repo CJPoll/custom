@@ -42,11 +42,15 @@ module MergeRoleIO
   # mask(text) -> text with credentials replaced by ***: an Authorization /
   # PRIVATE-TOKEN / JOB-TOKEN header value, a GitHub or GitLab token, and a
   # token=/password=/secret= value. The deny log keeps the command for a live
-  # verify; it never keeps a secret the command carried.
+  # verify; it never keeps a secret the command carried. A GitLab token runs
+  # through its '.' segments (routable tokens are dot-segmented, DND-1982) and
+  # ends on a non-'.', so a sentence's trailing period stays
+  # (athena-machine-secrets.md -> Credential patterns).
   def mask(text)
     text.to_s
         .gsub(/((?:Authorization|PRIVATE-TOKEN|JOB-TOKEN)\s*:\s*)(?:(?:token|bearer|basic)\s+)?\S+/i, '\1***')
-        .gsub(/\b(?:gh[pousr]_|github_pat_|glpat-|glrt-)[A-Za-z0-9_-]+/, "***")
+        .gsub(/\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_-]+/, "***")
+        .gsub(/\b(?:glpat-|glrt-)[A-Za-z0-9_.-]*[A-Za-z0-9_-]/, "***")
         .gsub(/((?:token|password|secret|passwd)=)[^\s&]+/i, '\1***')
   end
 

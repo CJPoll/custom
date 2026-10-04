@@ -335,11 +335,12 @@ A GitLab token's characters include `.`. GitLab mints routable tokens in
 dot-segments (`<prefix>t<n>_<payload>.<version>.<crc>`), so the minimum counts
 the whole token. A redaction that replaces a GitLab token consumes its `.`
 segments and ends on a non-`.` character: a `.` with no token character after
-it is a sentence's period and stays. The redactor that follows this rule is
-`grk_redact` (`scripts/lib/gitlab-runner-kit.sh`).
+it is a sentence's period and stays. The redactors that follow this rule are
+`MergeRoleIO.mask` (`ai/lib/merge_role_io.rb`) and `grk_redact`
+(`scripts/lib/gitlab-runner-kit.sh`).
 
 **Later (2026-10-04, DND-1982):** the `glpat-` and `glrt-` rows, and the
-runner kit's own copy of that charset, read
+runner kit's and `merge_role_io`'s own copies of that charset, read
 `[A-Za-z0-9_-]`. Superseded: every real routable token carries `.`, so the
 runner kit refused every real `glrt-` token (fail closed), and a redaction
 stopped at the first `.` and printed the token's tail (fail open).
