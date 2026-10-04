@@ -216,6 +216,12 @@ call itself ([[athena:merge-boarding]] → *GitLab path (no merge train)*):
 ~/dev/custom/ai/skills/athena:merge-boarding/scripts/locked-merge --mr <iid> --head <head sha>
 ```
 
+**Later (2026-10-03, DND-1943):** this named the direct
+`glab-athena mr merge <iid> --sha <head sha> --yes` call for a project with
+no merge train. Superseded: that call took no merge lock, so two admirals
+could each merge onto a base the other had just moved, and glab's default
+auto-merge could defer the merge to a moment nothing gated.
+
 What the wrapper refuses, exit 3 with a `Fix:`:
 
 - `mr merge` / `mr accept` without `--sha`, or with a sha that is not the head.

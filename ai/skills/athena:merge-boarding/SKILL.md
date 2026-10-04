@@ -907,7 +907,8 @@ every GitLab project with no merge train (`locked-merge --mr`, *GitLab path
 (no merge train)*):
 
 - **Same machine:** merge through
-  `ai/skills/athena:merge-boarding/scripts/locked-merge --pr <n> --head <sha>`,
+  `ai/skills/athena:merge-boarding/scripts/locked-merge --pr <n> --head <sha>`
+  (`--mr <iid>` on a GitLab project with no merge train),
   never a bare `gh-athena pr merge`. `<sha>` is the one `INTEGRATION OK` names.
   (The wrapper refuses that bare call anyway in a repo that declares a gate: it
   requires the same receipt, DND-969.) It takes the repo's merge lock (`~/.local/state/athena/<repo>-merge.lock`,
@@ -1200,16 +1201,20 @@ of the project (`--repo`): the receipt is in its git common dir.
   and a merge GitLab defers until a pipeline ends would land outside the lock.
   Never make that call yourself.
 - **The tip's pipelines are judged inside that call**, by glab-athena's merge
-  guard (DND-1941). Its `MAIN RED` refusal is exit 11 and its `COULD NOT
-  LOOK` exit 2, at once, with no confirm retries, exactly as gh-athena's on
-  GitHub. Until DND-1941 lands, nothing reads the tip's pipelines on this
-  path: do not merge gen_saas on GitLab before it does.
+  guard (`glmg_tip_gate`, DND-1941). Its `MAIN RED` refusal is exit 11 and
+  its `COULD NOT LOOK` exit 2, at once, with no confirm retries, exactly as
+  gh-athena's on GitHub; that mapping reads the guard's own refusal shape and
+  marks (`gmg_refusal_has_reason`). Before the lock the tool asks the guard
+  the wrapper loads whether `glmg_tip_gate` is defined, and refuses with
+  exit 2, `NO TIP JUDGE`, when it is not. So no `--mr` merge runs before
+  DND-1941 lands.
 - **A fork MR is refused** (exit 2): its head pipeline ran in another
   project. Push the branch into the project and open the MR from there.
 - **`--require-idle-workflow` is GitHub-only** and refused with `--mr`. The
   GitLab idle-pipeline check is not built.
-- **Telemetry:** it writes `merge.lock_wait` and never `merge.landed`;
-  glab-athena records the MR's landing itself (DND-1939).
+- **Telemetry:** it writes `merge.lock_wait` and never `merge.landed`.
+  The MR's `merge.landed` (`via=mr`) is glab-athena's to record (DND-1939);
+  until DND-1939 lands, a GitLab MR landing records no `merge.landed`.
 
 ## Ride a boarded train to landed (do not end your turn on it)
 
@@ -1270,9 +1275,10 @@ An epic-boundary crossing is reported on merge (a milestone, not an owner DM)
 — see [[athena:epic-progress-dm]]. Tear the stack down per
 [[athena:teardown-worktree-stack]] only after this confirmation. On GitHub,
 `locked-merge` already ran `teardown-stack` for the PR (exit 10: landed,
-teardown failed). On GitLab, run `ai/bin/teardown-stack --mr <n> --repo
-<repo>` as soon as `confirm-merged` exits 0, for every part of a multi-MR
-Mission as it lands. Then remove the worktree its `next:` line names, per
+teardown failed); so did `locked-merge --mr` on a GitLab project with no
+merge train. After a GitLab merge-train landing, run
+`ai/bin/teardown-stack --mr <n> --repo <repo>` as soon as `confirm-merged`
+exits 0, for every part of a multi-MR Mission as it lands. Then remove the worktree its `next:` line names, per
 that skill's *Removing the WORKTREE*.
 
 Landed is not working. A post-deploy live verify that disagrees with

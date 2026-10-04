@@ -119,6 +119,11 @@ exit 0
 EOF
 chmod +x "${STUBS}"/*
 fsg_require_stubs "${STUBS}" glab
+# The guard the stub wrapper "loads": <wrapper dir>/../lib/glab-merge-guard.sh,
+# as for the real ai/bin/glab-athena. This one defines the DND-1941 tip judge,
+# so the tool's NO TIP JUDGE refusal (g26) is not in the way of the others.
+mkdir -p "${TMP}/lib"
+printf '# fixture guard (DND-1943 self-test)\nglmg_tip_gate() { return 0; }\n' > "${TMP}/lib/glab-merge-guard.sh"
 export PATH="${STUBS}:${PATH}" LOCKED_MERGE_AI_BIN="${STUBS}" LIB
 
 # fixture <name> [origin-url] -- fresh bare origin + clone "wt" on a feature
@@ -208,6 +213,9 @@ lm; expect g3 3; no_merge g3; names g3 "MR !7 is closed, not opened"
 
 # g4 THE MISS: the base tip is red. The merge guard (DND-1941) refuses inside
 # the call with MAIN RED: exit 11 at once, no confirm retries, no teardown.
+# g4/g5 are CONTRACT tests: the stub stands for DND-1941's refusal, printed by
+# the guard library's own glmg_refuse with the shared marks (g24 pins that
+# shape). That the real guard defines the judge at all is g26/g27.
 fixture g4; echo redtip > "${ST}/merge_mode"; echo 1 > "${ST}/confirm_rc"
 lm; expect g4 11; no_teardown g4; no_confirm g4; names g4 "MAIN RED: main tip abc is RED"
 grep -q "^Fix: land only a red-main fix" <<<"${out}" && ok "g4 Fix: names the red-main fix rule" || bad "g4 Fix:" "${out}"
@@ -247,10 +255,10 @@ fixture g8; exec 8>>"${LOCK_PATH}"; flock 8
 "${TOOL}" --mr 7 --head "${H}" --repo "${WT}" --lock "${LOCK_PATH}" --wait 120 > "${TMP}/g8.out" 2>&1 8>&- &
 g8pid=$!
 waiting=""
-for _ in $(seq 1 600); do   # bounded: the flock child appearing is the event
+for _ in $(seq 1 60); do   # bounded (60 x 1 s): the flock child appearing is the event
   if pgrep -P "${g8pid}" -x flock >/dev/null 2>&1; then waiting=1; break; fi
   kill -0 "${g8pid}" 2>/dev/null || break
-  sleep 0.05
+  sleep 1
 done
 [ -n "${waiting}" ] && ok "g8 the tool is blocked in flock on the held lock" || bad "g8 the tool never waited at the lock" "$(cat "${TMP}/g8.out")"
 [ -s "${ST}/merge.log" ] && bad "g8 merged while the lock was held" || ok "g8 nothing merged while the lock was held"
@@ -352,6 +360,33 @@ for mark in "MAIN RED:" "COULD NOT LOOK:"; do
     bad "g24 '${other}' matched a '${mark}' refusal" "$(cat "${TMP}/g24.err")"
   else ok "g24 '${other}' does not match a '${mark}' refusal"; fi
 done
+
+# g26 THE GAP, enforced: the guard the wrapper loads defines no tip-pipeline
+# judge (glmg_tip_gate, DND-1941). Nothing would stop a red tip, so the tool
+# refuses before the lock (exit 2, NO TIP JUDGE): no merge, no lock wait.
+fixture g26; T="${TMP}/g26-store"; cp "${TMP}/lib/glab-merge-guard.sh" "${TMP}/guard.keep"
+printf '# a guard with no tip judge\nglmg_guard() { return 0; }\n' > "${TMP}/lib/glab-merge-guard.sh"
+out="$(ATHENA_TELEMETRY_DIR="${T}" "${TOOL}" --mr 7 --head "${H}" --repo "${WT}" --lock "${LOCK_PATH}" 2>&1)"; rc=$?
+expect g26 2; no_merge g26; names g26 "NO TIP JUDGE"; names g26 "DND-1941"
+[ "$(tel_count "${T}" merge.lock_wait)" = 0 ] && ok "g26 refused before the lock" || bad "g26 took the lock" "$(cat "${T}"/*.jsonl)"
+# g26b a guard that does not load is no judge either.
+printf 'exit 3\n' > "${TMP}/lib/glab-merge-guard.sh"
+lm; expect g26b 2; no_merge g26b; names g26b "NO TIP JUDGE"
+rm -f "${TMP}/lib/glab-merge-guard.sh"
+lm; expect g26c-missing 2; no_merge g26c-missing
+cp "${TMP}/guard.keep" "${TMP}/lib/glab-merge-guard.sh"
+# g27 the real guard: with the stub wrapper's lib pointing at this checkout's
+# ai/lib/glab-merge-guard.sh, the tool proceeds exactly when that guard
+# defines glmg_tip_gate. Which way it goes here is printed, so a reader sees
+# whether this checkout has DND-1941.
+fixture g27; mv "${TMP}/lib/glab-merge-guard.sh" "${TMP}/guard.keep"
+ln -s "${LIB}/glab-merge-guard.sh" "${TMP}/lib/glab-merge-guard.sh"
+if ( . "${LIB}/glab-merge-guard.sh" >/dev/null 2>&1 && declare -F glmg_tip_gate >/dev/null ); then
+  echo "  note g27: this checkout's guard defines glmg_tip_gate (DND-1941 present)"; lm; expect g27-real-guard 0
+else
+  echo "  note g27: this checkout's guard has no glmg_tip_gate (DND-1941 absent)"; lm; expect g27-real-guard 2; names g27-real-guard "NO TIP JUDGE"
+fi
+rm -f "${TMP}/lib/glab-merge-guard.sh"; mv "${TMP}/guard.keep" "${TMP}/lib/glab-merge-guard.sh"
 
 # g25 --help documents the GitLab path and exit 12.
 hout="$("${TOOL}" --help 2>/dev/null)"; rc=$?

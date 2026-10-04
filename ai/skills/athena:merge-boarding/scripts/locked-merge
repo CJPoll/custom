@@ -110,27 +110,32 @@ path fleets already share) it:
 GitLab (--mr, DND-1943): origin must be gitlab.com. Before the lock it reads
 the project (plain glab): merge_trains_enabled true is exit 12 (board the
 train instead); the key absent, with merge_method present, is a project with
-no train (gitlab.com Free omits the field). A fork MR is refused (exit 2). The
-same lock file and steps follow, with these differences:
+no train (gitlab.com Free omits the field). Then the guard the glab-athena
+it calls will load must define the tip-pipeline judge (glmg_tip_gate,
+DND-1941): without it, exit 2 NO TIP JUDGE, so nothing merges through --mr
+before that judge exists. A fork MR is refused (exit 2). The same lock file and
+steps follow, with these differences:
   1. the MR is read with glab api (state opened, sha == --head);
   4. --require-idle-workflow is GitHub-only and refused with --mr;
   4b. the base tip's CONTENT is read here as on GitHub; its pipelines are
-     judged by glab-athena's merge guard inside the merge call (DND-1941),
-     whose MAIN RED / COULD NOT LOOK refusals map to exits 11 / 2 as below;
+     judged inside the merge call by glab-athena's merge guard (glmg_tip_gate,
+     DND-1941, checked present above), whose MAIN RED / COULD NOT LOOK
+     refusals map to exits 11 / 2 as below;
   5. merges via glab-athena mr merge <iid> --squash --sha <head>
      --auto-merge=false --yes (never a deferred merge);
   6. confirm-merged --mr <iid> --fetch;
   7. the landed commit is the MR's merge_commit_sha (squash_commit_sha on a
      fast-forward project);
   8. teardown-stack --mr <iid> --repo DIR.
-It writes merge.lock_wait and never merge.landed: glab-athena records an MR's
-landing (DND-1939).
+It writes merge.lock_wait and never merge.landed: an MR's landing is
+glab-athena's to record (DND-1939); until DND-1939 lands, none is recorded.
 
 Exit (every non-zero prints a Fix: line):
   0 merged, confirmed, tree matches          (landed)
   2 usage / prerequisite / a remote that is not the flag's forge (--pr:
     github.com, --mr: gitlab.com) / a fork MR, or COULD NOT LOOK (a read this
-    tool or the merge guard could not make; nothing landed)
+    tool or the merge guard could not make, or NO TIP JUDGE on --mr; nothing
+    landed)
   3 stale: PR not open, head moved, CONFLICT with origin/<base>, or a
     SEMANTIC CONFLICT (the merged tree duplicates a migration version) -- merge
     origin/<base> in, resolve, re-gate (nothing landed)
@@ -198,7 +203,7 @@ if [ -n "${MR}" ]; then
 else
   FORGE=github; CH="${PR}"; CH_NAME="PR ${PR}"; CH_FLAG=--pr
 fi
-case "${PR}${MR}" in ''|*[!0-9]*) die 2 "--pr must be a PR number (got '${PR}')" "pass --pr <number>, or --mr <iid> for a GitLab MR." ;; esac
+[ "${FORGE}" = gitlab ] || case "${PR}" in ''|*[!0-9]*) die 2 "--pr must be a PR number (got '${PR}')" "pass --pr <number>, or --mr <iid> for a GitLab MR." ;; esac
 case "${HEAD_SHA}" in
   *[!0-9a-f]*|'') die 2 "--head must be a full lowercase hex SHA (got '${HEAD_SHA}')" "copy the SHA from integration-gate's INTEGRATION OK line." ;;
 esac
@@ -285,6 +290,21 @@ if [ "${FORGE}" = gitlab ]; then
     *) die 2 "COULD NOT LOOK: the project read for ${GL_PROJECT} is not a full project view (no merge_method, or a non-boolean merge_trains_enabled): $(head -c 200 <<<"${proj_json}" | tr '\n' ' ')" \
          "read it as a member with at least Developer access (glab auth status for gitlab.com); whether it has a merge train is unknown, so nothing was merged." ;;
   esac
+
+  # ---- the tip-pipeline judge must exist where it will run (DND-1941) ----
+  # On GitLab a red base tip's PIPELINES are judged inside the merge call, by
+  # the guard the wrapper sources (glmg_tip_gate). This tool does not copy that
+  # judge. So it asks the guard the wrapper at ${AI_BIN} will load whether the
+  # judge is there, and refuses when it is not: a tool that read as a full
+  # locked merge while nothing stopped a red tip would be the claim with no
+  # mechanism behind it (CLAUDE.md -> "A claimed mechanism must be able to
+  # fire"). Before DND-1941 lands, every --mr merge stops here.
+  GLMG_FOR_WRAPPER="$(dirname "$(readlink -f "${AI_BIN}/${WRAPPER}")")/../lib/glab-merge-guard.sh"
+  if ! ( . "${GLMG_FOR_WRAPPER}" >/dev/null 2>&1 && declare -F glmg_tip_gate >/dev/null ); then
+    die 2 "NO TIP JUDGE (COULD NOT LOOK): the merge guard ${WRAPPER} loads (${GLMG_FOR_WRAPPER}) defines no tip-pipeline judge (glmg_tip_gate, DND-1941), or does not load, so a red ${GL_PROJECT} target tip would not stop this merge" \
+      "land DND-1941 (glab merge guard parity: red tip and content) in ~/dev/custom and fast-forward the main checkout, then re-run. Merging around it is lowering the merge bar, an owner decision (~/.claude/CLAUDE.md -> Owner approval policy, item 5). Nothing was locked or merged."
+  fi
+  echo "TIP-JUDGE ${GLMG_FOR_WRAPPER}: glmg_tip_gate runs inside the merge call"
 fi
 
 # ---- telemetry (DND-1475) ----
@@ -299,10 +319,11 @@ fi
 # branch once it is read (--unit-branch), because this tool runs from a
 # checkout whose own branch need not name the ticket; the ledger joins them to
 # the landing by unit or head.
-# On GitLab (DND-1943) only merge.lock_wait is written: glab-athena records the
-# MR's merge.landed (via=mr) itself (DND-1939), and a second one would count
-# the landing twice. lead-time-phases starts a GitLab MR's merge phase from
-# this lock_wait.
+# On GitLab (DND-1943) only merge.lock_wait is written: the MR's merge.landed
+# (via=mr) is glab-athena's to record (DND-1939), and a second one would count
+# the landing twice. Until DND-1939 lands a GitLab MR landing records no
+# merge.landed. lead-time-phases starts a GitLab MR's merge phase from this
+# lock_wait.
 LM_TEL_LIB="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../../lib/telemetry-emit.sh"
 # shellcheck source=../../../lib/telemetry-emit.sh
 if ! . "${LM_TEL_LIB}" 2>/dev/null; then
