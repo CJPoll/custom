@@ -336,6 +336,8 @@ if [ "${RC}" = 0 ] && sent "pr create"; then ok "an attached value is never anot
 echo "--- DND-1976: every word the flag table cannot classify is refused ---"
 gha pr create --no-such-flag -b "x${TOKEN}"
 if [ "${RC}" = 3 ] && not_sent "pr create" && [[ "${OUT}" == *"--no-such-flag"* ]] && [[ "${OUT}" == *"Fix:"* ]] && no_literal; then ok "an unknown long flag refused"; else bad "unknown long flag" "rc=${RC} ${OUT}"; fi
+OUT="$(cd "${WORK}" && : > "${STUB_LOG}" && OTS_LENIENT=1 OTS_MODE=lenient "${WRAPPER}" pr create --no-such-flag value -b "x${TOKEN}" 2>&1)"; RC=$?
+if [ "${RC}" = 3 ] && [[ "${OUT}" != *"stub: SENT"* ]] && [[ "${OUT}" == *"--no-such-flag"* ]]; then ok "no inherited variable makes gh's parse lenient"; else bad "inherited lenient" "rc=${RC} ${OUT}"; fi
 gha pr create -Z -b "x${TOKEN}"
 if [ "${RC}" = 3 ] && not_sent "pr create" && [[ "${OUT}" == *"-Z"* ]] && [[ "${OUT}" == *"Fix:"* ]]; then ok "an unknown short flag refused"; else bad "unknown short flag" "rc=${RC} ${OUT}"; fi
 gha pr create -h -b "x${TOKEN}"

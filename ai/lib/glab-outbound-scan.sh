@@ -348,7 +348,7 @@ glos_guard() {
     # table or not (`--target-project` is not in glab 1.92).
     table="$(ots_with_roles "${LFT_FLAGS[$cmd]}" "$GLOS_TEXT $GLOS_FILE $GLOS_TARGET")"
     # Lenient: this glab may have flags the table's glab lacked (header).
-    prc=0; OTS_LENIENT=1 ots_pflag_parse "$table" "$i" "${argv[@]:$i}" || prc=$?
+    prc=0; ots_pflag_parse lenient "$table" "$i" "${argv[@]:$i}" || prc=$?
     case "$prc" in
       0) ;;
       2) ots_refuse 3 "'$OTS_UNKNOWN' is not a flag of \`glab $cmd\` in the pinned table (glab $LFT_VERSION), and \`$OTS_AMBIG\` after it reads as a flag: if '$OTS_UNKNOWN' takes a value, glab reads \`$OTS_AMBIG\` as that value, and the outbound scan cannot tell which text, file or project this sends. Fix: attach the value (\`--flag=value\`), drop the flag, or put it after the text flags' values; if this glab has the flag, run \`ai/bin/cli-flag-table --cli glab --write\` and commit the table." ;;

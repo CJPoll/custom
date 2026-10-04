@@ -184,7 +184,7 @@ gos_guard() {
   [ -n "${GFT_FLAGS[$cmd]+x}" ] || ots_refuse 3 "the pinned gh flag table has no \`$cmd\`, so the outbound scan cannot read its argv. Fix: run \`ai/bin/cli-flag-table --cli gh --write\` and commit the table."
   OTS_WHAT="$cmd"
 
-  if ! ots_pflag_parse "${GFT_FLAGS[$cmd]}" "$i" "${argv[@]:$i}"; then
+  if ! ots_pflag_parse strict "${GFT_FLAGS[$cmd]}" "$i" "${argv[@]:$i}"; then
     ots_refuse 3 "'$OTS_UNKNOWN' is not a flag of \`gh $cmd\` in the pinned table (gh $GFT_VERSION), so the outbound scan cannot tell which words gh reads as text. Fix: drop or correct the flag; if this gh has it, run \`ai/bin/cli-flag-table --cli gh --write\` and commit the table."
   fi
   [ -z "$OTS_HELP" ] || return 0

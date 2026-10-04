@@ -196,11 +196,14 @@ ots_refuse_flag_value() {
   ots_refuse 3 "the value of $1 in this $OTS_WHAT is \`$2\`, which looks like a flag that names a file or a repository. pflag may read it either way, and under one reading that file is sent, or that repository targeted, without the outbound scan. Fix: attach the value to its flag (\`$1=$2\`) if you meant it, or give $1 a real value."
 }
 
-# ots_pflag_parse <table> <offset> <args...> : reads <args> the way pflag
+# ots_pflag_parse <strict|lenient> <table> <offset> <args...> : reads <args>
+# the way pflag
 # reads them, with <table> the command's flags (" <v|b>:<short>:<long> … ",
 # the <P>_FLAGS format of ai/lib/<cli>-flag-table.sh). Returns 1 on a word it
 # cannot place (an unknown flag, `--=x`, `---x`), naming it in OTS_UNKNOWN.
-# With OTS_LENIENT set, an unknown flag is read as taking nothing, and the
+# The mode is an argument, never the environment, so nothing inherited can
+# loosen a strict caller. In lenient mode, an unknown flag is read as taking
+# nothing, and the
 # return is 2 (OTS_UNKNOWN, and OTS_AMBIG the word that makes it ambiguous)
 # only when that reading could be wrong in a way that matters: the next word
 # could be read as a flag or is `--`, or the flag is a letter with more of its
@@ -220,10 +223,11 @@ ots_refuse_flag_value() {
 # switch letter followed by `=` takes the rest as its value (`-d=true`); a
 # lone `-` is positional.
 ots_pflag_parse() {
-  local table="$1" off="$2"; shift 2
+  local mode="$1" table="$2" off="$3"; shift 3
   local -a args=("$@")
   local n=$# i=0 a name long j sh c rest
   OTS_FN=() OTS_FV=() OTS_FI=() OTS_FP=() OTS_FS=() OTS_PO=() OTS_POI=() OTS_UNKNOWN="" OTS_HELP="" OTS_AMBIG=""
+  case "$mode" in strict | lenient) ;; *) OTS_UNKNOWN="parse mode '$mode'"; return 1 ;; esac
   while [ "$i" -lt "$n" ]; do
     a="${args[$i]}"
     if [ "$a" = "--" ]; then
@@ -237,7 +241,7 @@ ots_pflag_parse() {
         long="${name%%=*}"
         if ! ots_table_long "$table" "$long"; then
           OTS_UNKNOWN="--$long"
-          [ -n "${OTS_LENIENT:-}" ] || return 1
+          [ "$mode" = lenient ] || return 1
           if [[ "$name" != *=* ]] && ots_pflag_ambiguous "${args[@]:$((i + 1)):1}"; then return 2; fi
           i=$((i + 1)); continue
         fi
@@ -255,7 +259,7 @@ ots_pflag_parse() {
             # command never runs, so nothing is sent.
             if [ "$c" = h ]; then OTS_HELP=1; return 0; fi
             OTS_UNKNOWN="-$c (in '$a')"
-            [ -n "${OTS_LENIENT:-}" ] || return 1
+            [ "$mode" = lenient ] || return 1
             # Lenient: the letter may take the rest of the word, or the next
             # word, as its value; either way it is ambiguous when what follows
             # could be read as flags.
