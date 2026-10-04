@@ -44,7 +44,12 @@
 # be normalized or does not spell its repository plainly (a ., .. or empty
 # segment, or an escaped / in repos/<owner>/<repo>), or a GraphQL call whose
 # query cannot be read is REFUSED (exit 3, Fix:): an api write the scan cannot
-# classify never passes. Its targets are
+# classify never passes. So is a write to a PUBLIC target whose typed -F value
+# or endpoint query holds a placeholder gh fills after the scan ({owner},
+# {repo}, {branch}, any {word}, :owner, :repo, :branch): the text sent would
+# not be the text scanned. An endpoint holding :// is a full URL to gh,
+# whatever the scheme's case; one on a host other than github.com or
+# api.github.com is an unknown target. Its targets are
 # gos_api_target's: repos/<owner>/<repo>/… names <owner>/<repo>, and
 # repos/{owner}/{repo}/… (or :owner/:repo) names GH_REPO, else the current
 # directory's repo, as gh fills them. A GraphQL mutation (its target is inside
@@ -204,13 +209,18 @@ gos_api_target() {
     esac
     return 0
   fi
-  case "$ep" in
-    http://* | https://*) host="${ep#*://}"; host="${host%%/*}"; host="${host,,}" ;;
-  esac
-  case "$host" in
-    "" | api.github.com | github.com | www.github.com) ;;
-    *) targets+=("?:the endpoint '$shown' is on the host '$host', which this guard does not resolve"); return 0 ;;
-  esac
+  # gh reads any endpoint containing :// as a full URL, whatever the scheme's
+  # case, and sends the request to its host.
+  if [[ "$ep" == *://* ]]; then
+    if ! [[ "$ep" =~ ^[A-Za-z][A-Za-z0-9+.-]*://([^/?#]*) ]]; then
+      targets+=("?:the endpoint '$shown' holds :// but is not a URL this guard can read"); return 0
+    fi
+    host="${BASH_REMATCH[1],,}"
+    case "$host" in
+      api.github.com | github.com | www.github.com) ;;
+      *) targets+=("?:the endpoint '$shown' is on the host '$host', which this guard does not resolve"); return 0 ;;
+    esac
+  fi
   if [ -n "$FAS_HOSTNAME" ] && [ "${FAS_HOSTNAME,,}" != github.com ]; then hosted="$FAS_HOSTNAME/"; fi
   IFS=/ read -ra s <<<"$path"
   if [ "${#s[@]}" -lt 3 ] || [ "${s[0],,}" != repos ]; then
@@ -220,7 +230,13 @@ gos_api_target() {
   gos_api_spelled "$ep" "${s[0]}/$o/$rp" \
     || ots_refuse 3 "the endpoint '$shown' does not route to the repository it spells (a ., .. or empty segment, or an escaped /), so the outbound scan cannot tell which repository it writes to. Fix: spell the endpoint plainly (repos/<owner>/<repo>/…)."
   case "$o:$rp" in
-    "{owner}:{repo}" | ":owner::repo") targets+=("${GH_REPO:-}"); return 0 ;;
+    "{owner}:{repo}" | ":owner::repo")
+      # gh fills these from GH_REPO or the current directory, on github.com;
+      # under another --hostname that is not the repository read here.
+      if [ -n "$hosted" ]; then
+        targets+=("?:the endpoint '$shown' fills {owner}/{repo} under --hostname $FAS_HOSTNAME"); return 0
+      fi
+      targets+=("${GH_REPO:-}"); return 0 ;;
   esac
   if [[ "$o$rp" == *[{}]* ]] || [[ "$o" == :* ]] || [[ "$rp" == :* ]]; then
     targets+=("?:the endpoint '$shown' mixes a placeholder into the repository name"); return 0
@@ -266,6 +282,22 @@ gos_api() {
   # shared with glab-athena (ai/lib/outbound-text-scan.sh, DND-1976).
   ots_api_collect GOS_ARGV 1 api v3 || return 0
   [ "$((${#texts[@]} + ${#fsrc[@]}))" -gt 0 ] || return 0
+  # gh fills {owner}, {repo}, {branch} (any {word}) and :owner, :repo,
+  # :branch in a typed -F value and in the endpoint, query included, AFTER
+  # this scan: the scanned text would not be the text sent (a branch named
+  # after a work ticket, say). Refused below when a target is PUBLIC.
+  local k q re='\{[a-z]+\}|:(owner|repo|branch)([^A-Za-z0-9_]|$)'
+  for k in "${!FAS_FKIND[@]}"; do
+    if [ "${FAS_FKIND[$k]}" = typed ] && [[ "${FAS_FVAL[$k]}" =~ $re ]]; then
+      GOS_API_FILLED="the typed field '${FAS_FKEY[$k]}' (-F)"; break
+    fi
+  done
+  for ep in "${FAS_POS[@]}"; do
+    if [[ "$ep" == *[?#]* ]]; then
+      q="${ep#*[?#]}"
+      if [[ "$q" =~ $re ]]; then GOS_API_FILLED="the endpoint's query"; fi
+    fi
+  done
   if [ "${#FAS_POS[@]}" = 0 ]; then
     targets+=("?:the call names no endpoint")
   fi
@@ -278,6 +310,7 @@ gos_api() {
 # (HITS) or 3 (cannot judge).
 gos_guard() {
   GOS_ARGV=("$@")
+  GOS_API_FILLED=""
   OTS_WHAT="gh command"
   local -a argv=("$@") path=() texts=() tlab=() fsrc=() fidx=() fpre=() flab=() fnoun=() fflag=() targets=()
   local -A fbase=()
@@ -391,5 +424,8 @@ gos_scan_targets() {
     esac
   done
   [ -n "$public" ] || return 0
+  if [ -n "$GOS_API_FILLED" ]; then
+    ots_refuse 3 "$GOS_API_FILLED holds a placeholder gh fills after this scan ({owner}, {repo}, {branch}, any {word}, or :owner, :repo, :branch), so the text sent to this PUBLIC repository is not the text scanned. Fix: send the value with -f (raw; gh does not fill it), or write it out in full."
+  fi
   ots_scan_all GOS_ARGV
 }

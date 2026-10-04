@@ -589,6 +589,36 @@ for ep in "repos/synth-owner/priv/../../synth-owner/pub/issues" "repos/synth-own
 done
 gha api -X POST "/api/v3/repos/synth-owner/pub/issues" -f "body=x${TOKEN}"
 if api_refused; then ok "a leading /api/v3 endpoint is read as its repository"; else bad "api/v3 prefix" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+
+echo "--- DND-2007 review round: a full URL on another host, gh's placeholder fill, attached stdin ---"
+# Review must-fix 1: an upper-case scheme skipped the other-host rule, so the
+# PRIVATE repo the path spells decided, and the text went to the other host.
+for ep in "HTTPS://other.example/repos/synth-owner/priv/issues" "https://other.example/repos/synth-owner/priv/issues"; do
+  gha api -X POST "${ep}" -f "body=x${TOKEN}"
+  if api_refused && [[ "${OUT}" == *"host 'other.example'"* ]]; then ok "a full URL on another host is scanned as PUBLIC (${ep%%://*})"; else bad "other host ${ep%%://*}" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+done
+# Review must-fix 2: gh fills placeholders in a typed -F value and the endpoint
+# query after the scan, so the scanned text is not the text sent.
+for argv in "api -X POST repos/synth-owner/pub/issues -F body=see-{branch}" \
+  "api -X POST repos/synth-owner/pub/issues -F body=note:branch" \
+  "api -X POST repos/synth-owner/pub/issues?title={repo} -f body=clean"; do
+  # shellcheck disable=SC2086
+  gha ${argv}
+  if [ "${RC}" = 3 ] && [[ "${OUT}" != *"stub: SENT"* ]] && [[ "${OUT}" == *"placeholder gh fills"* ]] && [[ "${OUT}" == *"Fix:"* ]]; then ok "refused: a placeholder gh fills (${argv##* })"; else bad "placeholder ${argv##* }" "rc=${RC} ${OUT}"; fi
+done
+gha api -X POST repos/synth-owner/pub/issues -f "body=see {branch}"
+if [ "${RC}" = 0 ] && [[ "${OUT}" == *"stub: SENT api"* ]]; then ok "a raw -f value is sent as written (gh does not fill it)"; else bad "raw -f placeholder" "rc=${RC} ${OUT}"; fi
+gha api -X POST repos/synth-owner/priv/issues -F "body=see {branch}"
+if [ "${RC}" = 0 ] && [[ "${OUT}" == *"stub: SENT api"* ]]; then ok "a placeholder in a write to a PRIVATE repo passes"; else bad "private placeholder" "rc=${RC} ${OUT}"; fi
+gha api -X POST --hostname ghe.example "repos/{owner}/{repo}/issues" -f "body=x${TOKEN}"
+if api_refused && [[ "${OUT}" == *"under --hostname ghe.example"* ]]; then ok "{owner}/{repo} under another --hostname is an unknown target"; else bad "hostname placeholders" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+OUT="$(cd "${WORK}" && : > "${STUB_LOG}" && printf 'x%s\n' "${TOKEN}" | "${WRAPPER}" api -X POST repos/synth-owner/pub/issues -Fbody=@- 2>&1)"; RC=$?; CALLS="$(cat "${STUB_LOG}")"
+if api_refused; then ok "an attached -Fbody=@- (stdin) field is scanned"; else bad "-Fbody=@-" "rc=${RC} ${OUT}"; fi
+OUT="$(cd "${WORK}" && : > "${STUB_LOG}" && printf '{"body":"clean"}\n' | "${WRAPPER}" api -X POST repos/synth-owner/pub/issues --input=- 2>&1)"; RC=$?; CALLS="$(cat "${STUB_LOG}")"
+if [ "${RC}" = 0 ] && [[ "${OUT}" == *'stub-body:{"body":"clean"}'* ]] && [[ "${CALLS}" != *"--input=-"* ]]; then ok "an attached --input=- reaches gh as the scanned copy"; else bad "--input=-" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+printf 'mutation { addComment(input: {subjectId: "I_1", body: "x%s"}) { clientMutationId } }\n' "${TOKEN}" > "${TMP}/gql-hit.graphql"
+gha api graphql -F "query=@${TMP}/gql-hit.graphql"
+if api_refused && [[ "${OUT}" == *"field-file:1 label=synth-token"* ]]; then ok "a GraphQL mutation read from an @file is scanned"; else bad "graphql @file" "rc=${RC} ${OUT}"; fi
 rm -f "${STUB_VIS}".synth-owner_*
 
 # DND-1647: no gh/glab call may have fallen through past its stub.
