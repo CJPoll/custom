@@ -28,6 +28,14 @@ Each of those is a model of the CLI, and each model has been wrong in a new way.
 | DND-2014 | `--related-issue` copies a server-side issue title into the MR | no text flag was given |
 | DND-2015 | `-R gitlab.com/g/p` names host `gitlab.com`, project `g/p` | project `gitlab.com/g/p` (404, refused) |
 | DND-2010 | the merge guard reads `-F query=@file`, then gh reads it again | the guard judged the bytes gh sends |
+| DND-2017 | the hidden glab flag `--experimental-notes-text-or-file` sends a file as release notes | the flag table, built from `--help`, has no hidden flags |
+| DND-2018 | `mr create -H <p> --create-source-branch` creates a branch on the head project | the head project is not a target |
+| DND-2019 | `pr create --fill/--template` and `issue develop` send text gh builds | the text is the flags' text |
+
+DND-2014 (landed, 6f16580c) names a whole class in glab's argv scan: *text
+glab builds itself* (`--related-issue`, `--fill`, `--recover`, `--signoff`, an
+editor). The argv scan cannot read that text, so it refuses those flags on any
+target that is not private. DND-2019 is the same class on gh.
 
 Every fix was correct and found the next hole, because the model is of an
 external program whose input language is open-ended: pflag spellings, env
@@ -72,10 +80,14 @@ refuses it.
   request is sent. Measured for both CLIs with `NO_PROXY` set to the forge host:
   `x509: certificate signed by unknown authority`. A dead proxy is
   `connection refused`. A request the proxy cannot parse is refused.
-- **Retires:** DND-2013 (the path is scanned), DND-2014 (the copied title is in
-  the body), DND-2015 (the target comes from the wire path; the argv `-R` parse
-  is retired with the argv scan), DND-2010 (with *Merges and ref moves at the
-  wire*), and the class: no argv reading decides what is scanned.
+- **Retires:** DND-2013 (the path is scanned); DND-2014's class and DND-2019
+  (text the CLI builds is in the body it sends); DND-2017 (a hidden flag's file
+  is in the body; no flag table decides what is text); DND-2018 and
+  `issue develop` (a branch created through the API is a `ref` operation,
+  refused without a grant, and its project is the wire path's); DND-2015 (the
+  target comes from the wire path; the argv `-R` parse is retired with the argv
+  scan); DND-2010 (with *Merges and ref moves at the wire*); and the class: no
+  argv reading decides what is scanned.
 - **Residual:** git content (it travels over the git transport, not the API;
   *Residuals*); text the server generates (GitHub `--generate-notes`); a
   multi-request command refused part-way leaves its earlier, clean writes in
@@ -119,7 +131,8 @@ refuses ordinary work.
 - **Exact or reconstructed:** reconstructed. Matching a shape still parses argv
   with a model of pflag, so every DND-1976-style ambiguity stays.
 - **Cannot see:** env fallbacks (DND-2006), placeholders filled later
-  (DND-2009), server-derived text (DND-2014), files read twice (DND-2010).
+  (DND-2009), text the CLI builds or copies from the server (DND-2014,
+  DND-2019), files read twice (DND-2010), hidden flags (DND-2017).
 - **Retires:** instances only, by refusing their shapes; not the class.
 - **Rejected as the scan.** Its sound part moves to the wire, where operations
   are canonical: *The operation table*.
@@ -338,7 +351,9 @@ become redundant once the wire scan refuses every case in their regression
 suites. Dropping a check that looks redundant is the owner's decision
 (`ai/blocks/ops/safety-checks.md`; `~/.claude/CLAUDE.md` → *Owner approval
 policy*, item 5). Until then both run, and the argv scan's false refusals
-(DND-2015) stand.
+stand: DND-2015, and the *text glab builds itself* refusals (`--fill` and the
+rest on a public project), which the wire scan would judge by their actual text
+instead.
 
 ## Testing
 
@@ -353,7 +368,7 @@ hang.
   `operations` and `verdict`, plus hand-built malformed requests for every row
   of *Fail-closed behaviour*.
 - **Every historical instance is a regression case.** DND-1976, 2006, 2007,
-  2009, 2012, 2013, 2014 and 2010 each run through the real wrapper and the real
+  2009, 2010, 2012, 2013, 2014, 2017, 2018 and 2019 each run through the real wrapper and the real
   CLI against the fake upstream: sent with the wire scan off (the current
   wrappers), refused with it on. The planted value is synthetic.
 - **Grant tests:** a granted merge is forwarded; a merge with no grant, another
