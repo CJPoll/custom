@@ -42,7 +42,7 @@ Always refer to a ticket as `<PREFIX>-<number>`, never by raw page id.
    the status to `In Progress`; the assignee stays **Athena**. On a DND ticket
    or a work-tracker ticket, make the move with
    `~/dev/custom/ai/skills/athena:ticket-management/scripts/mark-in-progress --ref <TICKET>`.
-   On a first dispatch (DND: from `Todo` or `Backlog`; work: from the statuses
+   On a first dispatch (DND: from `Todo`; work: from the statuses
    the private overlay names) the same write stamps the ticket's dispatch date
    (DND: `In Progress at`; work: the overlay's property, DND-1341). A
    re-dispatch from a park (DND: `Parked`; work: the overlay's optional
@@ -601,7 +601,7 @@ exist in the one you are on.** The personal DND tracker has no `In Review`, no
 `Ready for Release` and no `Backlog`; the walt_ui work tracker has the first two.
 So a fleet's DND finding is filed at `Todo`. Measured 2026-10-04: a captain's
 `ticket-file` with `Status` = `Backlog` got a Notion 400 and `NOT FILED`
-(DND-1999 report). So the status you are
+(DND-1999 report). The status you are
 about to set is a *lookup*, and it can miss.
 
 **Resolve the options before you set a status** — read the `Status` property's
