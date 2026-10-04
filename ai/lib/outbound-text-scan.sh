@@ -126,11 +126,16 @@ ots_copy_scan() {
 
 # ots_copy <noun> <flag> <key> <path or -> : the copy half of ots_copy_scan,
 # for a caller that must read the text before it decides to scan (a GraphQL
-# query, read once from the copy rather than twice from a pipe).
+# query, read once from the copy rather than twice from a pipe). <key> may
+# hold one `/`, for a copy that must keep its source's file name (a multipart
+# upload names the part after the path it is handed): `<dir>/<basename>`.
 ots_copy() {
   local noun="$1" flag="$2" key="$3" src="$4" dir f
   dir="$(ots_dir)" || exit 3
   f="$dir/$key"
+  if [[ "$key" == */* ]]; then
+    mkdir -p "${f%/*}" || ots_refuse 3 "could not create ${f%/*} for the outbound scan. Fix: make \$TMPDIR writable and retry."
+  fi
   if [ "$src" = "-" ]; then
     cat > "$f" || ots_refuse 3 "could not read the $noun from stdin. Fix: pass $flag <path> instead."
   else

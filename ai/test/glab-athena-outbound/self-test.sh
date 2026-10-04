@@ -306,6 +306,15 @@ for ep in projects/7/wikis/graphql projects/7/repository/files/graphql projects/
   gla api -X PUT "${ep}" -f "content=x${TOKEN}"
   if refused_hit; then ok "a REST path ending in graphql is a REST write: ${ep}"; else bad "REST graphql-suffix ${ep}" "rc=${RC} ${OUT}"; fi
 done
+gla api -X POST projects/:id/uploads --form "file=@${TMP}/body-hit.md"
+if refused_hit; then ok "a --form upload is scanned"; else bad "--form hit" "rc=${RC} ${OUT}"; fi
+gla api -X POST projects/:id/uploads --form "file=@${TMP}/body-clean.md"
+if [ "${RC}" = 0 ] && sent && [[ "${OUT}" == *"stub-body:a clean body"* ]] && [[ "${CALLS}" != *"${TMP}/body-clean.md"* ]] \
+   && [[ "${CALLS}" =~ file=@[^\ ]*/outbound-scan/file-0/body-clean\.md ]]; then
+  ok "a --form upload is handed the scanned copy under the source's file name"
+else
+  bad "--form clean" "rc=${RC} calls=[${CALLS}] ${OUT}"
+fi
 gla api -X POST "snippets?content=x${TOKEN}"
 if refused_hit && [[ "${OUT}" == *"'snippets' names no project"* ]]; then ok "a query string is scanned and never echoed"; else bad "query echo" "rc=${RC} ${OUT}"; fi
 vis "synth-group%2Fpriv" private

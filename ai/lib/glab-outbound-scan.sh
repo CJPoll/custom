@@ -96,6 +96,17 @@ glos_long_of() {
   esac
 }
 
+# glos_upload_name <path or -> : the file name a multipart upload of <path>
+# carries, for its scanned copy. Stdin and a name with no usable last segment
+# get a fixed name.
+glos_upload_name() {
+  local b="${1##*/}"
+  case "$1:$b" in
+    -:* | *: | *:. | *:..) b=upload ;;
+  esac
+  printf '%s' "$b"
+}
+
 # glos_shown <endpoint or URL> : the text without its ?query or #fragment, for
 # a message (a query can carry the very value the scan refuses to print).
 glos_shown() { printf '%s' "${1%%[?#]*}"; }
@@ -250,7 +261,10 @@ glos_api() {
     case "${FAS_FKIND[$k]}" in
       file | formfile)
         fsrc+=("${FAS_FVAL[$k]#@}"); fidx+=($((off + FAS_FIDX[k])))
-        fpre+=("${FAS_FPRE[$k]}${FAS_FKEY[$k]}=@"); flab+=(field-file); fnoun+=(field); fflag+=("-F ${FAS_FKEY[$k]}=@<path>") ;;
+        fpre+=("${FAS_FPRE[$k]}${FAS_FKEY[$k]}=@"); flab+=(field-file); fnoun+=(field); fflag+=("-F ${FAS_FKEY[$k]}=@<path>")
+        # A --form file is a multipart upload, named after the path glab is
+        # handed: the copy keeps the source's file name.
+        if [ "${FAS_FKIND[$k]}" = formfile ]; then fbase[$((${#fsrc[@]} - 1))]="$(glos_upload_name "${FAS_FVAL[$k]#@}")"; fi ;;
       *)
         texts+=("${FAS_FKEY[$k]}=${FAS_FVAL[$k]}"); tlab+=(field) ;;
     esac
@@ -271,7 +285,7 @@ glos_api() {
   if [ -n "$graphql" ] && [ "${#fsrc[@]}" -gt 0 ]; then
     FAS_FILES=()
     for k in "${!fsrc[@]}"; do
-      ots_copy "${fnoun[$k]}" "${fflag[$k]}" "graphql-$k" "${fsrc[$k]}"
+      ots_copy "${fnoun[$k]}" "${fflag[$k]}" "graphql-$k${fbase[$k]:+/${fbase[$k]}}" "${fsrc[$k]}"
       fsrc[k]="$OTS_COPY"
       GLOS_ARGV[${fidx[$k]}]="${fpre[$k]}$OTS_COPY"
       if [ "${flab[$k]}" = input ]; then FAS_INPUT="$OTS_COPY"; else FAS_FILES+=("$OTS_COPY"); fi
@@ -300,6 +314,7 @@ glos_guard() {
   GLOS_ARGV=("$@")
   OTS_TOOL=glab-athena OTS_DEST=project OTS_WHAT="glab command"
   local -a argv=("$@") path=() targets=() texts=() tlab=() fsrc=() fidx=() fpre=() flab=() fnoun=() fflag=() pos=()
+  local -A fbase=()
   local n=$# i=0 a v c rest pre="" group="" verb="" tl="" ts="" fl="" fs="" tg="" lf
   local after_unknown="" r_ambiguous=""
 
@@ -421,7 +436,7 @@ glos_guard() {
   local k
   for k in "${!texts[@]}"; do ots_scan_text "${tlab[$k]}" "${tlab[$k]}" "text-$k" "${texts[$k]}"; done
   for k in "${!fsrc[@]}"; do
-    ots_copy_scan "${flab[$k]}" "${fnoun[$k]}" "${fflag[$k]}" "file-$k" "${fsrc[$k]}"
+    ots_copy_scan "${flab[$k]}" "${fnoun[$k]}" "${fflag[$k]}" "file-$k${fbase[$k]:+/${fbase[$k]}}" "${fsrc[$k]}"
     GLOS_ARGV[${fidx[$k]}]="${fpre[$k]}$OTS_COPY"
   done
   return 0
