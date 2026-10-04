@@ -71,6 +71,14 @@ if [[ "$all" =~ ^api\ (--hostname\ [^\ ]+\ )?projects/[^\ ]+/merge_requests/[0-9
 if [[ "$all" =~ ^api\ projects/[0-9]+/repository/commits/[0-9a-f]+$ ]]; then answer commit "$all"; fi
 if [[ "$all" =~ ^api\ (--hostname\ [^\ ]+\ )?projects/[0-9]+/repository/branches/[^\ ]+$ ]]; then answer branch "$all"; fi
 if [[ "$all" =~ ^api\ (--hostname\ [^\ ]+\ )?projects/[0-9]+/merge_requests/[0-9]+/versions$ ]]; then answer versions "$all"; fi
+# The outbound scan's visibility read (DND-1938), run on an api write that
+# carries a field (a train car's `-f sha=`) once the merge guard has passed it.
+# Answered "private": the project the merge guard judges is the work-shaped
+# fixture, and the scan has its own suite (ai/test/glab-athena-outbound). It is
+# logged apart from STUB_READS, which counts the merge guard's own reads.
+if [[ "$all" =~ ^api\ (--hostname\ [^\ ]+\ )?(projects|groups)/[^/\ ]+$ ]]; then
+  printf '%s\n' "$all" >> "${STUB_READS}.vis"; echo '{"visibility":"private"}'; exit 0
+fi
 printf '%s\n' "$all" >> "${STUB_EXECS}"
 echo "stub: ran $all"
 exit 0

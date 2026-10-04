@@ -63,6 +63,14 @@ fas_path() {
   printf '%s' "${res[*]}"
 }
 
+# ---- the glab api flag table (glab 1.112) ------------------------------------
+# One table for every glab-athena guard that parses `glab api`: the merge guard
+# (ai/lib/glab-merge-guard.sh) and the outbound scan (ai/lib/glab-outbound-scan.sh).
+FAS_GLAB_API_VALUED=" --method --field --raw-field --header --input --form --hostname --output "
+FAS_GLAB_API_BOOL=" --include --paginate --silent --help "
+FAS_GLAB_API_SVALUED="XFfH"
+FAS_GLAB_API_SBOOL="ih"
+
 # ---- fas_parse_api ----------------------------------------------------------
 # The caller sets the flag table first (space-delimited, each with a leading and
 # trailing space):
@@ -87,24 +95,36 @@ fas_path() {
 #   FAS_OVERRIDE  1 when a header overrides the HTTP method
 #   FAS_HOSTNAME  the --hostname value, or ""
 #   FAS_POS       the positional words (the endpoint)
+#   FAS_FIDX/FAS_FPRE  per field and form, the 0-based index (in the args
+#                 given) of the word holding its `key=value`, and the text in
+#                 that word before `key=value` ("" when the value is its own
+#                 word, `--field=` or `-F` when attached). A caller that swaps
+#                 a value (an @- stdin read for a private copy) rewrites that
+#                 word as FPRE + key=new value (DND-1938).
+#   FAS_INPUT_IDX/FAS_INPUT_PRE  the same for the --input value (index "" when
+#                 there is no --input)
 # It returns 1 on a flag outside the table, with FAS_UNKNOWN naming it: an
 # unknown flag means the rest of the argv may not parse the way the CLI parses
 # it, so the caller refuses.
 fas_parse_api() {
-  local a v i c rest
+  local a v i c rest p=-1
   FAS_METHOD="" FAS_NPARAMS=0 FAS_INPUT="" FAS_NFORM=0 FAS_OVERRIDE=0 FAS_HOSTNAME="" FAS_UNKNOWN=""
   FAS_FKEY=() FAS_FVAL=() FAS_FKIND=() FAS_RAW=() FAS_FILES=() FAS_POS=()
+  FAS_FIDX=() FAS_FPRE=() FAS_INPUT_IDX="" FAS_INPUT_PRE="" FAS_VI="" FAS_VPRE=""
   while [ $# -gt 0 ]; do
-    a="$1"; shift
+    a="$1"; shift; p=$((p+1))
     case "$a" in
       --) FAS_POS+=("$@"); break ;;
       --*=*)
-        if [[ "$FAS_API_VALUED" == *" ${a%%=*} "* ]]; then fas_api_opt "${a%%=*}" "${a#*=}"
+        if [[ "$FAS_API_VALUED" == *" ${a%%=*} "* ]]; then
+          FAS_VI="$p" FAS_VPRE="${a%%=*}="
+          fas_api_opt "${a%%=*}" "${a#*=}"
         elif [[ "$FAS_API_BOOL" == *" ${a%%=*} "* ]]; then :
         else FAS_UNKNOWN="${a%%=*}"; return 1; fi ;;
       --*)
         if [[ "$FAS_API_VALUED" == *" $a "* ]]; then
-          v="${1:-}"; [ $# -gt 0 ] && shift
+          v="${1:-}"; [ $# -gt 0 ] && { shift; p=$((p+1)); }
+          FAS_VI="$p" FAS_VPRE=""
           fas_api_opt "$a" "$v"
         elif [[ "$FAS_API_BOOL" == *" $a "* ]]; then :
         else FAS_UNKNOWN="$a"; return 1; fi ;;
@@ -114,8 +134,14 @@ fas_parse_api() {
           c="${rest:$i:1}"
           if [[ "$FAS_API_SBOOL" == *"$c"* ]]; then :
           elif [[ "$FAS_API_SVALUED" == *"$c"* ]]; then
-            v="${rest:$((i+1))}"; v="${v#=}"
-            if [ -z "$v" ]; then v="${1:-}"; [ $# -gt 0 ] && shift; fi
+            v="${rest:$((i+1))}"
+            FAS_VI="$p" FAS_VPRE="-${rest:0:$((i+1))}"
+            [[ "$v" == =* ]] && FAS_VPRE="$FAS_VPRE="
+            v="${v#=}"
+            if [ -z "$v" ]; then
+              v="${1:-}"; [ $# -gt 0 ] && { shift; p=$((p+1)); }
+              FAS_VI="$p" FAS_VPRE=""
+            fi
             case "$c" in
               X) fas_api_opt --method "$v" ;;
               F) fas_api_opt --field "$v" ;;
@@ -139,9 +165,12 @@ fas_api_opt() {
   local k="${2%%=*}" v="${2#*=}"
   case "$1" in
     --method) FAS_METHOD="${2^^}" ;;
-    --raw-field) FAS_NPARAMS=$((FAS_NPARAMS+1)); FAS_FKEY+=("$k"); FAS_FVAL+=("$v"); FAS_FKIND+=(raw); FAS_RAW+=("$v") ;;
+    --raw-field)
+      FAS_NPARAMS=$((FAS_NPARAMS+1)); FAS_FKEY+=("$k"); FAS_FVAL+=("$v"); FAS_FKIND+=(raw); FAS_RAW+=("$v")
+      FAS_FIDX+=("$FAS_VI"); FAS_FPRE+=("$FAS_VPRE") ;;
     --field|--form)
       FAS_NPARAMS=$((FAS_NPARAMS+1))
+      FAS_FIDX+=("$FAS_VI"); FAS_FPRE+=("$FAS_VPRE")
       [ "$1" = --form ] && FAS_NFORM=$((FAS_NFORM+1))
       FAS_FKEY+=("$k"); FAS_FVAL+=("$v")
       # The CLI reads a file only when the VALUE starts with @ (key=@path).
@@ -154,7 +183,7 @@ fas_api_opt() {
       fi ;;
     --header)
       if [[ "${2,,}" =~ ^[[:space:]]*x-(http-)?method(-override)?[[:space:]]*: ]]; then FAS_OVERRIDE=1; fi ;;
-    --input) FAS_INPUT="$2" ;;
+    --input) FAS_INPUT="$2" FAS_INPUT_IDX="$FAS_VI" FAS_INPUT_PRE="$FAS_VPRE" ;;
     --hostname) FAS_HOSTNAME="$2" ;;
   esac
 }

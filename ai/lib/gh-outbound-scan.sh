@@ -16,18 +16,11 @@
 # the guard scans --title/--subject/-t, --body/-b, --comment/-c (close/reopen)
 # and --body-file/-F (every body file, `-` included, is copied into a private
 # file, scanned, and handed to gh in its place)
-# with `ai/bin/outbound-scan --text`, and:
-#
-#   CLEAN / WAIVED - NOT SCANNED   gh runs (the scanner's line is shown on stderr)
-#   HITS                           REFUSED, exit 1: labels and locations only
-#   COULD NOT MEASURE              REFUSED, exit 3 — except where the overlay is
-#                                  ABSENT and this machine is not marked as one
-#                                  that holds it (no outbound pre-push hook in
-#                                  the harness checkout's common git dir). There
-#                                  gh runs, and a WARNING says the text went out
-#                                  UNSCANNED. The overlay is optional
-#                                  (contract -> Discovery); the installed hook
-#                                  is the mark of a machine that must measure.
+# with `ai/bin/outbound-scan --text`. What each scanner outcome means (CLEAN,
+# WAIVED, HITS, COULD NOT MEASURE and the unmarked-machine warning, a crash)
+# and how a field reaches the scanner are shared with glab-athena's scan:
+# ai/lib/outbound-text-scan.sh. Only the gh argv parse and the gh visibility
+# read live here.
 #
 # Target visibility: `gh repo view [<repo>] --json visibility`, as the App.
 # PRIVATE and INTERNAL targets are not scanned. A visibility that cannot be
@@ -45,60 +38,9 @@
 # Test seam: none of its own. ai/test/gh-athena-outbound/self-test.sh drives the
 # real wrapper with a stub gh on PATH that records every call.
 
-GOS_BIN_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../bin"
-
-gos_refuse() {
-  local rc="$1"; shift
-  printf 'gh-athena: REFUSED: %s\n' "$*" >&2
-  exit "$rc"
-}
-
-# gos_machine_marked : 0 when the harness checkout holding this wrapper has the
-# outbound pre-push hook installed in its common git dir.
-#
-# Three outcomes, never two: 0 marked, 1 not marked (the hook path resolved
-# and holds no outbound hook), 2 could not determine (git could not resolve
-# the hook path, or the hook exists but cannot be read). The caller treats 2
-# as "must measure": a failed lookup never reads as "not marked". The hook
-# path honours core.hooksPath (git rev-parse --git-path).
-gos_machine_marked() {
-  local hook
-  hook="$(git -C "$GOS_BIN_DIR" rev-parse --path-format=absolute --git-path hooks/pre-push 2>/dev/null)" || return 2
-  [ -n "$hook" ] || return 2
-  [ -e "$hook" ] || return 1
-  [ -r "$hook" ] || return 2
-  if grep -q -e outbound-scan -e outbound-pre-push "$hook" 2>/dev/null; then return 0; fi
-  return 1
-}
-
-# gos_scan <label> <file> : run the scanner on one field; handles the outcome.
-gos_scan() {
-  local label="$1" file="$2" out rc=0
-  out="$("$GOS_BIN_DIR/outbound-scan" --text "$file" --label "$label" 2>&1)" || rc=$?
-  printf '%s\n' "$out" | sed 's/^/gh-athena: /' >&2
-  case "$rc" in
-    0) return 0 ;;
-    1)
-      # Exit 1 is HITS only when the scanner says so; a crash (a Ruby
-      # exception is also exit 1) is a scanner failure, never read as a result.
-      case "$out" in
-        *"outbound-scan: HITS mode="*) ;;
-        *) gos_refuse 3 "the outbound scanner exited 1 on the $label without reporting HITS (a crash, output above). Fix: run \`$GOS_BIN_DIR/outbound-scan --help\` and report the defect." ;;
-      esac
-      gos_refuse 1 "the $label of this $GOS_WHAT to a PUBLIC repository carries work-domain values (locations and labels above). Fix: remove them from the $label, or read them from the private overlay instead of pasting them (ai/contracts/athena-private-overlay.md -> Consumer obligation), then retry." ;;
-    3)
-      local st=0
-      "$GOS_BIN_DIR/private-overlay" status >/dev/null 2>&1 || st=$?
-      local marked=0
-      gos_machine_marked || marked=$?
-      if [ "$st" = 3 ] && [ "$marked" = 1 ]; then
-        printf 'gh-athena: WARNING: the %s of this %s went out UNSCANNED: the private overlay is ABSENT and this machine is not marked as one that holds it (no outbound pre-push hook installed). This is not a clean result. Fix: none needed on a machine without the overlay; on one that should hold it, the owner creates it with scripts/setup-private-overlay --init and installs the hook with scripts/setup-private-overlay --install.\n' "$label" "$GOS_WHAT" >&2
-        return 0
-      fi
-      gos_refuse 3 "the outbound scan of the $label could not measure (above), and this machine must measure. Fix: the Fix: line above names the problem; correct it and retry." ;;
-    *) gos_refuse 3 "the outbound scanner failed (exit $rc) on the $label. Fix: run \`$GOS_BIN_DIR/outbound-scan --help\` and correct the call; report the defect if the call was right." ;;
-  esac
-}
+# shellcheck source=outbound-text-scan.sh
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/outbound-text-scan.sh"
+OTS_TOOL=gh-athena OTS_DEST=repository
 
 # gos_positional <word> : a positional that is a URL adds its repository to the
 # caller's `targets` (dynamic scope). github.com URLs become OWNER/REPO; another
@@ -160,7 +102,7 @@ gos_guard() {
       "issue create" | "issue edit" | "issue comment" | "issue close" | "issue reopen") ;;
     *) return 0 ;;
   esac
-  GOS_WHAT="$group $verb"
+  GOS_WHAT="$group $verb" OTS_WHAT="$group $verb"
 
   local i=2 n=$# a have_r=""
   local -a argv=("$@") titles=() bodies=() bf_idx=() bf_pre=() bf_path=() targets=()
@@ -191,7 +133,7 @@ gos_guard() {
       --*) ;;
       -?*)
         if [ "${#a}" -gt 2 ] && { [[ "${a:2}" == *[tbFR]* ]] || { gos_comment_verb && [[ "${a:2}" == *c* ]]; }; }; then
-          gos_refuse 3 "the short-flag cluster \`${a:0:2}…\` in this $GOS_WHAT may carry a title, body or repo the outbound scan cannot separate. Fix: write each short flag as its own word (\`-d -b <text>\`, \`-B <branch>\`), or use the long flags (--title, --body, --body-file, --repo)."
+          ots_refuse 3 "the short-flag cluster \`${a:0:2}…\` in this $GOS_WHAT may carry a title, body or repo the outbound scan cannot separate. Fix: write each short flag as its own word (\`-d -b <text>\`, \`-B <branch>\`), or use the long flags (--title, --body, --body-file, --repo)."
         fi ;;
       *) gos_positional "$a" ;;
     esac
@@ -220,33 +162,12 @@ gos_guard() {
   done
   [ -n "$public" ] || return 0
 
-  [ -n "${FCI_CFG_DIR:-}" ] || gos_refuse 3 "the private config dir (FCI_CFG_DIR) is unset, so the outbound scan has nowhere to copy the text. Fix: run gh-athena as a whole (it sets the dir up before this guard); report a defect if it did."
-  local dir="$FCI_CFG_DIR/outbound-scan"
-  mkdir -p "$dir" || gos_refuse 3 "could not create $dir for the outbound scan. Fix: make \$TMPDIR writable and retry."
-  local k f
-  for k in "${!titles[@]}"; do
-    f="$dir/title-$k"
-    printf '%s\n' "${titles[$k]}" > "$f" || gos_refuse 3 "could not write the title to $f for the outbound scan. Fix: make \$TMPDIR writable and retry."
-    gos_scan title "$f"
-  done
-  for k in "${!bodies[@]}"; do
-    f="$dir/body-$k"
-    printf '%s\n' "${bodies[$k]}" > "$f" || gos_refuse 3 "could not write the body to $f for the outbound scan. Fix: make \$TMPDIR writable and retry."
-    gos_scan body "$f"
-  done
+  local k
+  for k in "${!titles[@]}"; do ots_scan_text title title "title-$k" "${titles[$k]}"; done
+  for k in "${!bodies[@]}"; do ots_scan_text body body "body-$k" "${bodies[$k]}"; done
   for k in "${!bf_path[@]}"; do
-    # Every body file is COPIED once and gh is handed the copy: a pipe
-    # (-F <(...), /dev/fd/N, a FIFO) can be read only once, and a regular
-    # file can change between the scan and gh's own read.
-    f="$dir/body-file-$k"
-    if [ "${bf_path[$k]}" = "-" ]; then
-      cat > "$f" || gos_refuse 3 "could not read the body from stdin. Fix: pass --body-file <path> instead."
-    else
-      [ -r "${bf_path[$k]}" ] || gos_refuse 3 "the body file ${bf_path[$k]} is not readable, so it cannot be scanned. Fix: pass a readable --body-file."
-      cat -- "${bf_path[$k]}" > "$f" || gos_refuse 3 "could not copy the body file ${bf_path[$k]} for the outbound scan. Fix: pass a readable regular file and retry."
-    fi
-    GOS_ARGV[${bf_idx[$k]}]="${bf_pre[$k]}$f"
-    gos_scan body-file "$f"
+    ots_copy_scan body-file body --body-file "body-file-$k" "${bf_path[$k]}"
+    GOS_ARGV[${bf_idx[$k]}]="${bf_pre[$k]}$OTS_COPY"
   done
   return 0
 }

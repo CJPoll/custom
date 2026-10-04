@@ -151,11 +151,12 @@ GLMG_SAFE_PATH="gate the MR's head with \`$GLMG_IG\` (athena:merge-boarding -> L
 GLMG_HOST=""
 GLMG_MERGE_MUTATIONS="mergeRequestAccept"
 
-# `glab api` flags (glab 1.112).
-GLMG_API_VALUED=" --method --field --raw-field --header --input --form --hostname --output "
-GLMG_API_BOOL=" --include --paginate --silent --help "
-GLMG_API_SVALUED="XFfH"
-GLMG_API_SBOOL="ih"
+# `glab api` flags (glab 1.112): the one table in ai/lib/forge-api-scan.sh,
+# shared with the outbound scan.
+GLMG_API_VALUED="$FAS_GLAB_API_VALUED"
+GLMG_API_BOOL="$FAS_GLAB_API_BOOL"
+GLMG_API_SVALUED="$FAS_GLAB_API_SVALUED"
+GLMG_API_SBOOL="$FAS_GLAB_API_SBOOL"
 
 # `glab mr merge` flags (glab 1.112; --when-pipeline-succeeds is its hidden,
 # deprecated boolean). -R/--repo is also accepted before the subcommand.

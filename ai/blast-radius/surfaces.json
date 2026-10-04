@@ -322,6 +322,7 @@
       "ai/git-hooks/agent-stash-guard.sh": "refuses stash-list writes (DND-775); it decides nothing about a merge or push",
       "ai/git-hooks/outbound-pre-push.sh": "refuses a push by its CONTENT (the public-repo work-value leak scan); a leak control, not the merge or push bar: it does not decide which merge or push to main is accepted or as whom",
       "ai/lib/gh-outbound-scan.sh": "the same leak scan on gh-athena PR and issue text (DND-699); it refuses by content, not by which merge is accepted or as whom",
+      "ai/lib/glab-outbound-scan.sh": "the same leak scan on glab-athena MR, issue, note, release and api text (DND-1938); it refuses by content, not by which merge is accepted or as whom",
       "ai/lib/telemetry-emit.sh": "writes telemetry for the guards that load it; it decides nothing",
       "ai/lib/proc_state.rb": "reads /proc process state for reap_tags; it writes no verdict",
       "ai/lib/athena_telemetry.rb": "the telemetry writer; the gate loads it fail-open and it decides nothing",
