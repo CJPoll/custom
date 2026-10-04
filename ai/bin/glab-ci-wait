@@ -23,12 +23,14 @@ HELP = <<~TXT
   one VERDICT: line on stdout. Use it for every CI, merge or deploy wait on a
   GitLab project, in place of `glab ci status --live`, `glab ci view` (a live
   view that refreshes until the pipeline ends) and hand-rolled loops around
-  glab. The guard ai/hooks/safe-wait-guard.sh denies those and names this.
+  glab. The guard ai/hooks/safe-wait-guard.sh denies those in a Bash call
+  and names this.
 
   What it waits on:
     every pipeline on --sha in --project, filtered by --ref and --source when
-    given. The newest pipeline per (source, ref) is current; an older one (a
-    re-run of the same sha) is named as superseded. Pipelines another pipeline
+    given. The newest pipeline per ref is current; an older one on that ref (a
+    re-push, or one a "Run pipeline" re-ran) is named as superseded, so an MR
+    pipeline and a branch pipeline are both judged. Pipelines another pipeline
     started (source parent_pipeline or pipeline) are not top level.
       MR head pipeline:   --sha <head> --source merge_request_event
       main / deploy:      --sha <merged sha> --ref main --source push --include-children
@@ -51,9 +53,11 @@ HELP = <<~TXT
                    NOT-FOUND; default #{GlabCiWait::DEFAULT_GRACE}. 0 says NOT-FOUND on the first
                    read that lists none.
 
-  Reads go through ~/dev/custom/ai/bin/glab-athena (the bot identity for the
-  project's namespace), never the owner's glab, as REST GETs with the project
-  named by its %2F-encoded path. GLAB_CI_WAIT_GLAB names another glab
+  Reads go through ~/dev/custom/ai/bin/glab-athena, never the owner's glab, so
+  they run as whichever bot glab-athena resolves for the project (one bot
+  before DND-1936; the namespace's bot after it). They are REST GETs with the
+  project named by its %2F-encoded path, which DND-1936's routing needs (it
+  refuses numeric project ids and `api graphql`). GLAB_CI_WAIT_GLAB names another glab
   executable; the test suite uses it for a fake. Each read is `glab api -i`, so
   GitLab's RateLimit headers are read: a 429 waits to its Retry-After or
   RateLimit-Reset when that falls inside --timeout, and otherwise stops with

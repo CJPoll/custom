@@ -303,6 +303,24 @@ check7 "7h. a sleeping while-loop around glab mr view"
 run "$(bash_json 'watch -n 30 glab ci status')"
 check7 "7i. watch -n 30 glab ci status"
 
+run "$(bash_json "watch 'glab ci status'")"
+check7 "7j. watch with the glab command quoted (single)"
+
+run "$(bash_json 'watch -n 30 "glab api projects/acme%2Fapp/pipelines"')"
+check7 "7k. watch -n 30 with the glab command quoted (double)"
+
+run "$(bash_json 'if true; then while true; do glab ci status; sleep 30; done; fi')"
+check7 "7l. a sleeping loop inside if/then"
+
+run "$(bash_json '{ while true; do glab ci status; sleep 30; done; }')"
+check7 "7m. a sleeping loop inside a { } group"
+
+run "$(bash_json "timeout 600 bash -c 'while :; do glab ci status; sleep 30; done'")"
+check7 "7n. a sleeping loop inside bash -c"
+
+run "$(bash_json "sh -ec 'glab ci status --live'")"
+check7 "7o. glab ci status --live inside sh -ec"
+
 run "$(bash_json 'glab ci status -R acme/app -b main')"
 check "M27. one glab ci status read (no --live)" allow
 
@@ -329,6 +347,18 @@ check "M34. a sleeping loop that ends before one glab read" allow
 
 run "$(bash_json 'glab ci status; while true; do sleep 30; date; done')"
 check "M35. one glab read before a loop that does not read glab" allow
+
+run "$(bash_json 'glab ci view --help')"
+check "M36. glab ci view --help" allow
+
+run "$(bash_json 'glab ci status --live -h')"
+check "M37. glab ci status --live -h (help, not a watch)" allow
+
+run "$(bash_json "bash -c 'glab ci status -F json'")"
+check "M38. one glab read inside bash -c" allow
+
+run "$(bash_json 'for p in a b; do glab api "projects/acme%2F$p"; done; sleep 5')"
+check "M39. a non-sleeping loop of glab reads, with a sleep after it" allow
 
 echo
 echo "--- HEREDOC cases (only a one-line send-mail shape is exempt) ---"

@@ -166,6 +166,10 @@ check("C2 a push pipeline and an MR pipeline on one sha are both current") do
                           T, next_page: nil)
   c[:current].map { |p| p["id"] }.sort == [11, 12]
 end
+check("C2b a newer \"Run pipeline\" (source web) on the same ref supersedes a failed push pipeline") do
+  c = W.current_pipelines([pl(14, "success", source: "web"), pl(12, "failed")], T, next_page: nil)
+  c[:current].map { |p| p["id"] } == [14] && c[:superseded].map { |p| p["id"] } == [12]
+end
 check("C3 a child pipeline in the list is not top level (bridges reach it)") do
   c = W.current_pipelines([pl(12, "success"), pl(13, "failed", source: "parent_pipeline")], T, next_page: nil)
   c[:current].map { |p| p["id"] } == [12]

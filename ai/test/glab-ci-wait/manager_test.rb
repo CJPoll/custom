@@ -31,8 +31,12 @@ end
 class Rig
   attr_reader :now, :sleeps, :paths, :log
 
-  def initialize(routes)
-    @routes = routes
+  # cost: seconds each read takes on the fake clock (a slow or hung network).
+  # Routes come as a Hash, or as bare string-keyed arguments (which Ruby
+  # passes as keywords once the method takes cost:).
+  def initialize(routes = {}, cost: 0, **more)
+    @cost = cost
+    @routes = routes.merge(more.transform_keys(&:to_s))
     @now = T0
     @sleeps = []
     @paths = []
@@ -42,6 +46,7 @@ class Rig
   def waiter
     reader = lambda do |path, _timeout_s|
       @paths << path
+      @now += @cost
       key = @routes.keys.find { |k| path.include?(k) } or raise "unrouted read #{path}"
       list = @routes[key]
       entry = list.length > 1 ? list.shift : list.first
@@ -90,6 +95,20 @@ check("V3 FAILED lists the failing jobs from the pipeline's jobs, with a Fix") d
   o = run(rig)
   o.verdict == :failed && o.line.include?("test/rspec (failed: script_failure)") && o.jobs.size == 1 &&
     o.jobs[0][:id] == 7 && o.fix.to_s.include?("jobs/<job id>/trace")
+end
+check("V3b a job list it cannot read leaves FAILED as judged, and says so") do
+  rig = Rig.new("/repository/commits/" => [COMMIT], "/pipelines?" => [ok([pl(12, "failed")])],
+                "/pipelines/12/jobs" => [ok({ "message" => "surprise" })])
+  o = run(rig)
+  o.verdict == :failed && o.line.include?("job list unreadable")
+end
+check("V3c more failing pipelines than it reads jobs for are counted, not dropped") do
+  routes = { "/repository/commits/" => [COMMIT],
+             "/pipelines?" => [ok((1..7).map { |i| pl(i, "failed", source: "push", ref: "r#{i}") })] }
+  (1..7).each { |i| routes["/pipelines/#{i}/jobs"] = [ok([])] }
+  rig = Rig.new(routes)
+  o = run(rig, W::Target.new(project: PROJ, sha: SHA, include_children: false))
+  o.verdict == :failed && o.line.include?("2 more failing pipelines")
 end
 check("V4 CANCELED is its own verdict") do
   rig = Rig.new("/repository/commits/" => [COMMIT], "/pipelines?" => [ok([pl(12, "canceled")])],
@@ -202,6 +221,36 @@ check("C5 a multi-project child is read under its own project path") do
                 "acme%2Fdeployer/pipelines/88/bridges" => [ok([])])
   o = run(rig, TC)
   o.verdict == :done && rig.paths.include?("projects/acme%2Fdeployer/pipelines/88/bridges?per_page=100")
+end
+check("D1 --timeout is a hard bound: no read starts after it, even mid-poll") do
+  rig = Rig.new({ "/repository/commits/" => [COMMIT], "/pipelines?" => [ok([pl(12, "running")])],
+                  "/pipelines/12/bridges" => [ok([])] }, cost: 50)
+  o = run(rig, TC, max: 120)
+  # commit (t=50), list (t=100), bridges (t=150), sleep 0 left... the read at
+  # or after the deadline is never made.
+  starts = rig.paths.size
+  o.verdict == :timeout && rig.now - T0 <= 120 + 50 && starts <= 4
+end
+check("D2 the deadline before any poll completes is COULD-NOT-LOOK, never NOT-FOUND") do
+  rig = Rig.new({ "/repository/commits/" => [COMMIT], "/pipelines?" => [ok([pl(12, "running")])],
+                  "/pipelines/12/bridges" => [ok([])] }, cost: 70)
+  o = run(rig, TC, max: 100)
+  o.verdict == :could_not_look && o.line.include?("--timeout") && !o.line.include?("NOT-FOUND")
+end
+check("D3 job lists are not read past the deadline; the verdict stands") do
+  rig = Rig.new({ "/repository/commits/" => [COMMIT], "/pipelines?" => [ok([pl(12, "failed")])],
+                  "/pipelines/12/jobs" => [ok([])] }, cost: 60)
+  o = run(rig, max: 100)
+  o.verdict == :failed && rig.paths.none? { |p| p.include?("/jobs") } && o.line.include?("not read")
+end
+check("C5b a downstream project the bot cannot see is named as downstream, not as --project") do
+  other = ds(88, "running", project: "acme/deployer")
+  nf = W::Read.new(kind: :not_found, status: 404, detail: "HTTP 404: 404 Project Not Found")
+  rig = Rig.new("/repository/commits/" => [COMMIT], "/pipelines?" => [ok([pl(12, "success")])],
+                "/pipelines/12/bridges" => [ok([br("deploy", "running", other)])],
+                "acme%2Fdeployer/pipelines/88/bridges" => [nf])
+  o = run(rig, TC)
+  o.verdict == :could_not_look && o.line.include?("downstream project acme/deployer") && !o.fix.include?("check --project")
 end
 check("C6 nesting past the depth bound is COULD-NOT-LOOK, never silently unfollowed") do
   routes = { "/repository/commits/" => [COMMIT], "/pipelines?" => [ok([pl(1, "success")])] }

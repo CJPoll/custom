@@ -174,8 +174,10 @@ Athena*.
 
 Wait with `~/dev/custom/ai/bin/glab-ci-wait` (DND-1940), never with
 `glab ci status --live`, `glab ci view`, `watch glab …` or a sleeping loop
-around a glab read. `ai/hooks/safe-wait-guard.sh` denies those. A single
-`glab ci status` or `glab mr view` read is fine.
+around a glab read, and never a `Monitor` that polls glab.
+`ai/hooks/safe-wait-guard.sh` denies those forms in a Bash call (directly, in
+`watch`, or in `sh -c`); it does not see a `Monitor`. A single `glab ci status`
+or `glab mr view` read is fine.
 
 ```sh
 # an MR head pipeline
@@ -185,7 +187,7 @@ around a glab read. `ai/hooks/safe-wait-guard.sh` denies those. A single
 ```
 
 It reads through `glab-athena` every 60 s (floor 30), stops at `--timeout`
-(default 570 s), honours GitLab's RateLimit headers, and prints one `VERDICT:`
+(default 570 s), honors GitLab's RateLimit headers, and prints one `VERDICT:`
 line: DONE, FAILED or CANCELED (with `JOB:` lines), TIMEOUT, NOT-FOUND (the
 commit exists, no pipeline is listed for it) or COULD-NOT-LOOK (an unknown
 project or sha, a refusal, a rate limit past the bound). A merged-results

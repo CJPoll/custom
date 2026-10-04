@@ -460,6 +460,16 @@ glab_cli_args() {
           *) break ;;
         esac
       done
+      # `watch 'glab ci status'`: watch runs its one quoted argument through
+      # sh -c, so split it into words.
+      if [ $# -eq 1 ]; then
+        case $1 in *' '*)
+          _old=$IFS; IFS=' '; set -f
+          # shellcheck disable=SC2086
+          set -- $1
+          IFS=$_old ;;
+        esac
+      fi
       _w=watch ;;
     *) _w='' ;;
   esac
@@ -479,6 +489,8 @@ glab_live_watcher() {
   [ $# -ge 2 ] || return 0
   _sub=$2
   shift 2
+  # Help prints and exits; it watches nothing.
+  for _a in "$@"; do case $_a in --help|-h) return 0 ;; esac; done
   case $_sub in
     status)
       for _a in "$@"; do
@@ -520,30 +532,78 @@ glab_ci_read() {
   return 1
 }
 
-# glab_watch_hit : print what shape 7 denies in SCAN, else nothing.
-glab_watch_hit() {
-  case $SCAN in *glab*) ;; *) return 0 ;; esac
+# lead_word <\037-joined command> : its first word, past the words that only
+# open a compound command (then, do, else, elif, `!`, `{`), so a loop nested
+# in an if or a group is still seen as a loop.
+lead_word() {
+  _lw_rest=$1
+  while :; do
+    _lw=${_lw_rest%%"$_us"*}
+    case $_lw in
+      then|do|else|elif|'!'|'{')
+        case $_lw_rest in *"$_us"*) _lw_rest=${_lw_rest#*"$_us"} ;; *) printf '\n'; return 0 ;; esac ;;
+      *) printf '%s\n' "$_lw"; return 0 ;;
+    esac
+  done
+}
+
+# sh_c_script <words…> : when the command (after wrappers) is sh, bash, zsh
+# or dash with -c (alone or in a cluster such as -ec), print its script.
+sh_c_script() {
+  _k=$(wrapper_len "$@")
+  shift "$_k"
+  case ${1-} in sh|*/sh|bash|*/bash|zsh|*/zsh|dash|*/dash) shift ;; *) return 0 ;; esac
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --*) shift ;;
+      -*c*) shift; [ $# -gt 0 ] && printf '%s\n' "$1" | sed "s/^$(printf '\036')//"; return 0 ;;
+      -*) shift ;;
+      *) return 0 ;;
+    esac
+  done
+  return 0
+}
+
+# glab_scan <text> <nesting> : print what shape 7 denies in <text>, else
+# nothing. The loop depth is tracked over the simple commands in order: one
+# that leads with while, until or for opens a loop (its condition is inside
+# it), one that leads with done closes it. A glab read counts as a poll only
+# inside a loop, and only when a sleep also runs inside a loop. A `sh -c`
+# script is scanned the same way, nested at most twice.
+glab_scan() {
+  case $1 in *glab*) ;; *) return 0 ;; esac
   _us=$(printf '\037')
-  _loop=false
-  if [ "$HAS_LOOP_KW" = true ] && [ "$HAS_DO_DONE" = true ] && has_word 'sleep'; then _loop=true; fi
-  # The loop depth is tracked over the simple commands in order: a command
-  # that starts with while, until or for opens a loop (its condition is
-  # inside it), one that starts with done closes it. So only a glab read
-  # inside a loop counts as a poll, not one before or after it.
+  _sleep_in_loop=$(
+    _d=0
+    split_commands "$1" | while IFS= read -r _l; do
+      case $(lead_word "$_l") in
+        while|until|for) _d=$((_d + 1)) ;;
+        done) [ "$_d" -gt 0 ] && _d=$((_d - 1)) ;;
+        sleep) if [ "$_d" -gt 0 ]; then echo true; break; fi ;;
+      esac
+    done
+  )
+  _nest=$2
   _depth=0
-  split_commands "$SCAN" | while IFS= read -r _line; do
-    _first=${_line%%"$_us"*}
-    case $_first in
+  split_commands "$1" | while IFS= read -r _line; do
+    case $(lead_word "$_line") in
       while|until|for) _depth=$((_depth + 1)) ;;
       done) [ "$_depth" -gt 0 ] && _depth=$((_depth - 1)); continue ;;
     esac
     case $_line in *glab*) ;; *) continue ;; esac
     _inloop=false
-    if [ "$_loop" = true ] && [ "$_depth" -gt 0 ]; then _inloop=true; fi
+    if [ "$_sleep_in_loop" = true ] && [ "$_depth" -gt 0 ]; then _inloop=true; fi
     _hit=$(
       IFS=$_us; set -f
       # shellcheck disable=SC2086
       set -- $_line
+      _script=$(sh_c_script "$@")
+      if [ -n "$_script" ] && [ "$_nest" -lt 2 ]; then
+        IFS='
+'
+        glab_scan "$_script" $((_nest + 1))
+        exit 0
+      fi
       _args=$(glab_cli_args "$@")
       [ -n "$_args" ] || exit 0
       # shellcheck disable=SC2086
@@ -560,9 +620,9 @@ glab_watch_hit() {
     if [ -n "$_hit" ]; then printf '%s\n' "$_hit"; break; fi
   done
 }
-GLAB_HIT=$(glab_watch_hit)
+GLAB_HIT=$(glab_scan "$SCAN" 0)
 if [ -n "$GLAB_HIT" ]; then
-  deny 'SAFE-WAIT (GitLab pipeline poll): `'"$GLAB_HIT"'` polls GitLab for as long as the pipeline runs, with no bound on the bot'"'"'s API budget and no verdict a script can read (DND-1940; the GitHub forms exhausted the 5000/h budget on 2026-10-02, DND-1706). Fix: wait with `~/dev/custom/ai/bin/glab-ci-wait --project <namespace>/<project> --sha <head>` (every pipeline on the commit; add `--source merge_request_event` for an MR head, or `--ref main --source push --include-children` for a merge and its deploy child pipeline). It reads through glab-athena every 60 s with a hard --timeout, honours GitLab'"'"'s RateLimit headers, and prints one VERDICT: line (DONE, FAILED, CANCELED, TIMEOUT, NOT-FOUND or COULD-NOT-LOOK) with the failing jobs. For a one-off look, a single `glab ci status` (no --live) or `glab ci get` is fine.'
+  deny 'SAFE-WAIT (GitLab pipeline poll): `'"$GLAB_HIT"'` polls GitLab for as long as the pipeline runs, with no bound on the bot'"'"'s API budget and no verdict a script can read (DND-1940; the GitHub forms exhausted the 5000/h budget on 2026-10-02, DND-1706). Fix: wait with `~/dev/custom/ai/bin/glab-ci-wait --project <namespace>/<project> --sha <head>` (every pipeline on the commit; add `--source merge_request_event` for an MR head, or `--ref main --source push --include-children` for a merge and its deploy child pipeline). It reads through glab-athena every 60 s with a hard --timeout, honors GitLab'"'"'s RateLimit headers, and prints one VERDICT: line (DONE, FAILED, CANCELED, TIMEOUT, NOT-FOUND or COULD-NOT-LOOK) with the failing jobs. For a one-off look, a single `glab ci status` (no --live) or `glab ci get` is fine.'
 fi
 
 # No dangerous construct detected -> allow silently.

@@ -51,7 +51,8 @@ module GlabCiWait
   Usage = CiWait::Usage
   Unreadable = CiWait::Unreadable
 
-  # kind: :ok, :rate_limited, :auth, :not_found, :refused or :error.
+  # kind: :ok, :rate_limited, :auth, :not_found, :refused or :error; the
+  # manager adds :deadline for a read it did not make because --timeout passed.
   # reset_at on :ok means GitLab said the budget is spent (RateLimit-Remaining 0).
   Read = Struct.new(:kind, :status, :body, :reset_at, :next_page, :detail, keyword_init: true)
   # state: :success, :failed, :canceled, :pending or :none (no current pipeline).
@@ -144,7 +145,7 @@ module GlabCiWait
     why = if v.match?(%r{\A[A-Za-z][A-Za-z0-9+.-]*://}) || v.include?("@") || v.include?(":")
             "is a URL or remote, not a project path"
           elsif v.match?(/\A\d+\z/)
-            "is a numeric id, which names no namespace (glab-athena routes by namespace, DND-1936)"
+            "is a numeric id, which names no namespace (DND-1936's glab-athena refuses one)"
           elsif v.include?("%")
             "is %-encoded"
           elsif v.end_with?(".git")
@@ -203,8 +204,9 @@ module GlabCiWait
   end
 
   # ---- what is read ----------------------------------------------------------
-  # Projects are always named by %2F path, never by numeric id, and nothing
-  # past the project is %-encoded (glab-athena's endpoint key, DND-1936).
+  # Projects are always named by %2F path, never by numeric id, and nothing in
+  # the path past the project is %-encoded; the query string may be (DND-1936's
+  # endpoint key reads the path and ignores the query).
   def commit_path(target)
     "projects/#{encode_project(target.project)}/repository/commits/#{target.sha}"
   end
@@ -226,8 +228,11 @@ module GlabCiWait
 
   # ---- the current pipelines on the sha -------------------------------------
   # current_pipelines(body, target, next_page:) -> { current: [...], superseded: [...] }.
-  # The newest pipeline (by id) per (source, ref) is current; an older one is
-  # superseded (a "Run pipeline" or a re-push of the same sha) and named.
+  # The newest pipeline (by id) per ref is current; an older one on that ref
+  # is superseded and named. So a "Run pipeline" (source web) re-run of a
+  # failed push pipeline replaces it, and an MR pipeline
+  # (refs/merge-requests/...) and a branch pipeline are both current. Pass
+  # --source to judge only one source's pipelines.
   def current_pipelines(body, target, next_page:)
     raise Unreadable, "pipelines body is not an array" unless body.is_a?(Array)
     raise Unreadable, "more than one page of pipelines on the sha (100 per page); the newest may be on another" if next_page
@@ -236,7 +241,7 @@ module GlabCiWait
     rows = rows.select { |p| p["sha"] == target.sha && !CHILD_SOURCES.include?(p["source"]) }
     rows = rows.select { |p| p["ref"] == target.ref } if target.ref
     rows = rows.select { |p| p["source"] == target.source } if target.source
-    groups = rows.group_by { |p| [p["source"], p["ref"]] }.values
+    groups = rows.group_by { |p| p["ref"] }.values
     current = groups.map { |ps| ps.max_by { |p| p["id"] } }.sort_by { |p| p["id"] }
     { current: current, superseded: (rows - current).sort_by { |p| p["id"] } }
   end

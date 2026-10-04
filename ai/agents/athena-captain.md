@@ -279,9 +279,9 @@ bare role name reaches you specifically.
    transition. With no such value, skip this step and set no status.
 9. **Drive CI and review to green.** Watch the MR's pipeline to a terminal
    state — don't just fire-and-forget. Use whatever the project gives you
-   for this (on GitLab, `~/dev/custom/ai/bin/glab-ci-wait --project <p>
-   --sha <head>`, never `glab ci status --live`) until every job is terminal, including any automated
-   review-bot jobs — this project's pipeline runs `claude-review` and
+   for this (on GitLab, `~/dev/custom/ai/bin/glab-ci-wait`, per
+   athena:gitlab → *Waiting on a pipeline*) until every job is terminal,
+   including any automated review-bot jobs — this project's pipeline runs `claude-review` and
    `adr-review` alongside build/lint/test, so "CI is done" and "the bots have
    reviewed" are the same event: the pipeline reaching a terminal state).
    **Forge:** the pipeline / `glab ci` model is GitLab (default); on a

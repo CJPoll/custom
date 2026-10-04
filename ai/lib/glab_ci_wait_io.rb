@@ -68,6 +68,8 @@ module GlabCiWait
 
           note(state.summary) if last_state&.summary != state.summary
           last_state = state
+        when :deadline
+          return stop(last_state, last_error)
         when :rate_limited
           last_error = read.detail
           note("RATE-LIMITED (#{read.detail}) until #{read.reset_at.utc.iso8601}")
@@ -143,8 +145,12 @@ module GlabCiWait
 
     # One bounded read, counted. A read never runs past the deadline by more
     # than READ_FLOOR_S. A read no later read can fix ends the wait here.
+    # No read starts at or after the deadline: a poll can be many reads (the
+    # bridges of every pipeline, the job lists), and --timeout is a hard bound.
     def read_once(path)
       left = (@deadline - @clock.call).ceil
+      return Read.new(kind: :deadline, detail: "--timeout reached before #{path} was read") if left <= 0
+
       read = @reader.call(path, left.clamp(READ_FLOOR_S, READ_TIMEOUT_S))
       @reads[read.kind] += 1
       raise Stop, key_outcome(path, read) if %i[not_found auth refused].include?(read.kind)
@@ -170,15 +176,22 @@ module GlabCiWait
     # The failing jobs of each failed or canceled pipeline. A job-list read
     # that fails leaves the verdict as judged, and says so.
     def failing_jobs(state)
-      state.failing.first(MAX_JOB_READS).flat_map do |n|
+      jobs = state.failing.first(MAX_JOB_READS).flat_map do |n|
         id = n[:pipeline]["id"]
         r = read_job_list(n[:project], id)
-        if r.kind == :ok
+        next [{ pipeline: id, words: "(job list not read: --timeout reached)" }] if r.kind == :deadline
+
+        begin
+          raise Unreadable, r.detail unless r.kind == :ok
+
           GlabCiWait.failing_jobs(r.body, next_page: r.next_page).map { |j| j.merge(pipeline: id) }
-        else
-          [{ pipeline: id, words: "(job list unreadable: #{r.detail})" }]
+        rescue Unreadable => e
+          [{ pipeline: id, words: "(job list unreadable: #{e.message})" }]
         end
       end
+      more = state.failing.size - MAX_JOB_READS
+      jobs << { pipeline: "-", words: "(#{more} more failing pipelines; their jobs were not read)" } if more.positive?
+      jobs
     end
 
     def read_job_list(project, id)
@@ -213,7 +226,11 @@ module GlabCiWait
                               "the newest state seen then was: #{last_state&.summary || 'none'}",
                               "re-run glab-ci-wait once the API answers; this is not idle, not pending and not green")
       end
-      return not_found("no pipeline listed within the #{@max}s --timeout") if last_state.nil? || last_state.state == :none
+      if last_state.nil?
+        return could_not_look("the #{@max}s --timeout passed before one poll finished",
+                              "pass a larger --timeout; this is not idle, not pending and not green")
+      end
+      return not_found("no pipeline listed within the #{@max}s --timeout") if last_state.state == :none
 
       Outcome.new(verdict: :timeout,
                   line: "VERDICT: TIMEOUT #{desc} pipelines=#{last_state.ids.join(',')} after #{@max}s: " \
@@ -238,10 +255,15 @@ module GlabCiWait
         if read.detail.to_s.include?("Commit Not Found")
           could_not_look("sha #{@target.sha} is not a commit in project #{project} (#{read.detail})",
                          "check --sha: pass the full sha of a commit pushed to --project (a wrong sha is not NOT-FOUND)")
+        elsif project != @target.project
+          could_not_look("downstream project #{project}, named by a bridge's downstream pipeline, is unknown or not " \
+                         "visible to the bot (#{read.detail}; read #{path})",
+                         "this is not --project: the bot glab-athena reads as cannot see the downstream project " \
+                         "a trigger bridge started; drop --include-children or give the bot access")
         else
           could_not_look("project #{project} is unknown or not visible to the bot (#{read.detail}; read #{path})",
                          "check --project: the <namespace>/<project> path as GitLab spells it, and that the " \
-                         "namespace's bot is a member (a wrong path is not NOT-FOUND)")
+                         "bot glab-athena reads as can see the project (a wrong path is not NOT-FOUND)")
         end
       when :auth
         could_not_look("GitLab refused the bot (#{read.detail}; read #{path})",
