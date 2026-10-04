@@ -348,16 +348,17 @@ run_refresh() { # <overlay-root-or-empty> [refresh args...]
 }
 mkdir -p "${TMP}/home-no-overlay"
 run_refresh ""
-if [ "${RC}" = 1 ] && [[ "${ERR}" == *"private overlay"* ]] && [[ "${ERR}" == *"Fix:"* ]] && [ ! -e "${TMP}/glab.args" ]; then
-  ok "21. refresh with no overlay: refused with Fix:, glab never called (DND-1668)"
+if [ "${RC}" = 1 ] && [[ "${ERR}" == *"NO ENTRY"* ]] && [[ "${ERR}" == *"ABSENT"* ]] && [[ "${ERR}" == *"Fix:"* ]] && [ ! -e "${TMP}/glab.args" ]; then
+  ok "21. refresh with no overlay: the work namespace has no identity (NO ENTRY, overlay ABSENT), refused with Fix:, glab never called (DND-1936)"
 else bad "21. refresh, overlay absent" "rc=${RC} err='${ERR}' args='$(cat "${TMP}/glab.args" 2>/dev/null)'"; fi
 
 OV="${TMP}/overlay-root"; mkdir -p "${OV}/overlay"; chmod 700 "${OV}"
 printf '{"kind":"athena-private-overlay","schema":1}\n' > "${OV}/athena-overlay.json"
-printf '{}\n' > "${OV}/overlay/gitlab.json"
+# The identity resolves, so refresh reaches the .group read, which is missing.
+printf '{"identities":[{"host":"gitlab.com","namespace":"synthetic-group","bot":"synthetic-sa-bot","token_file":"%s/sa-token","refresh":"group_service_account"}]}\n' "${TMP}" > "${OV}/overlay/gitlab.json"
 run_refresh "${OV}"
-if [ "${RC}" = 1 ] && [[ "${ERR}" == *"Fix:"* ]] && [ ! -e "${TMP}/glab.args" ]; then
-  ok "22. refresh with the overlay present but no gitlab .group: refused with Fix:, glab never called (DND-1668)"
+if [ "${RC}" = 1 ] && [[ "${ERR}" == *"group name is not readable from the private overlay"* ]] && [[ "${ERR}" == *"Fix:"* ]] && [ ! -e "${TMP}/glab.args" ]; then
+  ok "22. refresh whose identity resolves but the overlay has no gitlab .group: refused with Fix:, glab never called (DND-1668)"
 else bad "22. refresh, key missing" "rc=${RC} err='${ERR}'"; fi
 
 printf '{"group":"synthetic-group","identities":[{"host":"gitlab.com","namespace":"synthetic-group","bot":"synthetic-sa-bot","token_file":"%s/sa-token","refresh":"group_service_account"}]}\n' "${TMP}" > "${OV}/overlay/gitlab.json"
