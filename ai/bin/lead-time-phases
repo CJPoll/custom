@@ -402,6 +402,14 @@ module Ingest
     io = LeadTimePhasesIO
     now = env_now(env)
     landings = raw_rows.filter_map do |row|
+      # DND-1952: a landing whose post-merge CI has not concluded is read
+      # again next scan (lead-time's scanned_through holds before it); the
+      # ledger keeps a row's first write, so writing it now would keep it
+      # unmeasured for good.
+      if row["ci_pending"] == true
+        warn "lead-time-phases: #{repo.name}: not ledgered yet: #{row['unmeasured_reason']}; the cursor holds before it"
+        next
+      end
       ticket, ticket_na = io::TicketFor.call(row)
       warn "lead-time-phases: #{repo.name}: ticket could not be read: #{ticket_na}" if ticket_na
       landing, why = LeadTimePhases::Landing.from_row(row, ticket: ticket, ticket_na: ticket_na)
@@ -614,7 +622,8 @@ module Summary
 
     puts "  warning: idle_workflow none, but #{n} landing(s) in the window have a post-merge run: fix the repo's entry"
     puts "  Fix: set the repo's idle_workflow to its post-merge workflow file in this machine's lead-time config " \
-         "(ai/bin/lead-time-repos says which file)"
+         "(on a GitLab repo, its idle pipeline selector, gitlab:ref=<branch>,source=<pipeline source>[,child=<trigger job>]; " \
+         "ai/bin/lead-time-repos --help says which)"
   end
 
   def line(name, s)

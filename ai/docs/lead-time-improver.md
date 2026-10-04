@@ -182,8 +182,9 @@ Lead time is the owner's definition: captain dispatch (the ticket's
    (`ai/lib/gitlab_pipeline_selector.rb`). It declares post-merge CI like a
    workflow file, and the ingest passes it to `ai/bin/lead-time` as
    `--idle-workflow`, which ends each landing at its deploy child pipeline's
-   successful finish. A selector that matches nothing, or a deploy still
-   waiting or running, reads could not measure. Ledger rows keep the config's
+   successful finish. A selector that matches nothing reads could not
+   measure. A deploy still waiting or running is not ledgered yet, and the
+   ingest cursor holds before it. Ledger rows keep the config's
    short repo name, so a repo's GitHub-era and GitLab-era rows are one
    history. `leadtime-product` refuses to land under a selector until
    `locked-merge` has a GitLab idle check.

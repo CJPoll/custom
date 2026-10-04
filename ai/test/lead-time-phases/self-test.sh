@@ -432,7 +432,12 @@ cat >"${TMP}/rows-gl-era.json" <<JSON
 [ {"pr": 61, "title": "y", "branch": "dnd-9202-y", "landed_via": "merge", "landed_commit": null,
    "merge_commit": "${HEAD_PR}", "head_commit": "${GS_PRHEAD}", "head_commit_unmeasured": null,
    "merged": "2026-10-04T05:00:00Z", "closed_at": "2026-10-04T05:00:00Z", "start": "2026-10-04T04:30:00Z",
-   "end_kind": "deploy", "lead_seconds": 3600, "code_seconds": 1800, "tail_seconds": 1800, "unmeasured_reason": null} ]
+   "end_kind": "deploy", "lead_seconds": 3600, "code_seconds": 1800, "tail_seconds": 1800, "unmeasured_reason": null},
+  {"pr": 62, "title": "z", "branch": "dnd-9203-z", "landed_via": "merge", "landed_commit": null,
+   "merge_commit": "${HEAD_BARE}", "head_commit": "${GS_PRHEAD}", "head_commit_unmeasured": null,
+   "merged": "2026-10-04T06:00:00Z", "closed_at": "2026-10-04T06:00:00Z", "start": "2026-10-04T05:30:00Z",
+   "end_kind": "unmeasured", "lead_seconds": null, "code_seconds": 1800, "tail_seconds": null, "ci_pending": true,
+   "unmeasured_reason": "deploy not concluded: trigger job \"deploy\" is waiting_for_resource"} ]
 JSON
 printf '{"scanned_through":"2026-10-02T05:00:00Z","landings":1,"kept":1,"incomplete":false}\n' >"${TMP}/meta-gh-era.json"
 printf '{"scanned_through":"2026-10-04T05:00:00Z","landings":1,"kept":1,"incomplete":false}\n' >"${TMP}/meta-gl-era.json"
@@ -446,6 +451,8 @@ ROWS="${TMP}/rows-gl-era.json" META="${TMP}/meta-gl-era.json" run "${TEL_EMPTY}"
 eq "the GitLab-era ingest exits 0" "${CODE}" "0"
 has "the GitLab-era ingest passes the selector to lead-time" "$(cat "${TMP}/args")" "--idle-workflow ${GL_SEL}"
 eq "the ledger holds both eras' rows (the same MR/PR number 61 does not collide)" "$(ledger_lines)" "2"
+eq "a landing whose deploy is not concluded (ci_pending) is not ledgered yet" "$(row_field "${HEAD_BARE}" repo)" "null"
+has "... and the ingest says why" "${ERR}" "not ledgered yet: deploy not concluded"
 eq "the GitHub-era row is under gen_saas" "$(row_field "${HEAD_PUSH}" repo)" "gen_saas"
 eq "the GitLab-era row is under gen_saas" "$(row_field "${HEAD_PR}" repo)" "gen_saas"
 run "${TEL_EMPTY}" --summary --repo gen_saas --json

@@ -1193,7 +1193,8 @@ module LeadTimePhases
 
   # Whether a repo has post-merge CI (DND-1614). The repo's idle_workflow
   # (DND-1540, validated by ai/lib/lead_time_config.rb) is the one home of
-  # that fact: a workflow file declares CI, "none" declares none. Only a repo
+  # that fact: a workflow file or a GitLab idle pipeline selector (DND-1952)
+  # declares CI, "none" declares none. Only a repo
   # that declares nothing falls back to Stats.post_merge_ci?, the window
   # inference. A declaration is nil (absent) or a Declared.
   module TailCI
@@ -1419,7 +1420,8 @@ module LeadTimePhases
 
     # Foreign landings (DND-1531) are out of the phase stats and the biggest
     # pick; the forge totals (lead, code, tail) still include them.
-    # idle_workflow: the repo's declared post-merge workflow, "none", or nil
+    # idle_workflow: the repo's declared post-merge workflow file or GitLab
+    # idle pipeline selector, "none", or nil
     # (absent: the window inference), DND-1614. Anything else raises
     # DeclarationError. repo: the name the reasons use (default: the rows').
     def summarize(rows, idle_workflow: nil, repo: nil)

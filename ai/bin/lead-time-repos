@@ -50,16 +50,20 @@ HELP = <<~TXT
   Schema: {"repos":[{"name","path","mode":"improve|watch",
   "product_epic"?,"idle_workflow"?}], "window":N, "improvement_epic":"..."}.
   A repo with no product_epic files product tickets on improvement_epic.
-  idle_workflow (DND-1540) is the post-merge workflow file a product-repo
-  landing must find idle (locked-merge --require-idle-workflow), or "none";
+  idle_workflow (DND-1540) names the repo's post-merge CI, or "none". On a
+  GitHub repo it is the post-merge workflow file a product-repo landing
+  must find idle (locked-merge --require-idle-workflow);
   ai/bin/leadtime-product lands nothing in a repo that does not declare it.
-  On a GitLab repo it is an idle pipeline selector instead (DND-1952):
+  On a GitLab repo it is an idle pipeline selector (DND-1952):
   gitlab:ref=<branch>,source=<pipeline source>[,child=<trigger job>], e.g.
   gitlab:ref=main,source=push,child=deploy. ai/bin/lead-time reads the
   landing's pipeline (and, with child=, its deploy child pipeline) by it;
   leadtime-product lands nothing under one (no GitLab idle check yet).
+  The value must match the repo's origin: lead-time exits 1 on a workflow
+  file with a GitLab origin, or a selector with a GitHub origin. A repo
+  that moves forge changes this value in the same step as its origin.
   idle_workflow also declares post-merge CI for the tail summary
-  (lead-time-phases --summary, DND-1614): a file means the repo has it, so a
+  (lead-time-phases --summary, DND-1614): a file or a selector means the repo has it, so a
   0 tail with no post-merge run is n/a; "none" means it has none, so a 0
   tail is measured; absent, the summary infers it from the window.
   An "improve" repo MUST declare idle_workflow (DND-1927): inference per

@@ -635,10 +635,14 @@ def selector_forge(pipelines:, parent:, bridges:, child:, calls: [])
   f
 end
 GL_PUSH = { "id" => 10, "sha" => MERGE_SHA, "ref" => "main", "source" => "push", "status" => "success" }.freeze
-GL_PARENT = GL_PUSH.merge("project_id" => 9, "finished_at" => "2026-09-30T04:31:00Z").freeze
+GL_URL = "https://gitlab.example/group/repo"
+GL_PARENT = GL_PUSH.merge("project_id" => 9, "finished_at" => "2026-09-30T04:31:00Z",
+                          "web_url" => "#{GL_URL}/-/pipelines/10").freeze
+# GitLab's bridges API gives the downstream's id, status and web_url, never its project_id.
 GL_BRIDGE = { "id" => 2, "name" => "deploy", "status" => "success",
-              "downstream_pipeline" => { "id" => 77, "project_id" => 9, "status" => "success" } }.freeze
-GL_CHILD = { "id" => 77, "project_id" => 9, "status" => "success", "finished_at" => "2026-09-30T04:30:00Z" }.freeze
+              "downstream_pipeline" => { "id" => 77, "status" => "success", "web_url" => "#{GL_URL}/-/pipelines/77" } }.freeze
+GL_CHILD = { "id" => 77, "project_id" => 9, "status" => "success", "finished_at" => "2026-09-30T04:30:00Z",
+             "web_url" => "#{GL_URL}/-/pipelines/77" }.freeze
 
 idle_calls = []
 r_idle = analyze(selector_forge(pipelines: [GL_PUSH], parent: GL_PARENT, bridges: [GL_BRIDGE], child: GL_CHILD,
@@ -675,7 +679,29 @@ r_nobridge = analyze(selector_forge(pipelines: [GL_PUSH], parent: GL_PARENT, bri
 check("GL6 a pipeline without the named trigger job is a named could-not-measure") do
   r_nobridge[:end_kind] == :unmeasured && r_nobridge[:unmeasured_reason].to_s.include?("no trigger job named \"deploy\"")
 end
+check("GL3b a busy row is marked ci_pending, so the window's cursor holds before it") do
+  r_busy[:ci_pending] == true && r_running[:ci_pending] == true && !r_idle.key?(:ci_pending) && !r_none.key?(:ci_pending)
+end
+r_other = analyze(selector_forge(pipelines: [GL_PUSH], parent: GL_PARENT,
+                                 bridges: [GL_BRIDGE.merge("downstream_pipeline" => GL_BRIDGE["downstream_pipeline"]
+                                   .merge("web_url" => "https://gitlab.example/other/repo/-/pipelines/77"))],
+                                 child: :never), 6, stamped)
+check("GL6b a child in another project is could-not-measure, decided before any child read") do
+  r_other[:end_kind] == :unmeasured && r_other[:unmeasured_reason].to_s.include?("another project")
+end
 check("GL7 no failed probe on readable stubs") { !ProbeFailures.any? }
+%w[pipelines? pipelines/10 bridges pipelines/77].each do |part|
+  f = selector_forge(pipelines: [GL_PUSH], parent: GL_PARENT, bridges: [GL_BRIDGE], child: GL_CHILD)
+  inner = f.method(:api)
+  f.define_singleton_method(:api) do |path|
+    hit = part == "pipelines/10" ? path.end_with?("/pipelines/10") : path.include?(part)
+    hit ? nil : inner.call(path)
+  end
+  r = analyze(f, 6, stamped)
+  check("GL9 a failed #{part} read makes the row unmeasured, naming the read (never a merge-ended lead)") do
+    r[:end_kind] == :unmeasured && r[:lead_seconds].nil? && r[:unmeasured_reason].to_s.include?("read failed")
+  end
+end
 check("GL8 a start the CI reason replaced is still read: the row keeps its start") { r_busy[:start] == r_idle[:start] && r_idle[:start] }
 
 unstamped = NotionStart.new(FakeNotion.new(1203 => at_prop(nil)))
@@ -1069,6 +1095,20 @@ check("two tickets on one push are one landing") do
   rows = [{ pr: nil, landed_commit: sha_of("d"), closed_at: "2026-09-30T02:10:30Z" },
           { pr: nil, landed_commit: sha_of("d"), closed_at: "2026-09-30T02:10:30Z" }]
   LeadTime.scan_meta(rows: rows, kept: 2, failures: [])[:landings] == 1
+end
+check("DND-1952: a landing whose deploy is not concluded holds scanned_through before it, and is not incomplete") do
+  rows = six.each_with_index.map { |r, i| i == 3 ? r.merge(ci_pending: true) : r }
+  m = LeadTime.scan_meta(rows: rows, kept: 0, failures: [])
+  m[:incomplete] == false && m[:scanned_through] == "2026-09-30T03:00:00Z" && m[:landings] == 6
+end
+check("DND-1952: the earlier of a pending landing and a failed probe holds the cursor") do
+  rows = six.each_with_index.map { |r, i| i == 4 ? r.merge(ci_pending: true) : r }
+  m = LeadTime.scan_meta(rows: rows, kept: 0, failures: [{ cmd: "git log", detail: "x", at: "2026-09-30T03:00:00Z" }])
+  m[:incomplete] == true && m[:scanned_through] == "2026-09-30T02:00:00Z"
+end
+check("DND-1952: a pending first landing leaves no scanned_through (nothing before it)") do
+  rows = six.each_with_index.map { |r, i| i.zero? ? r.merge(ci_pending: true) : r }
+  LeadTime.scan_meta(rows: rows, kept: 0, failures: [])[:scanned_through].nil?
 end
 check("an empty window has no scanned_through, not a fabricated one") do
   LeadTime.scan_meta(rows: [], kept: 0, failures: []) ==

@@ -308,7 +308,8 @@ module LeadTimeConfig
     end
     if mode == "improve" && idle.nil?
       raise Error.new("#{path}: repo #{name.inspect} is mode improve and declares no idle_workflow; the lead-time ingest would infer post-merge CI per batch and can write two lead definitions into one ledger",
-                      "add \"idle_workflow\": \"<post-merge workflow file>.yml\" (or \"none\" when the repo has no post-merge workflow) to repo #{name.inspect} in #{path}")
+                      "add \"idle_workflow\": \"<post-merge workflow file>.yml\" (on a GitLab repo, its idle pipeline selector: " \
+                      "#{GitLabPipelineSelector.form}; or \"none\" when the repo has no post-merge CI) to repo #{name.inspect} in #{path}")
     end
     Repo.new(name: name, path: expand(path, entry["path"], name, home), mode: mode,
              product_epic: product, product_epic_source: source, idle_workflow: idle, inherited: inherited)

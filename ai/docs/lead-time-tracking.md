@@ -63,15 +63,28 @@ exists**. This maps exactly onto Cody's definition:
    - GitHub: latest successful non-deploy run for the merge commit.
    - GitLab: latest `finished_at` among all successful jobs in that pipeline;
      with a selector, the selected pipeline's own successful `finished_at`.
-
-With a selector, a landing whose pipeline the selector does not match, whose
-pipeline lacks the named trigger job, or whose pipeline or deploy child is still
-waiting or running (`waiting_for_resource` included) reads **could not
-measure**, with the reason. It never falls through to tier 3.
 3. **LANDING time** — if there is no post-merge CI at all (e.g. `~/dev/custom`,
    no CI, no deploy), the time the change landed on the base branch: the forge
    merge (`mergedAt` / `merged_at`), or, for a GitHub PR that is CLOSED without a
    merge, the push that put its change on the base (below).
+
+With a selector, these landings read **could not measure**, with the reason,
+and never take tier 3:
+
+- the selector matches no pipeline for the landing;
+- the pipeline has no trigger job by the `child=` name, or its child is in
+  another project;
+- the pipeline, trigger job or child sits at `manual`, which says nothing
+  about the deploy (*Why GitLab reads the deploy job, not the whole pipeline*);
+- a forge read failed (the scan also reports SCAN INCOMPLETE).
+
+A landing whose pipeline, trigger job or child is still waiting or running
+(`waiting_for_resource` included) is **not concluded**. It also reads could not
+measure, and it is marked `ci_pending`. `--meta`'s `scanned_through` stops
+before it, and `lead-time-phases --ingest` does not ledger it yet, so the next
+scan reads it again once it can end. A failed or canceled deploy ends no
+deploy, as on GitHub: the row takes the next tier that exists, and
+`lead-time-phases` marks a CI repo's landing-ended lead n/a.
 
 **Later (2026-09-30, DND-1317):** tier 3 was "the merge commit time
 (`mergedAt` / `merged_at`)", and a PR with no `mergedAt` read `via=open`.
@@ -242,6 +255,12 @@ The precise, durable signal is the latest successful **`deploy`-stage** job's
 `finished_at` (e.g. MR 1188's `porter:deploy`/`release:deploy`/`release:watch`
 succeeded ~06:58–07:07Z while the pipeline read `manual`). Reading the job, not
 the pipeline status, is what makes the GitLab end trustworthy.
+
+An idle pipeline selector (DND-1952) reads a deploy that runs as a child
+pipeline, whose jobs its parent's job list does not show. It reads pipeline
+status, so a `manual` status reads could not measure, never busy and never
+concluded. gen_saas's deploy child has no manual jobs (`.gitlab/ci/post-merge.yml`,
+2026-10-04).
 
 ### The START marker: the ticket's move to In Progress
 

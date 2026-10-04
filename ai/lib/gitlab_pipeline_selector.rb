@@ -26,7 +26,8 @@
 # does not have, is a named could-not-measure, never an idle or a no-CI read
 # (~/.claude/CLAUDE.md -> *A failed lookup must never look like an empty one*).
 # A pipeline still waiting or running (waiting_for_resource included: a
-# deploy queued on its resource group) is busy, never concluded.
+# deploy queued on its resource group) is busy, never concluded. One at
+# `manual` is could-not-measure: that status can outlive a successful deploy.
 
 module GitLabPipelineSelector
   PREFIX = "gitlab:"
@@ -41,7 +42,8 @@ module GitLabPipelineSelector
   CHILD_RE = /\A[A-Za-z0-9][A-Za-z0-9._-]*\z/.freeze
 
   SUCCESS = %w[success].freeze
-  BUSY = %w[created waiting_for_resource preparing pending running scheduled manual canceling].freeze
+  BUSY = %w[created waiting_for_resource preparing pending running scheduled canceling].freeze
+  BLOCKED = %w[manual].freeze
   FAILED = %w[failed canceled skipped].freeze
 
   Selector = Struct.new(:ref, :source, :child, :text, keyword_init: true)
@@ -100,15 +102,20 @@ module GitLabPipelineSelector
     nil
   end
 
-  # :success, :busy, :failed, or :unknown (a status this code does not know:
-  # never read as concluded).
+  # :success, :busy, :blocked (waiting on a person: a manual job), :failed, or
+  # :unknown (a status this code does not know: never read as concluded).
   def status_class(status)
     return :success if SUCCESS.include?(status)
     return :busy if BUSY.include?(status)
+    return :blocked if BLOCKED.include?(status)
     return :failed if FAILED.include?(status)
 
     :unknown
   end
+
+  # A forge read the selector needed failed. The reader records the failed
+  # probe, so the scan reports SCAN INCOMPLETE; the row says so too.
+  def read_failed(what) = Outcome.new(state: :unmeasured, reason: "could not measure: the #{what} read failed (see SCAN INCOMPLETE)")
 
   # The landing's post-merge pipeline. shas: the landing's candidate commits,
   # in the caller's order of preference. Both sides are filtered here even
@@ -134,18 +141,54 @@ module GitLabPipelineSelector
           "(#{bridges.size} trigger job(s); selector #{sel.text})"]
   end
 
-  # The landing's post-merge end. pipeline: the parent (with finished_at);
-  # bridge: pick_bridge's result when the selector names a child; child: the
-  # downstream pipeline read by id (nil when the trigger job started none).
+  # What the parent's trigger jobs decide, before any child read. parent: the
+  # parent pipeline as read by id. -> [Outcome, nil, nil] when they decide it,
+  # or [nil, bridge, child_id] when the child pipeline must be read. A child
+  # in another project is decided here, from the URLs GitLab gives, because
+  # reading it as this project's pipeline would fail.
+  def after_bridges(sel, parent, bridges)
+    bridge, why = pick_bridge(sel, parent, bridges)
+    return [unmeasured(why), nil, nil] unless bridge
+
+    down = bridge["downstream_pipeline"]
+    return [judge(sel, pipeline: parent, bridge: bridge), nil, nil] unless down
+
+    id = down["id"]
+    return [unmeasured("could not measure: trigger job #{sel.child.inspect} names a child with no id"), nil, nil] unless id
+
+    mine, theirs = project_of(parent["web_url"]), project_of(down["web_url"])
+    unless mine && theirs
+      return [unmeasured("could not measure: cannot tell which project child pipeline #{id} is in (no pipeline web_url)"), nil, nil]
+    end
+    unless mine == theirs
+      return [unmeasured("could not measure: #{sel.child.inspect}'s child pipeline #{id} is in another project (#{theirs})"), nil, nil]
+    end
+
+    [nil, bridge, id]
+  end
+
+  # "https://host/group/repo/-/pipelines/77" -> "https://host/group/repo";
+  # nil when it is not a pipeline URL.
+  def project_of(url)
+    m = %r{\A(https?://.+)/-/pipelines/\d+\z}.match(url.to_s)
+    m && m[1]
+  end
+
+  def unmeasured(reason) = Outcome.new(state: :unmeasured, reason: reason)
+
+  # The landing's post-merge end. pipeline: the parent as read by id (with
+  # finished_at); bridge: the trigger job named by child= (required when the
+  # selector names one); child: the downstream pipeline read by id (nil when
+  # the trigger job started none).
   def judge(sel, pipeline:, bridge: nil, child: nil)
     parent = parent_end(pipeline)
     return parent if parent.is_a?(Outcome)
     return parent_only(pipeline, parent) unless sel.child
     raise ArgumentError, "judge: #{sel.text} names a child but no trigger job was given" unless bridge
 
-    return trigger_only(sel, bridge, parent) unless bridge["downstream_pipeline"]
+    return trigger_only(sel, pipeline, bridge, parent) unless bridge["downstream_pipeline"]
 
-    child_end(sel, pipeline, child, parent)
+    child_end(sel, pipeline, bridge, child, parent)
   end
 
   # -> the parent's finish (or nil when it did not succeed), or an Outcome
@@ -154,42 +197,36 @@ module GitLabPipelineSelector
     status = pipeline["status"]
     case status_class(status)
     when :unknown
-      Outcome.new(state: :unmeasured, reason: "could not measure: pipeline #{pipeline['id']} has status " \
-                                              "#{status.inspect}, which this tool does not know")
+      unmeasured("could not measure: pipeline #{pipeline['id']} has status #{status.inspect}, which this tool does not know")
     when :success
-      pipeline["finished_at"] || Outcome.new(state: :unmeasured, reason: "could not measure: pipeline " \
-                                                                         "#{pipeline['id']} succeeded with no finished_at")
-    else
-      nil
+      pipeline["finished_at"] || unmeasured("could not measure: pipeline #{pipeline['id']} succeeded with no finished_at")
     end
   end
 
   def parent_only(pipeline, parent_at)
-    if status_class(pipeline["status"]) == :busy
-      return Outcome.new(state: :busy, reason: "post-merge CI not concluded: pipeline #{pipeline['id']} is #{pipeline['status']}")
+    status = pipeline["status"]
+    case status_class(status)
+    when :busy then Outcome.new(state: :busy, reason: "post-merge CI not concluded: pipeline #{pipeline['id']} is #{status}")
+    when :blocked then unmeasured(blocked_reason("pipeline #{pipeline['id']}"))
+    else Outcome.new(state: :concluded, deploy_at: nil, pipeline_at: parent_at)
     end
-
-    Outcome.new(state: :concluded, deploy_at: nil, pipeline_at: parent_at)
   end
 
-  def trigger_only(sel, bridge, parent_at)
+  def trigger_only(sel, pipeline, bridge, parent_at)
     status = bridge["status"]
     case status_class(status)
-    when :busy
-      Outcome.new(state: :busy, reason: "deploy not concluded: trigger job #{sel.child.inspect} is #{status}")
-    when :failed
-      Outcome.new(state: :concluded, deploy_at: nil, pipeline_at: parent_at)
-    else
-      Outcome.new(state: :unmeasured, reason: "could not measure: trigger job #{sel.child.inspect} is " \
-                                              "#{status.inspect} with no downstream pipeline")
+    when :busy then Outcome.new(state: :busy, reason: "deploy not concluded: trigger job #{sel.child.inspect} is #{status}")
+    when :blocked then unmeasured(blocked_reason("trigger job #{sel.child.inspect}"))
+    when :failed then no_deploy(pipeline, parent_at)
+    else unmeasured("could not measure: trigger job #{sel.child.inspect} is #{status.inspect} with no downstream pipeline")
     end
   end
 
-  def child_end(sel, pipeline, child, parent_at)
-    id = pipeline_id_of(child)
-    unless child && child["project_id"] && child["project_id"] == pipeline["project_id"]
-      return Outcome.new(state: :unmeasured, reason: "could not measure: #{sel.child.inspect}'s child " \
-                                                     "pipeline #{id} is not in this project")
+  def child_end(sel, pipeline, bridge, child, parent_at)
+    id = bridge.dig("downstream_pipeline", "id")
+    return unmeasured("could not measure: child pipeline #{id} was not read") unless child
+    unless child["project_id"] && child["project_id"] == pipeline["project_id"]
+      return unmeasured("could not measure: #{sel.child.inspect}'s child pipeline #{id} is not in this project")
     end
 
     status = child["status"]
@@ -197,16 +234,30 @@ module GitLabPipelineSelector
     when :success
       return Outcome.new(state: :concluded, deploy_at: child["finished_at"], pipeline_at: parent_at) if child["finished_at"]
 
-      Outcome.new(state: :unmeasured, reason: "could not measure: child pipeline #{id} succeeded with no finished_at")
-    when :busy
-      Outcome.new(state: :busy, reason: "deploy not concluded: child pipeline #{id} is #{status}")
-    when :failed
-      Outcome.new(state: :concluded, deploy_at: nil, pipeline_at: parent_at)
-    else
-      Outcome.new(state: :unmeasured, reason: "could not measure: child pipeline #{id} has status " \
-                                              "#{status.inspect}, which this tool does not know")
+      unmeasured("could not measure: child pipeline #{id} succeeded with no finished_at")
+    when :busy then Outcome.new(state: :busy, reason: "deploy not concluded: child pipeline #{id} is #{status}")
+    when :blocked then unmeasured(blocked_reason("child pipeline #{id}"))
+    when :failed then no_deploy(pipeline, parent_at)
+    else unmeasured("could not measure: child pipeline #{id} has status #{status.inspect}, which this tool does not know")
     end
   end
 
-  def pipeline_id_of(child) = child ? child["id"] : "(not read)"
+  # A deploy that did not succeed ends no deploy, as on GitHub. While the
+  # parent still runs, its trigger job can be retried, so that is busy.
+  def no_deploy(pipeline, parent_at)
+    if status_class(pipeline["status"]) == :busy
+      return Outcome.new(state: :busy, reason: "deploy not concluded: pipeline #{pipeline['id']} is still " \
+                                               "#{pipeline['status']}, and its trigger job can be retried")
+    end
+
+    Outcome.new(state: :concluded, deploy_at: nil, pipeline_at: parent_at)
+  end
+
+  # A pipeline at `manual` can stay there after its deploy succeeded, so its
+  # status says nothing about the deploy (ai/docs/lead-time-tracking.md ->
+  # *Why GitLab reads the deploy job*). It is never busy and never concluded.
+  def blocked_reason(what)
+    "could not measure: #{what} is blocked on a manual job, and a selector reads pipeline status, " \
+      "which cannot say whether the deploy finished"
+  end
 end

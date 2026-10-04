@@ -67,8 +67,9 @@ end
 
 check("C1 success concludes") { S.status_class("success") == :success }
 check("C2 every waiting or running status is busy, waiting_for_resource included") do
-  %w[created waiting_for_resource preparing pending running scheduled manual canceling].all? { |s| S.status_class(s) == :busy }
+  %w[created waiting_for_resource preparing pending running scheduled canceling].all? { |s| S.status_class(s) == :busy }
 end
+check("C2b manual is blocked, neither busy nor concluded (it can outlive a successful deploy)") { S.status_class("manual") == :blocked }
 check("C3 failed, canceled and skipped conclude without success") { %w[failed canceled skipped].all? { |s| S.status_class(s) == :failed } }
 check("C4 a status this code does not know is unknown, never idle") { [nil, "", "Success", "weird"].all? { |s| S.status_class(s) == :unknown } }
 
@@ -105,7 +106,11 @@ end
 
 # ── pick_bridge: the trigger job that starts the deploy child ──────────────
 
-def bridge(id, name: "deploy", status: "success", downstream: { "id" => 77, "project_id" => 9, "status" => "success" })
+# GitLab's bridges API gives the downstream pipeline's id, status and
+# web_url, never its project_id.
+URL = "https://gitlab.example/group/repo"
+DOWN = { "id" => 77, "status" => "success", "web_url" => "#{URL}/-/pipelines/77" }.freeze
+def bridge(id, name: "deploy", status: "success", downstream: DOWN)
   { "id" => id, "name" => name, "status" => status, "downstream_pipeline" => downstream }
 end
 
@@ -122,7 +127,8 @@ end
 def child(status: "success", finished_at: "2026-10-03T10:20:00Z", project_id: 9)
   { "id" => 77, "project_id" => project_id, "status" => status, "finished_at" => finished_at }
 end
-PARENT = pipe(10).merge("project_id" => 9, "finished_at" => "2026-10-03T10:21:00Z")
+PARENT = pipe(10).merge("project_id" => 9, "finished_at" => "2026-10-03T10:21:00Z",
+                        "web_url" => "#{URL}/-/pipelines/10")
 
 check("J1 an idle deploy: the child concluded success, so the deploy ends at the child's finish") do
   o = S.judge(SEL, pipeline: PARENT, bridge: bridge(2), child: child)
@@ -180,6 +186,68 @@ check("J12 a selector with child= but no bridge given is a caller error, not an 
   rescue ArgumentError
     true
   end
+end
+RUNNING = PARENT.merge("status" => "running", "finished_at" => nil)
+check("J13 a child at manual is could-not-measure, never busy and never concluded") do
+  o = S.judge(SEL, pipeline: PARENT, bridge: bridge(2), child: child(status: "manual", finished_at: nil))
+  o.state == :unmeasured && o.reason.include?("manual job")
+end
+check("J14 a parent at manual with no child= is could-not-measure") do
+  o = S.judge(BARE, pipeline: PARENT.merge("status" => "manual", "finished_at" => nil))
+  o.state == :unmeasured && o.reason.include?("pipeline 10 is blocked on a manual job")
+end
+check("J15 a parent at manual still ends its deploy at the child's success") do
+  o = S.judge(SEL, pipeline: PARENT.merge("status" => "manual", "finished_at" => nil), bridge: bridge(2), child: child)
+  o.state == :concluded && o.deploy_at == "2026-10-03T10:20:00Z" && o.pipeline_at.nil?
+end
+check("J16 a failed trigger job or child while the parent still runs is busy: the job can be retried") do
+  a = S.judge(SEL, pipeline: RUNNING, bridge: bridge(2, status: "failed", downstream: nil))
+  b = S.judge(SEL, pipeline: RUNNING, bridge: bridge(2), child: child(status: "failed"))
+  [a, b].all? { |o| o.state == :busy && o.reason.include?("can be retried") }
+end
+check("J17 the parent still running with the child succeeded: the deploy ended, the pipeline has not") do
+  o = S.judge(SEL, pipeline: RUNNING, bridge: bridge(2), child: child)
+  o.state == :concluded && o.deploy_at == "2026-10-03T10:20:00Z" && o.pipeline_at.nil?
+end
+check("J18 a downstream the caller did not read says so, not 'another project'") do
+  o = S.judge(SEL, pipeline: PARENT, bridge: bridge(2), child: nil)
+  o.state == :unmeasured && o.reason.include?("was not read")
+end
+check("J19 a failed parent with no child= concludes with no end") do
+  o = S.judge(BARE, pipeline: PARENT.merge("status" => "failed"))
+  o.state == :concluded && o.deploy_at.nil? && o.pipeline_at.nil?
+end
+
+# ── after_bridges: what the trigger jobs decide before any child read ──────
+
+check("A1 the named trigger job with a child in this project: read child 77") do
+  o, b, id = S.after_bridges(SEL, PARENT, [bridge(2)])
+  o.nil? && b["id"] == 2 && id == 77
+end
+check("A2 no such trigger job: a named could-not-measure, no read") do
+  o, b, id = S.after_bridges(SEL, PARENT, [bridge(2, name: "lint")])
+  o.state == :unmeasured && o.reason.include?("no trigger job named") && b.nil? && id.nil?
+end
+check("A3 a trigger job waiting for its resource (no child yet) decides busy, no read") do
+  o, _b, id = S.after_bridges(SEL, PARENT, [bridge(2, status: "waiting_for_resource", downstream: nil)])
+  o.state == :busy && id.nil?
+end
+check("A4 a child in another project is decided before the read, which would fail") do
+  other = DOWN.merge("web_url" => "https://gitlab.example/other/repo/-/pipelines/77")
+  o, _b, id = S.after_bridges(SEL, PARENT, [bridge(2, downstream: other)])
+  o.state == :unmeasured && o.reason.include?("another project") && o.reason.include?("other/repo") && id.nil?
+end
+check("A5 no web_url on either side: cannot tell the project, so no read") do
+  a = S.after_bridges(SEL, PARENT.merge("web_url" => nil), [bridge(2)])[0]
+  b = S.after_bridges(SEL, PARENT, [bridge(2, downstream: DOWN.merge("web_url" => "not a url"))])[0]
+  [a, b].all? { |o| o.state == :unmeasured && o.reason.include?("cannot tell which project") }
+end
+check("A6 a downstream with no id is a named could-not-measure") do
+  S.after_bridges(SEL, PARENT, [bridge(2, downstream: DOWN.merge("id" => nil))])[0].reason.include?("no id")
+end
+check("R1 a failed read names itself and SCAN INCOMPLETE") do
+  o = S.read_failed("bridges")
+  o.state == :unmeasured && o.reason.include?("bridges read failed") && o.reason.include?("SCAN INCOMPLETE")
 end
 
 if $failures.empty?

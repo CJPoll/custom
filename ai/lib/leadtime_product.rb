@@ -113,18 +113,20 @@ module LeadTimeProduct
   # locked-merge's idle flag for R (athena:merge-boarding -> The merge bar: on
   # gen_saas pass --require-idle-workflow post-merge.yml). Undeclared refuses
   # the landing: deny by default, never a merge without the repo's own bar.
-  # A GitLab idle pipeline selector (DND-1952) names a merge bar locked-merge
-  # cannot yet check (its GitLab path refuses --require-idle-workflow), so it
-  # refuses too: never a GitLab landing without its idle check.
+  # A GitLab idle pipeline selector (DND-1952) names a merge bar nothing can
+  # yet check: locked-merge's --require-idle-workflow reads GitHub Actions
+  # runs only, and no GitLab idle-pipeline check exists. So it refuses: never
+  # a GitLab landing without its idle check.
   def idle_args(idle)
     case LeadTimeConfig.idle_workflow_kind(idle)
     when :none then return []
     when :workflow then return ["--require-idle-workflow", idle]
     when :gitlab
-      raise Error.new("the repo's idle_workflow #{idle} is a GitLab idle pipeline selector, and locked-merge has no GitLab " \
-                      "idle-pipeline check, so its merge bar cannot be held; nothing lands",
-                      "land this repo's PRs by hand until the product lane has a GitLab path (a GitLab idle-pipeline " \
-                      "check in locked-merge, then a forge dispatch in leadtime-product); never drop the idle_workflow to land.")
+      raise Error.new("the repo's idle_workflow #{idle} is a GitLab idle pipeline selector, and no GitLab idle-pipeline " \
+                      "check exists to hold that merge bar; nothing lands",
+                      "land this repo's changes through the admiral's GitLab merge path until the product lane has a GitLab " \
+                      "path (a GitLab idle-pipeline check, then a forge dispatch in leadtime-product); never drop the " \
+                      "idle_workflow to land.")
     end
 
     raise Error.new("the repo declares no idle_workflow, so its merge bar (locked-merge --require-idle-workflow) is unknown; nothing lands",

@@ -483,14 +483,18 @@ module LeadTime
   # scanned_through on a complete scan is the newest landing; on an incomplete
   # one it is the newest landing strictly before the first failed one, and nil
   # when any failure belongs to no landing (the whole window is in doubt). An
-  # empty window has none: nothing was scanned through.
+  # empty window has none: nothing was scanned through. A landing whose
+  # post-merge CI has not concluded (ci_pending, DND-1952) holds it the same
+  # way, without making the scan incomplete: the next scan reads it again,
+  # once it can end, instead of the ledger keeping it unmeasured for good.
   def scan_meta(rows:, kept:, failures:)
     keys = rows.map { |r| r[:closed_at] }.compact
     landings = rows.map { |r| r[:pr] ? "pr:#{r[:pr]}" : "#{r[:closed_at]}:#{r[:landed_commit]}" }.uniq.size
-    through = if failures.empty?
+    holds = failures.map { |f| f[:at] } + rows.select { |r| r[:ci_pending] }.map { |r| r[:closed_at] }
+    through = if holds.empty?
                 keys.max_by { |k| Time.iso8601(k) }
-              elsif failures.none? { |f| f[:at].nil? }
-                first = failures.map { |f| Time.iso8601(f[:at]) }.min
+              elsif holds.none?(&:nil?)
+                first = holds.map { |at| Time.iso8601(at) }.min
                 keys.select { |k| Time.iso8601(k) < first }.max_by { |k| Time.iso8601(k) }
               end
     { scanned_through: through && Time.iso8601(through).utc.iso8601, landings: landings, kept: kept,
@@ -978,7 +982,7 @@ class GitLabForge
 
     commits = api("projects/#{@proj}/merge_requests/#{id}/commits") || []
     merge_sha = d["merge_commit_sha"] || d["squash_commit_sha"] || d["sha"]
-    deploy_at, pipeline_at, ci_why = @selector ? selector_ends(d) : ci_ends(d)
+    deploy_at, pipeline_at, ci_why, ci_pending = @selector ? selector_ends(d) : ci_ends(d)
     # A closed, unmerged MR may still have landed by a push; that is only
     # detected on GitHub (DND-1317), so here it says so instead of reading open.
     unmeasured = if d["state"] == "closed" && d["merged_at"].nil?
@@ -994,7 +998,7 @@ class GitLabForge
       closed_at: d["merged_at"] || d["closed_at"],
       # authored_date survives a rebase; created_at is the committer date.
       commit_times: commits.flat_map { |c| [c["authored_date"], c["committed_date"], c["created_at"]] },
-      deploy_at: deploy_at, pipeline_at: pipeline_at, ci_unmeasured: ci_why,
+      deploy_at: deploy_at, pipeline_at: pipeline_at, ci_unmeasured: ci_why, ci_pending: ci_pending == true,
     }
   end
 
@@ -1002,38 +1006,41 @@ class GitLabForge
   # the landing's pipeline on the selector's ref and source, and, with child=,
   # its trigger job's downstream pipeline (the deploy). The rules are
   # GitLabPipelineSelector's; this only reads. -> [deploy_at, pipeline_at,
-  # reason]: reason is nil when the end concluded, else why it is not
-  # measured (busy, or the selector matched nothing). A failed read is a
-  # recorded probe (run_json), so the scan reports INCOMPLETE.
+  # reason, pending]: reason is nil when the end concluded, else why it is
+  # not measured (busy, blocked, or the selector matched nothing); pending is
+  # true while it is busy, so the window's cursor holds before it
+  # (LeadTime.scan_meta). A failed read is a recorded probe (run_json), so
+  # the scan reports INCOMPLETE, and the row says so too.
   def selector_ends(mr)
+    out = selector_outcome(mr)
+    [out.deploy_at, out.pipeline_at, out.state == :concluded ? nil : out.reason, out.state == :busy]
+  end
+
+  # -> a GitLabPipelineSelector::Outcome. Every decision is the domain's;
+  # this reads in the order it asks.
+  def selector_outcome(mr)
+    sel = @selector
     shas = [mr["merge_commit_sha"], mr["squash_commit_sha"], mr["sha"]].compact.uniq
     listed = []
     shas.each do |sha|
-      q = URI.encode_www_form("sha" => sha, "ref" => @selector.ref, "source" => @selector.source, "per_page" => 100)
-      got = api("projects/#{@proj}/pipelines?#{q}")
-      return [nil, nil, nil] if got.nil?
-
+      q = URI.encode_www_form("sha" => sha, "ref" => sel.ref, "source" => sel.source, "per_page" => GITLAB_PAGE_CAP)
+      got = api("projects/#{@proj}/pipelines?#{q}") or return GitLabPipelineSelector.read_failed("pipeline list")
+      note_saturated("glab api pipelines?sha=#{sha}", got.size, GITLAB_PAGE_CAP)
       listed.concat(got)
     end
-    pipeline, why = GitLabPipelineSelector.pick_pipeline(@selector, shas, listed)
-    return [nil, nil, why] unless pipeline
+    pipeline, why = GitLabPipelineSelector.pick_pipeline(sel, shas, listed)
+    return GitLabPipelineSelector.unmeasured(why) unless pipeline
 
-    parent = api("projects/#{@proj}/pipelines/#{pipeline['id']}") or return [nil, nil, nil]
-    out = selector_outcome(parent)
-    out ? [out.deploy_at, out.pipeline_at, out.state == :concluded ? nil : out.reason] : [nil, nil, nil]
-  end
+    parent = api("projects/#{@proj}/pipelines/#{pipeline['id']}") or return GitLabPipelineSelector.read_failed("pipeline")
+    return GitLabPipelineSelector.judge(sel, pipeline: parent) unless sel.child
 
-  # -> a GitLabPipelineSelector::Outcome, or nil when a read failed.
-  def selector_outcome(parent)
-    return GitLabPipelineSelector.judge(@selector, pipeline: parent) unless @selector.child
+    bridges = api("projects/#{@proj}/pipelines/#{parent['id']}/bridges?per_page=#{GITLAB_PAGE_CAP}") or
+      return GitLabPipelineSelector.read_failed("trigger job")
+    decided, bridge, child_id = GitLabPipelineSelector.after_bridges(sel, parent, bridges)
+    return decided if decided
 
-    bridges = api("projects/#{@proj}/pipelines/#{parent['id']}/bridges?per_page=100") or return nil
-    bridge, why = GitLabPipelineSelector.pick_bridge(@selector, parent, bridges)
-    return GitLabPipelineSelector::Outcome.new(state: :unmeasured, reason: why) unless bridge
-
-    child_id = bridge.dig("downstream_pipeline", "id")
-    child = child_id && (api("projects/#{@proj}/pipelines/#{child_id}") or return nil)
-    GitLabPipelineSelector.judge(@selector, pipeline: parent, bridge: bridge, child: child)
+    child = api("projects/#{@proj}/pipelines/#{child_id}") or return GitLabPipelineSelector.read_failed("child pipeline")
+    GitLabPipelineSelector.judge(sel, pipeline: parent, bridge: bridge, child: child)
   end
 
   # Find the post-merge pipeline on the default branch for the merge and read
@@ -1320,6 +1327,7 @@ def analyze(forge, id, starts)
                                      closed: f[:closed], unmeasured: f[:unmeasured]))
           .merge(closed_at: f[:closed_at],
                  head_commit: f[:head_commit], head_commit_unmeasured: f[:head_commit_unmeasured])
+          .merge(f[:ci_pending] ? { ci_pending: true } : {})
 end
 
 # A row's landed_commit (a push landing), merge_commit (a forge merge), and
@@ -1912,9 +1920,11 @@ if $PROGRAM_NAME == __FILE__
                        ends each landing at its pipeline on ref R from source
                        S, or, with child=, at the successful finish of the
                        child pipeline trigger job J started (the deploy). A
-                       selector that matches no pipeline, or a pipeline still
-                       waiting or running (waiting_for_resource included),
-                       reads could not measure, with why. A GitHub workflow
+                       selector that matches no pipeline, or one at manual,
+                       reads could not measure, with why. One still waiting
+                       or running (waiting_for_resource included) reads could
+                       not measure and ci_pending, and --meta's
+                       scanned_through stops before it. A GitHub workflow
                        file on a GitLab origin, or a selector on a GitHub
                        origin, exits 1. "none", a workflow file on GitHub,
                        or no flag keeps the forge's own deploy rule.
@@ -1925,7 +1935,9 @@ if $PROGRAM_NAME == __FILE__
                        when no row is slow. On SCAN INCOMPLETE it is the newest
                        landing before the first one a probe failed on; null
                        when a failure belongs to no single landing, when no
-                       landing precedes it, or when the window is empty.
+                       landing precedes it, or when the window is empty. A
+                       ci_pending landing holds it the same way, without
+                       marking the scan incomplete.
         --help         this text
 
       Exit: 0 ok; 1 usage or tool error (a --since that is not a date or
