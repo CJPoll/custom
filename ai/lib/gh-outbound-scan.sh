@@ -185,7 +185,9 @@ gos_shown() { printf '%s' "${1%%[?#]*}"; }
 #   repos/<owner>/<repo>[/…]     <owner>/<repo> (HOST/<owner>/<repo> under a
 #                                --hostname other than github.com)
 #   repos/{owner}/{repo}[/…]     gh fills both from GH_REPO, else from the
-#   (or :owner, :repo)           current directory's repo: so GH_REPO, else ""
+#   (or :owner, :repo)           current directory's repo: gtr_resolve's
+#                                fallback (ai/lib/gh-target-repo.sh), with
+#                                no -R; a malformed GH_REPO is refused
 #   graphql, with a mutation     unknown: the target is inside the query
 #   anything else                unknown (repositories/<id>, gists, user, orgs,
 #                                a placeholder mixed with text, a full URL on
@@ -236,7 +238,11 @@ gos_api_target() {
       if [ -n "$hosted" ]; then
         targets+=("?:the endpoint '$shown' fills {owner}/{repo} under --hostname $FAS_HOSTNAME"); return 0
       fi
-      targets+=("${GH_REPO:-}"); return 0 ;;
+      # GH_REPO, else the checkout: gh-target-repo.sh holds that precedence
+      # (DND-2006). `gh api` has no -R, so no -R value is passed.
+      declare -F gtr_resolve >/dev/null || ots_refuse 3 "$GOS_LIB_DIR/gh-target-repo.sh did not load, so the outbound scan cannot tell which repository this $OTS_WHAT reaches. Fix: run gh-athena from a full ~/dev/custom checkout (ai/bin and ai/lib side by side)."
+      gtr_resolve 0 || ots_refuse 3 "$GTR_WHY"
+      targets+=("${GTR_TARGETS[@]}"); return 0 ;;
   esac
   if [[ "$o$rp" == *[{}]* ]] || [[ "$o" == :* ]] || [[ "$rp" == :* ]]; then
     targets+=("?:the endpoint '$shown' mixes a placeholder into the repository name"); return 0

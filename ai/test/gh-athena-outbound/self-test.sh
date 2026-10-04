@@ -274,7 +274,9 @@ else
 fi
 for argv in "pr create --repo= -b" "pr create --repo  -b" "pr comment 3 -R synth-owner/priv -R  -b" \
   "-R  pr comment 3 -b" "pr -R  comment 3 -b" "issue create -t t -R  -b" "issue comment 7 --repo= -b" \
-  "pr close 5 -R  -c" "pr merge 5 --squash -R  -b" "release create v1 -R  -n"; do
+  "pr close 5 -R  -c" "pr merge 5 --squash --match-head-commit ${STUB_HEAD} -R  -b" "release create v1 -R  -n"; do
+  # DND-2007: a pr merge reaches the scan only past the merge guard, so it
+  # pins the fixture PR's head.
   # The double space is an empty -R value; split by hand so it survives.
   words=(); rest="${argv}"
   while [ -n "${rest}" ]; do
@@ -560,6 +562,17 @@ if api_refused && [[ "${OUT}" == *"GraphQL mutation"* ]]; then ok "a GraphQL mut
 GH_REPO=synth-owner/pub gha api -X POST "repos/{owner}/{repo}/issues" -f "body=x${TOKEN}"
 if api_refused && [[ "${CALLS}" == *"repo view synth-owner/pub"* ]]; then ok "a {owner}/{repo} endpoint reads GH_REPO's visibility"; else bad "placeholder GH_REPO" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 unset GH_REPO
+# DND-2007 on DND-2006: the placeholder target resolves through gtr_resolve, so
+# GH_REPO (a PUBLIC repo) wins over a PRIVATE checkout, as gh fills it.
+echo PRIVATE > "${STUB_VIS}"
+GH_REPO=synth-owner/pub gha api -X POST "repos/:owner/:repo/issues" -f "body=x${TOKEN}"
+if api_refused && [[ "${CALLS}" == *"repo view synth-owner/pub"* ]] && [[ "${CALLS}" != *"repo view --json"* ]]; then ok "a placeholder endpoint with GH_REPO public and a PRIVATE checkout is scanned"; else bad "placeholder GH_REPO over private checkout" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+gha api -X POST "repos/{owner}/{repo}/issues" -f "body=x${TOKEN}"
+if [ "${RC}" = 0 ] && [[ "${OUT}" == *"stub: SENT api"* ]] && [[ "${CALLS}" == *"repo view --json"* ]]; then ok "with no GH_REPO, a placeholder endpoint reads the checkout (PRIVATE: sent)"; else bad "placeholder checkout" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+GH_REPO="not a repo" gha api -X POST "repos/{owner}/{repo}/issues" -f "body=clean"
+if [ "${RC}" = 3 ] && [[ "${OUT}" != *"stub: SENT"* ]] && [[ "${OUT}" == *"COULD NOT LOOK"* ]] && [[ "${OUT}" == *"Fix:"* ]]; then ok "a malformed GH_REPO behind a placeholder endpoint is refused"; else bad "malformed GH_REPO" "rc=${RC} ${OUT}"; fi
+unset GH_REPO
+echo PUBLIC > "${STUB_VIS}"
 
 echo "--- DND-2007: what passes ---"
 gha api -X POST repos/synth-owner/priv/issues -f "body=x${TOKEN}"
