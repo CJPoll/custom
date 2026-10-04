@@ -28,6 +28,13 @@
 # behavior that root bypasses).
 
 set -euo pipefail
+# Every step without its own message (the git build, the user setup, a
+# symlink) still fails with the command, its line and a Fix:.
+on_err() {
+  echo "setup.sh: line $2: \`$3\` failed (exit $1)" >&2
+  echo "  Fix: read the output above for its cause. For the git build: a GIT_VERSION bump may need another build dependency in PACKAGES. Re-run dockerfiles/ci-harness/Dockerfile's build locally to reproduce." >&2
+}
+trap 'on_err "$?" "$LINENO" "$BASH_COMMAND"' ERR
 
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
   # The header comment, from line 2 to the first line that is not a comment.
@@ -127,8 +134,8 @@ if grep -q 'install ok installed' <<<"$(dpkg-query -W -f='${Status}' git 2>/dev/
   echo "  Fix: find the package in PACKAGES that depends on git and drop it, or pin a release that does not." >&2
   exit 1
 fi
-make -C "${src}/git-${GIT_VERSION}" "${build[@]}" all install >/dev/null
-make -C "${src}/git-${GIT_VERSION}/contrib/subtree" "${build[@]}" install >/dev/null
+make -C "${src}/git-${GIT_VERSION}" "${build[@]}" all install
+make -C "${src}/git-${GIT_VERSION}/contrib/subtree" "${build[@]}" install
 rm -rf "${src}"
 # `git hook -h` exits 129 by design, so read its usage text, not its status.
 hook_usage="$(git hook -h 2>&1 || true)"
