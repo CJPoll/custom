@@ -42,6 +42,7 @@ set -uo pipefail
 
 GH_BIN="${CONFIRM_MERGED_GH:-gh}"
 GLAB_BIN="${CONFIRM_MERGED_GLAB:-glab}"
+FORGE_GIT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/forge-git"
 
 # --------------------------------------------------------------------------
 # Self-test: hermetic (throwaway git repo + stub gh/glab; no network, no state).
@@ -163,7 +164,8 @@ Usage:
 At least one probe is required (a --pr/--mr forge probe, or a --sha+--target
 git-ancestry probe). --repo sets the git working dir for both the forge read
 (gh/glab resolve the project from its remote) and the ancestry check (default:
-cwd). --fetch runs `git fetch` first so the ancestry probe sees the latest tip.
+cwd). --fetch runs `git fetch` first, through ai/bin/forge-git (Athena's forge
+route), so the ancestry probe sees the latest tip.
 
 Exit: 0 confirmed · 1 not merged · 2 usage/prereq · 3 could-not-determine.
 EOF
@@ -284,8 +286,10 @@ git_probe() {
     ERRORED=1; note "--repo '$REPO' is not a git repo (ancestry probe skipped)"; return
   fi
   if [ "$FETCH" -eq 1 ]; then
-    if ! out="$(git -C "$REPO" fetch --quiet 2>&1)"; then
-      ERRORED=1; note "git fetch failed: $(printf '%s' "$out" | head -1)"; return
+    # Through Athena's forge route, never the owner's SSH key (DND-1977):
+    # admirals run this unattended after every merge.
+    if ! out="$("$FORGE_GIT" -C "$REPO" fetch --quiet 2>&1)"; then
+      ERRORED=1; note "git fetch (forge-git) failed: $(printf '%s' "$out" | head -1)"; return
     fi
   fi
   if ! git -C "$REPO" rev-parse --verify --quiet "$SHA^{commit}" >/dev/null 2>&1; then

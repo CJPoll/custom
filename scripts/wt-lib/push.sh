@@ -1,5 +1,5 @@
 #!/bin/bash
-# push.sh - the one place wt pushes (DND-394).
+# push.sh - the one place wt pushes (DND-394) and pulls (wt_git_pull, DND-1977).
 # This file is meant to be sourced, not executed directly.
 #
 # By default wt pushes exactly as it always has: a plain `git push`, which runs
@@ -147,6 +147,26 @@ if [[ -z "${WT_LIB_PUSH_SOURCED:-}" ]]; then
             return 3
         fi
         return 0
+    }
+
+    # wt_git_pull <git pull args...> : pull in the current directory as the
+    # owner (default, plain git pull) or, under WT_AGENT_PUSH=1, through
+    # ai/bin/forge-git, so an agent's read of the remote rides Athena's forge
+    # route and never the owner's SSH key (DND-1977).
+    wt_git_pull() {
+        local mode
+        mode="$(wt_agent_push_mode)" || return 3
+        if [ "$mode" = owner ]; then
+            git pull "$@"
+            return
+        fi
+        local bin_dir="${WT_ATHENA_BIN_DIR:-${WT_LIB_PUSH_DIR}/../../ai/bin}"
+        [ -x "${bin_dir}/forge-git" ] || {
+            _wt_push_refuse "${bin_dir}/forge-git is missing or not executable." \
+                "run wt from a full ~/dev/custom checkout (scripts/ and ai/bin/ side by side); $WT_AGENT_PUSH_ESCALATE"
+            return 3
+        }
+        "${bin_dir}/forge-git" -C "$(pwd)" pull "$@"
     }
 
     # wt_refuse_gt_submit_under_agent : Graphite's `gt submit` pushes (and opens

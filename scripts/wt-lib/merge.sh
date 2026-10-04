@@ -50,7 +50,7 @@ if [[ -z "${WT_LIB_MERGE_SOURCED:-}" ]]; then
 
         # Update the target branch
         log "Pulling latest changes for $merge_into"
-        git pull origin "$merge_into" --ff-only || {
+        wt_git_pull origin "$merge_into" --ff-only || {
             error "Failed to update $merge_into. Resolve conflicts manually."
         }
 

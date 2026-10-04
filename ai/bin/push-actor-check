@@ -14,12 +14,12 @@
 # safe-wait rule).
 #
 # Reads only, on PLAIN gh/glab — the reads-stay-on-plain-CLI convention. It
-# never pushes, never mints a token, never runs a login/refresh. The repo/
-# branch resolution check (DND-451, below) also does a read-only `git
-# ls-remote` against the push remote, with GIT_TERMINAL_PROMPT=0 so a missing
-# credential fails fast instead of hanging on an interactive prompt — the same
-# ambient credentials a push from this repo already had, never a new auth
-# flow.
+# never pushes and never runs a login/refresh. The repo/branch resolution check
+# (DND-451, below) also does a read-only `git ls-remote` against the push
+# remote, through Athena's forge route (ai/bin/forge-git, DND-1977:
+# gh-athena or glab-athena by the URL's host, so the bot's token, never the
+# owner's SSH key), with GIT_TERMINAL_PROMPT=0 so a missing credential fails
+# fast instead of hanging on an interactive prompt.
 #
 # Exit codes — the bad outcomes are distinct, because a failed read must
 # never look like an empty one (~/dev/custom/CLAUDE.md):
@@ -210,9 +210,17 @@ RESOLVE_FIX="push-actor-check resolved remote '${REMOTE}' to ${URL} from repo '$
 # "git ls-remote <remote-name>" with no -C, asking the WRONG repo's remote
 # under a stale cwd, the exact DND-451 defect living inside the tool's own
 # guidance). Always the same repo, URL and branch this run resolved.
-LS_CMD_HINT="git -C '${REPO}' ls-remote '${URL}' refs/heads/${BRANCH}"
+LS_CMD_HINT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/forge-git -C '${REPO}' ls-remote '${URL}' refs/heads/${BRANCH}"
 
-GIT_BIN=${PUSH_ACTOR_CHECK_GIT:-git}
+# The read goes through Athena's forge route (ai/bin/forge-git, DND-1977),
+# never the owner's SSH key: agents run this unattended after each push, and a
+# gitlab.com remote refuses the owner's key for a private project on some
+# machines. PUSH_ACTOR_CHECK_GIT (tests only) runs that git in its place.
+if [ -n "${PUSH_ACTOR_CHECK_GIT:-}" ]; then
+  GIT_LS=("${PUSH_ACTOR_CHECK_GIT}" -C "${REPO}")
+else
+  GIT_LS=("$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/forge-git" -C "${REPO}")
+fi
 # One tempfile for both this resolution read and the events-read loop below;
 # the trap is installed BEFORE the file exists so a signal here can't leak it.
 ERRF=$(mktemp) || die_usage "mktemp failed" "check TMPDIR is writable"
@@ -220,7 +228,7 @@ trap 'rm -f "${ERRF}"' EXIT
 # Query the SAME URL named in every resolution message (the push URL), not the
 # remote's fetch URL — a remote with a separate pushurl would otherwise verify
 # one and name the other.
-LSOUT=$(GIT_TERMINAL_PROMPT=0 "${GIT_BIN}" -C "${REPO}" ls-remote "${URL}" "refs/heads/${BRANCH}" 2>"${ERRF}")
+LSOUT=$(GIT_TERMINAL_PROMPT=0 "${GIT_LS[@]}" ls-remote "${URL}" "refs/heads/${BRANCH}" 2>"${ERRF}")
 LSRC=$?
 LSERR=$(tr '\n' ' ' < "${ERRF}" | cut -c1-300)
 : > "${ERRF}"

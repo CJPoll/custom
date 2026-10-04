@@ -415,9 +415,13 @@ end
 # Refresh remote-tracking refs so `drift` can be measured at all. An open change
 # request's head is on `origin` by definition, so after a successful fetch the
 # sha is present locally; a fetch that FAILS is recorded, because every drift
-# number in the run then rests on possibly-stale refs.
+# number in the run then rests on possibly-stale refs. The fetch goes through
+# Athena's forge route (ai/bin/forge-git, DND-1977): the lead-time cron runs
+# this unattended, and origin is the owner's SSH URL.
+FORGE_GIT = File.expand_path("forge-git", __dir__)
+
 def refresh_refs(dir)
-  _out, err, st = Open3.capture3("git", "-C", dir, "fetch", "--quiet", "origin")
+  _out, err, st = Open3.capture3(FORGE_GIT, "-C", dir, "fetch", "--quiet", "origin")
   return true if st.success?
 
   warn "ready-and-idle: git -C #{dir} fetch origin failed: #{err.strip}"
@@ -1099,10 +1103,11 @@ def warn_degraded(repo:, rows:, refs_refreshed:, refs_reason:, target:)
   fix_head = if refs_refreshed || refs_reason.to_s.include?("--no-fetch")
                "drop --no-fetch so drift is measured against current refs"
              else
-               "make `git -C #{repo} fetch origin` succeed so drift is exact — in a " \
-                 "headless/cron session this is almost always a missing ssh-agent " \
-                 "(`ssh-add -l` should list the key), so run the sweep from a session that " \
-                 "has it or give the cron environment credential access to this remote"
+               "make `#{FORGE_GIT} -C #{repo} fetch origin` succeed so drift is exact — it " \
+                 "fetches through gh-athena or glab-athena by origin's host, so check that " \
+                 "wrapper's credentials (ai/bin/forge-preflight) and the network; an ssh:// or " \
+                 "host-alias origin is refused, so set origin to the git@<host>:<path> or " \
+                 "https://<host>/<path> form"
              end
   warn "Fix: #{fix_head}. Until then ACT ON THE ROWS ANYWAY: they are complete and each"
   warn "  one is finished work nobody is carrying. Never quote a `>=N` drift as an exact"

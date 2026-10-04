@@ -42,6 +42,9 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_DIR="$(dirname "${HERE}")"
+# origin is read through Athena's forge route (DND-1977), never the owner's SSH
+# key: the admiral runs this unattended.
+FORGE_GIT="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../../bin/forge-git"
 
 # The receipt reader is shared with gh-athena's merge guard and the writer
 # (integration-gate), so the three cannot drift (DND-969).
@@ -372,8 +375,8 @@ if [ "${LM_WAIT_OUTCOME}" = timeout ]; then
 fi
 touch "${LOCK}" 2>/dev/null || true
 
-git -C "${REPO}" fetch -q origin \
-  || die 3 "git fetch origin failed" "check the network/credentials, then re-run; nothing was merged."
+"${FORGE_GIT}" -C "${REPO}" fetch -q origin \
+  || die 3 "git fetch origin (forge-git) failed" "check the network and the forge wrapper's credentials (ai/bin/forge-preflight), then re-run; nothing was merged."
 
 if [ "${FORGE}" = github ]; then
   pr_json="$(cd "${REPO}" && gh pr view "${PR}" --json state,headRefOid,headRefName,baseRefName 2>/dev/null)" \
@@ -659,7 +662,7 @@ fi
 if [ "${FORGE}" = github ] && [[ "${M}" =~ ^[0-9a-f]{40}$ ]]; then
   LM_LANDED_AT="$(athena_telemetry_now)"; LM_LANDED_AFTER="${M}"; LM_BEFORE="${B}"
 fi
-git -C "${REPO}" fetch -q origin 2>/dev/null
+"${FORGE_GIT}" -C "${REPO}" fetch -q origin 2>/dev/null
 git -C "${REPO}" cat-file -e "${M}^{commit}" 2>/dev/null \
   || die 8 "merge commit ${M} not fetchable" "fetch origin and compare ${M}^{tree} with the expected tree ${EXPECTED_TREE} by hand."
 parent="$(git -C "${REPO}" rev-parse "${M}^1")"

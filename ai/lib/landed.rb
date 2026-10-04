@@ -95,6 +95,14 @@ module Landed
   REMOTE = "origin"
   REMOTE_REF = "refs/heads/main"
   LS_REMOTE_PROBE = "git ls-remote #{REMOTE} #{REMOTE_REF}".freeze
+  # Every read of origin goes through Athena's forge route (DND-1977): the
+  # gate and the checks run unattended, and origin is the owner's SSH URL.
+  # forge-git picks gh-athena / glab-athena by origin's host, plain git for a
+  # local-path origin (a fixture, the sandboxed gate's offline origin). Its
+  # test seams (FORGE_GIT_GH_ATHENA / FORGE_GIT_GLAB_ATHENA) can point the read
+  # elsewhere, as GIT_SSH_COMMAND or an insteadOf in the caller's env already
+  # could; origin is still the only thing a diff cannot forge.
+  FORGE_GIT = File.expand_path("../bin/forge-git", __dir__)
   # The bound only stops a hung transport from hanging the gate; hitting it is
   # "could not measure", never a pass.
   LS_REMOTE_TIMEOUT = 30
@@ -165,7 +173,7 @@ module Landed
   # 40-hex SHA raises Unreadable with the probes so far.
   def remote_tip(root, probes)
     env = { "GIT_TERMINAL_PROMPT" => "0", "GIT_OPTIONAL_LOCKS" => "0" }
-    out, err, status = capture_with_timeout(env, ["git", "-C", root, "ls-remote", "--exit-code",
+    out, err, status = capture_with_timeout(env, [FORGE_GIT, "-C", root, "ls-remote", "--exit-code",
                                                   REMOTE, REMOTE_REF], LS_REMOTE_TIMEOUT)
     outcome = if status.nil?
                 "timed out after #{LS_REMOTE_TIMEOUT}s (origin unreachable)"
@@ -184,7 +192,7 @@ module Landed
     probes << [LS_REMOTE_PROBE, sha[0][0, 12]]
     sha[0]
   rescue Errno::ENOENT
-    probes << [LS_REMOTE_PROBE, "git executable not found on PATH"]
+    probes << [LS_REMOTE_PROBE, "#{FORGE_GIT} not found, or git not on PATH"]
     raise Unreadable.new(probes)
   end
 
@@ -266,7 +274,7 @@ module Landed
   # Unreadable when the fetch fails or still leaves remote missing.
   def fetch_objects(root, remote, probes)
     env = { "GIT_TERMINAL_PROMPT" => "0" }
-    cmd = ["git", "-C", root, "fetch", "--quiet", "--no-tags", "--no-recurse-submodules",
+    cmd = [FORGE_GIT, "-C", root, "fetch", "--quiet", "--no-tags", "--no-recurse-submodules",
            "--no-auto-maintenance", "--no-write-fetch-head", "--refmap=", REMOTE, REMOTE_REF]
     _out, err, status = capture_with_timeout(env, cmd, LS_REMOTE_TIMEOUT)
     outcome = if status.nil?
@@ -279,7 +287,7 @@ module Landed
     probes << [FETCH_PROBE, outcome || "#{remote[0, 12]} fetched, objects only"]
     raise Unreadable.new(probes) if outcome
   rescue Errno::ENOENT
-    probes << [FETCH_PROBE, "git executable not found on PATH"]
+    probes << [FETCH_PROBE, "#{FORGE_GIT} not found, or git not on PATH"]
     raise Unreadable.new(probes)
   end
 

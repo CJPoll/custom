@@ -56,6 +56,7 @@ module LeadTimeProductIO
 
     def gh = seam("LEADTIME_GH", "gh")
     def gh_athena = seam("LEADTIME_GH_ATHENA", File.join(HARNESS, "ai/bin/gh-athena"))
+    def forge_git = seam("LEADTIME_FORGE_GIT", File.join(HARNESS, "ai/bin/forge-git"))
     def integration_gate = seam("LEADTIME_INTEGRATION_GATE", File.join(HARNESS, "ai/bin/integration-gate"))
     def locked_merge = seam("LEADTIME_LOCKED_MERGE", File.join(HARNESS, "ai/skills/athena:merge-boarding/scripts/locked-merge"))
     def confirm_merged = seam("LEADTIME_CONFIRM_MERGED", File.join(HARNESS, "ai/bin/confirm-merged"))
@@ -87,6 +88,10 @@ module LeadTimeProductIO
     module_function
 
     def call(dir, *args, timeout: 120) = Run.call(["git", "-C", dir, *args], chdir: "/", timeout: timeout)
+
+    # A read of origin, through Athena's forge route (ai/bin/forge-git,
+    # DND-1977), never the owner's SSH key: the lead-time cron runs this.
+    def fetch(dir, *args, timeout: 120) = Run.call([Cmd.forge_git, "-C", dir, "fetch", *args], chdir: "/", timeout: timeout)
 
     def rev(dir, ref)
       out, code = call(dir, "rev-parse", "--verify", "--quiet", "#{ref}^{commit}")
@@ -136,7 +141,7 @@ module LeadTimeProductIO
     end
 
     def fetch_main(dir)
-      _, code = call(dir, "fetch", "--quiet", "origin", "main")
+      _, code = fetch(dir, "--quiet", "origin", "main")
       code.zero? ? "fetched" : "fetch FAILED; based on the last-fetched origin/main"
     end
 
@@ -717,7 +722,7 @@ module LeadTimeProductIO
               false, true, 1]
     end
     Git.fetch_main(rl.path)
-    _, code = Git.call(rl.path, "fetch", "--quiet", "origin", "+refs/heads/#{s.branch}:refs/remotes/origin/#{s.branch}")
+    _, code = Git.fetch(rl.path, "--quiet", "origin", "+refs/heads/#{s.branch}:refs/remotes/origin/#{s.branch}")
     return ["open: could not fetch #{s.branch}; the next run retries", false, false] unless code.zero?
 
     # A ref that cannot be read after a good fetch is could-not-look, never a

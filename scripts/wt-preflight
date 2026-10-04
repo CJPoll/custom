@@ -82,6 +82,9 @@ fi
 # docker's pool is nearly out. pool-headroom names the stacks to reclaim.
 echo "== 0. docker address-pool headroom ($PROJECT) =="
 POOL_HEADROOM="$(cd "$(dirname "$0")/.." && pwd)/ai/bin/pool-headroom"
+# Every read of origin goes through Athena's forge route (DND-1977), never the
+# owner's SSH key: wt-preflight runs in every unattended fleet dispatch.
+FORGE_GIT="$(cd "$(dirname "$0")/.." && pwd)/ai/bin/forge-git"
 "$POOL_HEADROOM" --repo "$REPO" || { echo "FAIL: pool-headroom refused (exit $?) — a new $PROJECT stack may not get a subnet"; echo "Fix: follow pool-headroom's Fix: above (tear down your fleet's MERGED-BUT-UP stacks it names, ask other fleets' admirals about theirs, prune idle networks), then re-run wt-preflight"; exit 1; }
 
 echo "== 1. refresh local main ($PROJECT) =="
@@ -91,7 +94,7 @@ echo "== 1. refresh local main ($PROJECT) =="
 # LC_ALL=C: the classifier reads git's English messages; a translated locale
 # would drop every lock into the generic branch.
 pull_main() {
-  PULL_OUT=$(LC_ALL=C git -C "$REPO" pull --ff-only 2>&1); PULL_RC=$?
+  PULL_OUT=$(LC_ALL=C "$FORGE_GIT" -C "$REPO" pull --ff-only 2>&1); PULL_RC=$?
   printf '%s\n' "$PULL_OUT"
 }
 # The lock file git names in its error, or "" when it names none. git prints
@@ -148,7 +151,7 @@ if [ "$PULL_RC" -ne 0 ]; then
   fi
   exit 1
 fi
-git -C "$REPO" fetch origin --quiet
+"$FORGE_GIT" -C "$REPO" fetch origin --quiet
 ORIGIN=$(git -C "$REPO" rev-parse origin/main)
 LOCAL=$(git -C "$REPO" rev-parse main)
 echo "   origin/main $ORIGIN"
@@ -161,7 +164,7 @@ cd "$REPO" || exit 2  # wt defaults --parent to the CALLER's current branch; nev
 [ -d "$WT" ] || { echo "FAIL: worktree not at $WT"; echo "Fix: find where wt put it (git -C $REPO worktree list) and remove it; wt-preflight expects ~/.local/worktrees/<project>/<branch>"; exit 1; }
 
 echo "== 3. VERIFY the new branch descends from origin/main =="
-git -C "$REPO" fetch origin --quiet
+"$FORGE_GIT" -C "$REPO" fetch origin --quiet
 if git -C "$WT" merge-base --is-ancestor origin/main HEAD; then
   echo "   OK: origin/main is an ancestor of $BRANCH"
 else

@@ -173,8 +173,10 @@ done
 git -C "${REPO}" worktree prune >/dev/null 2>&1 8>&- || true
 
 # Children never inherit the lock fd (8>&-): a child that outlives this run
-# must not hold the next check's lock.
-timeout 120 git -C "${REPO}" fetch -q origin 2>"${STORE}/.fetch-err.$$" 8>&-; frc=$?
+# must not hold the next check's lock. The fetch goes through Athena's forge
+# route (ai/bin/forge-git, DND-1977), never the owner's SSH key: check runs
+# unattended (an admiral's landing, the shipwright tick).
+timeout 120 "${HERE}/forge-git" -C "${REPO}" fetch -q origin 2>"${STORE}/.fetch-err.$$" 8>&-; frc=$?
 ferr="$(head -n 3 "${STORE}/.fetch-err.$$" 2>/dev/null | tr '\n' ' ')"; rm -f "${STORE}/.fetch-err.$$"
 [ "${frc}" -eq 0 ] \
   || die 3 "COULD NOT MEASURE: git fetch origin failed (exit ${frc}: ${ferr}); no verdict on a possibly stale ref" "fix the remote or the network (git -C ${REPO} fetch origin), then re-run main-health check."

@@ -77,6 +77,9 @@ require_relative "../lib/since_rule"
 require_relative "../lib/lead_time_config_io"
 require_relative "../lib/lead_time_config"
 
+# Origin reads go through Athena's forge route (DND-1977): GitHubForge's fetches.
+FORGE_GIT = File.expand_path("forge-git", __dir__)
+
 # Which workflow/stage counts as "the deploy" (overridable, not hardcoded to a
 # repo). GitHub: workflow name matches this regex. GitLab: job stage equals the
 # gitlab value.
@@ -713,7 +716,7 @@ class GitHubForge
 
     tip = pushes.last[:after]
     unless have_commits?([tip, head]) ||
-           (git_ok("fetch", "--quiet", "--no-write-fetch-head", "origin",
+           (forge_git_ok("fetch", "--quiet", "--no-write-fetch-head", "origin",
                    "refs/heads/#{base}", "refs/pull/#{number}/head") && have_commits?([tip, head]))
       ProbeFailures.record("git fetch origin #{base} pull/#{number}/head",
                            "commit #{tip[0, 12]} or #{head[0, 12]} is not readable after a fetch")
@@ -776,7 +779,7 @@ class GitHubForge
                  .flat_map { |p| [p[:before], p[:after]] }.compact.reject { |s| s.match?(ZERO_SHA_RE) }.uniq
     return if shas.empty? || have_commits?(shas)
 
-    git_status("fetch", "--quiet", "--no-write-fetch-head", "origin", "refs/heads/#{base}")
+    forge_git_status("fetch", "--quiet", "--no-write-fetch-head", "origin", "refs/heads/#{base}")
   end
 
   # [{sha:, subject:, authored:}] newest first for before..after along the
@@ -912,6 +915,20 @@ class GitHubForge
 
   def git_ok(*args, stdin: nil)
     out, err, st = Open3.capture3(LeadTimeConfigIO::GIT_ENV_UNSET, "git", "-C", @dir, *args, stdin_data: stdin.to_s)
+    return out if st.success?
+
+    ProbeFailures.record("git #{args.first(3).join(' ')}", err)
+  end
+
+  # A read of origin goes through Athena's forge route (ai/bin/forge-git,
+  # DND-1977), never the owner's SSH key: the lead-time cron runs this.
+  def forge_git_status(*args)
+    _o, _e, st = Open3.capture3(LeadTimeConfigIO::GIT_ENV_UNSET, FORGE_GIT, "-C", @dir, *args)
+    st.exitstatus
+  end
+
+  def forge_git_ok(*args)
+    out, err, st = Open3.capture3(LeadTimeConfigIO::GIT_ENV_UNSET, FORGE_GIT, "-C", @dir, *args)
     return out if st.success?
 
     ProbeFailures.record("git #{args.first(3).join(' ')}", err)

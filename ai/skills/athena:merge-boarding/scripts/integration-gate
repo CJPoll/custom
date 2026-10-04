@@ -590,6 +590,9 @@ short() { git rev-parse --short "$1"; }
 tree_dirt() { git -C "$ROOT" status --porcelain 2>&1; }
 CRITIC="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../bin" 2>/dev/null && pwd)/critic-review"
 TEARDOWN="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../bin" 2>/dev/null && pwd)/teardown-stack"
+# The target's remote is read through Athena's forge route (DND-1977), never the
+# owner's SSH key: admirals, captains and cron lanes run this gate unattended.
+FORGE_GIT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../bin" 2>/dev/null && pwd)/forge-git"
 
 # DND-1576: record the worktree's stack marker right after the gate ran, while
 # the stack the gate used is still up. A captain's later `docker compose down`
@@ -620,7 +623,7 @@ fetch_target() {
     *)   remote="" ;;
   esac
   if [ -n "$remote" ] && grep -qx -- "$remote" <<<"$(git remote)"; then
-    git fetch "$remote" >/dev/null 2>&1 || \
+    "$FORGE_GIT" -C "$ROOT" fetch "$remote" >/dev/null 2>&1 || \
       echo "${PROG}: WARN fetch of '${remote}' failed; comparing against the ref as it stands locally." >&2
   fi
 }

@@ -120,6 +120,20 @@ fsg_arm "${TMP}/forge-guard"
 fsg_require_stubs "${STUB}" glab gh
 export PATH="${STUB}:${PATH}"
 
+# The fetch of a forge origin goes through ai/bin/forge-git (DND-1977), which
+# runs gh-athena / glab-athena. These stand-ins record the call and fail as an
+# unreachable forge would, so no case reaches a real forge or a bot token.
+for w in gh-athena glab-athena; do
+  cat > "${STUB}/forge-${w}" <<STUBEOF
+#!/usr/bin/env bash
+echo "${w} \$*" >> "${TMP}/routed.log"
+echo "fatal: unable to access the forge (test stand-in for ${w})" >&2
+exit 128
+STUBEOF
+  chmod +x "${STUB}/forge-${w}"
+done
+export FORGE_GIT_GH_ATHENA="${STUB}/forge-gh-athena" FORGE_GIT_GLAB_ATHENA="${STUB}/forge-glab-athena"
+
 ago() { date -u -d "-$1" +%Y-%m-%dT%H:%M:%SZ; }
 
 # Write the GitLab fixture set for ONE merge request and use it as the whole
@@ -215,12 +229,17 @@ run --repo "${WORK}" --json
 
 # ---------------------------------------------------------------------------
 # F1. THE REGRESSION. A FAILED `git fetch` must NOT suppress the orphan list.
-# GIT_SSH_COMMAND=/bin/false reproduces the cron lane's missing ssh-agent with
-# no network and no DNS.
+# The glab-athena stand-in fails the routed fetch with no network and no DNS;
+# GIT_SSH_COMMAND=/bin/false also fails any plain-git SSH attempt, so neither
+# route can reach a forge.
 # ---------------------------------------------------------------------------
 git -C "${WORK}" remote set-url origin git@gitlab.com:fixture/proj.git
 mk_gitlab 1187 "${SHA_OLD}" false true "$(ago '10 hours')" success 0
+: > "${TMP}/routed.log"
 GIT_SSH_COMMAND=/bin/false GIT_TERMINAL_PROMPT=0 run --repo "${WORK}" --json
+grep -qx "glab-athena git -C ${WORK} fetch --quiet origin" "${TMP}/routed.log" \
+  && ok "a gitlab.com origin is fetched through glab-athena (forge-git), not plain git over SSH (DND-1977)" \
+  || bad "a gitlab.com origin is fetched through glab-athena" "routed=$(cat "${TMP}/routed.log")"
 [ "${CODE}" -eq 4 ] && [ -n "${OUT}" ] \
   && grep -q '"orphans": 1' <<<"${OUT}" && grep -q '"id": 1187' <<<"${OUT}" \
   && grep -q 'DEGRADED SCAN' <<<"${ERR}" \
@@ -234,7 +253,7 @@ grep -q '"degraded"' <<<"${OUT}" && grep -q '"refs_refreshed": false' <<<"${OUT}
 
 GIT_SSH_COMMAND=/bin/false GIT_TERMINAL_PROMPT=0 run --repo "${WORK}"
 grep -q 'Fix:' <<<"${ERR}" \
-  && grep -q 'ssh-add' <<<"${ERR}" \
+  && grep -q 'forge-git' <<<"${ERR}" \
   && grep -q 'ACT ON THE ROWS' <<<"${ERR}" \
   && grep -q 'exit 3' <<<"${ERR}" \
   && ok "the DEGRADED banner tells the caller to act on the rows and not to call it unavailable" \

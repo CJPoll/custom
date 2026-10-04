@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+#
+# forge-git — read a repository's remote through Athena's forge route, never
+# through the machine owner's SSH key (DND-1977).
+#
+# Unattended harness paths (crons, lanes, gates, landings, fleet checks) used to
+# reach origin with plain `git fetch|pull|ls-remote`. origin is the owner's SSH
+# URL (git@github.com:..., and git@gitlab.com:... after the GitLab cutover,
+# DND-1947), so those paths worked only through an ssh-agent or the main
+# checkout's deploy-key core.sshCommand, and gitlab.com refuses the owner's key
+# for a private project on some machines. This tool picks the route by the URL
+# of the repository the git command reaches, with the same table the cron
+# runners' athena_fetch_origin_main uses (scripts/athena-shipwright-run.sh):
+#
+#   git@github.com:*  https://github.com/*   -> ai/bin/gh-athena git ...
+#   git@gitlab.com:*  https://gitlab.com/*   -> ai/bin/glab-athena git ...
+#   any other github.com / gitlab.com form   -> REFUSED, exit 3 (ssh://, a host
+#        alias, a port: the wrappers cannot rewrite it to HTTPS, and plain git
+#        would reach the forge as the owner)
+#   anything else (a local path, a fixture)  -> plain git, which needs no identity
+#
+# The repository is the one git itself reaches: the first argument after the
+# subcommand that is not an option, else the current branch's upstream remote
+# (branch.<name>.remote), else origin. A configured remote name routes by its
+# URL; any other word is taken as the URL itself, as git takes it. So a
+# checkout with two remotes (origin on gitlab.com, the old `github` remote kept
+# until the cutover is verified) routes each command by the remote it names.
+# An option whose value is a separate word would hide the repository, so it is
+# refused (pass it as --opt=value); so are --all and --multiple, which reach
+# several remotes.
+#
+# Only reads: fetch, ls-remote and pull. A push goes through gh-athena /
+# glab-athena git push (athena:github -> "Pushing as Athena").
+#
+# Exit codes: the routed git's own exit code, or
+#   64 usage error, or the route key cannot be computed (no -C, not a git
+#      repository, an empty URL). A key that cannot be resolved is an error,
+#      never "plain git". Not 2: `git ls-remote --exit-code` exits 2 for "no
+#      matching ref", and a caller must never read a failed route as an empty
+#      remote.
+#   3  refused: the URL is a forge URL form the Athena route does not take.
+#
+# Test seams (tests only): FORGE_GIT_GH_ATHENA and FORGE_GIT_GLAB_ATHENA name
+# the wrapper to run in place of ai/bin/gh-athena and ai/bin/glab-athena. The
+# same user can redirect git's own transport (GIT_SSH_COMMAND, insteadOf), so
+# the seams widen nothing.
+set -uo pipefail
+
+PROG=forge-git
+
+usage() {
+  cat <<'EOF'
+forge-git — read a remote through Athena's forge route, never the owner's SSH key.
+
+Usage:
+  forge-git -C <dir> <fetch|ls-remote|pull> [git args...]
+  forge-git --help
+
+  -C <dir>   the repository to run git in (required; never guessed from the cwd).
+
+Everything from the subcommand on is passed to git unchanged, after -C <dir>.
+The route follows the repository git reaches: the first non-option argument
+after the subcommand, else the current branch's upstream remote, else origin.
+A remote name routes by its URL; any other word is the URL.
+
+Route (by the URL's form):
+  git@github.com:*, https://github.com/*   ai/bin/gh-athena git -C <dir> ...
+  git@gitlab.com:*, https://gitlab.com/*   ai/bin/glab-athena git -C <dir> ...
+  other github.com / gitlab.com forms      refused, exit 3
+  anything else (a local path)             plain git -C <dir> ...
+
+Refused (exit 64): push or any other subcommand; --all / --multiple; an option
+whose value is a separate word (pass --opt=value).
+
+Exit: the git command's own code; 64 usage or an unresolvable route key; 3 refused.
+EOF
+}
+
+die() { # die <code> <what> <fix>
+  printf '%s: %s\n  Fix: %s\n' "${PROG}" "$2" "$3" >&2
+  exit "$1"
+}
+
+DIR=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --help|-h) usage; exit 0 ;;
+    -C) [ $# -ge 2 ] || die 64 "-C needs a directory" "pass -C <repository dir>."
+        DIR="$2"; shift 2 ;;
+    -*) die 64 "unknown option '$1' before the subcommand" "forge-git takes only -C before the subcommand (forge-git --help); put git's own options after the subcommand." ;;
+    *) break ;;
+  esac
+done
+
+[ $# -gt 0 ] || die 64 "no git subcommand" "pass one of fetch, ls-remote or pull, then its arguments (forge-git --help)."
+SUB="$1"
+case "${SUB}" in
+  fetch|ls-remote|pull) ;;
+  push) die 64 "forge-git does not push" "push as Athena with ai/bin/gh-athena git push (github.com) or ai/bin/glab-athena git push (gitlab.com); athena:github -> \"Pushing as Athena\"." ;;
+  *) die 64 "'${SUB}' is not a subcommand forge-git routes" "forge-git routes only fetch, ls-remote and pull; run a local git command with plain git." ;;
+esac
+[ -n "${DIR}" ] || die 64 "no -C <dir>" "pass -C <repository dir>; forge-git never guesses the repository from the cwd."
+git -C "${DIR}" rev-parse --git-dir >/dev/null 2>&1 \
+  || die 64 "'${DIR}' is not a git repository" "pass -C a directory inside the repository whose remote you read."
+
+# The repository word: the first non-option argument after the subcommand.
+REPO_WORD=""
+for a in "${@:2}"; do
+  case "${a}" in
+    --) die 64 "'--' in a ${SUB} argument list" "drop the '--'; name the remote as the first non-option argument." ;;
+    --all|--multiple)
+      die 64 "${SUB} ${a} reaches several remotes, which cannot share one route" "fetch each remote by name, one forge-git call each." ;;
+    --depth|--deepen|--shallow-since|--shallow-exclude|-j|--jobs|--upload-pack|-o|--server-option|--negotiation-tip|--refmap|--recurse-submodules-default|--sort|-s|--strategy|-X|--strategy-option|--exec|--filter|--submodule-prefix|--cleanup)
+      die 64 "${SUB} option '${a}' takes its value as the next word, which would hide the repository" "pass it as ${a}=<value>." ;;
+    -*) ;;
+    *) REPO_WORD="${a}"; break ;;
+  esac
+done
+
+if [ -z "${REPO_WORD}" ]; then
+  branch="$(git -C "${DIR}" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+  [ -n "${branch}" ] && REPO_WORD="$(git -C "${DIR}" config --get "branch.${branch}.remote" 2>/dev/null || true)"
+  REPO_WORD="${REPO_WORD:-origin}"
+fi
+
+if git -C "${DIR}" config --get "remote.${REPO_WORD}.url" >/dev/null 2>&1; then
+  URL="$(git -C "${DIR}" remote get-url "${REPO_WORD}" 2>/dev/null)" \
+    || die 64 "remote '${REPO_WORD}' in '${DIR}' has no readable URL" "check 'git -C ${DIR} remote -v'."
+  KEY="remote '${REPO_WORD}' (${URL})"
+else
+  URL="${REPO_WORD}"
+  KEY="'${URL}'"
+  case "${URL}" in
+    */*|*:*) ;;
+    *) die 64 "'${URL}' is neither a remote of '${DIR}' nor a URL or path, so no route can be chosen" "check 'git -C ${DIR} remote -v'; name a configured remote, or pass the URL." ;;
+  esac
+fi
+[ -n "${URL}" ] || die 64 "the route key is empty (${KEY})" "give the remote a URL."
+
+HERE="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+export GIT_TERMINAL_PROMPT=0
+case "${URL}" in
+  git@github.com:*|https://github.com/*)
+    exec "${FORGE_GIT_GH_ATHENA:-${HERE}/gh-athena}" git -C "${DIR}" "$@" ;;
+  git@gitlab.com:*|https://gitlab.com/*)
+    exec "${FORGE_GIT_GLAB_ATHENA:-${HERE}/glab-athena}" git -C "${DIR}" "$@" ;;
+  *github.com*|*gitlab.com*)
+    die 3 "${KEY} is a forge URL form the Athena route does not take; refusing rather than reach the forge with the owner's SSH key" \
+      "set the remote to the git@<host>:<owner>/<repo>.git or https://<host>/<owner>/<repo>.git form (git -C '${DIR}' remote set-url <name> <url>)." ;;
+  *)
+    exec git -C "${DIR}" "$@" ;;
+esac
