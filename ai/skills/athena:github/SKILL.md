@@ -124,8 +124,10 @@ push` (for a subtree, `git subtree split` first). It also refuses a
 `git-<name>` program on PATH that is not git's own (run it by its own name,
 `git-<name>`),
 and a subcommand git does not know, because `help.autocorrect` would run
-another one (DND-1867). It does **not** see an `~/.ssh/config` Host alias for
-github.com, a command git runs from config or a hook, `clone
+another one (DND-1867). It refuses a URL on any host but github.com (exit 3,
+DND-2000): a gitlab.com remote goes through `glab-athena git` or
+`ai/bin/forge-push`, and an `~/.ssh/config` Host alias reads as another host.
+It does **not** see a command git runs from config or a hook, `clone
 --recurse-submodules`, or git-lfs transfers inside a push; the
 header of `ai/lib/forge-git-passthrough.sh` (shared with `glab-athena git`)
 lists these. Handle a refusal by the rule in the next section.

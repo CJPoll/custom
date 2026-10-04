@@ -211,3 +211,40 @@ GIT_TRACE2_ENV_VARS,] t2=[/dev/null,<tmp>/t2-n3.json,]`; `FAIL N5`;
 hdr=ok:x-access-token`. After (trace2 targets set to 0 and its parameter
 variables unset; the probe refuses a URL git rewrites, naming why):
 `RESULT: 240 passed, 0 failed`.
+
+## DND-2000: a URL on any host but github.com is refused
+
+Before the fix, `gh-athena git` judged only URLs on github.com, so a
+gitlab.com remote went out over SSH with the machine owner's key. Cases
+XF1-XF18 were added first. They run git for real with `GIT_SSH_COMMAND`
+set to a recording stub. On the unfixed code (6aac9104), with the agent PATH
+git wrapper off the PATH: `RESULT: 243 passed, 16 failed`, every XF1-XF15
+red, among them:
+
+```
+  FAIL  XF1. literal gitlab.com push refused
+        rc=128 ssh-log=[-G -o SendEnv=GIT_PROTOCOL git@gitlab.com;git@gitlab.com git-upload-pack 'g/r.git';-G git@gitlab.com;git@gitlab.com git-receive-pack 'g/r.git';]
+  FAIL  XF13. trailing-dot github.com refused
+        rc=128 ssh-log=[...;git@github.com. git-receive-pack 'o/r.git';]
+  FAIL  XF14. unresolvable remote refused
+        rc=0 out='gh-athena: dry-run: cred: none (no URL it reaches is https://github.com/)
+```
+
+The glab-athena mirror (its XF1-XF9) was `RESULT: 34 passed, 9 failed`, with
+`git@github.com git-receive-pack 'o/r.git'` in the stub's log. After
+(`fg_refuse_foreign_host` and `fg_refuse_could_not_look` in
+`fg_refuse_non_https`): `RESULT: 259 passed, 0 failed` and `RESULT: 43
+passed, 0 failed`.
+
+Mutations, each on a copy of `ai/bin` and `ai/lib` run with
+`GH_ATHENA_UNDER_TEST`. An unmutated copy has 16 reds of its own (19, 23, 24,
+25b, 25c, 25e, 26, 30, 36, 37, 38, 41, 43, 47, P1, N5: the copy has no
+telemetry registry and its transport path differs). The table lists the reds
+each mutation adds.
+
+| Mutation | Red cases |
+|---|---|
+| M1 drop the `fg_refuse_foreign_host` call | XF1-XF13, XF2b, C4/E2 |
+| M2 a URL word `ls-remote --get-url` cannot resolve reads as the literal word | XF15 |
+| M3 `fg_host_is_route` strips a trailing dot | XF13 |
+| M4 `remote show`/`prune`/`set-head` and `archive --remote` not read | XF7, XF8 |

@@ -18,8 +18,9 @@
 #     core.askPass= , GIT_ASKPASS/SSH_ASKPASS unset, GIT_TERMINAL_PROMPT=0 — no
 #     fallback source of the owner's credentials; a bot-auth failure FAILS.
 #   * fg_refuse_non_https: before exec, for the network subcommands it knows —
-#     push, fetch, pull, ls-remote, clone, remote update, submodule, subtree
-#     pull/add, and git aliases that expand to them — every URL the command
+#     push, fetch, pull, ls-remote, clone, remote update / show / prune /
+#     set-head, archive --remote, submodule, subtree pull/add, and git
+#     aliases that expand to them — every URL the command
 #     would reach is resolved (rewrite applied, pushurl and pushInsteadOf
 #     included, submodule URLs when it recurses) and the command is REFUSED if
 #     any still reaches <host> over SSH or another non-HTTPS transport
@@ -44,6 +45,11 @@
 #     does not know, which help.autocorrect may turn into one; and an alias
 #     chain more than 10 deep (DND-1867; "Remote-ref writers other than
 #     push" below). A refusal is exit 3 with a Fix: line.
+#   * fg_refuse_foreign_host (DND-2000): every URL resolved above must be a
+#     local path or on FG_HOST. A URL on any other host (the other forge
+#     included) is REFUSED, and one git cannot resolve is COULD NOT LOOK.
+#     Also exit 3 with a Fix: line. See "A host that is not this route's
+#     forge" below.
 #   * fg_refuse_red_main (DND-1482): a push to main is refused while
 #     ai/bin/main-health has recorded origin/main RED, unless it lands a gated
 #     fix. Also exit 3 with a Fix: line. See "Red-main refusal" below.
@@ -52,8 +58,9 @@
 #     the pushed commit. Also exit 3 with a Fix: line. See "Ungated-main
 #     refusal" below.
 #
-# Residual (NOT checked; each still runs): an ~/.ssh/config Host alias for the
-# forge host (`myalias:owner/repo`); `clone
+# Residual (NOT checked; each still runs): an ~/.ssh/config Host entry named
+# exactly as the forge host whose HostName is elsewhere (a Host alias under
+# any other name is refused as another host, DND-2000); `clone
 # --recurse-submodules` (the submodule URLs are unknown until the clone lands);
 # git-lfs transfers from a push (a git-lfs on PATH is refused when called
 # directly, like any git-<name> that is not git's own); a push whose recursion comes
@@ -69,6 +76,9 @@
 #   FG_HOST      the forge host (github.com / gitlab.com); subdomains match too
 #   FG_BOT       the bot identity pushes must carry (athena-harness[bot] / athena-amby)
 #   FG_DRY_RUN   "1" to print the resolved URLs + redacted argv instead of exec
+#   FG_ROUTE_ONLY "1" (the default) refuses a URL not on FG_HOST (DND-2000);
+#                "0" only for a reader of the resolver, not a route
+#                (ai/lib/agent-forge-push.sh)
 #
 # Test seam: FG_DRY_RUN=1 runs the resolution and refusal, then prints the
 # resolved URLs and the git argv (token redacted) instead of exec'ing git.
@@ -138,6 +148,96 @@ fg_refuse() {
 $FG_TOOL: REFUSING \`git $1\`: '$2' resolves to $3, which reaches $FG_HOST over SSH or another non-HTTPS transport.
   The bot token only authenticates HTTPS, so this would run as $FG_OWNER, not $FG_BOT.
   Fix: push to the HTTPS URL instead — \`~/dev/custom/ai/bin/$FG_TOOL git $1 https://$FG_HOST/<owner>/<repo>.git <refspec>\` — or point the remote at https://$FG_HOST/<owner>/<repo>.git or git@$FG_HOST:<owner>/<repo>.git (the wrapper rewrites that form); drop any ssh:// pushurl override or global insteadOf/pushInsteadOf that forces SSH. $FG_ESCALATE
+EOF
+  exit 3
+}
+
+# ---- A host that is not this route's forge (DND-2000) ------------------------
+# Each route authenticates to its own forge alone: gh-athena to github.com,
+# glab-athena to gitlab.com. Before DND-2000 a URL on any other host matched
+# no rewrite and no refusal, so `gh-athena git push` to a gitlab.com remote
+# went out over SSH with the machine owner's key, as the owner. Now, with
+# FG_ROUTE_ONLY=1 (the default; only ai/lib/agent-forge-push.sh, which reads
+# this resolver for both hosts, sets 0), every URL fg_refuse_non_https
+# resolves must be a local path (or file://) or on the route's host (a
+# subdomain counts, as for fg_reaches_forge_insecurely). Any other host is
+# REFUSED, exit 3, with a Fix: naming the matching wrapper and
+# ai/bin/forge-push (DND-1995). A URL git cannot resolve is COULD NOT LOOK,
+# also exit 3, never read as "no URL" or as the literal word.
+#
+# What a local path does is unchanged: git runs it under the route's
+# isolation (no owner credential helper, askpass or pager) with no credential
+# ("The credential grant": cred: none).
+#
+# Coverage is fg_refuse_non_https's: push, fetch, pull, ls-remote, clone,
+# remote update, remote show / prune / set-head, archive --remote, submodule,
+# subtree pull/add, and aliases to them. A subcommand it does not read (for
+# example request-pull, fetch-pack, maintenance) is not judged here.
+# Residual: an ~/.ssh/config Host alias spelled exactly as the route's host
+# (`Host github.com` with a HostName elsewhere) reads as the route's host.
+
+# fg_host_is_route <host> : 0 when <host> is the route's forge host or a
+# subdomain of it. The one place the route's host set is read: DND-1936's
+# per-namespace identity map for glab-athena keys on (host, namespace) and
+# narrows within this host; a route that ever serves another host must add it
+# here AND to fg_rewrite and fg_reaches_forge_insecurely together.
+fg_host_is_route() {
+  case "$1" in "$FG_HOST"|*."$FG_HOST") return 0 ;; esac
+  return 1
+}
+
+# fg_host_route <host> : the wrapper that serves <host>, or empty.
+fg_host_route() {
+  case "$1" in
+    github.com|*.github.com) printf 'gh-athena' ;;
+    gitlab.com|*.gitlab.com) printf 'glab-athena' ;;
+  esac
+}
+
+# fg_url_authority <url> : the URL's authority as git reads it ([user@]host[:port]),
+# empty for a local path.
+fg_url_authority() {
+  local url="$1" rest
+  [ -n "$(fg_url_host_scheme "$url")" ] || return 0
+  case "$url" in
+    *://*) rest="${url#*://}"; printf '%s' "${rest%%/*}" ;;
+    *) printf '%s' "${url%%:*}" ;;
+  esac
+}
+
+# fg_refuse_foreign_host <subcommand> <what> <url> : refuse a URL whose host is
+# not the route's. A local path passes.
+fg_refuse_foreign_host() {
+  local sh host auth route fix
+  sh="$(fg_url_host_scheme "$3")"
+  [ -n "$sh" ] || return 0
+  host="${sh#* }"
+  auth="$(fg_url_authority "$3")"
+  # An authority with a character no host or port has (# ? \ space %) may be
+  # read differently by git, ssh or curl than by this parse: only a plain
+  # host spelling is taken as the route's.
+  if fg_host_is_route "$host" && [[ "$host" =~ ^[a-z0-9.-]+$ ]] && [[ "$auth" != *[\#\?\\\ %]* ]]; then
+    return 0
+  fi
+  route="$(fg_host_route "$host")"
+  if [ -n "$route" ] && [ "$route" != "$FG_TOOL" ]; then
+    fix="run it through that forge's own wrapper, \`~/dev/custom/ai/bin/$route git $1 …\`; to push, \`~/dev/custom/ai/bin/forge-push\` (DND-1995) picks the wrapper from the remote's host."
+  else
+    fix="no Athena route serves $host. If this is a local repository, name it by its path. If it is meant to be $FG_HOST, point the remote at https://$FG_HOST/<owner>/<repo>.git or git@$FG_HOST:<owner>/<repo>.git; for the other forge use its own wrapper (\`~/dev/custom/ai/bin/gh-athena git …\` / \`~/dev/custom/ai/bin/glab-athena git …\`) or \`~/dev/custom/ai/bin/forge-push\`."
+  fi
+  cat >&2 <<EOF
+$FG_TOOL: REFUSING \`git $1\`: '$2' resolves to $3, on host $host, which is not $FG_HOST. $FG_TOOL authenticates to $FG_HOST alone (as $FG_BOT), so this would reach $host with no Athena identity: over SSH it goes out with $FG_OWNER's key (DND-2000).
+  Fix: $fix $FG_ESCALATE
+EOF
+  exit 3
+}
+
+# fg_refuse_could_not_look <subcommand> <what> <why> : the URL a target
+# reaches could not be resolved, so its host is unknown.
+fg_refuse_could_not_look() {
+  cat >&2 <<EOF
+$FG_TOOL: REFUSING \`git $1\`: COULD NOT LOOK which URL '$2' resolves to ($3), so whether it reaches $FG_HOST or another host as $FG_OWNER is unknown (DND-2000).
+  Fix: check that git can read this repository's config (\`git config --list --show-origin\`) and that '$2' is a configured remote, a URL or a local path, then run \`~/dev/custom/ai/bin/$FG_TOOL git $1 …\` again. $FG_ESCALATE
 EOF
   exit 3
 }
@@ -851,7 +951,8 @@ fg_has_submodules() {
 }
 
 # fg_refuse_non_https <git args...> : resolve every URL the network op would
-# reach and refuse on the first one that goes to FG_HOST over non-HTTPS.
+# reach and refuse on the first one that goes to FG_HOST over non-HTTPS, or
+# (FG_ROUTE_ONLY=1) to another host or to a URL git cannot resolve (DND-2000).
 # Sets FG_RESOLVED_URLS (newline-separated) for the dry-run report, and, for a
 # `push`, FG_PUSH_URL (the first URL it pushes to) and FG_PUSH_GLOB (its git
 # global options) for the landing telemetry below, and FG_PUSH_ARGS (the
@@ -873,8 +974,8 @@ FG_PUSH_URL=""
 FG_PUSH_GLOB=()
 FG_PUSH_ARGS=()
 fg_refuse_non_https() {
-  local -a glob=() ex=()
-  local sub="" mode depth=0 alias_val
+  local -a glob=() ex=() extra=()
+  local sub="" mode depth=0 alias_val nodefault=0
   FG_URLS_RESOLVED=0; FG_URLS_SUB=""; FG_CRED_URLS=""; FG_PAGINATE=0; FG_CMD_GLOB=(); FG_CMD_ARGS=()
   fg_rewrite_args
 
@@ -955,7 +1056,38 @@ fg_refuse_non_https() {
       [ -z "$FG_PA_BAD" ] \
         || fg_refuse_option "$FG_PA_BAD" "it is no option of git push, an abbreviation that matches more than one, or an option missing its value or given one it does not take" ;;
     fetch|pull|ls-remote|clone) mode=fetch ;;
-    remote) [ "${1:-}" = update ] || return 0; mode=fetch ;;
+    remote)
+      case "${1:-}" in
+        update) mode=fetch ;;
+        # These contact each remote they name (DND-2000); with none named
+        # they list locally, so no default remote is added.
+        # they list locally, so no default remote is added. Every word that
+        # is not an option is a remote name or URL (set-head: the first).
+        show|prune|set-head)
+          mode=fetch; nodefault=1
+          local verb="$1"; shift
+          for a0 in "$@"; do
+            case "$a0" in -*) continue ;; esac
+            extra+=( "$a0" )
+            [ "$verb" = set-head ] && break
+          done
+          set -- ;;
+        *) return 0 ;;
+      esac ;;
+    archive)
+      # archive reaches a remote only through --remote (DND-2000), and git
+      # uses the last one; every one is checked. Any abbreviation git accepts
+      # (--rem) counts, so a slip can only over-refuse.
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --) break ;;
+          --*=*) fg_long_is "$1" remote && extra+=( "${1#*=}" ) ;;
+          --?*) if fg_long_is "$1" remote && [ $# -ge 2 ]; then extra+=( "$2" ); shift; fi ;;
+        esac
+        shift
+      done
+      [ "${#extra[@]}" -gt 0 ] || return 0
+      mode=fetch; nodefault=1; set -- ;;
     submodule) mode=fetch; recurse=1 ;;
     subtree)
       # subtree push was refused above (fg_writes_remote_ref, DND-1867).
@@ -982,7 +1114,7 @@ fg_refuse_non_https() {
   # with it; the first remaining positional is the repository. Independently,
   # EVERY token that names a configured remote or mentions the forge host is
   # also checked, so a mis-parsed option value can only add a check, never drop one.
-  local -a targets=() ; local positional="" all=0 has_repo=0 a takes_value
+  local -a targets=( "${extra[@]}" ) ; local positional="" all=0 has_repo=0 a takes_value
   if [ "$sub" = submodule ]; then
     # Every submodule URL (config after `submodule init`, and .gitmodules).
     # Relative URLs (./ ../) resolve against the superproject's remote, which
@@ -1054,7 +1186,7 @@ fg_refuse_non_https() {
     fi
   fi
 
-  if [ -z "$positional" ] && [ "$all" = 0 ] && [ "$has_repo" = 0 ] && [ "$sub" != clone ] && [ "$sub" != subtree ]; then
+  if [ -z "$positional" ] && [ "$all" = 0 ] && [ "$has_repo" = 0 ] && [ "$nodefault" = 0 ] && [ "$sub" != clone ] && [ "$sub" != subtree ]; then
     # Default remote, as git resolves it: pushRemote / pushDefault (push only),
     # then branch.<cur>.remote, then origin.
     local cur def=""
@@ -1068,28 +1200,46 @@ fg_refuse_non_https() {
     targets+=("$def")
   fi
 
-  local t u vcs ; local -a urls
+  local t u vcs got grc only="${FG_ROUTE_ONLY:-1}" ; local -a urls
   for t in "${targets[@]}"; do
     urls=(); vcs=""
     if is_remote "$t"; then
-      if [ "$mode" = push ]; then mapfile -t urls < <(G remote get-url --push --all "$t" 2>/dev/null || true)
-      else mapfile -t urls < <(G remote get-url --all "$t" 2>/dev/null || true); fi
+      grc=0
+      if [ "$mode" = push ]; then got="$(G remote get-url --push --all "$t" 2>/dev/null)" || grc=$?
+      else got="$(G remote get-url --all "$t" 2>/dev/null)" || grc=$?; fi
+      [ -n "$got" ] && mapfile -t urls <<<"$got"
+      # A remote git cannot resolve is COULD NOT LOOK, never "no URL"
+      # (DND-2000). A remote with no url key resolves to its own name.
+      if [ "$only" = 1 ] && { [ "$grc" != 0 ] || [ -z "$got" ]; }; then
+        fg_refuse_could_not_look "$sub" "$t" "\`git remote get-url\` exited $grc${got:+ }${got:-, with no URL}"
+      fi
       # remote.<n>.vcs: git reaches this remote through git-remote-<vcs>,
       # whatever its URL says (DND-1868: it gets no credential).
       vcs="$(G config --get "remote.$t.vcs" 2>/dev/null || true)"
     else
       # A URL literal (or an unknown name: git treats it as a URL). Apply
       # pushInsteadOf (push only, longest prefix wins), else insteadOf.
-      local rewritten="" best=0 key base prefix
+      local rewritten="" best=0 key base prefix rules=""
       if [ "$mode" = push ]; then
+        grc=0; rules="$(G config --get-regexp '^url\..*\.pushinsteadof$' 2>/dev/null)" || grc=$?
+        # exit 1 is "no such rule"; anything else is a config git cannot read.
+        if [ "$only" = 1 ] && [ "$grc" -gt 1 ]; then
+          fg_refuse_could_not_look "$sub" "$t" "\`git config --get-regexp url.*.pushinsteadof\` exited $grc"
+        fi
         while read -r key prefix; do
           base="${key#url.}"; base="${base%.pushinsteadof}"
           if [ -n "$prefix" ] && [[ "$t" == "$prefix"* ]] && [ "${#prefix}" -gt "$best" ]; then
             best="${#prefix}"; rewritten="$base${t#"$prefix"}"
           fi
-        done < <(G config --get-regexp '^url\..*\.pushinsteadof$' 2>/dev/null || true)
+        done <<<"$rules"
       fi
-      [ -n "$rewritten" ] || rewritten="$(G ls-remote --get-url "$t" 2>/dev/null || printf '%s' "$t")"
+      if [ -z "$rewritten" ]; then
+        grc=0; rewritten="$(G ls-remote --get-url "$t" 2>/dev/null)" || grc=$?
+        if [ "$grc" != 0 ] || [ -z "$rewritten" ]; then
+          [ "$only" = 1 ] && fg_refuse_could_not_look "$sub" "$t" "\`git ls-remote --get-url\` exited $grc${rewritten:+ }${rewritten:-, with no URL}"
+          rewritten="$t"
+        fi
+      fi
       urls=("$rewritten")
     fi
     for u in "${urls[@]}"; do
@@ -1103,6 +1253,7 @@ fg_refuse_non_https() {
                 fg_refuse_runs_command "$sub" ;;
       esac
       fg_reaches_forge_insecurely "$u" && fg_refuse "$sub" "$t" "$u"
+      [ "$only" = 1 ] && fg_refuse_foreign_host "$sub" "$t" "$u"
     done
   done
   FG_URLS_RESOLVED=1
@@ -1483,8 +1634,8 @@ fg_refuse_ungated_main() {
 # Which commands get the grant (fg_cred_decide), on the URL set
 # fg_refuse_non_https resolved (FG_CRED_URLS):
 #   * exactly one URL, athena-forge::https://<host>/...: granted;
-#   * no forge URL (a local path, file://, ssh:// or https to another host,
-#     a remote with remote.<n>.vcs, any other `<name>::` URL): no credential,
+#   * no forge URL (a local path, file://, a remote with remote.<n>.vcs, any
+#     other `<name>::` URL; another host is refused first, DND-2000): no credential,
 #     since nothing there needs the bot's;
 #   * a subcommand whose URLs the route does not resolve: no credential. An
 #     unresolvable set is never read as "forge only";

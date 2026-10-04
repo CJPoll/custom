@@ -200,7 +200,9 @@ AFP_ARGV=("${AFP_GLOB[@]}" push "$@")
 afp_reaches() {
   local host="$1" urls rc u hs h
   AFP_URL=""
-  urls="$(FG_HOST="$host"; FG_TOOL="$AFP_TAG"; FG_BOT=bot
+  # FG_ROUTE_ONLY=0: this reads the resolver once per forge host, so a URL
+  # on the other host is an answer here, not a refusal (DND-2000).
+  urls="$(FG_HOST="$host"; FG_TOOL="$AFP_TAG"; FG_BOT=bot; FG_ROUTE_ONLY=0
           fg_refuse_non_https "${AFP_ARGV[@]}" >/dev/null 2>&1 || exit $?
           printf '%s' "$FG_RESOLVED_URLS")" || { rc=$?; [ "$rc" = 3 ] && return 3; return 2; }
   while IFS= read -r u; do

@@ -337,6 +337,72 @@ if [[ "$(cat "${TMP}/glab.args" 2>/dev/null)" == "api groups/synthetic-group" ]]
   ok "23. refresh looks the group up by the overlay's value (DND-1668)"
 else bad "23. refresh, overlay value used" "rc=${RC} err='${ERR}' args='$(cat "${TMP}/glab.args" 2>/dev/null)'"; fi
 
+echo
+echo "--- DND-2000: a URL on another forge's host, or any host but gitlab.com, is REFUSED ---"
+# The defect, mirrored: glab-athena judged only URLs on gitlab.com, so a
+# github.com remote went out over SSH with the machine OWNER's key.
+# NO NETWORK: GIT_SSH_COMMAND is a RECORDING stub. On the unfixed wrapper git
+# starts it; after the fix the wrapper refuses first and the log stays empty.
+XF="${TMP}/x2000"; mkdir -p "${XF}/ssh" "${XF}/shim"
+XF_LOG="${XF}/ssh.log"; : > "${XF_LOG}"
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\nexit 1\n' "${XF_LOG}" > "${XF}/ssh/ssh-rec"
+chmod +x "${XF}/ssh/ssh-rec"
+fsg_require_stubs "${XF}/ssh" ssh-rec
+xf() {
+  local d="$1"; shift
+  : > "${XF_LOG}"
+  OUT="$(cd "${d}" && GIT_ALLOW_PROTOCOL=file:ssh GIT_SSH_COMMAND="${XF}/ssh/ssh-rec" \
+    timeout 60 "${WRAPPER}" git "$@" 2>"${TMP}/err" </dev/null)"; RC=$?
+  ERR="$(cat "${TMP}/err")"
+}
+xf_refused_hub() {
+  is_refusal && [ ! -s "${XF_LOG}" ] && [[ "${ERR}" == *"github.com"* ]] \
+    && [[ "${ERR}" == *"gh-athena git"* ]] && [[ "${ERR}" == *"ai/bin/forge-push"* ]]
+}
+xf_diag() { printf 'rc=%s ssh-log=[%s] out=[%s] err=[%s]' "${RC}" "$(tr '\n' ';' < "${XF_LOG}")" "${OUT}" "${ERR}"; }
+
+R="$(new_repo xf-hub 'git@github.com:o/r.git')"
+xf "${R}" push git@github.com:o/r.git HEAD:refs/heads/x
+xf_refused_hub && ok "XF1. \`push git@github.com:…\` (a literal URL): refused, exit 3, Fix: gh-athena / ai/bin/forge-push; nothing reached ssh" \
+  || bad "XF1. literal github.com push refused" "$(xf_diag)"
+xf "${R}" push origin HEAD:refs/heads/x
+xf_refused_hub && ok "XF2. \`push origin\` with a github.com origin: refused; nothing reached ssh" \
+  || bad "XF2. github.com origin push refused" "$(xf_diag)"
+xf "${R}" fetch origin
+xf_refused_hub && ok "XF3. \`fetch origin\` (github.com): refused; nothing reached ssh" \
+  || bad "XF3. github.com fetch refused" "$(xf_diag)"
+xf "${R}" ls-remote origin
+xf_refused_hub && ok "XF4. \`ls-remote origin\` (github.com): refused; nothing reached ssh" \
+  || bad "XF4. github.com ls-remote refused" "$(xf_diag)"
+xf "${R}" pull --no-rebase origin main
+xf_refused_hub && ok "XF5. \`pull origin main\` (github.com): refused; nothing reached ssh" \
+  || bad "XF5. github.com pull refused" "$(xf_diag)"
+xf "${XF}" clone git@github.com:o/r.git "${XF}/clone"
+xf_refused_hub && [ ! -e "${XF}/clone" ] && ok "XF6. \`clone git@github.com:…\`: refused; nothing reached ssh" \
+  || bad "XF6. github.com clone refused" "$(xf_diag)"
+R2="$(new_repo xf-pushurl 'https://gitlab.com/g/r.git')"
+git -C "${R2}" config remote.origin.pushurl 'git@github.com:o/r.git'
+xf "${R2}" push origin HEAD:refs/heads/x
+xf_refused_hub && ok "XF7. a gitlab.com origin with a github.com pushurl: refused" \
+  || bad "XF7. github.com pushurl refused" "$(xf_diag)"
+xf "${R2}" push git@gitlab.com.:g/r.git HEAD:refs/heads/x
+is_refusal && [ ! -s "${XF_LOG}" ] && [[ "${ERR}" == *"gitlab.com."* ]] \
+  && ok "XF8. \`push git@gitlab.com.:…\` (trailing dot): refused; nothing reached ssh" \
+  || bad "XF8. trailing-dot gitlab.com refused" "$(xf_diag)"
+printf '#!/bin/sh\nfor a in "$@"; do case "$a" in get-url|--get-url) echo "fatal: synthetic" >&2; exit 128 ;; esac; done\nexec %s "$@"\n' \
+  "$(command -v git)" > "${XF}/shim/git"
+chmod +x "${XF}/shim/git"
+fsg_require_stubs "${XF}/shim" git
+OUT="$(cd "${R2}" && PATH="${XF}/shim:${TMP}/git-guard:${PATH}" GLAB_ATHENA_GIT_DRY_RUN=1 "${WRAPPER}" git push origin HEAD 2>"${TMP}/err")"; RC=$?
+ERR="$(cat "${TMP}/err")"
+is_refusal && [[ "${ERR}" == *"COULD NOT LOOK"* ]] \
+  && ok "XF9. a remote whose URL git cannot resolve: refused, COULD NOT LOOK" \
+  || bad "XF9. unresolvable remote refused" "rc=${RC} out='${OUT}' err='${ERR}'"
+R3="$(new_repo xf-own 'git@gitlab.com:g/r.git')"
+gla "${R3}" push origin HEAD
+[ "${RC}" = 0 ] && [[ "${OUT}" == *"cred: granted"* ]] && ok "XF10. a gitlab.com origin still pushes with the grant" \
+  || bad "XF10. gitlab.com origin passes" "rc=${RC} out='${OUT}' err='${ERR}'"
+
 # DND-1647: no gh/glab call may have fallen through past its stub.
 if fsg_verify; then ok "no gh/glab call fell through past its stub (DND-1647)"
 else bad "no gh/glab call fell through past its stub (DND-1647)" "see the forge-stub-guard FAIL above"; fi

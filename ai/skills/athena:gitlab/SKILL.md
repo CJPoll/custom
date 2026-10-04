@@ -135,10 +135,12 @@ address, …; run such a command per submodule, or with plain git). It also
 refuses a command that writes a remote ref other than `git push` (`send-pack`,
 `http-push`, a `remote-<name>` helper, `subtree push`; push with `glab-athena
 git push` instead), a `git-<name>` program on PATH that is not git's own, and
-a subcommand git does not know (DND-1867). A missing
+a subcommand git does not know (DND-1867), and a URL on any host but
+gitlab.com (DND-2000; a github.com remote goes through `gh-athena git` or
+`ai/bin/forge-push`). A missing
 token file is refused too; `glab-athena refresh` is owner-gated, so do not run
-it. The mechanism and its named residuals (an `~/.ssh/config` Host alias, a
-command from config or a hook, git-lfs, …) are
+it. The mechanism and its named residuals (a command from config or a hook,
+git-lfs, …) are
 shared with `gh-athena git` and listed in `ai/lib/forge-git-passthrough.sh`.
 The `forge-identity-guard.sh` hook denies a plain `git push` to a gitlab.com
 remote before it runs, with a `Fix:` naming this form (DND-577). The agent PATH

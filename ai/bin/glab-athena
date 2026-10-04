@@ -133,7 +133,8 @@ fi
 #     URL, a config file or git's environment (DND-1868);
 #   * a network op that would still reach gitlab.com over SSH or another
 #     non-HTTPS transport (ssh://, a pushurl override, an insteadOf forcing SSH)
-#     is REFUSED, exit 3 with a Fix:.
+#     is REFUSED, exit 3 with a Fix:, and so is a URL on any host but
+#     gitlab.com, github.com included (DND-2000).
 # The mechanism, its coverage and its named residuals are shared with
 # `gh-athena git` and live in ai/lib/forge-git-passthrough.sh.
 #

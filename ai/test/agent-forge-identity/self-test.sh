@@ -509,7 +509,12 @@ run "${R}" "${GLA}" git push origin HEAD:refs/heads/feat
 passed "R2. glab-athena git push reaches git through the route's transport, with its grant and no header in git's environment (DND-1868)" 'hdr=none|cred=pipe:gitlab.com'
 repo 'https://github.com/synth-owner/synth-repo.git'
 run "${R}" "${GLA}" git push origin HEAD:refs/heads/feat
-refused "R3. glab-athena git push to a github.com remote (wrong bot for the host)" git gh-athena 'REAL-GIT'
+# Since DND-2000 glab-athena refuses a host that is not gitlab.com itself
+# (exit 3), before git, and so before this wrapper, runs.
+if [ "${RC}" = 3 ] && [[ "${OUT}" == *"glab-athena: REFUSING"* ]] && [[ "${OUT}" == *"Fix:"* ]] \
+  && [[ "${OUT}" == *"gh-athena git"* ]] && [[ "${CALLS}" != *"REAL-GIT"* ]]; then
+  ok "R3. glab-athena git push to a github.com remote (wrong bot for the host): glab-athena refuses it (DND-2000)"
+else bad "R3. glab-athena git push to a github.com remote" "rc=${RC} calls=[${CALLS}] out=$(printf '%s' "${OUT}" | head -c 400)"; fi
 run "${R}" "${GHA}" pr create --title t --body b -R synth-owner/synth-repo
 passed "R4. gh-athena pr create reaches gh as the App (token, isolated config)" 'REAL-GH pr create --title t --body b -R synth-owner/synth-repo|token=set|cfg=gh-athena-cfg.'
 run "${R}" "${GLA}" mr create --title t --description d

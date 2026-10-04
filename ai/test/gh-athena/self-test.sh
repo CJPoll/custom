@@ -595,8 +595,12 @@ origin_with_main r5; red_marker "${W}" "${BEFORE}"
 gha "${W}" -c alias.p=push p origin HEAD:main
 is_red_refusal && ok "33c. main RED: a push through a git alias (alias.p=push) is refused" \
   || bad "33c. alias push refused" "rc=${RC} err='${ERR}'"
+# By git's push grammar the word after `--repo origin` is the repository, so
+# git reads HEAD:main as an scp-style address on host "head". Since DND-2000
+# that host is refused before the red-main check is reached.
 gha "${W}" push --repo origin HEAD:main
-is_red_refusal && ok "33d. main RED: push --repo origin HEAD:main is refused" \
+{ is_red_refusal || { is_refusal && [[ "${ERR}" == *"on host head, which is not github.com"* ]]; }; } \
+  && ok "33d. main RED: push --repo origin HEAD:main is refused (HEAD:main is the repository, on host head: DND-2000)" \
   || bad "33d. --repo push refused" "rc=${RC} err='${ERR}'"
 gha "${W}" push origin 'refs/heads/*:refs/heads/*'
 is_red_refusal && ok "33e. main RED: a wildcard refspec that covers main is refused" \
@@ -1496,17 +1500,19 @@ if [[ "${C3D}" == *"cred: none"* ]] && [ "$(x_starts)" = 0 ] && ! grep -q '^c3 .
   ok "C3. remote.<n>.vcs: cred: none; nothing it starts gets a grant or a header, and no credentialed connection is made"
 else bad "C3. remote vcs helper" "dry='${C3D}' $(xdiag)"; fi
 
-# C4 / E2. core.sshCommand and GIT_SSH_COMMAND to another host: no credential.
+# C4 / E2. core.sshCommand and GIT_SSH_COMMAND to another host. Since DND-2000
+# the route refuses a host that is not github.com before git runs, so neither
+# command starts at all (before, each ran with cred: none and no header).
 git -C "${X}/src" remote add other 'ssh://other.invalid/r.git'
-xdry "${X}/src" -c core.sshCommand="$(mkprobe c4)" fetch other; C4D="${OUT}"
+xdry "${X}/src" -c core.sshCommand="$(mkprobe c4)" fetch other; C4R=0; is_refusal && C4R=1
 x_reset
 ( cd "${X}/src" && unset GIT_SSH_COMMAND && PATH="${XPATH}" GIT_ALLOW_PROTOCOL=file:athena-forge:https:ssh \
-    "${WRAPPER}" git -c core.sshCommand="$(mkprobe c4)" fetch -q other ) >/dev/null 2>&1
+    "${WRAPPER}" git -c core.sshCommand="$(mkprobe c4)" fetch -q other ) >/dev/null 2>&1; C4RC=$?
 ( cd "${X}/src" && PATH="${XPATH}" GIT_ALLOW_PROTOCOL=file:athena-forge:https:ssh GIT_SSH_COMMAND="$(mkprobe e2)" \
-    "${WRAPPER}" git fetch -q other ) >/dev/null 2>&1
-if [[ "${C4D}" == *"cred: none"* ]] && probe_nofd c4 && probe_nofd e2; then
-  ok "C4/E2. core.sshCommand and GIT_SSH_COMMAND to another host: cred: none; no grant, no header"
-else bad "C4/E2. ssh command" "dry='${C4D}' $(xdiag)"; fi
+    "${WRAPPER}" git fetch -q other ) >/dev/null 2>&1; E2RC=$?
+if [ "${C4R}" = 1 ] && [ "${C4RC}" = 3 ] && [ "${E2RC}" = 3 ] && ! grep -q '^\(c4\|e2\) ' "${X_PROBE_LOG}"; then
+  ok "C4/E2. core.sshCommand and GIT_SSH_COMMAND to another host: refused (exit 3) before either command starts (DND-2000)"
+else bad "C4/E2. ssh command" "c4r=${C4R} c4rc=${C4RC} e2rc=${E2RC} $(xdiag)"; fi
 
 # C5. A pager: never started under the route; -p is refused.
 xdry "${X}/src" -c pager.push="$(mkprobe c5)" push origin HEAD:main
@@ -1713,6 +1719,127 @@ OUT="$(cd "${X}/src" && PATH="${XPATH}" "${WRAPPER}" git config --get-all http.h
 if [ "${RC}" = 1 ] && [ -z "${OUT}" ]; then ok "DND-1880. \`gh-athena git config --get-all http.https://github.com/.extraheader\` prints no bot header"
 else bad "DND-1880. config read shows the bot header" "rc=${RC} out-has-header=$([[ "${OUT}" == *AUTHORIZATION* ]] && echo yes || echo no)"; fi
 export GIT_ALLOW_PROTOCOL=file
+
+echo
+echo "--- DND-2000: a URL on another forge's host, or any host but github.com, is REFUSED ---"
+# The defect: gh-athena judged only URLs on github.com. A remote on gitlab.com
+# matched no rewrite and no refusal, so `gh-athena git push` went out over SSH
+# with the machine OWNER's key: the push ran as the owner, not as Athena.
+#
+# NO NETWORK. Every case that would reach SSH runs for real with
+# GIT_SSH_COMMAND set to a RECORDING stub: on the unfixed wrapper git starts
+# it (the log names the host it would have reached), and after the fix the
+# wrapper refuses before git runs, so the log stays empty.
+XF="${TMP}/x2000"; mkdir -p "${XF}/ssh" "${XF}/shim"
+XF_LOG="${XF}/ssh.log"; : > "${XF_LOG}"
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\nexit 1\n' "${XF_LOG}" > "${XF}/ssh/ssh-rec"
+chmod +x "${XF}/ssh/ssh-rec"
+fsg_require_stubs "${XF}/ssh" ssh-rec
+# xf <dir> <git args...> : a REAL run with the recording ssh transport.
+xf() {
+  local d="$1"; shift
+  : > "${XF_LOG}"
+  OUT="$(cd "${d}" && GIT_ALLOW_PROTOCOL=file:ssh GIT_SSH_COMMAND="${XF}/ssh/ssh-rec" \
+    timeout 60 "${WRAPPER}" git "$@" 2>"${TMP}/err" </dev/null)"; RC=$?
+  ERR="$(cat "${TMP}/err")"
+}
+# A refusal of a gitlab.com URL: exit 3, nothing reached ssh, and the Fix:
+# names the matching wrapper and ai/bin/forge-push.
+xf_refused_lab() {
+  is_refusal && [ ! -s "${XF_LOG}" ] && [[ "${ERR}" == *"gitlab.com"* ]] \
+    && [[ "${ERR}" == *"glab-athena git"* ]] && [[ "${ERR}" == *"ai/bin/forge-push"* ]]
+}
+xf_diag() { printf 'rc=%s ssh-log=[%s] out=[%s] err=[%s]' "${RC}" "$(tr '\n' ';' < "${XF_LOG}")" "${OUT}" "${ERR}"; }
+
+R="$(new_repo xf-lab 'git@gitlab.com:g/r.git')"
+xf "${R}" push git@gitlab.com:g/r.git HEAD:refs/heads/x
+xf_refused_lab && ok "XF1. \`push git@gitlab.com:…\` (a literal URL): refused, exit 3, Fix: glab-athena / ai/bin/forge-push; nothing reached ssh" \
+  || bad "XF1. literal gitlab.com push refused" "$(xf_diag)"
+xf "${R}" push origin HEAD:refs/heads/x
+xf_refused_lab && ok "XF2. \`push origin\` with a gitlab.com origin: refused; nothing reached ssh" \
+  || bad "XF2. gitlab.com origin push refused" "$(xf_diag)"
+xf "${R}" push
+xf_refused_lab && ok "XF2b. a bare \`push\` (default remote origin on gitlab.com): refused" \
+  || bad "XF2b. default-remote gitlab.com push refused" "$(xf_diag)"
+xf "${R}" fetch origin
+xf_refused_lab && ok "XF3. \`fetch origin\` (gitlab.com): refused; nothing reached ssh" \
+  || bad "XF3. gitlab.com fetch refused" "$(xf_diag)"
+xf "${R}" ls-remote origin
+xf_refused_lab && ok "XF4. \`ls-remote origin\` (gitlab.com): refused; nothing reached ssh" \
+  || bad "XF4. gitlab.com ls-remote refused" "$(xf_diag)"
+xf "${R}" pull --no-rebase origin main
+xf_refused_lab && ok "XF5. \`pull origin main\` (gitlab.com): refused; nothing reached ssh" \
+  || bad "XF5. gitlab.com pull refused" "$(xf_diag)"
+xf "${XF}" clone git@gitlab.com:g/r.git "${XF}/clone"
+xf_refused_lab && [ ! -e "${XF}/clone" ] && ok "XF6. \`clone git@gitlab.com:…\`: refused before any directory is made; nothing reached ssh" \
+  || bad "XF6. gitlab.com clone refused" "$(xf_diag)"
+xf "${R}" remote show origin
+xf_refused_lab && ok "XF7. \`remote show origin\` (gitlab.com): refused; nothing reached ssh" \
+  || bad "XF7. gitlab.com remote show refused" "$(xf_diag)"
+xf "${R}" archive --remote=git@gitlab.com:g/r.git HEAD
+xf_refused_lab && ok "XF8. \`archive --remote=git@gitlab.com:…\`: refused; nothing reached ssh" \
+  || bad "XF8. gitlab.com archive --remote refused" "$(xf_diag)"
+# An insteadOf that turns a short name into gitlab.com, resolved as git will.
+xf "${R}" -c 'url.git@gitlab.com:.insteadOf=lab:' push lab:g/r.git HEAD:refs/heads/x
+xf_refused_lab && ok "XF9. an insteadOf rewrite to gitlab.com (\`push lab:g/r.git\`): refused" \
+  || bad "XF9. insteadOf to gitlab.com refused" "$(xf_diag)"
+# A github.com origin whose pushurl is gitlab.com: the push goes to the pushurl.
+R2="$(new_repo xf-pushurl 'https://github.com/o/r.git')"
+git -C "${R2}" config remote.origin.pushurl 'git@gitlab.com:g/r.git'
+xf "${R2}" push origin HEAD:refs/heads/x
+xf_refused_lab && ok "XF10. a github.com origin with a gitlab.com pushurl: refused" \
+  || bad "XF10. gitlab.com pushurl refused" "$(xf_diag)"
+# Plain https to gitlab.com would carry no owner credential, but it is still
+# not this wrapper's forge.
+gha "${R}" push https://gitlab.com/g/r.git HEAD:refs/heads/x
+is_refusal && [[ "${ERR}" == *"glab-athena git"* ]] && [[ "${OUT}" != *"dry-run: exec git"* ]] \
+  && ok "XF11. \`push https://gitlab.com/…\`: refused (exit 3, Fix: glab-athena)" \
+  || bad "XF11. https gitlab.com push refused" "rc=${RC} out='${OUT}' err='${ERR}'"
+# A host that is no Athena forge, and a trailing-dot spelling of github.com
+# (which no rewrite matches, so it too went out over SSH as the owner).
+xf "${R}" push ssh://git@other.invalid/r.git HEAD:refs/heads/x
+is_refusal && [ ! -s "${XF_LOG}" ] && [[ "${ERR}" == *"other.invalid"* ]] && [[ "${ERR}" == *"no Athena route"* ]] \
+  && ok "XF12. \`push ssh://git@other.invalid/…\`: refused, no Athena route serves that host" \
+  || bad "XF12. other host refused" "$(xf_diag)"
+xf "${R}" push git@github.com.:o/r.git HEAD:refs/heads/x
+is_refusal && [ ! -s "${XF_LOG}" ] && [[ "${ERR}" == *"github.com."* ]] \
+  && ok "XF13. \`push git@github.com.:…\` (trailing dot): refused; nothing reached ssh" \
+  || bad "XF13. trailing-dot github.com refused" "$(xf_diag)"
+# COULD NOT LOOK: a git that cannot resolve the URL (here, a shim failing every
+# get-url) refuses; it never reads as "no URL" or as the literal word.
+printf '#!/bin/sh\nfor a in "$@"; do case "$a" in get-url|--get-url) echo "fatal: synthetic" >&2; exit 128 ;; esac; done\nexec %s "$@"\n' \
+  "$(command -v git)" > "${XF}/shim/git"
+chmod +x "${XF}/shim/git"
+fsg_require_stubs "${XF}/shim" git
+OUT="$(cd "${R}" && PATH="${XF}/shim:${FSG_DIR}:${PATH}" GH_ATHENA_GIT_DRY_RUN=1 "${WRAPPER}" git push origin HEAD 2>"${TMP}/err")"; RC=$?
+ERR="$(cat "${TMP}/err")"
+is_refusal && [[ "${ERR}" == *"COULD NOT LOOK"* ]] && [[ "${ERR}" == *"origin"* ]] \
+  && ok "XF14. a remote whose URL git cannot resolve: refused, COULD NOT LOOK" \
+  || bad "XF14. unresolvable remote refused" "rc=${RC} out='${OUT}' err='${ERR}'"
+OUT="$(cd "${R}" && PATH="${XF}/shim:${FSG_DIR}:${PATH}" GH_ATHENA_GIT_DRY_RUN=1 "${WRAPPER}" git ls-remote somewhere 2>"${TMP}/err")"; RC=$?
+ERR="$(cat "${TMP}/err")"
+is_refusal && [[ "${ERR}" == *"COULD NOT LOOK"* ]] && [[ "${ERR}" == *"somewhere"* ]] \
+  && ok "XF15. a URL word git cannot resolve: refused, COULD NOT LOOK" \
+  || bad "XF15. unresolvable URL word refused" "rc=${RC} out='${OUT}' err='${ERR}'"
+# What must still pass: github.com itself, a local path, and a command that
+# reaches no remote.
+R3="$(new_repo xf-own 'git@github.com:o/r.git')"
+gha "${R3}" push origin HEAD
+[ "${RC}" = 0 ] && [[ "${OUT}" == *"cred: granted"* ]] && ok "XF16. a github.com origin still pushes with the grant" \
+  || bad "XF16. github.com origin passes" "rc=${RC} out='${OUT}' err='${ERR}'"
+XB="${TMP}/xf-bare.git"; git init -q --bare "${XB}"
+R4="$(new_repo xf-local "${XB}")"
+git -C "${R4}" remote add lab 'git@gitlab.com:g/r.git'
+( cd "${R4}" && "${WRAPPER}" git push -q origin HEAD:refs/heads/landed ) >"${TMP}/out" 2>"${TMP}/push-err"; PRC=$?
+gha "${R4}" fetch "${XB}"
+if [ "${PRC}" = 0 ] && [ "$(git -C "${XB}" rev-parse refs/heads/landed 2>/dev/null)" = "$(git -C "${R4}" rev-parse HEAD)" ] \
+  && [ "${RC}" = 0 ] && [[ "${OUT}" == *"cred: none"* ]]; then
+  ok "XF17. a local-path remote keeps today's behaviour: it runs, with no credential, beside a gitlab.com remote"
+else bad "XF17. local path passes" "rc=${RC} out='${OUT}' err='${ERR}' prc=${PRC} push-err='$(cat "${TMP}/push-err")'"; fi
+gha "${R}" remote -v
+gha2_rc="${RC}"; gha "${R}" status --short
+[ "${gha2_rc}" = 0 ] && [ "${RC}" = 0 ] && ok "XF18. \`remote -v\` and \`status\` with a gitlab.com origin reach no remote and pass" \
+  || bad "XF18. local commands pass" "rc=${RC} err='${ERR}'"
 
 # DND-1667: no git call may have fallen through past its shim.
 if fsg_verify; then ok "no git call fell through past its shim (DND-1667)"

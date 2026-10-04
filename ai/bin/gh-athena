@@ -122,7 +122,8 @@ fi
 # `gh-athena git <args>` runs git authenticated as the App for ONE command, over
 # HTTPS only: the SSH form git@github.com: is rewritten, every owner credential
 # source is removed, and a network op that would still reach github.com over
-# SSH or another non-HTTPS transport is REFUSED (exit 3, Fix:). The mechanism,
+# SSH or another non-HTTPS transport is REFUSED (exit 3, Fix:), and so is a URL
+# on any host but github.com, gitlab.com included (DND-2000). The mechanism,
 # its coverage and its named residuals live in ai/lib/forge-git-passthrough.sh,
 # shared with `glab-athena git` (DND-393). The App token, as an x-access-token
 # basic-auth header, reaches only the route's transport (git-remote-athena-forge)
