@@ -944,9 +944,10 @@ fi
 
 # --- 3. fetch origin/main -----------------------------------------------------------
 # Before the reaper, so it judges a dead lane's work against a current
-# origin/main. A failed fetch (no network, or no ssh-agent under cron) falls
+# origin/main. A failed fetch (no network, or the bot route refusing) falls
 # back to the origin/main this checkout last fetched: the session syncs down
 # first anyway (athena:shipwright-lane).
+#
 # Fetch origin's main the way Athena reaches a forge: through its own route
 # (gh-athena / glab-athena, HTTPS with the bot's token), never the owner's SSH
 # key. A cron tick has no ssh-agent, and the repo-wide core.sshCommand deploy key
