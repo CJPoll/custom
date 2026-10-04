@@ -510,7 +510,7 @@ glrt_out="$(SRC="${SRC}" V="${SYN_R}" S="${SYN_R_SHORT}" ruby -e '
   puts "embedded=#{m.credential_content?("xx" + v)}"
 ' 2>&1)"
 for want in value=true content=true short=false embedded=false; do
-  if printf '%s\n' "${glrt_out}" | grep -qx "${want}"; then ok "glrt-: ${want}"
+  if grep -qx "${want}" <<<"${glrt_out}"; then ok "glrt-: ${want}"
   else bad "glrt-: ${want}" "${glrt_out}"; fi
 done
 mask_out="$(SRC="${SRC}" V="${SYN_R}" ruby -e '
