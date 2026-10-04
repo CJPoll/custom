@@ -1129,8 +1129,24 @@ fi
 # base. No-network fallback: if the fetch fails (offline, or a repo with no
 # remote), base the lane on the main checkout's HEAD instead — the run still
 # works, it just starts from local state and its commits land locally.
+# Fetch origin's main the way Athena reaches a forge: through its own route
+# (gh-athena / glab-athena, HTTPS with the bot's token), never the owner's SSH
+# key. A cron tick has no ssh-agent, and the repo-wide core.sshCommand deploy key
+# that used to cover that also hijacked the owner's own SSH pushes. A non-forge
+# origin (a local path, a test fixture) needs no identity and uses plain git.
+# Bounded: a fetch that hangs is a failed fetch, never a hung tick.
+athena_fetch_origin_main() {
+  local dir="$1" url
+  url="$(git -C "${dir}" remote get-url origin 2>/dev/null || true)"
+  case "${url}" in
+    *github.com[:/]*) timeout 120 "${dir}/ai/bin/gh-athena" git -C "${dir}" fetch --quiet origin main ;;
+    *gitlab.com[:/]*) timeout 120 "${dir}/ai/bin/glab-athena" git -C "${dir}" fetch --quiet origin main ;;
+    *) timeout 120 git -C "${dir}" fetch --quiet origin main ;;
+  esac
+}
+
 mkdir -p "${LANES_DIR}"
-if git -C "${MAIN_CHECKOUT}" fetch --quiet origin main >>"${log}" 2>&1; then
+if athena_fetch_origin_main "${MAIN_CHECKOUT}" >>"${log}" 2>&1; then
   BASE_COMMIT="$(git -C "${MAIN_CHECKOUT}" rev-parse FETCH_HEAD 2>/dev/null || true)"
   base_desc="origin/main"
 else
@@ -1282,7 +1298,7 @@ own_newest=""
 # failed fetch leaves it stale, and the record says so.
 main_note=""
 if has_origin; then
-  git -C "${MAIN_CHECKOUT}" fetch --quiet origin main >>"${log}" 2>&1 || main_note=" (the teardown fetch failed; origin/main may be stale)"
+  athena_fetch_origin_main "${MAIN_CHECKOUT}" >>"${log}" 2>&1 || main_note=" (the teardown fetch failed; origin/main may be stale)"
 fi
 if [ "${own_known}" -eq 0 ]; then
   OWN_LANDED="UNKNOWN (${own_why})"

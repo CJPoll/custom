@@ -947,8 +947,24 @@ fi
 # origin/main. A failed fetch (no network, or no ssh-agent under cron) falls
 # back to the origin/main this checkout last fetched: the session syncs down
 # first anyway (athena:shipwright-lane).
+# Fetch origin's main the way Athena reaches a forge: through its own route
+# (gh-athena / glab-athena, HTTPS with the bot's token), never the owner's SSH
+# key. A cron tick has no ssh-agent, and the repo-wide core.sshCommand deploy key
+# that used to cover that also hijacked the owner's own SSH pushes. A non-forge
+# origin (a local path, a test fixture) needs no identity and uses plain git.
+# Bounded: a fetch that hangs is a failed fetch, never a hung tick.
+athena_fetch_origin_main() {
+  local dir="$1" url
+  url="$(git -C "${dir}" remote get-url origin 2>/dev/null || true)"
+  case "${url}" in
+    *github.com[:/]*) timeout 120 "${dir}/ai/bin/gh-athena" git -C "${dir}" fetch --quiet origin main ;;
+    *gitlab.com[:/]*) timeout 120 "${dir}/ai/bin/glab-athena" git -C "${dir}" fetch --quiet origin main ;;
+    *) timeout 120 git -C "${dir}" fetch --quiet origin main ;;
+  esac
+}
+
 FETCH_NOTE="fetched"
-if ! timeout 120 git -C "${MAIN_CHECKOUT}" fetch --quiet origin main </dev/null >>"${GIT_LOG}" 2>&1; then
+if ! athena_fetch_origin_main "${MAIN_CHECKOUT}" </dev/null >>"${GIT_LOG}" 2>&1; then
   FETCH_NOTE="fetch FAILED; based on the last-fetched origin/main"
   echo "${ME}: could not fetch origin/main; using the last-fetched origin/main. The session syncs down itself." >&2
   echo "  Fix: nothing needed for this tick. If every tick says so, read ${GIT_LOG} for git's reason." >&2
@@ -1220,7 +1236,7 @@ status=0
 
 # --- 9. teardown: what landed, the fast-forward, the lane ---------------------------
 AFTER_FETCH=""
-if ! timeout 120 git -C "${MAIN_CHECKOUT}" fetch --quiet origin main </dev/null >>"${GIT_LOG}" 2>&1; then
+if ! athena_fetch_origin_main "${MAIN_CHECKOUT}" </dev/null >>"${GIT_LOG}" 2>&1; then
   # The run's own push still updates origin/main's tracking ref; a landing it
   # made another way (a push to a URL) is only seen once origin/main is fetched.
   AFTER_FETCH=" (origin/main NOT re-fetched after the run: as of the last fetch or the run's own push)"
