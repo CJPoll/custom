@@ -227,3 +227,16 @@ Each row changes one line of the fixed code in place and runs the suite.
 S32 first survived: P12 listed the failed child pipeline as the NEWER one, so
 one ungrouped list judged it red too. P12 now lists it as the older one, which
 only a per-source judgment keeps red.
+
+### Review round (bf22a932)
+
+The review floor added P6c, P13b-P13d (`canceling` is red; a newer web run
+does not clear a failed push pipeline, and the Fix says to retry it), W24-W24d
+(group-level `protected_branches`), GS6 (a head not in the local store onto a
+duplicated tip) and AM15 (`--auto-merge=false` after `--`). Suite on the fixed
+code: `RESULT: 287 passed, 0 failed`.
+
+| id | mutation | red |
+|----|----------|-----|
+| S34 | `canceling` is not red | P13b |
+| S35 | `groups/…` paths are not scanned for ref routes | W24 W24b |

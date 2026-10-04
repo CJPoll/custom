@@ -227,27 +227,38 @@ no merge train. Superseded: that call took no merge lock, so two admirals
 could each merge onto a base the other had just moved, and glab's default
 auto-merge could defer the merge to a moment nothing gated.
 
+**Later (2026-10-03, DND-1941):** the no-train command was `glab-athena mr
+merge <iid> --sha <head sha> --yes`, and this list said "`--auto-merge` does
+not relax this", because with a passed pipeline nothing was left to wait for.
+Superseded: glab's default auto-merge hands the merge to GitLab, which can
+complete it later (an unmet approval, an open thread), onto a target no
+receipt or red-tip check covers. The wrapper now refuses it, so the command
+carries `--auto-merge=false`.
+
 What the wrapper refuses, exit 3 with a `Fix:`:
 
 - `mr merge` / `mr accept` without `--sha`, or with a sha that is not the head.
 - `mr merge` / `mr accept` with auto-merge on: no `--auto-merge=false`, or a
   later `--auto-merge`, or any `--when-pipeline-succeeds`. Train boarding with
   an `auto_merge` or `when_pipeline_succeeds` field. Each is a deferred merge.
-- Either merge path while the target branch's tip is RED: its latest pipeline
-  of any source failed or was canceled, or its tree breaks what
-  `ai/config/main-content-checks.json` declares for the project (gen_saas: a
-  duplicated migration version). The one exception is a red-main fix, a head
-  that contains the tip and removes every duplicate. A tip with no pipeline,
-  or one the wrapper cannot read, is `COULD NOT LOOK` and refused. A running
-  tip pipeline is not red. These are the judges gh-athena runs (DND-1902).
+- Either merge path while the target branch's tip is RED: the latest pipeline
+  of some source on the tip failed or was canceled, or the tip's tree breaks
+  what `ai/config/main-content-checks.json` declares for the project
+  (gen_saas: a duplicated migration version). The one exception is a red-main
+  fix, a head that contains the tip and removes every duplicate. A newer
+  pipeline of another source (a web run, a schedule) does not clear a red
+  one; retrying the red pipeline does. A tip with no pipeline, or one the
+  wrapper cannot read, is `COULD NOT LOOK` and refused, so a project merged
+  this way must run a pipeline on its target branch. A running tip pipeline
+  is not red. These are the judges gh-athena runs (DND-1902).
 - API writes that create or move a ref, or change protection: `repository/
   branches` and `repository/tags` (a plain DELETE of one passes),
   `repository/commits` and its `cherry_pick`/`revert`, `repository/files`,
-  `repository/submodules`, `repository/changelog`, `protected_branches`,
-  `protected_tags`, `remote_mirrors`, `mirror/pull`, `merge_requests/<iid>/
-  rebase`, and GraphQL `commitCreate`, `createBranch`, `tagCreate` and
-  `branchRuleCreate`/`Update`/`Delete`. Move a branch with `glab-athena git
-  push`.
+  `repository/submodules`, `repository/changelog`, `protected_branches` (a
+  project's or a group's), `protected_tags`, `remote_mirrors`, `mirror/pull`,
+  `merge_requests/<iid>/rebase`, and the GraphQL mutations in
+  `GLMG_REF_MUTATIONS` (`ai/lib/glab-merge-guard.sh`). Move a branch with
+  `glab-athena git push`.
 - Train boarding without `-f sha=<head>`, or with the sha in a query string,
   a file, `--input` or `--form`.
 - Either one when the head pipeline is not `success`, is missing, or cannot be

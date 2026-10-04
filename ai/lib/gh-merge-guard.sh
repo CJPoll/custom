@@ -146,8 +146,8 @@
 # shared with glab-athena's guard (DND-742).
 # shellcheck source=forge-api-scan.sh
 . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/forge-api-scan.sh" || {
-  echo "gh-athena: REFUSING: cannot load ai/lib/forge-api-scan.sh, so no merge can be judged." >&2
-  echo "  Fix: run gh-athena from a full ~/dev/custom checkout (ai/bin and ai/lib side by side)." >&2
+  echo "${GMG_TOOL:-gh-athena}: REFUSING: cannot load ai/lib/forge-api-scan.sh, so no merge can be judged." >&2
+  echo "  Fix: run ${GMG_TOOL:-gh-athena} from a full ~/dev/custom checkout (ai/bin and ai/lib side by side)." >&2
   exit 3
 }
 
@@ -155,8 +155,8 @@
 # integration-gate and locked-merge so the three cannot drift (DND-969).
 # shellcheck source=integration-receipt.sh
 . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/integration-receipt.sh" || {
-  echo "gh-athena: REFUSING: cannot load ai/lib/integration-receipt.sh, so no merge can be judged." >&2
-  echo "  Fix: run gh-athena from a full ~/dev/custom checkout (ai/bin and ai/lib side by side)." >&2
+  echo "${GMG_TOOL:-gh-athena}: REFUSING: cannot load ai/lib/integration-receipt.sh, so no merge can be judged." >&2
+  echo "  Fix: run ${GMG_TOOL:-gh-athena} from a full ~/dev/custom checkout (ai/bin and ai/lib side by side)." >&2
   exit 3
 }
 

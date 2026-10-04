@@ -130,8 +130,10 @@
 #
 # Residual (NOT checked; each still runs):
 #   * A ref move outside `api`: `glab mr rebase` (the CLI form of the refused
-#     rebase route), and a `glab-athena git push` to the default branch, which
-#     ai/lib/forge-git-passthrough.sh judges instead. A PUT projects/<p> that
+#     rebase route; it moves only the MR's source branch, as a feature-branch
+#     push does, as gh-athena leaves `gh pr update-branch`), and a
+#     `glab-athena git push` to `main`, which ai/lib/forge-git-passthrough.sh
+#     judges instead (a default branch with another name is not judged there). A PUT projects/<p> that
 #     re-points default_branch or changes merge settings (it moves no ref).
 #     Other forge settings: approval rules, push rules, and branchRule*
 #     mutations other than create/update/delete. External commit statuses
@@ -147,6 +149,11 @@
 #     receipt on an older base passes, so the head plus the target's newer
 #     commits was never gated (DND-1463, accepted by the owner); the merge
 #     train re-tests that integrated result before the car merges.
+#
+# glab versions: the flag tables and the routing measurements are glab 1.112's
+# (2026-09-26); the auto-merge default was read from glab 1.92.1's --help on
+# 2026-10-03 (this machine), and the DND-742 suite's M4 case already named
+# auto-merge as 1.112's default.
 #
 # Test seam: GLAB_ATHENA_MERGE_DRY_RUN=1 (read by ai/bin/glab-athena) runs this
 # guard (reads only) and prints the command instead of running glab.
@@ -526,15 +533,22 @@ glmg_receipt_gate() {
 #   * RUNS (glmg_tip_health): the tip's pipelines on the target branch,
 #     `projects/<id>/pipelines?sha=<tip>&ref=<target>`. The latest pipeline of
 #     each source (push, a child pipeline, a schedule, …) is judged, the way
-#     gh-merge-guard judges the latest run of each check: failed or canceled is
-#     RED; created, waiting_for_resource, preparing, pending, running, scheduled
-#     or manual is PENDING (not red, so the merge proceeds and names it);
-#     success or skipped is not red. An older red pipeline is superseded only
-#     when its source's latest pipeline SUCCEEDED. A status the judge does not
-#     know is COULD NOT LOOK.
+#     gh-merge-guard judges the latest run of each check: failed, canceled or
+#     canceling is RED; created, waiting_for_resource, preparing, pending,
+#     running, scheduled or manual is PENDING (not red, so the merge proceeds
+#     and names it); success or skipped is not red. An older red pipeline is
+#     superseded only when its source's latest pipeline SUCCEEDED. So a new
+#     pipeline of ANOTHER source (a "Run pipeline" click is source `web`, a
+#     schedule may run other jobs) never clears a red push pipeline; retrying
+#     the red pipeline does, since its status becomes its retried jobs'. A
+#     status the judge does not know is COULD NOT LOOK.
 #   * A tip with NO pipeline is COULD NOT LOOK, never green. This is stricter
 #     than GitHub, where a repo with no CI (custom's shape) reports no run and
-#     passes: every GitLab project merged here runs CI on its default branch.
+#     passes. So a project merged through this guard must run a pipeline on its
+#     target branch (gen_saas's post-merge deploy does). A project whose target
+#     branch runs none (custom, which lands by a fast-forward `glab-athena git
+#     push`, not by an MR merge) cannot merge here: every such merge is refused
+#     COULD NOT LOOK, closed, by design.
 #   * CONTENT: gmg_content_health, the same code and the same declaration
 #     (ai/config/main-content-checks.json) as on GitHub, keyed by the MR's full
 #     project path, so gitlab.com/cjpoll/gen_saas reads the gen_saas entry.
@@ -560,7 +574,7 @@ GLMG_TIP_SHAPE='
 # GLMG_TIP_JUDGE: one line per finding, like gh-merge-guard's GMG_TIP_JUDGE:
 # RED, PEND, OLD (a superseded red pipeline) or ODD (a status it does not know).
 GLMG_TIP_JUDGE='
-  def red: .status | IN("failed", "canceled");
+  def red: .status | IN("failed", "canceled", "canceling");
   def pending: .status | IN("created", "waiting_for_resource", "preparing", "pending", "running", "scheduled", "manual");
   def known: red or pending or (.status | IN("success", "skipped"));
   def lbl: "pipeline \(.id) (\(.source // "no source")): \(.status)\(if (.web_url // "") == "" then "" else " \(.web_url)" end)";
@@ -582,27 +596,27 @@ GLMG_TIP_JUDGE='
 # project by GLMG_PID on GLMG_HOST, both set by glmg_receipt_gate.
 glmg_tip_health() {
   local tip="$3" head="$4" gitdir="$5" base="$6" enc pipes err rc why shape judged line red="" pend="" odd="" mb
-  local -a read=(api)
+  local -a req=(api)
   GMG_TIP_STATE="LOOK" GMG_TIP_RUNS="" GMG_TIP_OLD="" GMG_TIP_WHY=""
   if ! [[ "$tip" =~ ^[0-9a-f]{40}$ ]]; then GMG_TIP_WHY="the target tip '$tip' is not a full SHA"; return 2; fi
   if ! [[ "${GLMG_PID:-}" =~ ^[0-9]+$ ]]; then GMG_TIP_WHY="the MR's project id '${GLMG_PID:-}' is not a number, so the tip's pipelines cannot be read"; return 2; fi
   if [ -z "$base" ] || ! enc="$(jq -rn --arg b "$base" '$b | @uri' 2>/dev/null)" || [ -z "$enc" ]; then
     GMG_TIP_WHY="the target branch '$base' could not be URL-encoded, so the tip's pipelines cannot be read"; return 2
   fi
-  [ -n "$GLMG_HOST" ] && read+=(--hostname "$GLMG_HOST")
-  read+=("projects/$GLMG_PID/pipelines?sha=$tip&ref=$enc&per_page=100")
+  [ -n "$GLMG_HOST" ] && req+=(--hostname "$GLMG_HOST")
+  req+=("projects/$GLMG_PID/pipelines?sha=$tip&ref=$enc&per_page=100")
   if ! err="$(mktemp)"; then GMG_TIP_WHY="mktemp failed, so the tip's pipelines could not be read"; return 2; fi
-  if pipes="$(glab "${read[@]}" 2>"$err")"; then rc=0; else rc=$?; fi
+  if pipes="$(glab "${req[@]}" 2>"$err")"; then rc=0; else rc=$?; fi
   why="$(tr '\n' ' ' <"$err")"; rm -f "$err"
   if [ "$rc" != 0 ]; then
-    GMG_TIP_WHY="the pipelines on $tip could not be read (\`glab ${read[*]}\` exit $rc: ${why:-no stderr})"; return 2
+    GMG_TIP_WHY="the pipelines on $tip could not be read (\`glab ${req[*]}\` exit $rc: ${why:-no stderr})"; return 2
   fi
   if ! shape="$(jq -r --arg tip "$tip" --arg ref "$base" "$GLMG_TIP_SHAPE" <<<"$pipes" 2>/dev/null)"; then
     shape="ERR"$'\t'"the answer is not the expected JSON: $(head -c 200 <<<"$pipes" | tr '\n' ' ')"
   fi
   case "$shape" in
     OK) ;;
-    EMPTY) GMG_TIP_WHY="no pipeline has run on the $base tip $tip (\`glab ${read[*]}\` listed none), so nothing shows it green; a tip with no pipeline is never read as green"; return 2 ;;
+    EMPTY) GMG_TIP_WHY="no pipeline has run on the $base tip $tip (\`glab ${req[*]}\` listed none), so nothing shows it green; a tip with no pipeline is never read as green"; return 2 ;;
     *) GMG_TIP_WHY="the pipelines on $tip could not be read: ${shape#ERR$'\t'}"; return 2 ;;
   esac
   if ! judged="$(jq -r "$GLMG_TIP_JUDGE" <<<"$pipes" 2>&1)"; then
@@ -639,18 +653,18 @@ ${odd%$'\n'}"; return 2
   if ! [[ "$head" =~ ^[0-9a-f]{40}$ ]]; then
     GMG_TIP_STATE="LOOK"; GMG_TIP_WHY="$tip is red, and the head '$head' is not a full SHA, so whether it contains the tip cannot be read"; return 2
   fi
-  read=(api)
-  [ -n "$GLMG_HOST" ] && read+=(--hostname "$GLMG_HOST")
-  read+=("projects/$GLMG_PID/repository/merge_base?refs%5B%5D=$tip&refs%5B%5D=$head")
+  req=(api)
+  [ -n "$GLMG_HOST" ] && req+=(--hostname "$GLMG_HOST")
+  req+=("projects/$GLMG_PID/repository/merge_base?refs%5B%5D=$tip&refs%5B%5D=$head")
   if ! err="$(mktemp)"; then
     GMG_TIP_STATE="LOOK"; GMG_TIP_WHY="$tip is red, and mktemp failed, so whether the head $head contains it could not be read"; return 2
   fi
-  if mb="$(glab "${read[@]}" 2>"$err")"; then rc=0; else rc=$?; fi
+  if mb="$(glab "${req[@]}" 2>"$err")"; then rc=0; else rc=$?; fi
   why="$(tr '\n' ' ' <"$err")"; rm -f "$err"
   mb="$(jq -r '.id // empty' <<<"$mb" 2>/dev/null)" || mb=""
   if [ "$rc" != 0 ] || ! [[ "$mb" =~ ^[0-9a-f]{40}$ ]]; then
     GMG_TIP_STATE="LOOK"
-    GMG_TIP_WHY="$tip is red (${GMG_TIP_RUNS#    }), and whether the head $head contains it could not be read (\`glab ${read[*]}\` exit $rc: ${why:-no usable merge base})"
+    GMG_TIP_WHY="$tip is red (${GMG_TIP_RUNS#    }), and whether the head $head contains it could not be read (\`glab ${req[*]}\` exit $rc: ${why:-no usable merge base})"
     return 2
   fi
   if [ "$mb" = "$tip" ]; then GMG_TIP_STATE="FIX"; return 0; fi
@@ -660,19 +674,20 @@ ${odd%$'\n'}"; return 2
 # glmg_tip_gate <shown> : returns 0 when the target tip does not stop the
 # merge; exits 3 otherwise. Called after glmg_receipt_gate, which read the tip.
 glmg_tip_gate() {
-  local shown="$1" owner repo rc fix
+  local shown="$1" owner repo rc fix enc
   if [[ "${GLMG_PROJ_PATH:-}" != ?*/?* ]]; then
     glmg_refuse "$shown" "${GMG_LOOK_MARK} the MR's project path '${GLMG_PROJ_PATH:-}' has no namespace, so its content declaration cannot be looked up" \
       "make the MR readable (right iid, right -R <group>/<project>), then $GLMG_SAFE_PATH"
   fi
   owner="${GLMG_PROJ_PATH%/*}" repo="${GLMG_PROJ_PATH##*/}"
+  enc="$(jq -rn --arg b "$GLMG_BRANCH" '$b | @uri' 2>/dev/null)" || enc="<the URL-encoded target branch>"
   if gmg_line_check "$owner" "$repo" "$GLMG_BRANCH" "$GLMG_TIP" "$GLMG_HEAD" "$GLMG_TOP" glmg_tip_health; then rc=0; else rc=$?; fi
   case "$rc" in
     0) printf '%s: %s\n' "$GLMG_TOOL" "$GMG_LINE_NOTE" >&2; return 0 ;;
-    1) fix="land only a red-main fix: a head that contains $GLMG_TIP, removes every duplicate named above, and carries its own INTEGRATION OK receipt (merge origin/$GLMG_BRANCH into it, fix it, push as Athena, re-gate with \`$GLMG_IG\`). Every other MR waits until the latest $GLMG_BRANCH pipeline on its tip passes (\`glab api \"projects/$GLMG_PID/pipelines?ref=$GLMG_BRANCH&per_page=5\"\`). Then $GLMG_BOARD"
+    1) fix="land only a red-main fix: a head that contains $GLMG_TIP, removes every duplicate named above, and carries its own INTEGRATION OK receipt (merge origin/$GLMG_BRANCH into it, fix it, push as Athena, re-gate with \`$GLMG_IG\`). Every other MR waits until the tip is green again: a red pipeline clears when it is retried and passes (\`~/dev/custom/ai/bin/$GLMG_TOOL api -X POST \"projects/$GLMG_PID/pipelines/<id>/retry\"\`), or when a later push pipeline of the same source passes; a new pipeline of another source (a web run, a schedule) does not clear it. Read the tip's pipelines with \`glab api \"projects/$GLMG_PID/pipelines?ref=$enc&per_page=5\"\`. Then $GLMG_BOARD"
        glmg_refuse "$shown" "$GMG_LINE_WHY" "$fix" ;;
     *) glmg_refuse "$shown" "$GMG_LINE_WHY" \
-         "make the tip readable (network up, the right -R <group>/<project>, glab-athena's token, \`git fetch origin\` in this checkout); a tip with no pipeline needs one: run the $GLMG_BRANCH pipeline on it and wait for it to finish. Then $GLMG_BOARD" ;;
+         "make the tip readable (network up, the right -R <group>/<project>, glab-athena's token, \`git fetch origin\` in this checkout). A tip with no pipeline needs one: \`~/dev/custom/ai/bin/$GLMG_TOOL api -X POST \"projects/$GLMG_PID/pipeline?ref=$enc\"\`, then wait for it to finish. A malformed repo key or an unloadable runs judge is a defect in the guard: escalate it to your admiral with this output. Then $GLMG_BOARD" ;;
   esac
 }
 
@@ -753,7 +768,8 @@ glmg_route() {
 # the path creates or moves a ref, or changes a branch's protection (DND-1941,
 # the GitLab side of DND-741); echoes what it does. <method> is never GET/HEAD
 # here; a plain `DELETE` of one branch or tag moves nothing onto a ref and is
-# not a match, but a DELETE with a method override is. Routes, after
+# not a match, but a DELETE with a method override is. Group-level protection
+# (groups/<g…>/protected_branches) is a match too. Routes, after
 # projects/<p…>/:
 #   repository/branches[/…], repository/tags[/…]  (create, protect, unprotect)
 #   repository/commits                           (create a commit on a branch)
@@ -776,10 +792,13 @@ glmg_ref_route() {
   local -a s
   IFS=/ read -ra s <<<"$1"
   n="${#s[@]}"
-  [ "$n" -ge 3 ] && [ "${s[0]}" = projects ] || return 1
+  [ "$n" -ge 3 ] || return 1
+  case "${s[0]}" in projects|groups) ;; *) return 1 ;; esac
   s[n-1]="${s[n-1]%%[.;]*}"
   for ((i = 2; i < n; i++)); do
     w="${s[i]}"; nx="${s[i+1]:-}"
+    # A group has no repository: only its protection routes apply.
+    [ "${s[0]}" = groups ] && [ "$w" != protected_branches ] && continue
     case "$w:$nx" in
       repository:branches|repository:tags)
         # A plain DELETE of one named ref passes; keep scanning the rest.

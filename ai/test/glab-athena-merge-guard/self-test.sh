@@ -707,6 +707,8 @@ am_refused AM7 "--when-pipeline-succeeds=false (any spelling of the deprecated f
 reset_fx; green_fx
 am_refused AM8 "mr accept, default auto-merge -> refused" mr accept 4242 --sha "${HEAD_SHA}" --yes
 reset_fx; green_fx
+am_refused AM15 "--auto-merge=false after -- (a positional there, so auto-merge stays on) -> refused" mr merge 4242 --sha "${HEAD_SHA}" --yes -- --auto-merge=false
+reset_fx; green_fx
 expect_refused AM9 "--auto-merge=maybe (not a bool pflag parses) -> refused" "maybe" mr merge 4242 --sha "${HEAD_SHA}" --auto-merge=maybe --yes
 for f in false 0 f F FALSE False; do
   reset_fx; green_fx
@@ -757,6 +759,10 @@ reset_fx; ref_refused W13 "the full URL with api/v4" "repository/branches" api -
 reset_fx; ref_refused W14 "a branch DELETE with a method-override header is not a plain DELETE" "repository/branches" api -X DELETE -H "X-HTTP-Method-Override: POST" "projects/:id/repository/branches/feature"
 reset_fx; ref_refused W15 "a branch DELETE with a _method field is not a plain DELETE" "repository/branches" api -X DELETE -f "_method=POST" "projects/:id/repository/branches/feature"
 reset_fx; ref_refused W16 "a DELETE that also names protected_branches deeper in the path" "protected_branches" api -X DELETE "projects/1/repository/branches/x/protected_branches/main"
+reset_fx; ref_refused W24 "POST groups/<g>/protected_branches (group-level protection)" "protected_branches" api -X POST "groups/example-group/protected_branches" -f name=main
+reset_fx; ref_refused W24b "DELETE groups/<g>/protected_branches/main (unprotects main in every project)" "protected_branches" api -X DELETE "groups/example-group%2Fsub/protected_branches/main"
+reset_fx; expect_ran W24c "GET groups/<g>/protected_branches passes" none api "groups/example-group/protected_branches"
+reset_fx; expect_ran W24d "a group write that is not protection passes (POST group labels)" none api -X POST "groups/example-group/labels" -f name=x -f color=#fff
 reset_fx; expect_ran W17 "GET repository/branches passes" none api "projects/:id/repository/branches"
 reset_fx; expect_ran W18 "a plain DELETE of a branch passes (moves nothing onto a ref)" none api -X DELETE "projects/:id/repository/branches/feature%2Fx"
 reset_fx; expect_ran W19 "a plain DELETE of a tag passes" none api -X DELETE "projects/:id/repository/tags/v1"
@@ -811,6 +817,7 @@ tip_refused P5 "red tip, containment unreadable -> COULD NOT LOOK" "COULD NOT LO
 reset_fx; green_fx; fx pipes '[]'
 tip_refused P6 "THE MISS: a tip with NO pipeline -> COULD NOT LOOK, never green" "COULD NOT LOOK:" "${MERGE_ARGS[@]}"
 [[ "${ERR}" == *"no pipeline"* ]] && ok "P6b. the refusal says no pipeline ran on the tip" || bad "P6b. no pipeline named" "$(detail)"
+[[ "$(grep -m1 'Fix:' <<<"${ERR}")" == *'api -X POST "projects/7000001/pipeline?ref=main"'* ]] && ok "P6c. the Fix names the call that runs a pipeline on the tip" || bad "P6c. pipeline Fix" "$(detail)"
 reset_fx; green_fx; fx pipes '' 1 'glab: 503 Service Unavailable'
 tip_refused P7 "the tip's pipelines cannot be read -> COULD NOT LOOK, the error named" "503 Service Unavailable" "${MERGE_ARGS[@]}"
 [[ "${ERR}" == *"COULD NOT LOOK:"* ]] && ok "P7b. it is COULD NOT LOOK" || bad "P7b. LOOK mark" "$(detail)"
@@ -826,6 +833,11 @@ reset_fx; green_fx; pipes_are "$(pipe 8000000003 success)" "$(pipe 8000000002 fa
 tip_refused P12 "a failed child pipeline, older than a green push pipeline -> red (each source's latest is judged; another source never supersedes it)" "MAIN RED:" "${MERGE_ARGS[@]}"
 reset_fx; green_fx; tip_pipes canceled
 tip_refused P13 "a canceled tip pipeline is red" "MAIN RED:" "${MERGE_ARGS[@]}"
+reset_fx; green_fx; tip_pipes canceling
+tip_refused P13b "a canceling tip pipeline is red (it ends canceled)" "MAIN RED:" "${MERGE_ARGS[@]}"
+reset_fx; green_fx; pipes_are "$(pipe 8000000003 success web)" "$(pipe 8000000002 failed push)"
+tip_refused P13c "a newer SUCCESS of another source (a web run) does not clear a failed push pipeline" "MAIN RED:" "${MERGE_ARGS[@]}"
+[[ "$(grep -m1 'Fix:' <<<"${ERR}")" == *"/retry"* ]] && ok "P13d. the Fix says a red pipeline clears when it is retried and passes" || bad "P13d. retry Fix" "$(detail)"
 reset_fx; green_fx; tip_pipes bogus_status
 tip_refused P14 "a status the judge does not know -> COULD NOT LOOK" "COULD NOT LOOK:" "${MERGE_ARGS[@]}"
 reset_fx; green_fx; printf '[%s]\n' "$(pipe 8000000001 success push "${OLD_TIP}")" > "${FX}/pipes.out"
@@ -890,6 +902,10 @@ reset_fx; gs_fx "${GS_FEAT}" "${GS_BASE}"
 tip_ran GS4 "the GitLab project cjpoll/gen_saas resolves the gen_saas declaration: a clean tip is read and runs" "no duplicated migration version (1 director(ies), 1 migration(s) read)" mr merge 77 --sha "${GS_FEAT}" --auto-merge=false --yes
 reset_fx; gs_fx "${GS_FEAT}" "${GS_DUP}"
 tip_refused GS5 "the same refusal on the train" "Duplicated migration version" api -X POST "projects/:id/merge_trains/merge_requests/77" -f "sha=${GS_FEAT}"
+reset_fx; gs_fx "0123456789abcdef0123456789abcdef01234567" "${GS_DUP}"
+tip_refused GS6 "a duplicated tip and a head not in the local store -> COULD NOT LOOK (whether it is a fix cannot be read)" "COULD NOT LOOK:" mr merge 77 --sha 0123456789abcdef0123456789abcdef01234567 --auto-merge=false --yes
+[[ "${ERR}" == *"fetch the PR branch"* ]] && [[ "${ERR}" == *"holds a duplicated migration version"* ]] \
+  && ok "GS6b. it says to fetch the head, and still names the duplicate" || bad "GS6b. fetch named" "$(detail)"
 cd "${REPO_FX}" || exit 2
 
 echo

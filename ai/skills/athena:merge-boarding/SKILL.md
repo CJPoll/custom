@@ -945,8 +945,9 @@ every GitLab project with no merge train (`locked-merge --mr`, *GitLab path
   `INTEGRATION OK` names. The gh-athena merge guard applies the same receipt
   rule to a bare `gh-athena pr merge` (DND-969); it has no tree check.
   glab-athena's merge guard applies it to every `mr merge`/`mr accept` and
-  train boarding, declared gate or not (DND-1845); it has no tree check
-  either. Because every GitLab project is gated that way, it refuses a
+  train boarding, declared gate or not (DND-1845). It has no expected-tree
+  check either (locked-merge's), though it does judge the target tip's
+  content (DND-1941). Because every GitLab project is gated that way, it refuses a
   deferred merge everywhere: `mr merge` needs `--auto-merge=false`, since
   glab turns auto-merge on by default (DND-1941).
 
