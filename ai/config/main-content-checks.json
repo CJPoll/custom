@@ -1,6 +1,6 @@
 {
   "schema": "main-content-checks/1",
-  "about": "DND-1902: what a GitHub repo's base tip must not CONTAIN for a merge onto it (ai/lib/gh-merge-guard.sh -> gmg_content_health). Keyed by lower-case <owner>/<repo>. unique_migration_dirs is an ERE matched against each directory path in the tip's tree; in every matching directory, no two files named <digits>_*.exs may share the digits (an Ecto migration version). A repo not listed declares no content check. The bar lives here, in custom, never in the repo whose merge it judges.",
+  "about": "DND-1902: what a repo's base tip must not CONTAIN for a merge onto it (ai/lib/gh-merge-guard.sh -> gmg_content_health, run by gh-athena on GitHub and, since DND-1941, by glab-athena on GitLab). Keyed by the lower-case project path: <owner>/<repo> on GitHub, the full <namespace>/<project> on GitLab (a nested group is part of the key), so github.com/CJPoll/gen_saas and gitlab.com/cjpoll/gen_saas read the same entry. A malformed key is an error, never 'no check'. unique_migration_dirs is an ERE matched against each directory path in the tip's tree; in every matching directory, no two files named <digits>_*.exs may share the digits (an Ecto migration version). A repo not listed declares no content check, and the merge says which key it looked up. The bar lives here, in custom, never in the repo whose merge it judges.",
   "repos": {
     "cjpoll/gen_saas": {
       "unique_migration_dirs": "^apps/[^/]+/priv/repo/migrations$"

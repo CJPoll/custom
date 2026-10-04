@@ -41,7 +41,10 @@
 #     migration version), is REFUSED (stop the line, DND-1902), unless the
 #     pinned head contains that tip and removes every duplicate (a red-main
 #     fix). What cannot be read is COULD NOT LOOK and refused; a pending run
-#     is not red. See gmg_line_check.
+#     is not red. See gmg_line_check. glab-athena's guard
+#     (ai/lib/glab-merge-guard.sh) loads this file and runs the same
+#     gmg_line_check and content judge on GitLab, with its own pipelines
+#     read as the runs judge (DND-1941).
 #   * A gh ALIAS is expanded the way gh expands it (see gmg_expand_alias) and
 #     the EXPANDED argv is what the guard judges, so `gh alias set p pr` then
 #     `p merge 5 --auto` is refused like `pr merge 5 --auto`. A gh shell alias
@@ -958,12 +961,23 @@ gmg_mig_dups() {
   return 0
 }
 
-# gmg_content_re <owner> <repo> : sets GMG_CONTENT_RE to the repo's declared
+# gmg_content_re <owner> <repo> : sets GMG_CONTENT_KEY to the key it looks up
+# (lower-case <owner>/<repo>) and GMG_CONTENT_RE to that key's declared
 # unique_migration_dirs ERE, or "" when it declares none. Returns 2 with
-# GMG_CONTENT_WHY when the declaration cannot be read or is malformed.
+# GMG_CONTENT_WHY when the declaration cannot be read or is malformed, or when
+# the key itself is malformed. Both forges share it (DND-1941): on GitHub
+# <owner> is the account; on GitLab it is the project's namespace path, which
+# may hold more than one segment (a nested group), so the key is the full
+# project path, and gitlab.com/cjpoll/gen_saas reads the same entry as
+# github.com/CJPoll/gen_saas. An empty segment or whitespace is an error, never
+# "no check declared": a wrongly computed key would otherwise match nothing and
+# read as a repo with no checks.
 gmg_content_re() {
   local key="${1,,}/${2,,}" re
-  GMG_CONTENT_RE=""
+  GMG_CONTENT_RE="" GMG_CONTENT_KEY="$key"
+  if ! [[ "$key" =~ ^[^/[:space:]]+(/[^/[:space:]]+)+$ ]]; then
+    GMG_CONTENT_WHY="the repo key '$key' (owner '$1', repo '$2') is malformed (an empty segment or whitespace), so which content checks it declares cannot be looked up"; return 2
+  fi
   if ! re="$(jq -er --arg k "$key" 'if .schema != "main-content-checks/1" then error("schema is not main-content-checks/1")
              elif (.repos | type) != "object" then error("repos is not an object")
              elif .repos[$k] == null then ""
@@ -1035,15 +1049,27 @@ GMG_RED_MARK="MAIN RED:"
 # share this one constant.
 GMG_LOOK_MARK="COULD NOT LOOK:"
 
-# gmg_line_check <owner> <repo> <base> <tip> <head|""> <gitdir> : the whole
-# stop-the-line judgment, the runs (gmg_tip_health) and the content
+# gmg_line_check <owner> <repo> <base> <tip> <head|""> <gitdir> [runs judge] :
+# the whole stop-the-line judgment, the runs and the content
 # (gmg_content_health). Never exits. Returns 0 (GMG_LINE_NOTE says why the
 # merge may proceed), 1 RED or 2 COULD NOT LOOK (GMG_LINE_WHY says why). A red
 # finding outranks a COULD NOT LOOK in the other half: either refuses.
+#
+# The runs judge is GitHub's gmg_tip_health unless [runs judge] names another
+# function with its contract: called as `<judge> <owner> <repo> <tip> <head|"">
+# <gitdir> <base>`, it sets GMG_TIP_STATE (NONE, CLEAN, PENDING or FIX: return
+# 0; RED: return 1; LOOK: return 2), GMG_TIP_RUNS, GMG_TIP_OLD and GMG_TIP_WHY.
+# glab-athena's guard passes glmg_tip_health, which judges the tip's GitLab
+# pipelines (DND-1941); the content half and this composition are the same
+# code on both forges. A judge that is not a defined function is COULD NOT
+# LOOK, never a clean tip.
 gmg_line_check() {
-  local owner="$1" repo="$2" base="$3" tip="$4" head="$5" gitdir="$6" rr cr
+  local owner="$1" repo="$2" base="$3" tip="$4" head="$5" gitdir="$6" judge="${7:-gmg_tip_health}" rr cr
   GMG_LINE_NOTE="" GMG_LINE_WHY=""
-  if gmg_tip_health "$owner" "$repo" "$tip" "$head" "$gitdir"; then rr=0; else rr=$?; fi
+  if ! declare -F "$judge" >/dev/null; then
+    GMG_TIP_STATE="LOOK" GMG_TIP_RUNS="" GMG_TIP_OLD=""
+    GMG_TIP_WHY="the runs judge '$judge' is not a defined function (a defect in the guard that called gmg_line_check)"; rr=2
+  elif "$judge" "$owner" "$repo" "$tip" "$head" "$gitdir" "$base"; then rr=0; else rr=$?; fi
   if gmg_content_health "$owner" "$repo" "$tip" "$head" "$gitdir"; then cr=0; else cr=$?; fi
   if [ "$rr" = 1 ] || [ "$cr" = 1 ]; then
     GMG_LINE_WHY="${GMG_RED_MARK} $base tip $tip is RED, so the line is stopped (DND-1902)."
@@ -1077,7 +1103,7 @@ $GMG_TIP_RUNS" ;;
 $GMG_TIP_RUNS" ;;
   esac
   case "$GMG_CONTENT_STATE" in
-    NONE) GMG_LINE_NOTE+=$'\n'"  content: no check declared for $owner/$repo" ;;
+    NONE) GMG_LINE_NOTE+=$'\n'"  content: no check declared for $GMG_CONTENT_KEY" ;;
     CLEAN) GMG_LINE_NOTE+=$'\n'"  content: no duplicated migration version ($GMG_CONTENT_COUNTS)" ;;
     FIX) GMG_LINE_NOTE+=$'\n'"  content: RED-MAIN FIX: the tip holds a duplicated migration version and the head removes it:"$'\n'"$GMG_CONTENT_DUPS" ;;
   esac

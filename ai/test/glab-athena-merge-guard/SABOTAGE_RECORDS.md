@@ -175,3 +175,55 @@ suite. Every mutation turns at least one case red.
 | S20 | the re-pushed-head wording is never used | R9b R9d |
 | S21 | the merge-command path skips the receipt check | R1-R3, R6, R7, R8-*, R9, R9b, R9e, R10-R23, R25, D3 |
 | S22 | the target-tip read drops `--hostname` | R24b |
+
+## DND-1941: parity with GitHub's merge bar
+
+The gaps, against ai/lib/gh-merge-guard.sh: a merge onto a RED target tip
+(its pipelines or its content, DND-1902) went through; glab's default
+auto-merge (a deferred merge, which no receipt can cover) went through with a
+pin and a receipt; and API writes that create or move a ref
+(`repository/commits`, `repository/branches`, `protected_branches`,
+`remote_mirrors`, GraphQL `commitCreate`, …) ran unjudged.
+
+### Old vs new (fail-first)
+
+Recorded 2026-10-03 on the branch base bbf06766's `ai/lib/glab-merge-guard.sh`,
+`ai/lib/gh-merge-guard.sh` and `ai/bin/glab-athena` (the unfixed code,
+swapped into the worktree so the receipt seal verifies), with the final tests:
+
+- `RESULT: 196 passed, 80 failed`.
+- Red: T12, R2b, AM1-AM9, AM11-AM14, W1-W16, GR1-GR6, P1-P17 (with P1b,
+  P1c, P6b, P7b), P18b, P18c, GS1-GS5 (with GS1b), K1-K3, K6.
+- The misses, each `rc=0` with the command reaching glab:
+  - AM1: `out=stub: ran mr merge 4242 --sha 4cc5665… --yes`, auto-merge on.
+  - P1, P6: `ran mr merge 4242 --auto-merge=false --sha 4cc5665… --yes` onto
+    a failed tip, and onto a tip with no pipeline.
+  - GS1: `ran mr merge 77 …` onto a gen_saas tip holding two migrations with
+    version 20250101000000.
+  - W2: `ran api -X POST projects/:id/repository/commits -f branch=main …`.
+  - GR1: `ran api graphql -f query=mutation { commitCreate(…) }`.
+  - AM11: the train POST with `-f auto_merge=true -f sha=…` ran.
+
+On the fixed code: `RESULT: 276 passed, 0 failed`.
+
+### Mutations
+
+Each row changes one line of the fixed code in place and runs the suite.
+
+| id | mutation | red |
+|----|----------|-----|
+| S23 | `mr merge` skips the tip gate | P1-P18c, GS1-GS4 (27 cases) |
+| S24 | auto-merge defaults to off | AM1 AM8 |
+| S25 | an empty pipelines list reads as CLEAN | P6 P6b |
+| S26 | a DELETE with a method override counts as a plain DELETE | W14 W15 |
+| S27 | `gmg_content_re` drops its key check | K1 K2 K3 |
+| S28 | an older red pipeline is always superseded | P11 |
+| S29 | the train accepts an `auto_merge` field | T12 AM11-AM14 |
+| S30 | the ref-route check is off | W1-W16 |
+| S31 | the pipelines' sha/ref check is off | P15 P16 |
+| S32 | pipelines are not grouped by source | P12 |
+| S33 | `gmg_line_check` ignores the runs judge it is given | 48 cases, every merge that should run |
+
+S32 first survived: P12 listed the failed child pipeline as the NEWER one, so
+one ungrouped list judged it red too. P12 now lists it as the older one, which
+only a per-source judgment keeps red.

@@ -167,7 +167,7 @@ afc_main() {
   fi
   case "$AFC_TOOL $grp $verb" in
     "glab mr merge" | "glab mr accept")
-      afc_refuse "\`glab mr $verb …\`: a merge on plain glab is stamped to the machine owner AND skips the pinned-head, passed-pipeline merge guard (DND-742, DND-1803). Fix: board the merge train through the Athena route, \`~/dev/custom/ai/bin/glab-athena api -X POST \"projects/:id/merge_trains/merge_requests/<iid>\" -f sha=<head sha>\`, or with no train \`~/dev/custom/ai/bin/glab-athena mr merge <iid> --sha <head sha> --yes\`, once the head pipeline passed on that head. $AFC_ESC" ;;
+      afc_refuse "\`glab mr $verb …\`: a merge on plain glab is stamped to the machine owner AND skips the pinned-head, passed-pipeline merge guard (DND-742, DND-1803). Fix: board the merge train through the Athena route, \`~/dev/custom/ai/bin/glab-athena api -X POST \"projects/:id/merge_trains/merge_requests/<iid>\" -f sha=<head sha>\`, or with no train \`~/dev/custom/ai/bin/glab-athena mr merge <iid> --sha <head sha> --auto-merge=false --yes\`, once the head pipeline passed on that head. $AFC_ESC" ;;
   esac
   reads="${reads#|}"; reads="${reads%|}"; reads="${reads//|/, }"
   [ -n "$reads" ] || reads='none; it runs an agent or a server that can write as the owner'

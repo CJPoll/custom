@@ -196,6 +196,9 @@ unset TOKEN
 # merge-train boarding (`api -X POST projects/<p>/merge_trains/merge_requests/
 # <iid>`) needs -f sha=<head>. Both also need integration-gate's sealed receipt
 # for that head, read from the checkout the wrapper runs in (DND-1845).
+# Both also refuse a deferred merge (`mr merge` needs --auto-merge=false) and
+# a RED target tip unless the head is a red-main fix; API ref writes are
+# refused outright (DND-1941).
 # A REST PUT …/merge_requests/<iid>/merge and the
 # GraphQL mergeRequestAccept are REFUSED outright, and so is `mcp serve`. The
 # mechanism, its measurements and its named residuals live in

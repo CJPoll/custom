@@ -216,6 +216,11 @@ call itself ([[athena:merge-boarding]] → *GitLab path (no merge train)*):
 ~/dev/custom/ai/skills/athena:merge-boarding/scripts/locked-merge --mr <iid> --head <head sha>
 ```
 
+`--auto-merge=false` in that call is required. glab turns auto-merge on by
+default, and auto-merge is a deferred merge: GitLab completes it later, onto
+whatever `main` is then, where no receipt or red-tip check can follow
+(DND-1941).
+
 **Later (2026-10-03, DND-1943):** this named the direct
 `glab-athena mr merge <iid> --sha <head sha> --yes` call for a project with
 no merge train. Superseded: that call took no merge lock, so two admirals
@@ -225,7 +230,24 @@ auto-merge could defer the merge to a moment nothing gated.
 What the wrapper refuses, exit 3 with a `Fix:`:
 
 - `mr merge` / `mr accept` without `--sha`, or with a sha that is not the head.
-  `--auto-merge` does not relax this.
+- `mr merge` / `mr accept` with auto-merge on: no `--auto-merge=false`, or a
+  later `--auto-merge`, or any `--when-pipeline-succeeds`. Train boarding with
+  an `auto_merge` or `when_pipeline_succeeds` field. Each is a deferred merge.
+- Either merge path while the target branch's tip is RED: its latest pipeline
+  of any source failed or was canceled, or its tree breaks what
+  `ai/config/main-content-checks.json` declares for the project (gen_saas: a
+  duplicated migration version). The one exception is a red-main fix, a head
+  that contains the tip and removes every duplicate. A tip with no pipeline,
+  or one the wrapper cannot read, is `COULD NOT LOOK` and refused. A running
+  tip pipeline is not red. These are the judges gh-athena runs (DND-1902).
+- API writes that create or move a ref, or change protection: `repository/
+  branches` and `repository/tags` (a plain DELETE of one passes),
+  `repository/commits` and its `cherry_pick`/`revert`, `repository/files`,
+  `repository/submodules`, `repository/changelog`, `protected_branches`,
+  `protected_tags`, `remote_mirrors`, `mirror/pull`, `merge_requests/<iid>/
+  rebase`, and GraphQL `commitCreate`, `createBranch`, `tagCreate` and
+  `branchRuleCreate`/`Update`/`Delete`. Move a branch with `glab-athena git
+  push`.
 - Train boarding without `-f sha=<head>`, or with the sha in a query string,
   a file, `--input` or `--form`.
 - Either one when the head pipeline is not `success`, is missing, or cannot be
@@ -254,8 +276,9 @@ it with plain `glab`, which the `forge-identity-guard` hook and the agent PATH
 `glab` wrapper deny too. On
 walt_ui GitLab also enforces "pipelines must succeed" server-side (measured
 2026-09-26); the wrapper is the floor that fires on every project, and the
-only thing that pins the reviewed head. Its named residuals (ref-moving API
-writes, a pipeline not yet created for a new head) are in the lib's header.
+only thing that pins the reviewed head. Its named residuals (`glab mr
+rebase`, settings writes such as approval rules, a pipeline not yet created
+for a new head) are in the lib's header.
 
 ## Relationship to the fleet agents
 

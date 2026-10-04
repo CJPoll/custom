@@ -9,15 +9,18 @@
 # that PASSED on that head; the REST merge route, mergeRequestAccept and `mcp
 # serve` are refused outright. Since DND-1845 both merge paths also need
 # integration-gate's sealed receipt for the head (the R cases), read from a
-# fixture checkout of the MR's project. Design and measurements: the header of
-# ai/lib/glab-merge-guard.sh. Old-vs-new evidence and mutation results:
-# SABOTAGE_RECORDS.md next to this file.
+# fixture checkout of the MR's project. Since DND-1941 a merge also needs auto-
+# merge off by name (the AM cases), a target tip that is not RED by its
+# pipelines (P) or content (GS), and API ref writes are refused (W, GR).
+# Design and measurements: the header of ai/lib/glab-merge-guard.sh. Old-vs-new
+# evidence and mutation results: SABOTAGE_RECORDS.md next to this file.
 #
-# NO NETWORK, EVER. `glab` is a stub on PATH. It answers the guard's five reads
+# NO NETWORK, EVER. `glab` is a stub on PATH. It answers the guard's seven reads
 # (`mr view … -F json`, `api projects/<p>/merge_requests/<iid>`, `api
 # projects/<p>/repository/commits/<sha>`, `api projects/<p>/repository/branches/
-# <branch>`, `api projects/<p>/merge_requests/<iid>/versions`) from fixture
-# files, and records every
+# <branch>`, `api projects/<p>/merge_requests/<iid>/versions`, `api
+# projects/<p>/pipelines?sha=…&ref=…`, `api projects/<p>/repository/merge_base?…`)
+# from fixture files, and records every
 # OTHER call as an exec in a separate log. Every refusal case asserts that log
 # is empty, i.e. nothing that could merge reached glab.
 #
@@ -71,6 +74,10 @@ if [[ "$all" =~ ^api\ (--hostname\ [^\ ]+\ )?projects/[^\ ]+/merge_requests/[0-9
 if [[ "$all" =~ ^api\ projects/[0-9]+/repository/commits/[0-9a-f]+$ ]]; then answer commit "$all"; fi
 if [[ "$all" =~ ^api\ (--hostname\ [^\ ]+\ )?projects/[0-9]+/repository/branches/[^\ ]+$ ]]; then answer branch "$all"; fi
 if [[ "$all" =~ ^api\ (--hostname\ [^\ ]+\ )?projects/[0-9]+/merge_requests/[0-9]+/versions$ ]]; then answer versions "$all"; fi
+# DND-1941: the target tip's own pipelines, and the forge's merge base of the
+# tip and the head (asked only when the head is not in the local store).
+if [[ "$all" =~ ^api\ (--hostname\ [^\ ]+\ )?projects/[0-9]+/pipelines\?sha=[0-9a-f]+\&ref=[^\ ]+\&per_page=100$ ]]; then answer pipes "$all"; fi
+if [[ "$all" =~ ^api\ (--hostname\ [^\ ]+\ )?projects/[0-9]+/repository/merge_base\?refs%5B%5D=[0-9a-f]+\&refs%5B%5D=[0-9a-f]+$ ]]; then answer mergebase "$all"; fi
 # The outbound scan's visibility read (DND-1938), run on an api write that
 # carries a field (a train car's `-f sha=`) once the merge guard has passed it.
 # Answered "private": the project the merge guard judges is the work-shaped
@@ -152,8 +159,22 @@ green_fx() {
   printf '{"id":"%s","parent_ids":["%s","%s"]}\n' "${MERGE_SHA}" "${TARGET_SHA}" "${HEAD_SHA}" > "${FX}/commit.out"
   branch_is "${TIP_FX}"
   printf '[{"id":1,"head_commit_sha":"%s"}]\n' "${HEAD_SHA}" > "${FX}/versions.out"
+  tip_pipes success
+  # The forge's merge base of the tip and the (non-local) head: not the tip, so
+  # the head does not contain it. Read only when the tip is red.
+  printf '{"id":"%s"}\n' "${OLD_TIP}" > "${FX}/mergebase.out"
   plant "${HEAD_SHA}" "${TIP_FX}"
 }
+# pipe <id> <status> [source] [sha] [ref] : one pipeline object, as GitLab's
+# `projects/<id>/pipelines` lists it.
+pipe() {
+  printf '{"id":%s,"sha":"%s","ref":"%s","status":"%s","source":"%s","web_url":"https://gitlab.com/example-group/example-app/-/pipelines/%s"}' \
+    "$1" "${4:-${TIP_FX}}" "${5:-main}" "$2" "${3:-push}" "$1"
+}
+# tip_pipes <status> [ref] : the target tip has one main pipeline, <status>.
+tip_pipes() { printf '[%s]\n' "$(pipe 8000000001 "$1" push "${TIP_FX}" "${2:-main}")" > "${FX}/pipes.out"; }
+# pipes_are <pipe json>... : the tip's pipelines, newest first (GitLab's order).
+pipes_are() { local IFS=,; printf '[%s]\n' "$*" > "${FX}/pipes.out"; }
 # nogate_fx : green, but integration-gate never passed the head (no receipt).
 nogate_fx() { green_fx; rm -rf "${STORE_FX}"; }
 status_fx() { green_fx; mr_json "$1" > "${FX}/mrview.out"; mr_json "$1" > "${FX}/mrapi.out"; }
@@ -188,71 +209,65 @@ echo
 
 echo "--- mr merge: the pin and the passed head pipeline ---"
 reset_fx; green_fx
-expect_refused M1 "mr merge with no --sha is refused, naming the head" "${HEAD_SHA}" mr merge 4242 --yes
+expect_refused M1 "mr merge with no --sha is refused, naming the head" "${HEAD_SHA}" mr merge 4242 --auto-merge=false --yes
 reset_fx; green_fx
-expect_ran M2 "mr merge --sha <head> with a passed merged-results pipeline runs" any mr merge 4242 --sha "${HEAD_SHA}" --yes
+expect_ran M2 "mr merge --sha <head> with a passed merged-results pipeline runs" any mr merge 4242 --auto-merge=false --sha "${HEAD_SHA}" --yes
 if [[ "$(reads)" == *"repository/commits/${MERGE_SHA}"* ]]; then ok "M2b. the merged-results commit was read to tie the pipeline to the head"
 else bad "M2b. merged-results commit read" "$(detail)"; fi
 reset_fx; green_fx
-expect_refused M3 "mr merge --sha <not the head> is refused" "not the MR's head" mr merge 4242 --sha "${OTHER_SHA}" --yes
+expect_refused M3 "mr merge --sha <not the head> is refused" "not the MR's head" mr merge 4242 --auto-merge=false --sha "${OTHER_SHA}" --yes
 reset_fx; status_fx running
-expect_refused M4 "a running head pipeline is refused (auto-merge default)" "'running', not success" mr merge 4242 --sha "${HEAD_SHA}" --yes
-reset_fx; status_fx running
-expect_refused M4b "a running head pipeline is refused with --auto-merge" "'running', not success" mr merge 4242 --sha "${HEAD_SHA}" --auto-merge --yes
-reset_fx; status_fx running
-expect_refused M4c "a running head pipeline is refused with --when-pipeline-succeeds" "'running', not success" mr merge 4242 --sha "${HEAD_SHA}" --when-pipeline-succeeds --yes
+expect_refused M4 "a running head pipeline is refused" "'running', not success" mr merge 4242 --auto-merge=false --sha "${HEAD_SHA}" --yes
 reset_fx; status_fx failed
-expect_refused M5 "a failed head pipeline is refused" "'failed', not success" mr merge 4242 --sha "${HEAD_SHA}" --yes
+expect_refused M5 "a failed head pipeline is refused" "'failed', not success" mr merge 4242 --auto-merge=false --sha "${HEAD_SHA}" --yes
 reset_fx; green_fx
 printf '{"iid":4242,"project_id":7000001,"sha":"%s","head_pipeline":null}\n' "${HEAD_SHA}" > "${FX}/mrview.out"
-expect_refused M6 "no head pipeline is refused" "has no head pipeline" mr merge 4242 --sha "${HEAD_SHA}" --yes
+expect_refused M6 "no head pipeline is refused" "has no head pipeline" mr merge 4242 --auto-merge=false --sha "${HEAD_SHA}" --yes
 reset_fx; green_fx; mr_json success "${HEAD_SHA}" "feature-branch" > "${FX}/mrview.out"
-expect_ran M7 "a passed pipeline ON the head (branch pipeline) runs" any mr merge 4242 --sha "${HEAD_SHA}" --yes
+expect_ran M7 "a passed pipeline ON the head (branch pipeline) runs" any mr merge 4242 --auto-merge=false --sha "${HEAD_SHA}" --yes
 if [[ "$(reads)" != *"repository/commits"* ]]; then ok "M7b. no commit read when the pipeline sha is the head"
 else bad "M7b. unexpected commit read" "$(detail)"; fi
 reset_fx; green_fx
 printf '{"id":"%s","parent_ids":["%s","%s"]}\n' "${MERGE_SHA}" "${TARGET_SHA}" "${OTHER_SHA}" > "${FX}/commit.out"
-expect_refused M8 "a merged-results commit whose 2nd parent is not the head is refused" "do not end in head" mr merge 4242 --sha "${HEAD_SHA}" --yes
+expect_refused M8 "a merged-results commit whose 2nd parent is not the head is refused" "do not end in head" mr merge 4242 --auto-merge=false --sha "${HEAD_SHA}" --yes
 reset_fx; green_fx; mr_json success "216e40abc081b59f341d2d1de2fdd12facee7772" "refs/merge-requests/4242/train" > "${FX}/mrview.out"
-expect_refused M9 "a merge-train head pipeline cannot be tied and is refused" "cannot be tied" mr merge 4242 --sha "${HEAD_SHA}" --yes
+expect_refused M9 "a merge-train head pipeline cannot be tied and is refused" "cannot be tied" mr merge 4242 --auto-merge=false --sha "${HEAD_SHA}" --yes
 reset_fx; green_fx; fx commit '' 1 'glab: 404 Commit Not Found'
-expect_refused M10 "a failed commit read is refused" "could not read the merged-results commit" mr merge 4242 --sha "${HEAD_SHA}" --yes
+expect_refused M10 "a failed commit read is refused" "could not read the merged-results commit" mr merge 4242 --auto-merge=false --sha "${HEAD_SHA}" --yes
 reset_fx; fx mrview '' 1 'glab: 404 Not Found'
-expect_refused M11 "a failed MR read is refused" "could not read the MR" mr merge 4242 --sha "${HEAD_SHA}" --yes
+expect_refused M11 "a failed MR read is refused" "could not read the MR" mr merge 4242 --auto-merge=false --sha "${HEAD_SHA}" --yes
 reset_fx; green_fx
-expect_refused M12 "mr accept (merge's alias) with no --sha is refused" "no sha was given" mr accept 4242 --yes
+expect_refused M12 "mr accept (merge's alias) with no --sha is refused" "no sha was given" mr accept 4242 --auto-merge=false --yes
 reset_fx; green_fx
-expect_refused M13 "--repo before the subcommand, no --sha, is refused" "no sha was given" --repo example-group/example-app mr merge 4242 --yes
+expect_refused M13 "--repo before the subcommand, no --sha, is refused" "no sha was given" --repo example-group/example-app mr merge 4242 --auto-merge=false --yes
 reset_fx; green_fx
-expect_refused M13b "mr -R <repo> merge, no --sha, is refused" "no sha was given" mr -R example-group/example-app merge 4242
+expect_refused M13b "mr -R <repo> merge, no --sha, is refused" "no sha was given" mr -R example-group/example-app merge 4242 --auto-merge=false
 if [[ "$(reads)" == *"mr view 4242 -R example-group/example-app -F json"* ]]; then ok "M13c. the MR is read in the -R project"
 else bad "M13c. -R carried into the read" "$(detail)"; fi
 reset_fx; green_fx
-expect_ran M14 "--sha=<head> with combined short flags runs" any mr merge 4242 "--sha=${HEAD_SHA}" -sdy
+expect_ran M14 "--sha=<head> with combined short flags runs" any mr merge 4242 --auto-merge=false "--sha=${HEAD_SHA}" -sdy
 reset_fx; green_fx
-expect_ran M14b "--sha <head> --auto-merge with a passed pipeline runs" any mr merge 4242 --sha "${HEAD_SHA}" --auto-merge --yes
+expect_refused M15 "an unknown mr merge flag is refused" "--bogus" mr merge 4242 --auto-merge=false --sha "${HEAD_SHA}" --bogus
 reset_fx; green_fx
-expect_refused M15 "an unknown mr merge flag is refused" "--bogus" mr merge 4242 --sha "${HEAD_SHA}" --bogus
+expect_refused M16 "--sha given twice is refused" "2 times" mr merge 4242 --auto-merge=false --sha "${OTHER_SHA}" --sha "${HEAD_SHA}"
 reset_fx; green_fx
-expect_refused M16 "--sha given twice is refused" "2 times" mr merge 4242 --sha "${OTHER_SHA}" --sha "${HEAD_SHA}"
+expect_refused M17 "mr merge --help gets no short-circuit (judged, refused with no pin)" "no sha was given" mr merge --auto-merge=false --help
 reset_fx; green_fx
-expect_refused M17 "mr merge --help gets no short-circuit (judged, refused with no pin)" "no sha was given" mr merge --help
+expect_refused M23 "--help then --help=false (pflag: last wins, so it merges) is refused" "no sha was given" mr merge 4242 --auto-merge=false --help --help=false --yes
 reset_fx; green_fx
-expect_refused M23 "--help then --help=false (pflag: last wins, so it merges) is refused" "no sha was given" mr merge 4242 --help --help=false --yes
+expect_refused M24 "-h then --help=0 is refused" "no sha was given" mr merge 4242 --auto-merge=false -h --help=0 --yes
 reset_fx; green_fx
-expect_refused M24 "-h then --help=0 is refused" "no sha was given" mr merge 4242 -h --help=0 --yes
-reset_fx; green_fx
-expect_refused M18 "an unknown flag before the subcommand is refused" "comes before the subcommand" --bogus x mr merge 4242 --sha "${HEAD_SHA}"
+expect_refused M18 "an unknown flag before the subcommand is refused" "comes before the subcommand" --bogus x mr merge 4242 --auto-merge=false --sha "${HEAD_SHA}"
 reset_fx; green_fx; printf '{"iid":4242,"sha":"%s","head_pipeline":{"status":"success"}}\n' "${HEAD_SHA}" > "${FX}/mrview.out"
-expect_refused M19 "an MR read with no project_id is refused" "no usable sha" mr merge 4242 --sha "${HEAD_SHA}"
+expect_refused M19 "an MR read with no project_id is refused" "no usable sha" mr merge 4242 --auto-merge=false --sha "${HEAD_SHA}"
 reset_fx; green_fx
 printf '{"id":"%s","parent_ids":["%s"]}\n' "${MERGE_SHA}" "${HEAD_SHA}" > "${FX}/commit.out"
-expect_refused M20 "a merged-results commit with one parent is refused" "do not end in head" mr merge 4242 --sha "${HEAD_SHA}"
+expect_refused M20 "a merged-results commit with one parent is refused" "do not end in head" mr merge 4242 --auto-merge=false --sha "${HEAD_SHA}"
 reset_fx; green_fx
-expect_ran M21 "no selector: the current branch's MR, pinned and green, runs" any mr merge --sha "${HEAD_SHA}" --yes
+expect_ran M21 "no selector: the current branch's MR, pinned and green, runs" any mr merge --auto-merge=false --sha "${HEAD_SHA}" --yes
 if [[ "$(reads)" == *"mr view -F json"* ]]; then ok "M21b. the current-branch MR was read"; else bad "M21b. current-branch read" "$(detail)"; fi
 reset_fx; green_fx
-expect_refused M22 "mr merge -R<repo> attached, no --sha, is refused" "no sha was given" mr merge -Rexample-group/example-app 4242
+expect_refused M22 "mr merge -R<repo> attached, no --sha, is refused" "no sha was given" mr merge -Rexample-group/example-app 4242 --auto-merge=false
 # A flag cluster before the subcommand whose meaning differs between the
 # guard's flag table and cobra's command walk (critic round 3). Measured, glab
 # 1.112: `glab mr -ym merge x --help` prints mr merge's help, so cobra routes
@@ -264,11 +279,11 @@ for cl in -ym -sm -dm -rm -hm; do
   expect_refused "M25${cl}" "mr ${cl} merge 4242 (a cluster before the subcommand) is refused" "before the subcommand" mr "${cl}" merge 4242
 done
 reset_fx; green_fx
-expect_refused M26 "mr -h merge 4242 --sha <head> (help before the subcommand) is refused" "before the subcommand" mr -h merge 4242 --sha "${HEAD_SHA}" --yes
+expect_refused M26 "mr -h merge 4242 --sha <head> (help before the subcommand) is refused" "before the subcommand" mr -h merge 4242 --auto-merge=false --sha "${HEAD_SHA}" --yes
 reset_fx; green_fx
-expect_refused M27 "-y before mr, then merge, is refused" "before the subcommand" -y mr merge 4242 --sha "${HEAD_SHA}"
+expect_refused M27 "-y before mr, then merge, is refused" "before the subcommand" -y mr merge 4242 --auto-merge=false --sha "${HEAD_SHA}"
 reset_fx; green_fx
-expect_refused M28 "a cluster before mr merge, with a pin, is still refused" "before the subcommand" mr -ym merge 4242 --sha "${HEAD_SHA}"
+expect_refused M28 "a cluster before mr merge, with a pin, is still refused" "before the subcommand" mr -ym merge 4242 --auto-merge=false --sha "${HEAD_SHA}"
 # The class, not the listed sites: EVERY short flag, every two-letter cluster of
 # them, and every long flag in the tables, placed before `merge` and before
 # `mr`, must be refused. Only -R/--repo forms may sit there (M29-M31).
@@ -283,19 +298,19 @@ M32_WORDS+=" --message --sha --squash-message --auto-merge --when-pipeline-succe
 for w in ${M32_WORDS}; do
   for shape in pre-merge pre-mr; do
     reset_fx; green_fx
-    if [ "${shape}" = pre-merge ]; then run mr "${w}" merge 4242 --sha "${HEAD_SHA}" --yes
-    else run "${w}" mr merge 4242 --sha "${HEAD_SHA}" --yes; fi
+    if [ "${shape}" = pre-merge ]; then run mr "${w}" merge 4242 --auto-merge=false --sha "${HEAD_SHA}" --yes
+    else run "${w}" mr merge 4242 --auto-merge=false --sha "${HEAD_SHA}" --yes; fi
     refused || M32_BAD+=" ${shape}:${w}"
   done
 done
 if [ -z "${M32_BAD}" ]; then ok "M32. every non-repo flag spelling before the subcommand is refused ($(wc -w <<<"${M32_WORDS}") spellings x 2 shapes)"
 else bad "M32. flag spellings before the subcommand that were not refused" "${M32_BAD}"; fi
 reset_fx; green_fx
-expect_ran M29 "--repo <repo> before the subcommand, pinned and green, runs" any --repo example-group/example-app mr merge 4242 --sha "${HEAD_SHA}" --yes
+expect_ran M29 "--repo <repo> before the subcommand, pinned and green, runs" any --repo example-group/example-app mr merge 4242 --auto-merge=false --sha "${HEAD_SHA}" --yes
 reset_fx; green_fx
-expect_ran M30 "mr --repo=<repo> merge, pinned and green, runs" any mr --repo=example-group/example-app merge 4242 --sha "${HEAD_SHA}" --yes
+expect_ran M30 "mr --repo=<repo> merge, pinned and green, runs" any mr --repo=example-group/example-app merge 4242 --auto-merge=false --sha "${HEAD_SHA}" --yes
 reset_fx; green_fx
-expect_ran M31 "mr -R<repo> merge (attached), pinned and green, runs" any mr -Rexample-group/example-app merge 4242 --sha "${HEAD_SHA}" --yes
+expect_ran M31 "mr -R<repo> merge (attached), pinned and green, runs" any mr -Rexample-group/example-app merge 4242 --auto-merge=false --sha "${HEAD_SHA}" --yes
 
 echo
 echo "--- api: the REST merge route is refused outright ---"
@@ -371,7 +386,7 @@ expect_ran T10 "DELETE a car (take it off the train) runs with no reads" none ap
 reset_fx
 expect_ran T11 "GET a car runs with no reads" none api "projects/:id/merge_trains/merge_requests/4242"
 reset_fx; green_fx
-expect_ran T12 "auto_merge=true plus the pin, passed pipeline, runs" any api -X POST "projects/:id/merge_trains/merge_requests/4242" -f auto_merge=true -f "sha=${HEAD_SHA}"
+expect_refused T12 "auto_merge=true plus the pin, passed pipeline, is refused (a deferred boarding, DND-1941)" "auto_merge" api -X POST "projects/:id/merge_trains/merge_requests/4242" -f auto_merge=true -f "sha=${HEAD_SHA}"
 reset_fx; green_fx
 expect_ran T13 "an encoded project path" any api -X POST "projects/example-group%2Fexample-app/merge_trains/merge_requests/4242" -f "sha=${HEAD_SHA}"
 if [[ "$(reads)" == *"api projects/example-group%2Fexample-app/merge_requests/4242"* ]]; then ok "T13b. the encoded project was re-encoded for the MR read"
@@ -482,7 +497,7 @@ echo "--- DND-1845: every merge needs integration-gate's receipt for the MR's he
 # receipt for exactly the MR's head (ai/lib/integration-receipt.sh, the reader
 # gh-athena and locked-merge use) and refuses without it.
 TRAIN="projects/:id/merge_trains/merge_requests/4242"
-MERGE_ARGS=(mr merge 4242 --sha "${HEAD_SHA}" --yes)
+MERGE_ARGS=(mr merge 4242 --auto-merge=false --sha "${HEAD_SHA}" --yes)
 BOARD_ARGS=(api -X POST "${TRAIN}" -f "sha=${HEAD_SHA}")
 # receipt_refused <id> <label> <kind> <args…> : refused with that kind, a Fix:
 # naming integration-gate, and nothing that merges reached glab.
@@ -508,7 +523,7 @@ receipt_refused R1 "THE MISS: mr merge, pinned head, passed pipeline, NO receipt
 reset_fx; nogate_fx
 receipt_refused R2 "THE MISS on the train: boarding, pinned head, passed pipeline, NO receipt -> refused" "NO RECEIPT" "${BOARD_ARGS[@]}"
 reset_fx; nogate_fx
-receipt_refused R2b "mr merge --auto-merge with no receipt -> refused" "NO RECEIPT" mr merge 4242 --sha "${HEAD_SHA}" --auto-merge --yes
+expect_refused R2b "mr merge --auto-merge with no receipt -> refused (deferred, before any read)" "deferred merge" mr merge 4242 --sha "${HEAD_SHA}" --auto-merge --yes
 reset_fx; green_fx
 receipt_ran R3 "mr merge with a receipt for the head -> runs" "${MERGE_ARGS[@]}"
 reset_fx; green_fx
@@ -657,22 +672,250 @@ reset_fx; green_fx
 receipt_ran R24 "train boarding with --hostname -> runs" api --hostname gitlab.com -X POST "${TRAIN}" -f "sha=${HEAD_SHA}"
 [[ "$(reads)" == *"api --hostname gitlab.com projects/7000001/repository/branches/main"* ]] \
   && ok "R24b. the target tip is read on the same host" || bad "R24b. hostname on the branch read" "$(detail)"
-reset_fx; green_fx; for f in mrview mrapi; do jq -c '.target_branch = "release/2026.10"' "${FX}/${f}.out" > "${FX}/${f}.tmp" && mv "${FX}/${f}.tmp" "${FX}/${f}.out"; done
+reset_fx; green_fx; for f in mrview mrapi; do jq -c '.target_branch = "release/2026.10"' "${FX}/${f}.out" > "${FX}/${f}.tmp" && mv "${FX}/${f}.tmp" "${FX}/${f}.out"; done; tip_pipes success release/2026.10
 receipt_ran R25 "a target branch with a slash -> runs" "${MERGE_ARGS[@]}"
 [[ "$(reads)" == *"repository/branches/release%2F2026.10"* ]] && ok "R25b. the branch name is URL-encoded in the read" || bad "R25b. branch encoding" "$(detail)"
 
 echo
+echo "--- DND-1941: a deferred merge is refused (the receipt cannot be read when it lands) ---"
+# glab's `mr merge` sets auto-merge by DEFAULT (glab 1.92.1 --help: "--auto-merge
+# Set auto-merge. (true)"): GitLab then merges when its own checks pass, later,
+# onto whatever the target is then. Every project merged through glab-athena
+# needs a receipt (DND-1845), so every project is gated, and a deferred merge is
+# refused everywhere (DND-969 on GitHub). Each refusal is made before any read.
+# am_refused <id> <label> <args…> : refused as a deferred merge, with no read.
+am_refused() {
+  local id="$1" label="$2"; shift 2
+  run "$@"
+  if refused && [[ "${ERR}" == *"deferred merge"* ]] && [[ "$(grep -m1 'Fix:' <<<"${ERR}")" == *"--auto-merge=false"* ]] && [ ! -s "${STUB_READS}" ]; then ok "${id}. ${label}"
+  else bad "${id}. ${label} (want a deferred-merge refusal, Fix naming --auto-merge=false, no read)" "$(detail)"; fi
+}
+reset_fx; green_fx
+am_refused AM1 "THE MISS: mr merge --sha <head>, green, receipt, auto-merge left at glab's default -> refused" mr merge 4242 --sha "${HEAD_SHA}" --yes
+reset_fx; green_fx
+am_refused AM2 "--auto-merge -> refused" mr merge 4242 --sha "${HEAD_SHA}" --auto-merge --yes
+reset_fx; green_fx
+am_refused AM3 "--auto-merge=true -> refused" mr merge 4242 --sha "${HEAD_SHA}" --auto-merge=true --yes
+reset_fx; green_fx
+am_refused AM4 "--auto-merge=false then --auto-merge (pflag: the last wins) -> refused" mr merge 4242 --sha "${HEAD_SHA}" --auto-merge=false --auto-merge --yes
+reset_fx; green_fx
+am_refused AM5 "--auto-merge false (a bool takes no separate value; 'false' is a positional) -> refused" mr merge 4242 --sha "${HEAD_SHA}" --auto-merge false --yes
+reset_fx; green_fx
+am_refused AM6 "--when-pipeline-succeeds (glab's hidden, deprecated spelling) -> refused" mr merge 4242 --sha "${HEAD_SHA}" --auto-merge=false --when-pipeline-succeeds --yes
+reset_fx; green_fx
+am_refused AM7 "--when-pipeline-succeeds=false (any spelling of the deprecated flag) -> refused" mr merge 4242 --sha "${HEAD_SHA}" --auto-merge=false --when-pipeline-succeeds=false --yes
+reset_fx; green_fx
+am_refused AM8 "mr accept, default auto-merge -> refused" mr accept 4242 --sha "${HEAD_SHA}" --yes
+reset_fx; green_fx
+expect_refused AM9 "--auto-merge=maybe (not a bool pflag parses) -> refused" "maybe" mr merge 4242 --sha "${HEAD_SHA}" --auto-merge=maybe --yes
+for f in false 0 f F FALSE False; do
+  reset_fx; green_fx
+  receipt_ran "AM10-${f}" "--auto-merge=${f} (immediate), green, receipt -> runs" mr merge 4242 --sha "${HEAD_SHA}" "--auto-merge=${f}" --yes
+done
+reset_fx; green_fx
+am_refused AM11 "THE MISS on the train: boarding with -f auto_merge=true -> refused" api -X POST "${TRAIN}" -f auto_merge=true -f "sha=${HEAD_SHA}"
+reset_fx; green_fx
+am_refused AM12 "boarding with -F when_pipeline_succeeds=true -> refused" api -X POST "${TRAIN}" -F when_pipeline_succeeds=true -f "sha=${HEAD_SHA}"
+reset_fx; green_fx
+am_refused AM13 "boarding with -f auto_merge=false (the field at all) -> refused" api -X POST "${TRAIN}" -f auto_merge=false -f "sha=${HEAD_SHA}"
+reset_fx; green_fx
+am_refused AM14 "boarding with an upper-case AUTO_MERGE field -> refused" api -X POST "${TRAIN}" -f AUTO_MERGE=true -f "sha=${HEAD_SHA}"
+
+echo
+echo "--- DND-1941: API ref writes are refused (the DND-741 analogue) ---"
+# ref_refused <id> <label> <must-contain> <args…> : refused as a ref write, with
+# no read and nothing reaching glab.
+ref_refused() {
+  local id="$1" label="$2" want="$3"; shift 3
+  run "$@"
+  if refused && [[ "${ERR}" == *"moves a branch"* ]] && [[ "${ERR}" == *"${want}"* ]] && [ ! -s "${STUB_READS}" ]; then ok "${id}. ${label}"
+  else bad "${id}. ${label} (want a ref-write refusal naming '${want}')" "$(detail)"; fi
+}
+reset_fx; ref_refused W1 "POST repository/branches (create a branch)" "repository/branches" api -X POST "projects/:id/repository/branches" -f branch=x -f ref=main
+reset_fx; ref_refused W2 "POST repository/commits with branch=main" "repository/commits" api -X POST "projects/:id/repository/commits" -f branch=main -f "commit_message=x" -f "actions[][action]=create"
+reset_fx; ref_refused W2b "POST repository/commits on a feature branch (the scope is every branch)" "repository/commits" api -X POST "projects/:id/repository/commits" -f branch=feature
+reset_fx; ref_refused W2c "repository/commits with fields and no -X (glab defaults to POST)" "repository/commits" api "projects/:id/repository/commits" -f branch=main
+reset_fx; ref_refused W3 "POST repository/commits/<sha>/cherry_pick" "cherry_pick" api -X POST "projects/:id/repository/commits/${HEAD_SHA}/cherry_pick" -f branch=main
+reset_fx; ref_refused W3b "POST repository/commits/<sha>/revert" "revert" api -X POST "projects/:id/repository/commits/${HEAD_SHA}/revert" -f branch=main
+reset_fx; ref_refused W4 "PUT repository/files/<encoded path>" "repository/files" api -X PUT "projects/:id/repository/files/lib%2Fa.ex" -f branch=main -f content=x
+reset_fx; ref_refused W4b "DELETE repository/files/<path> (a commit too)" "repository/files" api -X DELETE "projects/:id/repository/files/lib%2Fa.ex" -f branch=main
+reset_fx; ref_refused W5 "POST protected_branches" "protected_branches" api -X POST "projects/:id/protected_branches" -f name=x
+reset_fx; ref_refused W5b "DELETE protected_branches/main (unprotects main)" "protected_branches" api -X DELETE "projects/:id/protected_branches/main"
+reset_fx; ref_refused W5c "PATCH protected_branches/main (allow force push)" "protected_branches" api -X PATCH "projects/:id/protected_branches/main" -f allow_force_push=true
+reset_fx; ref_refused W5d "PUT repository/branches/main/unprotect" "repository/branches" api -X PUT "projects/:id/repository/branches/main/unprotect"
+reset_fx; ref_refused W6 "POST remote_mirrors" "remote_mirrors" api -X POST "projects/:id/remote_mirrors" -f url=https://example.invalid/x.git
+reset_fx; ref_refused W6b "PUT remote_mirrors/<id>" "remote_mirrors" api -X PUT "projects/:id/remote_mirrors/1" -f enabled=true
+reset_fx; ref_refused W6c "POST remote_mirrors/<id>/sync" "remote_mirrors" api -X POST "projects/:id/remote_mirrors/1/sync"
+reset_fx; ref_refused W7 "POST mirror/pull (a pull mirror moves refs in)" "mirror/pull" api -X POST "projects/:id/mirror/pull"
+reset_fx; ref_refused W8 "POST repository/tags" "repository/tags" api -X POST "projects/:id/repository/tags" -f tag_name=v1 -f ref=main
+reset_fx; ref_refused W8b "POST protected_tags" "protected_tags" api -X POST "projects/:id/protected_tags" -f name=v1
+reset_fx; ref_refused W9 "PUT merge_requests/<iid>/rebase (moves the source branch)" "rebase" api -X PUT "projects/:id/merge_requests/4242/rebase"
+reset_fx; ref_refused W10 "PUT repository/submodules/<path>" "repository/submodules" api -X PUT "projects/:id/repository/submodules/lib%2Fdep" -f branch=main -f "commit_sha=${HEAD_SHA}"
+reset_fx; ref_refused W11 "POST repository/changelog (commits the changelog)" "repository/changelog" api -X POST "projects/:id/repository/changelog" -f version=1.0.0
+reset_fx; ref_refused W12 "an encoded project path, upper case, a .json suffix" "repository/commits" api -X post "PROJECTS/example-group%2Fexample-app/REPOSITORY/COMMITS.json" -f branch=main
+reset_fx; ref_refused W13 "the full URL with api/v4" "repository/branches" api -X POST "https://gitlab.com/api/v4/projects/1/repository/branches" -f branch=x
+reset_fx; ref_refused W14 "a branch DELETE with a method-override header is not a plain DELETE" "repository/branches" api -X DELETE -H "X-HTTP-Method-Override: POST" "projects/:id/repository/branches/feature"
+reset_fx; ref_refused W15 "a branch DELETE with a _method field is not a plain DELETE" "repository/branches" api -X DELETE -f "_method=POST" "projects/:id/repository/branches/feature"
+reset_fx; ref_refused W16 "a DELETE that also names protected_branches deeper in the path" "protected_branches" api -X DELETE "projects/1/repository/branches/x/protected_branches/main"
+reset_fx; expect_ran W17 "GET repository/branches passes" none api "projects/:id/repository/branches"
+reset_fx; expect_ran W18 "a plain DELETE of a branch passes (moves nothing onto a ref)" none api -X DELETE "projects/:id/repository/branches/feature%2Fx"
+reset_fx; expect_ran W19 "a plain DELETE of a tag passes" none api -X DELETE "projects/:id/repository/tags/v1"
+reset_fx; expect_ran W20 "GET protected_branches passes" none api "projects/:id/protected_branches"
+reset_fx; expect_ran W21 "GET remote_mirrors passes" none api "projects/:id/remote_mirrors"
+reset_fx; expect_ran W22 "POST a commit comment passes" none api -X POST "projects/:id/repository/commits/${HEAD_SHA}/comments" -f note=x
+reset_fx; expect_ran W23 "GET a file passes" none api "projects/:id/repository/files/lib%2Fa.ex?ref=main"
+
+echo
+echo "--- DND-1941: GraphQL ref writes are refused ---"
+reset_fx; ref_refused GR1 "commitCreate" "commitCreate" api graphql -f 'query=mutation { commitCreate(input: {projectPath: "g/p", branch: "main", message: "x", actions: []}) { errors } }'
+reset_fx; ref_refused GR2 "createBranch" "createBranch" api graphql -f 'query=mutation { createBranch(input: {projectPath: "g/p", name: "x", ref: "main"}) { errors } }'
+reset_fx; ref_refused GR3 "tagCreate" "tagCreate" api graphql -f 'query=mutation { tagCreate(input: {}) { errors } }'
+reset_fx; ref_refused GR4 "branchRuleUpdate (protection)" "branchRuleUpdate" api graphql -f 'query=mutation { branchRuleUpdate(input: {}) { errors } }'
+reset_fx; ref_refused GR5 "branchRuleDelete (protection)" "branchRuleDelete" api graphql -f 'query=mutation { branchRuleDelete(input: {}) { errors } }'
+reset_fx; printf '{"query":"mutation { commit\\u0043reate(input: {}) { errors } }"}' > "${TMP}/qc.json"
+reset_fx; ref_refused GR6 "commitCreate in an --input body with a \\u escape" "commitCreate" api graphql --input "${TMP}/qc.json"
+reset_fx; expect_ran GR7 "branchDelete passes (a ref delete)" none api graphql -f 'query=mutation { branchDelete(input: {}) { errors } }'
+
+echo
+echo "--- DND-1941: a RED target tip stops the line (DND-1902 on GitHub) ---"
+# The tip's own main pipelines (projects/<id>/pipelines?sha=<tip>&ref=<target>).
+# The latest pipeline of each source is judged; an older red one is superseded
+# only when that source's latest SUCCEEDED. A red tip refuses every merge but a
+# red-main fix, a head that contains the tip. No pipeline at all is COULD NOT
+# LOOK, never green.
+# tip_refused <id> <label> <mark> <args…> : refused with <mark>, nothing ran.
+tip_refused() {
+  local id="$1" label="$2" mark="$3"; shift 3
+  run "$@"
+  if refused && [[ "${ERR}" == *"${mark}"* ]]; then ok "${id}. ${label}"
+  else bad "${id}. ${label} (want a refusal naming '${mark}')" "$(detail)"; fi
+}
+tip_ran() {
+  local id="$1" label="$2" note="$3"; shift 3
+  run "$@"
+  if ran_once "$@" && [[ "${ERR}" == *"${note}"* ]]; then ok "${id}. ${label}"
+  else bad "${id}. ${label} (want one exec and '${note}')" "$(detail)"; fi
+}
+reset_fx; green_fx; tip_pipes failed
+tip_refused P1 "THE MISS: an ordinary MR onto a failed tip -> refused (MAIN RED)" "MAIN RED:" "${MERGE_ARGS[@]}"
+[[ "${ERR}" == *"pipelines/8000000001"* ]] && ok "P1b. the refusal names the red pipeline" || bad "P1b. red pipeline named" "$(detail)"
+[[ "$(grep -m1 'Fix:' <<<"${ERR}")" == *"red-main fix"* ]] && ok "P1c. the Fix names the red-main fix" || bad "P1c. Fix" "$(detail)"
+reset_fx; green_fx; tip_pipes failed
+tip_refused P2 "the same on the train" "MAIN RED:" "${BOARD_ARGS[@]}"
+reset_fx; green_fx; tip_pipes failed; printf '{"id":"%s"}\n' "${TIP_FX}" > "${FX}/mergebase.out"
+tip_ran P3 "a red-main fix (the forge's merge base of tip and head IS the tip) -> runs" "RED-MAIN FIX" "${MERGE_ARGS[@]}"
+reset_fx; green_fx; tip_pipes failed; printf '{"id":"%s"}\n' "${OLD_TIP}" > "${FX}/mergebase.out"
+tip_refused P4 "a head that does not contain the red tip -> refused" "MAIN RED:" "${MERGE_ARGS[@]}"
+reset_fx; green_fx; tip_pipes failed; fx mergebase '' 1 'glab: 500'
+tip_refused P5 "red tip, containment unreadable -> COULD NOT LOOK" "COULD NOT LOOK:" "${MERGE_ARGS[@]}"
+reset_fx; green_fx; fx pipes '[]'
+tip_refused P6 "THE MISS: a tip with NO pipeline -> COULD NOT LOOK, never green" "COULD NOT LOOK:" "${MERGE_ARGS[@]}"
+[[ "${ERR}" == *"no pipeline"* ]] && ok "P6b. the refusal says no pipeline ran on the tip" || bad "P6b. no pipeline named" "$(detail)"
+reset_fx; green_fx; fx pipes '' 1 'glab: 503 Service Unavailable'
+tip_refused P7 "the tip's pipelines cannot be read -> COULD NOT LOOK, the error named" "503 Service Unavailable" "${MERGE_ARGS[@]}"
+[[ "${ERR}" == *"COULD NOT LOOK:"* ]] && ok "P7b. it is COULD NOT LOOK" || bad "P7b. LOOK mark" "$(detail)"
+reset_fx; green_fx; fx pipes '{"message":"404 Not Found"}'
+tip_refused P8 "a pipelines answer that is not a list -> COULD NOT LOOK" "COULD NOT LOOK:" "${MERGE_ARGS[@]}"
+reset_fx; green_fx; tip_pipes running
+tip_ran P9 "a running tip pipeline is not red: the merge runs and names it PENDING" "PENDING" "${MERGE_ARGS[@]}"
+reset_fx; green_fx; pipes_are "$(pipe 8000000003 success)" "$(pipe 8000000002 failed)"
+tip_ran P10 "an older failed pipeline superseded by a newer SUCCESS of the same source -> runs" "no judged run is red" "${MERGE_ARGS[@]}"
+reset_fx; green_fx; pipes_are "$(pipe 8000000003 running)" "$(pipe 8000000002 failed)"
+tip_refused P11 "an older failed pipeline, the newer one only running -> still red" "does not supersede" "${MERGE_ARGS[@]}"
+reset_fx; green_fx; pipes_are "$(pipe 8000000003 success)" "$(pipe 8000000002 failed parent_pipeline)"
+tip_refused P12 "a failed child pipeline, older than a green push pipeline -> red (each source's latest is judged; another source never supersedes it)" "MAIN RED:" "${MERGE_ARGS[@]}"
+reset_fx; green_fx; tip_pipes canceled
+tip_refused P13 "a canceled tip pipeline is red" "MAIN RED:" "${MERGE_ARGS[@]}"
+reset_fx; green_fx; tip_pipes bogus_status
+tip_refused P14 "a status the judge does not know -> COULD NOT LOOK" "COULD NOT LOOK:" "${MERGE_ARGS[@]}"
+reset_fx; green_fx; printf '[%s]\n' "$(pipe 8000000001 success push "${OLD_TIP}")" > "${FX}/pipes.out"
+tip_refused P15 "a listed pipeline whose sha is not the tip -> COULD NOT LOOK" "COULD NOT LOOK:" "${MERGE_ARGS[@]}"
+reset_fx; green_fx; printf '[%s]\n' "$(pipe 8000000001 success push "${TIP_FX}" other-branch)" > "${FX}/pipes.out"
+tip_refused P16 "a listed pipeline on another ref -> COULD NOT LOOK" "COULD NOT LOOK:" "${MERGE_ARGS[@]}"
+reset_fx; green_fx
+p100="$(for i in $(seq 1 100); do pipe "$((8000000100 + i))" success; printf ','; done)"; printf '[%s]\n' "${p100%,}" > "${FX}/pipes.out"
+tip_refused P17 "a full page of 100 pipelines (more may exist) -> COULD NOT LOOK" "COULD NOT LOOK:" "${MERGE_ARGS[@]}"
+reset_fx; green_fx
+receipt_ran P18 "a green tip: the merge runs and names the tip" "${MERGE_ARGS[@]}"
+[[ "${ERR}" == *"BASE-TIP main ${TIP_FX}"* ]] && [[ "$(reads)" == *"api --hostname gitlab.com projects/7000001/pipelines?sha=${TIP_FX}&ref=main&per_page=100"* ]] \
+  && ok "P18b. the tip's pipelines were read on the MR's host, for the tip and the target" || bad "P18b. tip read" "$(detail)"
+[[ "${ERR}" == *"content: no check declared for example-group/example-app"* ]] \
+  && ok "P18c. a project with no content declaration says so, naming the key it looked up" || bad "P18c. content key named" "$(detail)"
+reset_fx; nogate_fx; tip_pipes failed
+receipt_refused P19 "a red tip does not excuse a missing receipt (the receipt is read first)" "NO RECEIPT" "${MERGE_ARGS[@]}"
+
+echo
+echo "--- DND-1941: the tip's CONTENT (ai/config/main-content-checks.json) ---"
+# The declaration is keyed by project path; the GitLab project cjpoll/gen_saas
+# must resolve the same entry as the GitHub repo CJPoll/gen_saas. A fixture
+# checkout of it, its tip holding two migrations with one version.
+GS="${TMP}/gen_saas"; MIG="apps/athena/priv/repo/migrations"
+git init -q -b main "${GS}"
+gs() { git -C "${GS}" -c user.name=t -c user.email=t@t -c commit.gpgsign=false "$@"; }
+gs remote add origin git@gitlab.com:cjpoll/gen_saas.git
+mkdir -p "${GS}/${MIG}"; : > "${GS}/${MIG}/20250101000000_init.exs"; gs add -A; gs commit -q -m base
+GS_BASE="$(gs rev-parse HEAD)"
+: > "${GS}/${MIG}/20250101000000_other.exs"; gs add -A; gs commit -q -m dup
+GS_DUP="$(gs rev-parse HEAD)"
+gs mv "${MIG}/20250101000000_other.exs" "${MIG}/20250102000000_other.exs"; gs commit -q -m fix
+GS_FIX="$(gs rev-parse HEAD)"
+gs checkout -q -b still "${GS_DUP}"; : > "${GS}/${MIG}/20250103000000_more.exs"; gs add -A; gs commit -q -m still
+GS_STILL="$(gs rev-parse HEAD)"
+gs checkout -q -b feat "${GS_BASE}"; : > "${GS}/${MIG}/20250104000000_feat.exs"; gs add -A; gs commit -q -m feat
+GS_FEAT="$(gs rev-parse HEAD)"
+gs checkout -q main
+GS_STORE="$(git -C "${GS}" rev-parse --path-format=absolute --git-common-dir)/integration-receipts"
+# gs_fx <head> <tip> : MR !77 of cjpoll/gen_saas, head <head> with a passed
+# branch pipeline on it, the target tip <tip> with a passed main pipeline, and
+# a sealed receipt for <head> on <tip>.
+gs_fx() {
+  local m
+  m="$(printf '{"iid":77,"project_id":7000002,"sha":"%s","target_branch":"main","web_url":"https://gitlab.com/cjpoll/gen_saas/-/merge_requests/77","head_pipeline":{"id":9000000077,"sha":"%s","ref":"feat","status":"success"}}' "$1" "$1")"
+  printf '%s\n' "$m" > "${FX}/mrview.out"; printf '%s\n' "$m" > "${FX}/mrapi.out"
+  printf '{"name":"main","commit":{"id":"%s"}}\n' "$2" > "${FX}/branch.out"
+  printf '[%s]\n' "$(pipe 8000000077 success push "$2")" > "${FX}/pipes.out"
+  printf '[{"id":1,"head_commit_sha":"%s"}]\n' "$1" > "${FX}/versions.out"
+  rm -rf "${GS_STORE}"; STORE_FX="${GS_STORE}" plant "$1" "$2"
+}
+cd "${GS}" || exit 2
+reset_fx; gs_fx "${GS_FEAT}" "${GS_DUP}"
+tip_refused GS1 "THE MISS: an ordinary MR onto a tip with a duplicated migration version -> refused" "Duplicated migration version" mr merge 77 --sha "${GS_FEAT}" --auto-merge=false --yes
+[[ "${ERR}" == *"MAIN RED:"* ]] && [[ "${ERR}" == *"20250101000000_init.exs, 20250101000000_other.exs"* ]] \
+  && ok "GS1b. it is MAIN RED and names both files" || bad "GS1b. dup files named" "$(detail)"
+reset_fx; gs_fx "${GS_FIX}" "${GS_DUP}"
+tip_ran GS2 "a red-main fix (contains the tip, removes the duplicate) -> runs" "RED-MAIN FIX" mr merge 77 --sha "${GS_FIX}" --auto-merge=false --yes
+reset_fx; gs_fx "${GS_STILL}" "${GS_DUP}"
+tip_refused GS3 "a head that contains the tip but keeps the duplicate -> refused" "still holds" mr merge 77 --sha "${GS_STILL}" --auto-merge=false --yes
+reset_fx; gs_fx "${GS_FEAT}" "${GS_BASE}"
+tip_ran GS4 "the GitLab project cjpoll/gen_saas resolves the gen_saas declaration: a clean tip is read and runs" "no duplicated migration version (1 director(ies), 1 migration(s) read)" mr merge 77 --sha "${GS_FEAT}" --auto-merge=false --yes
+reset_fx; gs_fx "${GS_FEAT}" "${GS_DUP}"
+tip_refused GS5 "the same refusal on the train" "Duplicated migration version" api -X POST "projects/:id/merge_trains/merge_requests/77" -f "sha=${GS_FEAT}"
+cd "${REPO_FX}" || exit 2
+
+echo
+echo "--- DND-1941: the shared content key is never computed wrong silently ---"
+# gmg_content_re (ai/lib/gh-merge-guard.sh, shared by both guards): a key that
+# is malformed for its type is an error, never "no check declared".
+key_rc() { ( . "${AI_DIR}/lib/gh-merge-guard.sh" >/dev/null 2>&1; gmg_content_re "$1" "$2"; echo "rc=$? re=${GMG_CONTENT_RE} key=${GMG_CONTENT_KEY:-} why=${GMG_CONTENT_WHY:-}" ); }
+out="$(key_rc "" gen_saas)"; [[ "${out}" == rc=2* ]] && [[ "${out}" == *"malformed"* ]] && ok "K1. an empty owner is an error, not 'no check'" || bad "K1. empty owner" "${out}"
+out="$(key_rc cjpoll "")"; [[ "${out}" == rc=2* ]] && ok "K2. an empty repo is an error" || bad "K2. empty repo" "${out}"
+out="$(key_rc "cj poll" gen_saas)"; [[ "${out}" == rc=2* ]] && ok "K3. whitespace in a key is an error" || bad "K3. whitespace" "${out}"
+out="$(key_rc CJPoll gen_saas)"; [[ "${out}" == rc=0*"apps/"* ]] && ok "K4. GitHub's CJPoll/gen_saas resolves the entry (case-folded)" || bad "K4. github key" "${out}"
+out="$(key_rc cjpoll gen_saas)"; [[ "${out}" == rc=0*"apps/"* ]] && ok "K5. GitLab's cjpoll/gen_saas resolves the same entry" || bad "K5. gitlab key" "${out}"
+out="$(key_rc example-group/sub example-app)"; [[ "${out}" == "rc=0 re= key=example-group/sub/example-app"* ]] && ok "K6. a nested GitLab group is one key, and an undeclared one is named" || bad "K6. nested key" "${out}"
+
+echo
 echo "--- the dry-run seam ---"
 reset_fx; green_fx
-OUT="$(GLAB_ATHENA_MERGE_DRY_RUN=1 "${WRAPPER}" mr merge 4242 --sha "${HEAD_SHA}" 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"
-if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: would exec glab mr merge 4242 --sha ${HEAD_SHA}"* ]] && [ ! -s "${STUB_EXECS}" ] && [ -s "${STUB_READS}" ]; then
+OUT="$(GLAB_ATHENA_MERGE_DRY_RUN=1 "${WRAPPER}" mr merge 4242 --auto-merge=false --sha "${HEAD_SHA}" 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"
+if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: would exec glab mr merge 4242 --auto-merge=false --sha ${HEAD_SHA}"* ]] && [ ! -s "${STUB_EXECS}" ] && [ -s "${STUB_READS}" ]; then
   ok "D1. dry-run runs the guard's reads and execs nothing"
 else bad "D1. dry-run seam" "$(detail)"; fi
 reset_fx; green_fx
-OUT="$(GLAB_ATHENA_MERGE_DRY_RUN=1 "${WRAPPER}" mr merge 4242 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"
+OUT="$(GLAB_ATHENA_MERGE_DRY_RUN=1 "${WRAPPER}" mr merge 4242 --auto-merge=false 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"
 if refused; then ok "D2. dry-run still refuses"; else bad "D2. dry-run refusal" "$(detail)"; fi
 reset_fx; nogate_fx
-OUT="$(GLAB_ATHENA_MERGE_DRY_RUN=1 "${WRAPPER}" mr merge 4242 --sha "${HEAD_SHA}" 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"
+OUT="$(GLAB_ATHENA_MERGE_DRY_RUN=1 "${WRAPPER}" mr merge 4242 --auto-merge=false --sha "${HEAD_SHA}" 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"
 if refused && [[ "${ERR}" == *"NO RECEIPT"* ]]; then ok "D3. dry-run with no receipt refuses the same way (DND-1845)"; else bad "D3. dry-run receipt refusal" "$(detail)"; fi
 
 # DND-1647: no gh/glab call may have fallen through past its stub.

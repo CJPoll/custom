@@ -21,17 +21,30 @@
 #
 # THE ONE RULE, for every merge path this lets through: the call pins the MR's
 # exact head SHA, and the MR's head pipeline on that head PASSED.
-#   * `mr merge` / `mr accept` (any flags: --auto-merge, --when-pipeline-succeeds,
-#     --squash, --rebase, …) is REFUSED unless `--sha <sha>` is given, <sha> IS
-#     the MR's head, and the head pipeline passed on it (see glmg_check_head).
-#     --auto-merge does not relax this: with a passed pipeline there is nothing
-#     left to wait for, so it merges (or joins the train) at once.
+#   * `mr merge` / `mr accept` (--squash, --rebase, …) is REFUSED unless
+#     `--sha <sha>` is given, <sha> IS the MR's head, and the head pipeline
+#     passed on it (see glmg_check_head).
+#   * …and unless auto-merge is OFF by name, `--auto-merge=false` (DND-1941).
+#     glab sets auto-merge by DEFAULT (glab 1.92.1 --help: "--auto-merge Set
+#     auto-merge. (true)"), and auto-merge is a DEFERRED merge: GitLab
+#     completes it later, when its own checks pass (approvals, threads, a new
+#     pipeline), onto whatever the target branch is then. No receipt or
+#     red-tip judgment can be read at that moment, so it is refused, as gh-athena
+#     refuses `--auto` in a gated repo (DND-969); every project merged here is
+#     gated (DND-1845, below). `--when-pipeline-succeeds` (hidden, deprecated)
+#     is refused in any spelling. Before DND-1941 this said "--auto-merge does
+#     not relax this: with a passed pipeline there is nothing left to wait
+#     for"; but a merge GitLab cannot complete at once (an unmet approval rule,
+#     an open thread) can wait, scheduled, and complete later with nothing
+#     here re-read.
 #   * MERGE-TRAIN BOARDING — `glab-athena api -X POST
 #     projects/<p>/merge_trains/merge_requests/<iid> -f sha=<sha>` — is the
 #     guarded path the athena:merge-boarding flow already uses; it now needs the
 #     `sha` field, and the same head check. The train then re-tests the
 #     integrated result before the car merges. GET/HEAD (read a car) and DELETE
-#     (take a car off the train) pass. Any other method on a car is refused.
+#     (take a car off the train) pass. Any other method on a car is refused,
+#     and so is an `auto_merge` / `when_pipeline_succeeds` field (DND-1941: it
+#     boards the car later, when the checks pass, which is a deferred merge).
 #   * REST PUT projects/<p>/merge_requests/<iid>/merge (any non-GET method, or a
 #     method override) is REFUSED outright: `mr merge --sha` is its guarded form.
 #   * GraphQL mergeRequestAccept is REFUSED outright, wherever the query comes
@@ -43,6 +56,19 @@
 #     merging an MR, with no guard in the way.
 #   * `--auto-merge` on any command but `mr merge` (e.g. `mr create
 #     --auto-merge`) is REFUSED: it schedules a merge with no pin.
+#   * API writes that CREATE OR MOVE A REF, or change a branch's protection, are
+#     REFUSED outright (DND-1941, the GitLab side of DND-741): REST writes to
+#     repository/branches and repository/tags (a plain DELETE of one ref
+#     passes), POST repository/commits and its cherry_pick / revert,
+#     repository/files, repository/submodules, repository/changelog,
+#     protected_branches, protected_tags, remote_mirrors, mirror/pull and
+#     merge_requests/<iid>/rebase; and the GraphQL mutations in
+#     GLMG_REF_MUTATIONS. See glmg_ref_route for the scope decision.
+#
+# AND the target tip is not RED (DND-1941, the GitLab side of DND-1902): its
+# own pipelines and its content are judged by gmg_line_check, the code
+# gh-athena runs, with glmg_tip_health in place of the GitHub runs read. See
+# "stop the line" below.
 #
 # AND integration-gate passed that head (DND-1845, glmg_receipt_gate). Both
 # paths it lets through (`mr merge`/`mr accept --sha`, train boarding) read
@@ -103,11 +129,14 @@
 # glab's config dir, which glab-athena makes fresh and empty on every call.
 #
 # Residual (NOT checked; each still runs):
-#   * API writes that move a ref without merging: REST POST
-#     …/repository/commits, …/repository/branches, PUT/POST …/repository/files,
-#     GraphQL commitCreate / createBranch (the GitLab side of DND-741), and a
-#     `glab-athena git push` to the default branch. On walt_ui the default
-#     branch's protection is GitLab's own gate for those.
+#   * A ref move outside `api`: `glab mr rebase` (the CLI form of the refused
+#     rebase route), and a `glab-athena git push` to the default branch, which
+#     ai/lib/forge-git-passthrough.sh judges instead. A PUT projects/<p> that
+#     re-points default_branch or changes merge settings (it moves no ref).
+#     Other forge settings: approval rules, push rules, and branchRule*
+#     mutations other than create/update/delete. External commit statuses
+#     (POST projects/<p>/statuses/<sha>), as on GitHub. Before DND-1941 this
+#     listed the REST and GraphQL ref writes now refused.
 #   * A pipeline that has not been CREATED yet for the head: head_pipeline is
 #     then an older one, whose sha is not the head, so it is refused. A head
 #     pipeline that passed while a later, still-running pipeline exists for the
@@ -143,13 +172,34 @@
   exit 3
 }
 
+# The stop-the-line judges (DND-1902: gmg_line_check, gmg_content_health and
+# their marks) are gh-merge-guard.sh's, shared so the two forges cannot drift
+# (DND-1941). Loading it defines functions and constants only; nothing in it
+# runs, and its GitHub-only reads (gmg_tip_health) are never called here:
+# glmg_tip_health judges the GitLab tip in their place.
+GMG_TOOL=glab-athena
+# shellcheck source=gh-merge-guard.sh
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/gh-merge-guard.sh" || {
+  echo "glab-athena: REFUSING: cannot load ai/lib/gh-merge-guard.sh (the shared stop-the-line judges), so no merge can be judged." >&2
+  echo "  Fix: run glab-athena from a full ~/dev/custom checkout (ai/bin and ai/lib side by side)." >&2
+  exit 3
+}
+
 GLMG_TOOL=glab-athena
-GLMG_ESCALATE='Never merge around this (a bare `glab mr merge`, a `glab api` merge call, or the owner'"'"'s login); if the pipeline cannot pass, escalate to your admiral with the MR number and this output.'
+GLMG_ESCALATE='Never merge or move a branch around this (a bare `glab mr merge`, a `glab api` merge or ref write, or the owner'"'"'s login); if the pipeline cannot pass, escalate to your admiral with the MR number and this output.'
 GLMG_IG="~/dev/custom/ai/bin/integration-gate"
-GLMG_BOARD="read the MR's head and its head pipeline (\`glab mr view <iid> -F json\`: .sha and .head_pipeline.status must be success), then board it on the merge train — \`~/dev/custom/ai/bin/$GLMG_TOOL api -X POST \"projects/:id/merge_trains/merge_requests/<iid>\" -f sha=<head sha>\` — or, on a project with no merge train, \`~/dev/custom/ai/bin/$GLMG_TOOL mr merge <iid> --sha <head sha> --yes\`, running either from a checkout of the MR's project"
+GLMG_BOARD="read the MR's head and its head pipeline (\`glab mr view <iid> -F json\`: .sha and .head_pipeline.status must be success), then board it on the merge train — \`~/dev/custom/ai/bin/$GLMG_TOOL api -X POST \"projects/:id/merge_trains/merge_requests/<iid>\" -f sha=<head sha>\` — or, on a project with no merge train, \`~/dev/custom/ai/bin/$GLMG_TOOL mr merge <iid> --sha <head sha> --auto-merge=false --yes\`, running either from a checkout of the MR's project"
 GLMG_SAFE_PATH="gate the MR's head with \`$GLMG_IG\` (athena:merge-boarding -> Landing onto a moving main), then $GLMG_BOARD"
 GLMG_HOST=""
 GLMG_MERGE_MUTATIONS="mergeRequestAccept"
+# GitLab's GraphQL mutations that create or move a ref, or change a branch's
+# protection (DND-1941; the mutation list of gitlab.com's schema, read
+# 2026-10-03). branchDelete moves nothing onto a ref and passes, as a REST
+# branch DELETE does.
+GLMG_REF_MUTATIONS="commitCreate|createBranch|tagCreate|branchRuleCreate|branchRuleUpdate|branchRuleDelete|scanExecutionPolicyCommit|securityFindingCreateMergeRequest"
+GLMG_REF_FIX="commit locally and move a branch only with \`~/dev/custom/ai/bin/$GLMG_TOOL git push origin <feature-branch>\` (athena:gitlab -> Pushing as Athena); land on the default branch only through an MR: $GLMG_SAFE_PATH. A branch-protection or mirror change is a forge-settings change: name it to your admiral, never make it through the API"
+# The deferred-merge refusal's Fix (DND-1941).
+GLMG_DEFER_FIX="merge at once with auto-merge OFF, spelled \`--auto-merge=false\` (glab sets auto-merge by default): \`~/dev/custom/ai/bin/$GLMG_TOOL mr merge <iid> --sha <head sha> --auto-merge=false --yes\` once the head pipeline passed and integration-gate passed that head; or board the merge train with only -f sha=<head sha>. Full path: $GLMG_SAFE_PATH"
 
 # `glab api` flags (glab 1.112): the one table in ai/lib/forge-api-scan.sh,
 # shared with the outbound scan.
@@ -178,9 +228,18 @@ glmg_refuse() {
 # There is deliberately no --help short-circuit: pflag lets a later
 # `--help=false` switch help off again, so a merge carrying --help is judged
 # like any other (DND-742 critic finding).
+#
+# It also reads auto-merge the way pflag does (DND-1941): GLMG_AUTO is 1 unless
+# the LAST --auto-merge spelling set it false (`--auto-merge=false`, `=0`, `=f`,
+# …; glab's default is true, and a bare `--auto-merge` sets it true again).
+# A bool flag takes no separate value: in `--auto-merge false`, `false` is a
+# positional word. GLMG_AUTO_BAD names an `--auto-merge=<v>` whose value pflag
+# would reject; GLMG_WPS names any --when-pipeline-succeeds spelling (glab's
+# hidden, deprecated auto-merge flag).
 glmg_parse_cli() {
   local a v i c rest n="$#"
   GLMG_POS=() GLMG_REPO="" GLMG_SHA="" GLMG_SHA_N=0 GLMG_UNKNOWN="" GLMG_POS0_AT=""
+  GLMG_AUTO=1 GLMG_AUTO_BAD="" GLMG_WPS=""
   while [ $# -gt 0 ]; do
     a="$1"; shift
     case "$a" in
@@ -189,13 +248,13 @@ glmg_parse_cli() {
         GLMG_POS+=("$@"); break ;;
       --*=*)
         if [[ "$GLMG_MR_VALUED" == *" ${a%%=*} "* ]]; then glmg_cli_opt "${a%%=*}" "${a#*=}"
-        elif [[ "$GLMG_MR_BOOL" == *" ${a%%=*} "* ]]; then :
+        elif [[ "$GLMG_MR_BOOL" == *" ${a%%=*} "* ]]; then glmg_cli_bool "${a%%=*}" "${a#*=}" "$a"
         else [ -n "$GLMG_UNKNOWN" ] || GLMG_UNKNOWN="${a%%=*}"; fi ;;
       --*)
         if [[ "$GLMG_MR_VALUED" == *" $a "* ]]; then
           v="${1:-}"; [ $# -gt 0 ] && shift
           glmg_cli_opt "$a" "$v"
-        elif [[ "$GLMG_MR_BOOL" == *" $a "* ]]; then :
+        elif [[ "$GLMG_MR_BOOL" == *" $a "* ]]; then glmg_cli_bool "$a" true "$a"
         else [ -n "$GLMG_UNKNOWN" ] || GLMG_UNKNOWN="$a"; fi ;;
       -?*)
         rest="${a#-}"; i=0
@@ -224,6 +283,20 @@ glmg_cli_opt() {
   case "$1" in
     --repo) GLMG_REPO="$2" ;;
     --sha) GLMG_SHA="$2"; GLMG_SHA_N=$((GLMG_SHA_N+1)) ;;
+  esac
+}
+
+# glmg_cli_bool <flag> <value> <word as given> : one boolean of the mr-merge
+# table. pflag's ParseBool reads 1/t/T/TRUE/true/True and 0/f/F/FALSE/false/
+# False (gmg_false_word); anything else is an error in glab.
+glmg_cli_bool() {
+  case "$1" in
+    --auto-merge)
+      if gmg_false_word "$2"; then GLMG_AUTO=0
+      else
+        case "$2" in 1|t|T|true|TRUE|True) GLMG_AUTO=1 ;; *) GLMG_AUTO=1; GLMG_AUTO_BAD="$3" ;; esac
+      fi ;;
+    --when-pipeline-succeeds) GLMG_WPS="$3" ;;
   esac
 }
 
@@ -441,7 +514,166 @@ glmg_receipt_gate() {
   else
     printf '%s: RECEIPT %s base %s recorded %s\n' "$GLMG_TOOL" "$IR_RECEIPT" "$tip" "$IR_RECORDED_AT" >&2
   fi
+  # What the stop-the-line check (glmg_tip_gate, DND-1941) judges: the same
+  # tip, read once, with the MR's project, target and head.
+  GLMG_TIP="$tip" GLMG_BRANCH="$branch" GLMG_PROJ_PATH="$proj" GLMG_PID="$pid" GLMG_HEAD="$head"
   return 0
+}
+
+# ---- stop the line: the target tip's own pipelines and content (DND-1941) ---
+# The GitLab side of DND-1902. Every merge this guard lets through (mr merge,
+# train boarding) also judges the target branch's tip, after the receipt:
+#   * RUNS (glmg_tip_health): the tip's pipelines on the target branch,
+#     `projects/<id>/pipelines?sha=<tip>&ref=<target>`. The latest pipeline of
+#     each source (push, a child pipeline, a schedule, …) is judged, the way
+#     gh-merge-guard judges the latest run of each check: failed or canceled is
+#     RED; created, waiting_for_resource, preparing, pending, running, scheduled
+#     or manual is PENDING (not red, so the merge proceeds and names it);
+#     success or skipped is not red. An older red pipeline is superseded only
+#     when its source's latest pipeline SUCCEEDED. A status the judge does not
+#     know is COULD NOT LOOK.
+#   * A tip with NO pipeline is COULD NOT LOOK, never green. This is stricter
+#     than GitHub, where a repo with no CI (custom's shape) reports no run and
+#     passes: every GitLab project merged here runs CI on its default branch.
+#   * CONTENT: gmg_content_health, the same code and the same declaration
+#     (ai/config/main-content-checks.json) as on GitHub, keyed by the MR's full
+#     project path, so gitlab.com/cjpoll/gen_saas reads the gen_saas entry.
+#   * The red-main fix and the composition are gmg_line_check's: a head that
+#     contains the tip (from the local object store, else the forge's merge
+#     base) and removes every duplicate passes; any other MR is refused. What
+#     cannot be read is COULD NOT LOOK and refused.
+# Residuals (named, not closed): those of DND-1902 (a merge onto a PENDING tip
+# that turns red; containing a red tip is the only fix evidence read for a red
+# pipeline); a red pipeline beyond the first page of 100 is COULD NOT LOOK; a
+# pipeline on the tip that GitLab lists under another ref (a tag) is not read.
+
+# GLMG_TIP_SHAPE: OK, EMPTY or ERR<TAB><why>, for the pipelines answer.
+GLMG_TIP_SHAPE='
+  if type != "array" then "ERR\tthe answer is not a list of pipelines: \(tojson | .[0:200])"
+  elif length == 0 then "EMPTY"
+  elif length >= 100 then "ERR\tthe tip lists \(length) pipelines on one page of 100, so more may exist, and unread pipelines are not green"
+  elif (map((.id | type) == "number" and (.status | type) == "string") | all | not) then "ERR\ta listed pipeline has no numeric id or no status: \(tojson | .[0:200])"
+  elif (map(.sha == $tip and .ref == $ref) | all | not) then
+    "ERR\tthe answer lists pipelines that are not on \($ref) at \($tip): \([.[] | select(.sha != $tip or .ref != $ref) | "\(.id) on \(.ref // "?") at \(.sha // "?")"] | join(", "))"
+  else "OK" end'
+
+# GLMG_TIP_JUDGE: one line per finding, like gh-merge-guard's GMG_TIP_JUDGE:
+# RED, PEND, OLD (a superseded red pipeline) or ODD (a status it does not know).
+GLMG_TIP_JUDGE='
+  def red: .status | IN("failed", "canceled");
+  def pending: .status | IN("created", "waiting_for_resource", "preparing", "pending", "running", "scheduled", "manual");
+  def known: red or pending or (.status | IN("success", "skipped"));
+  def lbl: "pipeline \(.id) (\(.source // "no source")): \(.status)\(if (.web_url // "") == "" then "" else " \(.web_url)" end)";
+  def judge($why):
+    if (known | not) then "ODD\t\(lbl)"
+    elif red then "RED\t\(lbl)\($why)"
+    elif pending then "PEND\t\(lbl)"
+    else empty end;
+  def skey: if (.source | type) == "string" and .source != "" then "source:\(.source)" else "alone:\(.id)" end;
+  group_by(skey)[] | sort_by(.id) | .[-1] as $cur | .[:-1] as $old | ($cur.status == "success") as $supersedes
+  | ($cur | judge(", the latest \(.source // "no-source") pipeline")),
+    ($old[] | if (known | not) then "ODD\t\(lbl)"
+              elif (red | not) then empty
+              elif $supersedes then "OLD\t\(lbl)"
+              else "RED\t\(lbl): the newer pipeline \($cur.id) is \($cur.status), not success, so it does not supersede this one" end)'
+
+# glmg_tip_health <owner> <repo> <tip> <head|""> <gitdir> <target> : the runs
+# judge gmg_line_check calls (its contract is there). Never exits. Reads the
+# project by GLMG_PID on GLMG_HOST, both set by glmg_receipt_gate.
+glmg_tip_health() {
+  local tip="$3" head="$4" gitdir="$5" base="$6" enc pipes err rc why shape judged line red="" pend="" odd="" mb
+  local -a read=(api)
+  GMG_TIP_STATE="LOOK" GMG_TIP_RUNS="" GMG_TIP_OLD="" GMG_TIP_WHY=""
+  if ! [[ "$tip" =~ ^[0-9a-f]{40}$ ]]; then GMG_TIP_WHY="the target tip '$tip' is not a full SHA"; return 2; fi
+  if ! [[ "${GLMG_PID:-}" =~ ^[0-9]+$ ]]; then GMG_TIP_WHY="the MR's project id '${GLMG_PID:-}' is not a number, so the tip's pipelines cannot be read"; return 2; fi
+  if [ -z "$base" ] || ! enc="$(jq -rn --arg b "$base" '$b | @uri' 2>/dev/null)" || [ -z "$enc" ]; then
+    GMG_TIP_WHY="the target branch '$base' could not be URL-encoded, so the tip's pipelines cannot be read"; return 2
+  fi
+  [ -n "$GLMG_HOST" ] && read+=(--hostname "$GLMG_HOST")
+  read+=("projects/$GLMG_PID/pipelines?sha=$tip&ref=$enc&per_page=100")
+  if ! err="$(mktemp)"; then GMG_TIP_WHY="mktemp failed, so the tip's pipelines could not be read"; return 2; fi
+  if pipes="$(glab "${read[@]}" 2>"$err")"; then rc=0; else rc=$?; fi
+  why="$(tr '\n' ' ' <"$err")"; rm -f "$err"
+  if [ "$rc" != 0 ]; then
+    GMG_TIP_WHY="the pipelines on $tip could not be read (\`glab ${read[*]}\` exit $rc: ${why:-no stderr})"; return 2
+  fi
+  if ! shape="$(jq -r --arg tip "$tip" --arg ref "$base" "$GLMG_TIP_SHAPE" <<<"$pipes" 2>/dev/null)"; then
+    shape="ERR"$'\t'"the answer is not the expected JSON: $(head -c 200 <<<"$pipes" | tr '\n' ' ')"
+  fi
+  case "$shape" in
+    OK) ;;
+    EMPTY) GMG_TIP_WHY="no pipeline has run on the $base tip $tip (\`glab ${read[*]}\` listed none), so nothing shows it green; a tip with no pipeline is never read as green"; return 2 ;;
+    *) GMG_TIP_WHY="the pipelines on $tip could not be read: ${shape#ERR$'\t'}"; return 2 ;;
+  esac
+  if ! judged="$(jq -r "$GLMG_TIP_JUDGE" <<<"$pipes" 2>&1)"; then
+    GMG_TIP_WHY="the tip judge in ai/lib/glab-merge-guard.sh failed (jq: $(tr '\n' ' ' <<<"$judged")); a defect in the guard, not in the MR"; return 2
+  fi
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      RED$'\t'*) red+="    ${line#*$'\t'}"$'\n' ;;
+      PEND$'\t'*) pend+="    ${line#*$'\t'}"$'\n' ;;
+      OLD$'\t'*) GMG_TIP_OLD+="    ${line#*$'\t'}"$'\n' ;;
+      *) odd+="    ${line#*$'\t'}"$'\n' ;;
+    esac
+  done <<<"$judged"
+  if [ -n "$odd" ]; then
+    GMG_TIP_WHY="the tip lists pipelines whose status the judge does not know:
+${odd%$'\n'}"; return 2
+  fi
+  if [ -z "$red" ]; then
+    GMG_TIP_RUNS="${pend%$'\n'}"
+    if [ -n "$pend" ]; then GMG_TIP_STATE="PENDING"; else GMG_TIP_STATE="CLEAN"; fi
+    return 0
+  fi
+  GMG_TIP_RUNS="${red%$'\n'}"
+  GMG_TIP_STATE="RED"
+  [ -n "$head" ] || return 1
+  # Does the head contain the red tip? The local graph answers when both
+  # commits are here (0 yes, 1 no); anything else asks the forge.
+  if git -C "$gitdir" merge-base --is-ancestor "$tip" "$head" 2>/dev/null; then rc=0; else rc=$?; fi
+  case "$rc" in
+    0) GMG_TIP_STATE="FIX"; return 0 ;;
+    1) return 1 ;;
+  esac
+  if ! [[ "$head" =~ ^[0-9a-f]{40}$ ]]; then
+    GMG_TIP_STATE="LOOK"; GMG_TIP_WHY="$tip is red, and the head '$head' is not a full SHA, so whether it contains the tip cannot be read"; return 2
+  fi
+  read=(api)
+  [ -n "$GLMG_HOST" ] && read+=(--hostname "$GLMG_HOST")
+  read+=("projects/$GLMG_PID/repository/merge_base?refs%5B%5D=$tip&refs%5B%5D=$head")
+  if ! err="$(mktemp)"; then
+    GMG_TIP_STATE="LOOK"; GMG_TIP_WHY="$tip is red, and mktemp failed, so whether the head $head contains it could not be read"; return 2
+  fi
+  if mb="$(glab "${read[@]}" 2>"$err")"; then rc=0; else rc=$?; fi
+  why="$(tr '\n' ' ' <"$err")"; rm -f "$err"
+  mb="$(jq -r '.id // empty' <<<"$mb" 2>/dev/null)" || mb=""
+  if [ "$rc" != 0 ] || ! [[ "$mb" =~ ^[0-9a-f]{40}$ ]]; then
+    GMG_TIP_STATE="LOOK"
+    GMG_TIP_WHY="$tip is red (${GMG_TIP_RUNS#    }), and whether the head $head contains it could not be read (\`glab ${read[*]}\` exit $rc: ${why:-no usable merge base})"
+    return 2
+  fi
+  if [ "$mb" = "$tip" ]; then GMG_TIP_STATE="FIX"; return 0; fi
+  return 1
+}
+
+# glmg_tip_gate <shown> : returns 0 when the target tip does not stop the
+# merge; exits 3 otherwise. Called after glmg_receipt_gate, which read the tip.
+glmg_tip_gate() {
+  local shown="$1" owner repo rc fix
+  if [[ "${GLMG_PROJ_PATH:-}" != ?*/?* ]]; then
+    glmg_refuse "$shown" "${GMG_LOOK_MARK} the MR's project path '${GLMG_PROJ_PATH:-}' has no namespace, so its content declaration cannot be looked up" \
+      "make the MR readable (right iid, right -R <group>/<project>), then $GLMG_SAFE_PATH"
+  fi
+  owner="${GLMG_PROJ_PATH%/*}" repo="${GLMG_PROJ_PATH##*/}"
+  if gmg_line_check "$owner" "$repo" "$GLMG_BRANCH" "$GLMG_TIP" "$GLMG_HEAD" "$GLMG_TOP" glmg_tip_health; then rc=0; else rc=$?; fi
+  case "$rc" in
+    0) printf '%s: %s\n' "$GLMG_TOOL" "$GMG_LINE_NOTE" >&2; return 0 ;;
+    1) fix="land only a red-main fix: a head that contains $GLMG_TIP, removes every duplicate named above, and carries its own INTEGRATION OK receipt (merge origin/$GLMG_BRANCH into it, fix it, push as Athena, re-gate with \`$GLMG_IG\`). Every other MR waits until the latest $GLMG_BRANCH pipeline on its tip passes (\`glab api \"projects/$GLMG_PID/pipelines?ref=$GLMG_BRANCH&per_page=5\"\`). Then $GLMG_BOARD"
+       glmg_refuse "$shown" "$GMG_LINE_WHY" "$fix" ;;
+    *) glmg_refuse "$shown" "$GMG_LINE_WHY" \
+         "make the tip readable (network up, the right -R <group>/<project>, glab-athena's token, \`git fetch origin\` in this checkout); a tip with no pipeline needs one: run the $GLMG_BRANCH pipeline on it and wait for it to finish. Then $GLMG_BOARD" ;;
+  esac
 }
 
 # glmg_mr_merge <shown> <args...> : `mr merge` / `mr accept`.
@@ -456,6 +688,24 @@ glmg_mr_merge() {
   if [ "$GLMG_SHA_N" -gt 1 ]; then
     glmg_refuse "$shown" "--sha is given $GLMG_SHA_N times; exactly one pin is judged" "pass --sha once; to merge, $GLMG_SAFE_PATH"
   fi
+  # A deferred merge (DND-1941): auto-merge hands the merge to GitLab, which
+  # completes it later, when its own checks pass, onto whatever the target is
+  # then. Every project merged here needs a receipt (DND-1845), and no receipt
+  # or tip judgment can be read at that later moment (DND-969 on GitHub). glab
+  # sets auto-merge by DEFAULT, so it must be turned off by name. Refused before
+  # any read.
+  if [ -n "$GLMG_AUTO_BAD" ]; then
+    glmg_refuse "$shown" "'$GLMG_AUTO_BAD' is not a boolean pflag reads (glab rejects it), so whether this is a deferred merge cannot be told" \
+      "$GLMG_DEFER_FIX"
+  fi
+  if [ -n "$GLMG_WPS" ]; then
+    glmg_refuse "$shown" "'$GLMG_WPS' is glab's hidden, deprecated auto-merge flag: a deferred merge, which GitLab completes later, when its checks pass, onto whatever the target branch is then; no integration-gate receipt or red-tip judgment can cover that moment (DND-1941, DND-969)" \
+      "drop it; $GLMG_DEFER_FIX"
+  fi
+  if [ "$GLMG_AUTO" = 1 ]; then
+    glmg_refuse "$shown" "this is a deferred merge: auto-merge is on (glab's default, or --auto-merge), so GitLab completes the merge later, when its checks pass, onto whatever the target branch is then. No integration-gate receipt or red-tip judgment can cover that moment (DND-1941, DND-969)" \
+      "$GLMG_DEFER_FIX"
+  fi
   local -a view=(mr view)
   [ -n "${GLMG_POS[2]:-}" ] && view+=("${GLMG_POS[2]}")
   [ -n "$GLMG_REPO" ] && view+=(-R "$GLMG_REPO")
@@ -469,6 +719,7 @@ glmg_mr_merge() {
   rm -f "$err"
   glmg_check_head "$shown" "$mr" "$GLMG_SHA" "pass --sha <the MR's head sha>: $GLMG_SAFE_PATH"
   glmg_receipt_gate "$shown" "$mr"
+  glmg_tip_gate "$shown"
 }
 
 # glmg_route <lower-cased normalised path> : classifies a REST path. Sets
@@ -498,6 +749,64 @@ glmg_route() {
   return 0
 }
 
+# glmg_ref_route <lower-cased normalised path> <method> : true when a WRITE to
+# the path creates or moves a ref, or changes a branch's protection (DND-1941,
+# the GitLab side of DND-741); echoes what it does. <method> is never GET/HEAD
+# here; a plain `DELETE` of one branch or tag moves nothing onto a ref and is
+# not a match, but a DELETE with a method override is. Routes, after
+# projects/<p…>/:
+#   repository/branches[/…], repository/tags[/…]  (create, protect, unprotect)
+#   repository/commits                           (create a commit on a branch)
+#   repository/commits/<sha>/cherry_pick|revert
+#   repository/files/…, repository/submodules/…, repository/changelog
+#   protected_branches[/…], protected_tags[/…], remote_mirrors[/…], mirror/pull
+#   merge_requests/<iid>/rebase                   (moves the source branch)
+# The project path itself may hold several segments (an encoded %2F decodes to
+# `/`), and so may a branch or file name, so every segment after projects/<one
+# segment> is tried as the start of a route. A project or group that happens to
+# be named like a route word only over-refuses a write, never passes one.
+#
+# SCOPE (as DND-741 decided for GitHub): EVERY ref write by API, not only one
+# aimed at the default branch. Branches move by `glab-athena git push`; the
+# target is often not in the call (a commit action list, a file body), and the
+# default branch is a read that can fail. A refusal that needs no read has no
+# lookup to get wrong.
+glmg_ref_route() {
+  local method="$2" i n w nx
+  local -a s
+  IFS=/ read -ra s <<<"$1"
+  n="${#s[@]}"
+  [ "$n" -ge 3 ] && [ "${s[0]}" = projects ] || return 1
+  s[n-1]="${s[n-1]%%[.;]*}"
+  for ((i = 2; i < n; i++)); do
+    w="${s[i]}"; nx="${s[i+1]:-}"
+    case "$w:$nx" in
+      repository:branches|repository:tags)
+        # A plain DELETE of one named ref passes; keep scanning the rest.
+        if [ "$method" = DELETE ] && [ $((i + 2)) -lt "$n" ]; then continue; fi
+        echo "a write to repository/$nx"; return 0 ;;
+      repository:commits)
+        if [ $((i + 2)) = "$n" ]; then echo "a commit through repository/commits"; return 0; fi
+        if [ $((i + 4)) = "$n" ] && [[ "${s[i+3]}" =~ ^(cherry_pick|revert)$ ]]; then
+          echo "a ${s[i+3]} onto a branch through repository/commits/<sha>/${s[i+3]}"; return 0
+        fi ;;
+      repository:files|repository:submodules|repository:changelog)
+        echo "a commit through repository/$nx"; return 0 ;;
+      mirror:pull)
+        echo "a pull-mirror update through mirror/pull"; return 0 ;;
+    esac
+    case "$w" in
+      protected_branches|protected_tags|remote_mirrors)
+        echo "a write to $w"; return 0 ;;
+      merge_requests)
+        if [ $((i + 3)) = "$n" ] && [ "${s[i+2]}" = rebase ]; then
+          echo "a rebase of the MR's source branch through merge_requests/<iid>/rebase"; return 0
+        fi ;;
+    esac
+  done
+  return 1
+}
+
 # glmg_train_board <shown> <endpoint as given> : a POST that boards a train car.
 glmg_train_board() {
   local shown="$1" ep="$2" i pin="" npin=0 mr err rc
@@ -519,6 +828,15 @@ glmg_train_board() {
         fi ;;
       _method)
         glmg_refuse "$shown" "a '_method' field can override the HTTP method" "drop it; to board, $GLMG_SAFE_PATH" ;;
+    esac
+    # A deferred boarding (DND-1941): these fields add the car only when the
+    # checks pass, later, onto whatever the target is then. Any value is
+    # refused: the head pipeline has already passed here, so they are never
+    # needed. Matched without case, more strictly than GitLab reads them.
+    case "${FAS_FKEY[$i],,}" in
+      auto_merge|when_pipeline_succeeds|merge_when_pipeline_succeeds)
+        glmg_refuse "$shown" "the '${FAS_FKEY[$i]}' field makes this a deferred merge: GitLab adds the car later, when its checks pass, onto whatever the target branch is then, and no integration-gate receipt or red-tip judgment can cover that moment (DND-1941, DND-969)" \
+          "drop the field; $GLMG_DEFER_FIX" ;;
     esac
   done
   if [ "$npin" -gt 1 ]; then
@@ -543,11 +861,12 @@ glmg_train_board() {
   glmg_check_head "$shown" "$mr" "$pin" "pass -f sha=<the MR's head sha>: $GLMG_SAFE_PATH"
   GLMG_HOST="$FAS_HOSTNAME"
   glmg_receipt_gate "$shown" "$mr"
+  glmg_tip_gate "$shown"
 }
 
 # glmg_api_guard <shown> <glab api args (after the word api)...>
 glmg_api_guard() {
-  local shown="$1" ep path lower last method write sc
+  local shown="$1" ep path lower last method write sc what how
   shift
   FAS_API_VALUED="$GLMG_API_VALUED" FAS_API_BOOL="$GLMG_API_BOOL"
   FAS_API_SVALUED="$GLMG_API_SVALUED" FAS_API_SBOOL="$GLMG_API_SBOOL"
@@ -574,14 +893,31 @@ glmg_api_guard() {
     lower="${path,,}"
     last="${lower##*/}"; last="${last%%[.;]*}"
     if [ "$last" = graphql ]; then
-      if fas_graphql_scan "$GLMG_MERGE_MUTATIONS"; then sc=0; else sc=$?; fi
+      if fas_graphql_scan "$GLMG_MERGE_MUTATIONS|$GLMG_REF_MUTATIONS"; then sc=0; else sc=$?; fi
       case "$sc" in
-        0) glmg_refuse "$shown" "this GraphQL call carries the merge mutation '$FAS_FOUND', which merges (or schedules a merge or train car) without the pinned-head, passed-pipeline check (DND-742)" \
-             "merge only through a guarded path: $GLMG_SAFE_PATH" ;;
-        2) glmg_refuse "$shown" "$GLMG_TOOL cannot tell whether this GraphQL call merges: $FAS_WHY" \
+        0)
+          # A merge name is reported as a merge; anything else that matched
+          # (including a name that could not be re-extracted) as a ref write.
+          if [[ "${FAS_FOUND,,}" =~ ^(${GLMG_MERGE_MUTATIONS,,})$ ]]; then
+            glmg_refuse "$shown" "this GraphQL call carries the merge mutation '$FAS_FOUND', which merges (or schedules a merge or train car) without the pinned-head, passed-pipeline check (DND-742)" \
+              "merge only through a guarded path: $GLMG_SAFE_PATH"
+          fi
+          glmg_refuse "$shown" "this GraphQL call carries the ref-write mutation '${FAS_FOUND:-?}', which creates or moves a branch or changes its protection (it can put commits on the default branch) with no pinned head and no passed pipeline (DND-1941, the DND-741 analogue)" \
+            "$GLMG_REF_FIX" ;;
+        2) glmg_refuse "$shown" "$GLMG_TOOL cannot tell whether this GraphQL call merges or moves a branch: $FAS_WHY" \
              "$FAS_HOW; to merge, $GLMG_SAFE_PATH" ;;
       esac
       continue
+    fi
+    if [ "$write" = 1 ]; then
+      # Only a PLAIN DELETE may pass as a ref delete: an override header or
+      # a _method field can turn it into any write.
+      how="$method"
+      if [ "$FAS_OVERRIDE" = 1 ] || [[ " ${FAS_FKEY[*]} " == *" _method "* ]]; then how="$method with a method override"; fi
+      if what="$(glmg_ref_route "$lower" "$how")"; then
+        glmg_refuse "$shown" "this is $what ($method $path), which creates or moves a branch or changes its protection (it can put commits on the default branch) with no pinned head and no passed pipeline (DND-1941, the DND-741 analogue)" \
+          "$GLMG_REF_FIX"
+      fi
     fi
     glmg_route "$lower"
     case "$GLMG_KIND" in

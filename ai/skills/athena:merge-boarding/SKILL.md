@@ -171,6 +171,11 @@ The landing, as Cody confirmed it (2026-10-01):
    `locked-merge` also reads its expected squash tree against the same
    declaration, so two PRs that each add one migration version are refused
    (exit 3, `SEMANTIC CONFLICT`) before the second lands.
+   In a GitLab project, the `glab-athena` merge guard applies the same
+   judgment through the same code (`gmg_line_check`) to `mr merge` and train
+   boarding, with the target tip's pipelines as its runs: the latest pipeline
+   of each source on the tip. A tip with no pipeline is COULD NOT LOOK there,
+   never green (DND-1941; `ai/lib/glab-merge-guard.sh` → `glmg_tip_health`).
 
 **Later (2026-10-02, DND-1664):** step 5 was "Check `main` after the push"
 and ran `main-health check` first, with no fast-forward or installer before
@@ -941,7 +946,9 @@ every GitLab project with no merge train (`locked-merge --mr`, *GitLab path
   rule to a bare `gh-athena pr merge` (DND-969); it has no tree check.
   glab-athena's merge guard applies it to every `mr merge`/`mr accept` and
   train boarding, declared gate or not (DND-1845); it has no tree check
-  either.
+  either. Because every GitLab project is gated that way, it refuses a
+  deferred merge everywhere: `mr merge` needs `--auto-merge=false`, since
+  glab turns auto-merge on by default (DND-1941).
 
   **Later (2026-10-01, DND-1463):** `locked-merge` asserted `origin/<base>`
   was contained in the gated head (exit 3, "re-gate"), required the receipt's
