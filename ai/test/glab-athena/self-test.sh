@@ -38,6 +38,10 @@ export GIT_ALLOW_PROTOCOL=file
 export GIT_SSH_COMMAND=false
 export GIT_TERMINAL_PROMPT=0
 unset GIT_CONFIG_COUNT
+# A push to a default branch emits merge.landed (DND-1939): never into the
+# machine's real store from a fixture.
+export ATHENA_TELEMETRY_DIR="${TMP}/telemetry"
+unset ATHENA_UNIT
 FAKE_TOKEN="glpat-SELFTESTFAKETOKEN0000"
 printf '%s\n' "${FAKE_TOKEN}" > "${TMP}/token"
 chmod 600 "${TMP}/token"
@@ -276,13 +280,16 @@ for f in "$(git --exec-path)"/*; do ln -s "${f}" "${X_EXEC}/${f##*/}"; done
 rm -f "${X_EXEC}/git-remote-https"
 cat > "${X_EXEC}/git-remote-https" <<'EOF'
 #!/usr/bin/env bash
-url="${2:-$1}"; hdr=none; i=0
+url="${2:-$1}"; hdr=none; via=direct; i=0
 while [ "${i}" -lt "${GIT_CONFIG_COUNT:-0}" ]; do
   k="GIT_CONFIG_KEY_${i}"; v="GIT_CONFIG_VALUE_${i}"
   case "${!k}" in http.https://gitlab.com/.extraheader) [ "${!v}" = "AUTHORIZATION: basic ${X_B64}" ] && hdr=ok:oauth2 || hdr=wrong ;; esac
   i=$((i + 1))
 done
-printf 'start url=%s hdr=%s\n' "${url}" "${hdr}" >> "${X_LOG}"
+# The route's transport runs git-remote-https with signing refused; a push's
+# own ls-remote probes (DND-1939) run it directly.
+case "${GIT_CONFIG_PARAMETERS:-}" in *refuse-signing*) via=transport ;; esac
+printf 'start via=%s url=%s hdr=%s\n' "${via}" "${url}" "${hdr}" >> "${X_LOG}"
 while IFS= read -r line; do
   case "${line}" in
     capabilities) printf 'connect\n\n' ;;
@@ -310,7 +317,7 @@ EOF
 chmod +x "${R}/.git/hooks/pre-push"
 ( cd "${R}" && PATH="${X}/shim:${FSG_DIR}:${PATH}" GIT_ALLOW_PROTOCOL=file:athena-forge "${WRAPPER}" git push -q origin HEAD:main ) >"${TMP}/out" 2>"${TMP}/err"; RC=$?
 if [ "${RC}" = 0 ] && [ "$(git --git-dir="${X_FORGE}/g/r.git" rev-parse main 2>/dev/null)" = "$(git -C "${R}" rev-parse HEAD)" ] \
-  && [ "$(grep -c '^start url=https://gitlab.com/g/r.git hdr=ok:oauth2$' "${X_LOG}")" = 1 ] \
+  && [ "$(grep -c '^start via=transport url=https://gitlab.com/g/r.git hdr=ok:oauth2$' "${X_LOG}")" = 1 ] \
   && grep -q '^hook hdr=absent transport=already-used$' "${X_LOG}" \
   && [ -z "$(grep -rlF -e "${FAKE_TOKEN}" -e "${B64}" "${X}" 2>/dev/null)" ]; then
   ok "X1868. a routed push to a fixture gitlab.com lands with the oauth2 header at the transport alone; the pre-push hook gets no header and finds the grant used"
@@ -606,6 +613,99 @@ if [ "${RC}" = 1 ] && [ "$(head -n1 "${TMP}/glab.args" 2>/dev/null)" = "api grou
   && [[ "${ERR}" == *"synthetic-public-group"* ]] && [[ "${ERR}" != *"private overlay"* ]]; then
   ok "N16. refresh for a public group_service_account entry looks up the entry's namespace as the group, no overlay read"
 else bad "N16. public group refresh" "rc=${RC} err='${ERR}' args='$(cat "${TMP}/glab.args" 2>/dev/null)'"; fi
+echo
+echo "--- DND-1939: a glab-athena push that moves the default branch is merge.landed ---"
+# Real pushes to local bare origins, one store per case, as gh-athena's own
+# cases 19-24 do: the landing record is the shared passthrough's.
+landed() { cat "$1"/*.jsonl 2>/dev/null | jq -c 'select(.event == "merge.landed")'; }
+landed_n() { local n; n="$(landed "$1" | grep -c .)"; printf '%s' "${n:-0}"; }
+# origin_with_main <name> -> a bare origin whose main has one commit, and a
+# clone "<name>-wt" with one more commit on main. Sets O, W, BEFORE, AFTER.
+origin_with_main() {
+  O="${TMP}/$1-origin.git"; W="${TMP}/$1-wt"
+  git init -q --bare -b main "${O}"
+  git init -q -b main "${W}" && git -C "${W}" commit -q --allow-empty -m c0 && git -C "${W}" remote add origin "${O}"
+  git -C "${W}" push -q origin main 2>/dev/null
+  BEFORE="$(git -C "${W}" rev-parse HEAD)"
+  git -C "${W}" commit -q --allow-empty -m c1; AFTER="$(git -C "${W}" rev-parse HEAD)"
+}
+glpush() { # <dir> <store> <git args...> -> OUT RC ERR
+  local d="$1" s="$2"; shift 2
+  OUT="$(cd "${d}" && ATHENA_TELEMETRY_DIR="${s}" "${WRAPPER}" git "$@" 2>"${TMP}/err")"; RC=$?
+  ERR="$(cat "${TMP}/err")"
+}
+
+origin_with_main l1; S="${TMP}/l1-store"
+T_PRE="$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
+glpush "${W}" "${S}" push -q origin HEAD:main
+T_POST="$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
+EV="$(landed "${S}")"; EV_AT="$(jq -r .at <<<"${EV}" 2>/dev/null)"
+if [ "${RC}" = 0 ] && [ "$(git --git-dir="${O}" rev-parse main)" = "${AFTER}" ] && [ "$(landed_n "${S}")" = 1 ] \
+  && [ "$(jq -cS .attrs <<<"${EV}")" = "$(jq -cnS --arg b "${BEFORE}" --arg a "${AFTER}" '{via:"push",before:$b,after:$a}')" ] \
+  && [ "$(jq -r .head <<<"${EV}")" = "${AFTER}" ] && [ "$(jq -r .repo <<<"${EV}")" = l1-wt ] \
+  && [ "$(jq -r '.duration_s | type' <<<"${EV}")" = number ] \
+  && [[ ! "${EV_AT}" < "${T_PRE}" ]] && [[ ! "${EV_AT}" > "${T_POST}" ]] && [ ! -e "${S}/write-failures" ]; then
+  ok "L1. a push that moves origin's main: exactly one merge.landed via=push, gh-athena's schema (before/after/head, timed), no drops"
+else bad "L1. merge.landed on a glab-athena main push" "rc=${RC} ev='${EV}' err='${ERR}' failures='$(cat "${S}/write-failures" 2>/dev/null)'"; fi
+
+S="${TMP}/l2-store"; git -C "${W}" commit -q --allow-empty -m c2
+glpush "${W}" "${S}" push -q origin HEAD:refs/heads/topic
+[ "${RC}" = 0 ] && [ "$(git --git-dir="${O}" rev-parse topic)" = "$(git -C "${W}" rev-parse HEAD)" ] && [ "$(landed_n "${S}")" = 0 ] \
+  && ok "L2. a push to a feature branch: no event" \
+  || bad "L2. feature-branch push" "rc=${RC} events='$(cat "${S}"/*.jsonl 2>/dev/null)'"
+
+S="${TMP}/l3-store"; git -C "${W}" reset -q --hard "${BEFORE}"; git -C "${W}" commit -q --allow-empty -m diverged
+glpush "${W}" "${S}" push -q origin HEAD:main
+[ "${RC}" != 0 ] && [ "$(git --git-dir="${O}" rev-parse main)" = "${AFTER}" ] && [ "$(landed_n "${S}")" = 0 ] \
+  && ok "L3. a failed (non-ff, refused) push: exit ${RC}, main unmoved, no event" \
+  || bad "L3. failed push" "rc=${RC} events='$(cat "${S}"/*.jsonl 2>/dev/null)'"
+
+S="${TMP}/l4-store"
+GLAB_ATHENA_GIT_DRY_RUN=1 glpush "${W}" "${S}" push origin HEAD:main
+[ "${RC}" = 0 ] && [ "$(landed_n "${S}")" = 0 ] && [ ! -e "${S}" ] \
+  && ok "L4. the dry-run seam pushes nothing and records nothing" \
+  || bad "L4. dry-run records nothing" "rc=${RC} events='$(cat "${S}"/*.jsonl 2>/dev/null)'"
+
+# L5. The repo key is the checkout's, never the forge's: the same checkout
+# lands once through gh-athena with a github.com origin and once through
+# glab-athena after the cutover flips origin to gitlab.com, and both events
+# carry the same short key. A linked worktree of it carries that key too.
+# The routed pushes go through the X1868 fixture forge (no network): both
+# hosts map to ${X_FORGE}/g/r.git.
+KD="${TMP}/keys"; mkdir -p "${KD}"
+git -C "${X_FORGE}/g/r.git" update-ref -d refs/heads/main 2>/dev/null
+git init -q -b main "${KD}/custom" && git -C "${KD}/custom" commit -q --allow-empty -m k0
+git -C "${KD}/custom" remote add origin 'git@github.com:g/r.git'
+printf '12345\n' > "${TMP}/gh-app-id"; printf 'not-a-key\n' > "${TMP}/gh-key.pem"
+printf '%s\t%s\n' "ghs_SELFTESTFAKETOKEN0000" "$(( $(date +%s) + 86400 ))" > "${TMP}/gh-token-cache"; chmod 600 "${TMP}/gh-token-cache"
+S="${TMP}/l5-store"
+( cd "${KD}/custom" && PATH="${X}/shim:${FSG_DIR}:${PATH}" GIT_ALLOW_PROTOCOL=file:athena-forge ATHENA_TELEMETRY_DIR="${S}" \
+    GH_ATHENA_APP_ID_FILE="${TMP}/gh-app-id" GH_ATHENA_KEY="${TMP}/gh-key.pem" GH_ATHENA_TOKEN_CACHE="${TMP}/gh-token-cache" \
+    "${AI_DIR}/bin/gh-athena" git push -q origin HEAD:main ) >"${TMP}/out" 2>"${TMP}/err"; RC_GH=$?
+GH_KEY="$(landed "${S}" | jq -r .repo)"
+git -C "${KD}/custom" remote set-url origin 'git@gitlab.com:g/r.git'
+git -C "${KD}/custom" commit -q --allow-empty -m k1
+( cd "${KD}/custom" && PATH="${X}/shim:${FSG_DIR}:${PATH}" GIT_ALLOW_PROTOCOL=file:athena-forge ATHENA_TELEMETRY_DIR="${S}" \
+    "${WRAPPER}" git push -q origin HEAD:main ) >"${TMP}/out" 2>>"${TMP}/err"; RC_GL=$?
+git -C "${KD}/custom" worktree add -q -b lane "${KD}/lane-wt" 2>/dev/null
+git -C "${KD}/lane-wt" commit -q --allow-empty -m k2
+( cd "${KD}/lane-wt" && PATH="${X}/shim:${FSG_DIR}:${PATH}" GIT_ALLOW_PROTOCOL=file:athena-forge ATHENA_TELEMETRY_DIR="${S}" \
+    "${WRAPPER}" git push -q origin HEAD:main ) >"${TMP}/out" 2>>"${TMP}/err"; RC_WT=$?
+KEYS="$(landed "${S}" | jq -r .repo | tr '\n' ' ')"
+if [ "${RC_GH}" = 0 ] && [ "${RC_GL}" = 0 ] && [ "${RC_WT}" = 0 ] && [ "${GH_KEY}" = custom ] \
+  && [ "$(landed_n "${S}")" = 3 ] && [ "${KEYS}" = "custom custom custom " ] \
+  && [ "$(git --git-dir="${X_FORGE}/g/r.git" rev-parse main)" = "$(git -C "${KD}/lane-wt" rev-parse HEAD)" ]; then
+  ok "L5. one checkout's key across the cutover: gh-athena (github.com origin), glab-athena (gitlab.com origin) and a linked worktree all record repo=custom"
+else bad "L5. repo key across forges" "rc_gh=${RC_GH} rc_gl=${RC_GL} rc_wt=${RC_WT} keys='${KEYS}' err='$(cat "${TMP}/err")'"; fi
+
+# L6. On the routed path the push's own ls-remote probes reach gitlab.com
+# authenticated as the bot (the oauth2 header), so a real GitLab landing is
+# readable; the X1868 push above to main recorded exactly one event.
+if [ "$(landed_n "${TMP}/telemetry")" = 1 ] && [ "$(landed "${TMP}/telemetry" | jq -r .attrs.via)" = push ] \
+  && [ "$(grep -c '^start via=direct url=https://gitlab.com/g/r.git hdr=ok:oauth2$' "${X_LOG}")" -ge 2 ] \
+  && [ "$(grep -c '^start via=direct url=https://gitlab.com/g/r.git hdr=none$' "${X_LOG}")" = 0 ]; then
+  ok "L6. a routed push to gitlab.com main: its probes carry the bot's oauth2 header, one merge.landed recorded"
+else bad "L6. routed gitlab landing probes" "events='$(landed "${TMP}/telemetry")' log='$(cat "${X_LOG}" 2>/dev/null)'"; fi
 
 # DND-1647: no gh/glab call may have fallen through past its stub.
 if fsg_verify; then ok "no gh/glab call fell through past its stub (DND-1647)"

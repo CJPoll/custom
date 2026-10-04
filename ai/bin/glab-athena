@@ -302,6 +302,11 @@ if [ "${1:-}" = git ]; then
 	# shellcheck source=../lib/forge-git-passthrough.sh
 	. "$LIB"
 	FG_TOOL=glab-athena FG_HOST=gitlab.com
+	# A push that moves the remote's default branch is recorded as merge.landed,
+	# exactly as gh-athena records it (DND-1939; the lib's "Landing telemetry"
+	# section). The repo key is the checkout's, so it does not change when
+	# origin moves from github.com to gitlab.com. Fails open.
+	FG_LANDING_TELEMETRY=1
 	# For messages before the URL is known: the bot of this checkout's origin
 	# when it resolves. The credential itself is chosen by ga_git_cred below,
 	# from the URL the command actually reaches.
