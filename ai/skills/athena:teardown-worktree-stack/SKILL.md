@@ -49,8 +49,10 @@ a script (tier 1 below).
   multi-part Mission reclaims each part's stack as that part lands, not at the
   last merge. Its exit 10 means the PR LANDED and the teardown failed: do not
   re-merge, follow the printed `Fix:`.
-- **GitLab:** no wrapper runs the merge. Right after `confirm-merged --mr <n>`
-  exits 0, run `teardown-stack --mr <n> --repo <repo>`.
+- **GitLab, no merge train:** `locked-merge --mr` runs it after the landing,
+  as on GitHub (DND-1943).
+- **GitLab merge train:** no wrapper runs the merge. Right after
+  `confirm-merged --mr <n>` exits 0, run `teardown-stack --mr <n> --repo <repo>`.
 - **Parked Missions:** `teardown-stack --worktree <wt> --parked <reason>`. The
   tree stays (*Tear down the STACK; keep the TREE*, below).
 - **A stack with no containers left** (a captain's `docker compose down`

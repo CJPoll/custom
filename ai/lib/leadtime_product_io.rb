@@ -290,7 +290,7 @@ module LeadTimeProductIO
       k = kind(repo_lane.path)
       return if k == "github"
 
-      raise P::Error.new("#{repo_lane.name}'s forge is #{k}: the product lane opens and lands GitHub PRs only (locked-merge is GitHub-only)",
+      raise P::Error.new("#{repo_lane.name}'s forge is #{k}: the product lane opens and lands GitHub PRs only (its sweep reads GitHub Actions checks and deploys)",
                          "keep #{repo_lane.name} in watch mode on this machine, or file a ticket to build the GitLab landing path.")
     end
 

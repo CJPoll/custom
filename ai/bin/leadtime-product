@@ -81,7 +81,7 @@ HELP = <<~TXT
               (teardown: COULD NOT DELETE, exit 0, never counted as a
               failure; reap: its lock and meta stay, so the next tick retries).
 
-  Forge: GitHub only (locked-merge is GitHub-only); a GitLab R is refused.
+  Forge: GitHub only (its sweep reads GitHub Actions); a GitLab R is refused.
 
   Environment: LEADTIME_PRODUCT_MANIFEST (the manifest, set by the runner);
   LEADTIME_PRODUCT_SWEEP_TIMEOUT (the sweep's budget in seconds, default

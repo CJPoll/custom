@@ -309,7 +309,7 @@ git operation on that worktree, not a rewrite.
 ### 6a. Tear down a Mission's docker stack once its MR is merged
 
 **As soon as each MR is CONFIRMED merged** (not merely green), its stack goes —
-`locked-merge` runs `ai/bin/teardown-stack`; on GitLab you run it — then remove
+`locked-merge` runs `ai/bin/teardown-stack`; after a train merge you run it — then remove
 its worktree (clean trees only; 33 merged ones filled `/home`, 2026-09-27).
 Never bare `down -v`, only YOUR fleet's: **[[athena:teardown-worktree-stack]]**.
 

@@ -207,10 +207,13 @@ normal path:
   "projects/:id/merge_trains/merge_requests/<iid>" -f sha=<head sha>
 ```
 
-On a project with no merge train:
+On a project with no merge train, merge through `locked-merge --mr`, which
+takes the repo's merge lock and makes the pinned
+`glab-athena mr merge <iid> --squash --sha <head sha> --auto-merge=false --yes`
+call itself ([[athena:merge-boarding]] → *GitLab path (no merge train)*):
 
 ```sh
-~/dev/custom/ai/bin/glab-athena mr merge <iid> --sha <head sha> --yes
+~/dev/custom/ai/skills/athena:merge-boarding/scripts/locked-merge --mr <iid> --head <head sha>
 ```
 
 What the wrapper refuses, exit 3 with a `Fix:`:

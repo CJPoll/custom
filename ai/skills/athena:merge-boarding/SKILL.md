@@ -1,6 +1,6 @@
 ---
 name: athena:merge-boarding
-description: How the athena-admiral protects the latency between a green MR and a landed deploy — the merge bar (incl. the no-CI-repo rule), merge-train boarding on GitLab, the GitHub squash-merge path, batching one deploy per batch with the Auto-Deploy label, the label-assertion before a batch tail, confirming a merge actually landed with confirm-merged, the Oban worker-rename gate, and landing onto a main that other fleets are moving under you (gate the head, merge one at a time under the lock; a main that moved past the gated base needs a re-gate only on a conflict). Use when a captain reports DONE and you are boarding/merging its MR. Merging is the admiral's alone.
+description: How the athena-admiral protects the latency between a green MR and a landed deploy — the merge bar (incl. the no-CI-repo rule), merge-train boarding on GitLab, the GitHub squash-merge path and the GitLab no-train path (locked-merge --mr), batching one deploy per batch with the Auto-Deploy label, the label-assertion before a batch tail, confirming a merge actually landed with confirm-merged, the Oban worker-rename gate, and landing onto a main that other fleets are moving under you (gate the head, merge one at a time under the lock; a main that moved past the gated base needs a re-gate only on a conflict). Use when a captain reports DONE and you are boarding/merging its MR. Merging is the admiral's alone.
 ---
 
 # athena:merge-boarding
@@ -902,7 +902,9 @@ merge is a TOCTOU. `origin/main` is still the arbiter of *what is true*; it does
 not serialize *who merges*. Six fleets then hand-rolled the same flock recipe
 from prose (2026-09-22..26 state logs).
 
-So the merge step is a critical section on every GitHub-merged repo:
+So the merge step is a critical section on every GitHub-merged repo, and on
+every GitLab project with no merge train (`locked-merge --mr`, *GitLab path
+(no merge train)*):
 
 - **Same machine:** merge through
   `ai/skills/athena:merge-boarding/scripts/locked-merge --pr <n> --head <sha>`,
@@ -1046,6 +1048,9 @@ ancestor of current main.
 
 ## Boarding (GitLab merge train — walt_ui, the default)
 
+A GitLab project with no merge train does not board: *GitLab path (no merge
+train)*.
+
 - **Trigger on DONE, not on sweeps.** Every dispatch brief carries your agentId
   and "message me the instant your report file is written". A DONE message or a
   fresh terminal report is a trigger: verify and add the MR to the merge train
@@ -1147,7 +1152,9 @@ protection is NOT the gate. A refusal is expected, not an auth error: follow its
 label; wait on it with `gh-ci-wait --repo <owner>/<repo> --workflow <name> --sha
 <merged-sha>` (one 60 s waiter on the App budget; never a 3 s `gh run watch`,
 DND-1706). See [[athena:github]]; GitLab
-forge mechanics are in [[athena:gitlab]].
+forge mechanics are in [[athena:gitlab]]. A GitLab project with no merge
+train takes the same steps under the same lock: *GitLab path (no merge
+train)*.
 
 **Later (2026-09-27, DND-969):** this section named the direct
 `gh-athena pr merge <n> --squash --match-head-commit <sha>` as the merge
@@ -1156,6 +1163,53 @@ direct call skipped the receipt `locked-merge` requires. The wrapper now reads
 the same receipt through the same library (`ai/lib/integration-receipt.sh`), so
 the direct call is refused in a gated repo, and the section names
 `integration-gate` then `locked-merge` as the one path.
+
+## GitLab path (no merge train)
+
+A GitLab project with no merge train (gitlab.com Free has none; gen_saas on
+`gitlab.com/cjpoll/gen_saas`) lands through the same critical section as
+GitHub (*Landing onto a moving main*), DND-1943. Once the MR's head pipeline
+passed on the exact head, run `integration-gate` from a checkout of the
+project, then:
+
+```sh
+~/dev/custom/ai/skills/athena:merge-boarding/scripts/locked-merge --mr <iid> --head <sha>
+```
+
+`<sha>` is the one `INTEGRATION OK` names. Run it from a checkout or worktree
+of the project (`--repo`): the receipt is in its git common dir.
+
+- **Train or no train is the project's, never the host's.** Before the lock
+  it reads the project with plain `glab`. `merge_trains_enabled` true is exit
+  12, `MERGE TRAIN`: board the train (*Boarding*), and walt_ui keeps that
+  path. The key absent (gitlab.com Free omits it) or false, with
+  `merge_method` present, is the no-train path. A read with no
+  `merge_method` is not a full project view: COULD NOT LOOK, exit 2.
+- **Same lock, same steps.** The lock file is
+  `~/.local/state/athena/<repo>-merge.lock`, the one the GitHub path takes for
+  that repo. Under it: the MR must be `opened` with `sha` == `--head`; the
+  receipt; the expected squash tree and its conflict refusal; the tip's
+  content (`ai/config/main-content-checks.json`, keyed
+  `<namespace>/<project>`) and the expected tree's `SEMANTIC CONFLICT`; then
+  the merge, `confirm-merged --mr <iid>`, the landed-tree assertion (the MR's
+  `merge_commit_sha`, or `squash_commit_sha` on a fast-forward project), and
+  `teardown-stack --mr <iid>` after the lock is released. Exit codes are the
+  GitHub path's (`--help`).
+- **The merge call** is `glab-athena mr merge <iid> -R <project> --squash
+  --sha <head> --auto-merge=false --yes`. glab turns auto-merge on by default,
+  and a merge GitLab defers until a pipeline ends would land outside the lock.
+  Never make that call yourself.
+- **The tip's pipelines are judged inside that call**, by glab-athena's merge
+  guard (DND-1941). Its `MAIN RED` refusal is exit 11 and its `COULD NOT
+  LOOK` exit 2, at once, with no confirm retries, exactly as gh-athena's on
+  GitHub. Until DND-1941 lands, nothing reads the tip's pipelines on this
+  path: do not merge gen_saas on GitLab before it does.
+- **A fork MR is refused** (exit 2): its head pipeline ran in another
+  project. Push the branch into the project and open the MR from there.
+- **`--require-idle-workflow` is GitHub-only** and refused with `--mr`. The
+  GitLab idle-pipeline check is not built.
+- **Telemetry:** it writes `merge.lock_wait` and never `merge.landed`;
+  glab-athena records the MR's landing itself (DND-1939).
 
 ## Ride a boarded train to landed (do not end your turn on it)
 

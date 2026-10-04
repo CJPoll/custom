@@ -1,5 +1,14 @@
 #!/usr/bin/env bash
-# locked-merge -- merge one GitHub PR inside the repo's merge critical section.
+# locked-merge -- merge one GitHub PR, or one GitLab MR on a project with no
+# merge train, inside the repo's merge critical section.
+#
+# DND-1943: gitlab.com Free has no merge trains, so a GitLab project without
+# one had no locked merge and the TOCTOU below was open there. `--mr <iid>`
+# runs the same steps under the same lock file, with the pinned
+# `glab-athena mr merge <iid> --squash --sha <head>` as the merge call. A
+# project with merge trains enabled (its merge_trains_enabled, read from the
+# project, never guessed from the host name) is refused with exit 12: it
+# boards the train (athena:merge-boarding -> Boarding).
 #
 # Why this exists: a GitHub squash-merge does NOT refuse when the base moved
 # after integration-gate ran. With no textual conflict it lands a tree nobody
@@ -53,11 +62,13 @@ fi
 
 usage() {
   cat <<'EOF'
-locked-merge -- merge one GitHub PR under the repo's merge lock.
+locked-merge -- merge one GitHub PR, or one GitLab MR on a project with no
+merge train, under the repo's merge lock.
 
 Usage:
   locked-merge --pr <n> --head <sha> [--repo DIR] [--lock PATH] [--wait SECS]
                [--require-idle-workflow <workflow-file>]
+  locked-merge --mr <iid> --head <sha> [--repo DIR] [--lock PATH] [--wait SECS]
   locked-merge --help | --self-test
 
 Run integration-gate first; pass the SHA its INTEGRATION OK line names as
@@ -96,10 +107,30 @@ path fleets already share) it:
   8. releases the lock and runs teardown-stack --pr <n> --repo DIR, which
      tears down the PR's worktree stack (DND-864).
 
+GitLab (--mr, DND-1943): origin must be gitlab.com. Before the lock it reads
+the project (plain glab): merge_trains_enabled true is exit 12 (board the
+train instead); the key absent, with merge_method present, is a project with
+no train (gitlab.com Free omits the field). A fork MR is refused (exit 2). The
+same lock file and steps follow, with these differences:
+  1. the MR is read with glab api (state opened, sha == --head);
+  4. --require-idle-workflow is GitHub-only and refused with --mr;
+  4b. the base tip's CONTENT is read here as on GitHub; its pipelines are
+     judged by glab-athena's merge guard inside the merge call (DND-1941),
+     whose MAIN RED / COULD NOT LOOK refusals map to exits 11 / 2 as below;
+  5. merges via glab-athena mr merge <iid> --squash --sha <head>
+     --auto-merge=false --yes (never a deferred merge);
+  6. confirm-merged --mr <iid> --fetch;
+  7. the landed commit is the MR's merge_commit_sha (squash_commit_sha on a
+     fast-forward project);
+  8. teardown-stack --mr <iid> --repo DIR.
+It writes merge.lock_wait and never merge.landed: glab-athena records an MR's
+landing (DND-1939).
+
 Exit (every non-zero prints a Fix: line):
   0 merged, confirmed, tree matches          (landed)
-  2 usage / prerequisite / non-GitHub remote, or COULD NOT LOOK (a read this tool
-    or the merge guard could not make; nothing landed)
+  2 usage / prerequisite / a remote that is not the flag's forge (--pr:
+    github.com, --mr: gitlab.com) / a fork MR, or COULD NOT LOOK (a read this
+    tool or the merge guard could not make; nothing landed)
   3 stale: PR not open, head moved, CONFLICT with origin/<base>, or a
     SEMANTIC CONFLICT (the merged tree duplicates a migration version) -- merge
     origin/<base> in, resolve, re-gate (nothing landed)
@@ -121,6 +152,8 @@ Exit (every non-zero prints a Fix: line):
      land only a red-main fix; others wait for a green base (nothing landed).
      Also when the tip turns red after this check and the merge guard's own
      re-check refuses (DND-1906): no confirm retries, the guard's message kept.
+  12 MERGE TRAIN: the GitLab project has merge trains enabled -- board the
+     train (athena:merge-boarding -> Boarding); nothing was locked or merged
 EOF
 }
 
@@ -129,10 +162,11 @@ die() { # <exit> <message> <fix>
   exit "$1"
 }
 
-PR=""; HEAD_SHA=""; REPO="."; LOCK=""; WAIT=900; IDLE_WF=""
+PR=""; MR=""; HEAD_SHA=""; REPO="."; LOCK=""; WAIT=900; IDLE_WF=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --pr)   [ $# -ge 2 ] || die 2 "--pr needs a value" "pass --pr <number>."; PR="$2"; shift 2 ;;
+    --mr)   [ $# -ge 2 ] || die 2 "--mr needs a value" "pass --mr <MR iid>."; MR="$2"; shift 2 ;;
     --head) [ $# -ge 2 ] || die 2 "--head needs a value" "pass --head <full sha from INTEGRATION OK>."; HEAD_SHA="$2"; shift 2 ;;
     --repo) [ $# -ge 2 ] || die 2 "--repo needs a value" "pass --repo <worktree dir>."; REPO="$2"; shift 2 ;;
     --lock) [ $# -ge 2 ] || die 2 "--lock needs a value" "pass --lock <absolute path>, or omit it for the default."; LOCK="$2"; shift 2 ;;
@@ -140,14 +174,31 @@ while [ $# -gt 0 ]; do
     --require-idle-workflow)
             [ $# -ge 2 ] || die 2 "--require-idle-workflow needs a value" "pass the workflow file name, e.g. post-merge.yml."
             IDLE_WF="$2"; shift 2 ;;
-    --self-test) exec bash "${SKILL_DIR}/test/locked-merge/self-test.sh" ;;
+    --self-test)
+      # Both suites, the GitHub one unchanged (DND-1943).
+      bash "${SKILL_DIR}/test/locked-merge/self-test.sh"; st_gh=$?
+      bash "${SKILL_DIR}/test/locked-merge-gitlab/self-test.sh"; st_gl=$?
+      [ "${st_gh}" -eq 0 ] && [ "${st_gl}" -eq 0 ]; exit $? ;;
     -h|--help) usage; exit 0 ;;
-    *) die 2 "unknown argument: $1" "see --help; valid flags are --pr, --head, --repo, --lock, --wait, --require-idle-workflow, --self-test." ;;
+    *) die 2 "unknown argument: $1" "see --help; valid flags are --pr, --mr, --head, --repo, --lock, --wait, --require-idle-workflow, --self-test." ;;
   esac
 done
 
 # ---- resolve every key first; a key that cannot be computed is an error ----
-case "${PR}" in ''|*[!0-9]*) die 2 "--pr must be a PR number (got '${PR}')" "pass --pr <number>." ;; esac
+# FORGE is chosen by the flag, and the origin must then be that forge's host.
+# CH is the change number either way; CH_NAME names it in messages.
+if [ -n "${PR}" ] && [ -n "${MR}" ]; then
+  die 2 "both --pr and --mr given; a repo is one forge" "pass --pr <n> for a GitHub PR or --mr <iid> for a GitLab MR, not both."
+fi
+if [ -n "${MR}" ]; then
+  FORGE=gitlab; CH="${MR}"; CH_NAME="MR !${MR}"; CH_FLAG=--mr
+  case "${MR}" in ''|*[!0-9]*) die 2 "--mr must be an MR iid (got '${MR}')" "pass --mr <iid> (the number after ! in the MR's URL)." ;; esac
+  [ -z "${IDLE_WF}" ] || die 2 "--require-idle-workflow names a GitHub Actions workflow and has no GitLab form" \
+    "drop it with --mr; a GitLab idle-pipeline check is not built yet (see athena:merge-boarding -> GitLab path (no merge train))."
+else
+  FORGE=github; CH="${PR}"; CH_NAME="PR ${PR}"; CH_FLAG=--pr
+fi
+case "${PR}${MR}" in ''|*[!0-9]*) die 2 "--pr must be a PR number (got '${PR}')" "pass --pr <number>, or --mr <iid> for a GitLab MR." ;; esac
 case "${HEAD_SHA}" in
   *[!0-9a-f]*|'') die 2 "--head must be a full lowercase hex SHA (got '${HEAD_SHA}')" "copy the SHA from integration-gate's INTEGRATION OK line." ;;
 esac
@@ -164,11 +215,23 @@ esac
 REPO_NAME="$(basename "$(dirname "${COMMON}")")"
 
 ORIGIN_URL="$(git -C "${REPO}" config --get remote.origin.url 2>/dev/null)" \
-  || die 2 "no remote 'origin' in ${REPO}" "run from a checkout whose origin is the GitHub repo."
-case "${ORIGIN_URL}" in
-  *github.com[:/]*) ;;
-  *) die 2 "origin '${ORIGIN_URL}' is not github.com" "GitLab repos merge through the merge train (athena:merge-boarding -> Boarding); this tool is for GitHub squash merges only." ;;
-esac
+  || die 2 "no remote 'origin' in ${REPO}" "run from a checkout whose origin is the repo the ${CH_NAME} belongs to."
+if [ "${FORGE}" = github ]; then
+  case "${ORIGIN_URL}" in
+    *github.com[:/]*) ;;
+    *) die 2 "origin '${ORIGIN_URL}' is not github.com" "--pr is for a GitHub PR; for a GitLab MR pass --mr <iid> (a project with a merge train boards it instead: athena:merge-boarding -> Boarding)." ;;
+  esac
+else
+  # glab-athena acts on gitlab.com only, so the GitLab path does too. The
+  # project path is the whole path after the host (nested groups included).
+  [[ "${ORIGIN_URL}" =~ ^([a-z][a-z0-9+.-]*://)?([^@/]*@)?gitlab\.com(:[0-9]+)?[:/]+(.+)$ ]] \
+    || die 2 "origin '${ORIGIN_URL}' is not gitlab.com" "--mr is for a gitlab.com MR; for a GitHub PR pass --pr <n>."
+  GL_PROJECT="${BASH_REMATCH[4]%/}"; GL_PROJECT="${GL_PROJECT%.git}"
+  [[ "${GL_PROJECT}" =~ ^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)+$ ]] \
+    || die 2 "COULD NOT LOOK: origin '${ORIGIN_URL}' names no <namespace>/<project> (got '${GL_PROJECT}')" \
+         "set origin to the project's URL (git@gitlab.com:<namespace>/<project>.git); nothing was merged."
+  GL_ENC="${GL_PROJECT//\//%2F}"
+fi
 
 LM_LOCK_KIND=explicit   # telemetry's closed `lock` label: never the caller's path
 if [ -z "${LOCK}" ]; then
@@ -183,12 +246,46 @@ mkdir -p "$(dirname "${LOCK}")" || die 2 "cannot create $(dirname "${LOCK}")" "c
 echo "LOCK ${LOCK}"
 
 AI_BIN="${LOCKED_MERGE_AI_BIN:-$(cd "${SKILL_DIR}/../../bin" 2>/dev/null && pwd)}"
-for t in gh-athena confirm-merged teardown-stack; do
+if [ "${FORGE}" = github ]; then WRAPPER=gh-athena READER=gh MERGE_CALL="gh-athena pr merge ${PR}"
+else WRAPPER=glab-athena READER=glab MERGE_CALL="glab-athena mr merge ${MR}"; fi
+for t in "${WRAPPER}" confirm-merged teardown-stack; do
   [ -x "${AI_BIN}/${t}" ] || die 2 "${AI_BIN}/${t} not found" "run this script from its home in ~/dev/custom/ai/skills/athena:merge-boarding/scripts/."
 done
-command -v gh >/dev/null 2>&1 || die 2 "gh (read-only forge CLI) not on PATH" "install gh; reads use plain gh."
+command -v "${READER}" >/dev/null 2>&1 || die 2 "${READER} (read-only forge CLI) not on PATH" "install ${READER}; reads use plain ${READER}."
 command -v flock >/dev/null 2>&1 || die 2 "flock not on PATH" "install util-linux flock."
-command -v jq >/dev/null 2>&1 || die 2 "jq not on PATH" "install jq; the PR state and the integration-gate receipt are read with it."
+command -v jq >/dev/null 2>&1 || die 2 "jq not on PATH" "install jq; the ${CH_NAME} state and the integration-gate receipt are read with it."
+
+# ---- GitLab: the project decides train or no train (DND-1943) ----
+# Read from the project, never from the host name. gitlab.com Free omits
+# merge_trains_enabled (measured 2026-10-04 on cjpoll/gen_saas: merge_method
+# "merge", no merge_trains_enabled key), so an absent key is a project with no
+# train ONLY when the read is a full project view: merge_method must be there.
+# Anything else is COULD NOT LOOK, never "no train" (ai/CLAUDE.md -> "A failed
+# lookup must never look like an empty one"). Before the lock: a train project
+# takes nothing here.
+gl_api() { # <endpoint> -- one plain-glab read on gitlab.com
+  glab api --hostname gitlab.com "$1"
+}
+if [ "${FORGE}" = gitlab ]; then
+  gl_err="$(mktemp)" || die 2 "COULD NOT LOOK: mktemp failed" "check that \$TMPDIR is writable; nothing was merged."
+  proj_json="$(cd "${REPO}" && gl_api "projects/${GL_ENC}" 2>"${gl_err}")"; proj_rc=$?
+  proj_why="$(head -3 "${gl_err}" | tr '\n' ' ')"; rm -f "${gl_err}"
+  [ "${proj_rc}" -eq 0 ] || die 2 "COULD NOT LOOK: glab api projects/${GL_ENC} failed (exit ${proj_rc}): ${proj_why}" \
+    "check glab auth for gitlab.com and that ${GL_PROJECT} exists; whether it has a merge train is unknown, so nothing was merged."
+  trains="$(jq -r 'if type != "object" then "BAD"
+                   elif (.merge_method | type) != "string" then "BAD"
+                   elif has("merge_trains_enabled") | not then "absent"
+                   elif (.merge_trains_enabled | type) == "boolean" then (.merge_trains_enabled | tostring)
+                   else "BAD" end' <<<"${proj_json}" 2>/dev/null)" || trains=BAD
+  case "${trains}" in
+    true) die 12 "MERGE TRAIN: ${GL_PROJECT} has merge trains enabled (merge_trains_enabled true), so ${CH_NAME} boards the train, not this tool" \
+            "board it: athena:merge-boarding -> Boarding (glab-athena api -X POST \"projects/:id/merge_trains/merge_requests/${MR}\" -f sha=${HEAD_SHA}, from a checkout of the project). Nothing was locked or merged." ;;
+    false) echo "PROJECT ${GL_PROJECT}: merge trains disabled (merge_trains_enabled false)" ;;
+    absent) echo "PROJECT ${GL_PROJECT}: no merge train (merge_trains_enabled not offered; merge_method $(jq -r .merge_method <<<"${proj_json}"))" ;;
+    *) die 2 "COULD NOT LOOK: the project read for ${GL_PROJECT} is not a full project view (no merge_method, or a non-boolean merge_trains_enabled): $(head -c 200 <<<"${proj_json}" | tr '\n' ' ')" \
+         "read it as a member with at least Developer access (glab auth status for gitlab.com); whether it has a merge train is unknown, so nothing was merged." ;;
+  esac
+fi
 
 # ---- telemetry (DND-1475) ----
 # merge.lock_wait (the time blocked in flock -w, acquired or timeout) and
@@ -202,6 +299,10 @@ command -v jq >/dev/null 2>&1 || die 2 "jq not on PATH" "install jq; the PR stat
 # branch once it is read (--unit-branch), because this tool runs from a
 # checkout whose own branch need not name the ticket; the ledger joins them to
 # the landing by unit or head.
+# On GitLab (DND-1943) only merge.lock_wait is written: glab-athena records the
+# MR's merge.landed (via=mr) itself (DND-1939), and a second one would count
+# the landing twice. lead-time-phases starts a GitLab MR's merge phase from
+# this lock_wait.
 LM_TEL_LIB="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../../lib/telemetry-emit.sh"
 # shellcheck source=../../../lib/telemetry-emit.sh
 if ! . "${LM_TEL_LIB}" 2>/dev/null; then
@@ -248,19 +349,39 @@ touch "${LOCK}" 2>/dev/null || true
 git -C "${REPO}" fetch -q origin \
   || die 3 "git fetch origin failed" "check the network/credentials, then re-run; nothing was merged."
 
-pr_json="$(cd "${REPO}" && gh pr view "${PR}" --json state,headRefOid,headRefName,baseRefName 2>/dev/null)" \
-  || die 2 "gh pr view ${PR} failed" "check gh auth and that PR ${PR} exists in this repo; nothing was merged."
-state="$(jq -r '.state // empty' <<<"${pr_json}")"
-pr_head="$(jq -r '.headRefOid // empty' <<<"${pr_json}")"
-base="$(jq -r '.baseRefName // empty' <<<"${pr_json}")"
-# The PR's head branch names the work (a ticket branch): telemetry's unit.
-LM_UNIT_BRANCH="$(jq -r '.headRefName // empty' <<<"${pr_json}")"
-[ -n "${state}" ] && [ -n "${pr_head}" ] && [ -n "${base}" ] \
-  || die 2 "gh pr view ${PR} returned no state/head/base" "check gh auth; an empty answer is not a PR."
+if [ "${FORGE}" = github ]; then
+  pr_json="$(cd "${REPO}" && gh pr view "${PR}" --json state,headRefOid,headRefName,baseRefName 2>/dev/null)" \
+    || die 2 "gh pr view ${PR} failed" "check gh auth and that PR ${PR} exists in this repo; nothing was merged."
+  state="$(jq -r '.state // empty' <<<"${pr_json}")"
+  pr_head="$(jq -r '.headRefOid // empty' <<<"${pr_json}")"
+  base="$(jq -r '.baseRefName // empty' <<<"${pr_json}")"
+  # The PR's head branch names the work (a ticket branch): telemetry's unit.
+  LM_UNIT_BRANCH="$(jq -r '.headRefName // empty' <<<"${pr_json}")"
+  [ -n "${state}" ] && [ -n "${pr_head}" ] && [ -n "${base}" ] \
+    || die 2 "gh pr view ${PR} returned no state/head/base" "check gh auth; an empty answer is not a PR."
+  OPEN_STATE=OPEN
+else
+  pr_json="$(cd "${REPO}" && gl_api "projects/${GL_ENC}/merge_requests/${MR}" 2>/dev/null)" \
+    || die 2 "COULD NOT LOOK: glab api projects/${GL_ENC}/merge_requests/${MR} failed" "check glab auth for gitlab.com and that !${MR} exists in ${GL_PROJECT}; nothing was merged."
+  jq -e --argjson i "${MR}" 'type == "object" and .iid == $i' <<<"${pr_json}" >/dev/null 2>&1 \
+    || die 2 "COULD NOT LOOK: the read of !${MR} did not return MR !${MR}: $(head -c 200 <<<"${pr_json}" | tr '\n' ' ')" "check glab auth; an answer for another MR is not this MR. Nothing was merged."
+  state="$(jq -r '.state // empty' <<<"${pr_json}")"
+  pr_head="$(jq -r '.sha // empty' <<<"${pr_json}")"
+  base="$(jq -r '.target_branch // empty' <<<"${pr_json}")"
+  LM_UNIT_BRANCH="$(jq -r '.source_branch // empty' <<<"${pr_json}")"
+  [ -n "${state}" ] && [ -n "${pr_head}" ] && [ -n "${base}" ] \
+    || die 2 "COULD NOT LOOK: the read of !${MR} has no state/sha/target_branch" "check glab auth; an empty answer is not an MR. Nothing was merged."
+  # A fork MR's head lives in another project, whose own pipeline the merge
+  # guard would read as the head's. Most restrictive: refuse it here.
+  jq -e '(.source_project_id | type) == "number" and .source_project_id == .target_project_id' <<<"${pr_json}" >/dev/null 2>&1 \
+    || die 2 "!${MR} comes from another project (source_project_id $(jq -r '.source_project_id' <<<"${pr_json}") is not the target's $(jq -r '.target_project_id' <<<"${pr_json}"))" \
+         "push the branch into ${GL_PROJECT} itself and open the MR from there, then gate and merge that MR. Nothing was merged."
+  OPEN_STATE=opened
+fi
 
-[ "${state}" = "OPEN" ] || die 3 "PR ${PR} is ${state}, not OPEN" "if it merged, run confirm-merged; otherwise reopen it before merging."
+[ "${state}" = "${OPEN_STATE}" ] || die 3 "${CH_NAME} is ${state}, not ${OPEN_STATE}" "if it merged, run confirm-merged; otherwise reopen it before merging."
 [ "${pr_head}" = "${HEAD_SHA}" ] \
-  || die 3 "PR ${PR} head is ${pr_head}, not the gated ${HEAD_SHA}" "re-run integration-gate on the new head and pass its SHA."
+  || die 3 "${CH_NAME} head is ${pr_head}, not the gated ${HEAD_SHA}" "re-run integration-gate on the new head and pass its SHA."
 
 B="$(git -C "${REPO}" rev-parse --verify -q "refs/remotes/origin/${base}^{commit}")" \
   || die 2 "origin/${base} does not resolve after fetch" "check the PR's base branch exists on origin."
@@ -390,17 +511,41 @@ idle_check() {
 # gh-athena's judge (ai/lib/gh-merge-guard.sh -> gmg_line_check); the guard
 # reads them again. It runs AFTER the idle check, so a deploy that check
 # waited out is read concluded, not pending.
-[[ "${ORIGIN_URL}" =~ github\.com[:/]+([^/]+)/([^/]+)$ ]] \
-  || die 2 "COULD NOT LOOK: origin '${ORIGIN_URL}' names no <owner>/<repo>, so the base tip's runs cannot be read" \
-       "set origin to the GitHub repo's URL (https://github.com/<owner>/<repo>.git); nothing was merged."
-GH_OWNER="${BASH_REMATCH[1]}"; GH_REPO="${BASH_REMATCH[2]%.git}"
-if gmg_line_check "${GH_OWNER}" "${GH_REPO}" "origin/${base}" "${B}" "${HEAD_SHA}" "${REPO}"; then tip_rc=0; else tip_rc=$?; fi
-case "${tip_rc}" in
-  0) echo "${GMG_LINE_NOTE}" ;;
-  1) die 11 "${GMG_LINE_WHY}" "$(gmg_line_fix "${GH_OWNER}" "${GH_REPO}" "${base}" "${B}"), then re-run locked-merge. Nothing was merged." ;;
-  *) die 2 "${GMG_LINE_WHY}" \
-       "make the tip readable (network up, gh auth, git fetch origin), then re-run locked-merge. Could-not-read is never green; nothing was merged." ;;
-esac
+if [ "${FORGE}" = github ]; then
+  [[ "${ORIGIN_URL}" =~ github\.com[:/]+([^/]+)/([^/]+)$ ]] \
+    || die 2 "COULD NOT LOOK: origin '${ORIGIN_URL}' names no <owner>/<repo>, so the base tip's runs cannot be read" \
+         "set origin to the GitHub repo's URL (https://github.com/<owner>/<repo>.git); nothing was merged."
+  GH_OWNER="${BASH_REMATCH[1]}"; GH_REPO="${BASH_REMATCH[2]%.git}"
+  if gmg_line_check "${GH_OWNER}" "${GH_REPO}" "origin/${base}" "${B}" "${HEAD_SHA}" "${REPO}"; then tip_rc=0; else tip_rc=$?; fi
+  case "${tip_rc}" in
+    0) echo "${GMG_LINE_NOTE}" ;;
+    1) die 11 "${GMG_LINE_WHY}" "$(gmg_line_fix "${GH_OWNER}" "${GH_REPO}" "${base}" "${B}"), then re-run locked-merge. Nothing was merged." ;;
+    *) die 2 "${GMG_LINE_WHY}" \
+         "make the tip readable (network up, gh auth, git fetch origin), then re-run locked-merge. Could-not-read is never green; nothing was merged." ;;
+  esac
+else
+  # GitLab (DND-1943): the tip's CONTENT is forge-free (git and
+  # ai/config/main-content-checks.json, keyed <namespace>/<project>), so the
+  # same shared judge reads it here. The tip's PIPELINES are judged inside the
+  # merge call by glab-athena's guard (DND-1941); its refusal is classified
+  # below, after the call, exactly as gh-athena's is.
+  if gmg_content_health "${GL_PROJECT%/*}" "${GL_PROJECT##*/}" "${B}" "${HEAD_SHA}" "${REPO}"; then tip_rc=0; else tip_rc=$?; fi
+  case "${tip_rc}" in
+    0) case "${GMG_CONTENT_STATE}" in
+         NONE) echo "BASE-TIP origin/${base} ${B} content: no check declared for ${GL_PROJECT}; its pipelines are judged by the merge guard (DND-1941)" ;;
+         CLEAN) echo "BASE-TIP origin/${base} ${B} content: no duplicated migration version (${GMG_CONTENT_COUNTS}); its pipelines are judged by the merge guard (DND-1941)" ;;
+         FIX) echo "BASE-TIP origin/${base} ${B} content: RED-MAIN FIX: the tip holds a duplicated migration version and the head removes it:
+${GMG_CONTENT_DUPS}" ;;
+       esac ;;
+    1) die 11 "${GMG_RED_MARK} origin/${base} tip ${B} is RED, so the line is stopped (DND-1902).
+  Duplicated migration version(s) (ai/config/main-content-checks.json):
+${GMG_CONTENT_DUPS}
+  The head ${HEAD_SHA} is not a red-main fix: it must contain ${B} and remove every duplicate." \
+         "land only a red-main fix: a head that contains ${B}, removes every duplicate named above, and carries its own INTEGRATION OK receipt (merge origin/${base} into it, fix it, push as Athena, re-gate), then re-run locked-merge. Every other MR waits until ${base} is green again. Nothing was merged." ;;
+    *) die 2 "${GMG_LOOK_MARK} whether the origin/${base} tip ${B} is red cannot be told: ${GMG_CONTENT_WHY}" \
+         "make the tip readable (git fetch origin; fix the declaration if the message names it), then re-run locked-merge. Could-not-read is never green; nothing was merged." ;;
+  esac
+fi
 
 # ---- the merged tree must not break main either (DND-1902) ----
 # gen_saas #767 and #771 each added an athena migration with one version; the
@@ -424,7 +569,7 @@ confirmed=""
 confirm_landed() {
   local i
   for i in $(seq 1 "$1"); do
-    if "${AI_BIN}/confirm-merged" --pr "${PR}" --repo "${REPO}" --fetch >/dev/null 2>&1; then confirmed=1; return 0; fi
+    if "${AI_BIN}/confirm-merged" "${CH_FLAG}" "${CH}" --repo "${REPO}" --fetch >/dev/null 2>&1; then confirmed=1; return 0; fi
     [ "${i}" -lt "$1" ] && sleep "${LOCKED_MERGE_CONFIRM_SLEEP:-20}"
   done
   return 1
@@ -435,7 +580,14 @@ confirm_landed() {
 # forge before claiming either; a landing goes on to the same checks below.
 merge_err="$(mktemp)" || die 2 "COULD NOT LOOK: mktemp failed" "check that \$TMPDIR is writable; nothing was merged."
 merge_rc=0
-( cd "${REPO}" && "${AI_BIN}/gh-athena" pr merge "${PR}" --squash --match-head-commit "${HEAD_SHA}" ) 2>"${merge_err}" || merge_rc=$?
+if [ "${FORGE}" = github ]; then
+  ( cd "${REPO}" && "${AI_BIN}/gh-athena" pr merge "${PR}" --squash --match-head-commit "${HEAD_SHA}" ) 2>"${merge_err}" || merge_rc=$?
+else
+  # Run from the checkout: the guard reads the receipt from its git common
+  # dir. --auto-merge=false: glab defaults auto-merge on, and a merge GitLab
+  # deferred until a pipeline finished would land outside this lock.
+  ( cd "${REPO}" && "${AI_BIN}/glab-athena" mr merge "${MR}" -R "${GL_PROJECT}" --squash --sha "${HEAD_SHA}" --auto-merge=false --yes ) 2>"${merge_err}" || merge_rc=$?
+fi
 cat "${merge_err}" >&2
 merge_red="" merge_look=""
 if [ "${merge_rc}" -ne 0 ] && gmg_refusal_has_reason "${merge_err}" "${GMG_RED_MARK}"; then merge_red=1; fi
@@ -446,27 +598,34 @@ rm -f "${merge_err}"
 # DND-1906: the tip turned red between the check above and the guard's own
 # re-check. The guard refused before any call to the forge, so nothing landed:
 # exit 11 at once, with no confirm retries (they read as exit 4).
-[ -z "${merge_red}" ] || die 11 "${GMG_RED_MARK} the merge guard refused PR ${PR}: ${base} went red after the check above; its message is above" \
-  "land only a red-main fix: a head that contains the red tip the guard names above (not ${B}, which this tool read before the tip moved), removes every duplicate it names, and carries its own INTEGRATION OK receipt; re-run integration-gate on it, then re-run locked-merge. Every other PR waits until ${base} is green again. Nothing was merged."
+[ -z "${merge_red}" ] || die 11 "${GMG_RED_MARK} the merge guard refused ${CH_NAME}: ${base} went red after the check above; its message is above" \
+  "land only a red-main fix: a head that contains the red tip the guard names above (not ${B}, which this tool read before the tip moved), removes every duplicate it names, and carries its own INTEGRATION OK receipt; re-run integration-gate on it, then re-run locked-merge. Every other ${CH_NAME%% *} waits until ${base} is green again. Nothing was merged."
 # DND-1907: exit 2 at once, with no confirm retries (they read as exit 4).
-[ -z "${merge_look}" ] || die 2 "${GMG_LOOK_MARK} the merge guard refused PR ${PR} because it could not look at ${base}; its message is above" \
-  "read the guard's own Fix: above, fix what it could not read (gh auth, the checkout), then re-run locked-merge. Nothing was merged."
+[ -z "${merge_look}" ] || die 2 "${GMG_LOOK_MARK} the merge guard refused ${CH_NAME} because it could not look at ${base}; its message is above" \
+  "read the guard's own Fix: above, fix what it could not read (${READER} auth, the checkout), then re-run locked-merge. Nothing was merged."
 if [ "${merge_rc}" -ne 0 ]; then
   confirm_landed 3 \
-    || die 4 "gh-athena pr merge ${PR} refused or failed, and confirm-merged does not show it landed" \
-         "read the wrapper's own Fix: above (checks not green, conflict). If it was a forge error (5xx, timeout), check the PR on the forge before re-running."
-  echo "locked-merge: the merge call failed, but PR ${PR} landed (confirm-merged); verifying it like any other merge" >&2
+    || die 4 "${MERGE_CALL} refused or failed, and confirm-merged does not show it landed" \
+         "read the wrapper's own Fix: above (checks not green, conflict). If it was a forge error (5xx, timeout), check the ${CH_NAME%% *} on the forge before re-running."
+  echo "locked-merge: the merge call failed, but ${CH_NAME} landed (confirm-merged); verifying it like any other merge" >&2
 fi
 
 [ -n "${confirmed}" ] || confirm_landed 6
-[ -n "${confirmed}" ] || die 8 "merge of PR ${PR} ran but confirm-merged did not confirm it" \
-  "check the PR on the forge by hand; do not retry the merge blind."
+[ -n "${confirmed}" ] || die 8 "merge of ${CH_NAME} ran but confirm-merged did not confirm it" \
+  "check the ${CH_NAME%% *} on the forge by hand; do not retry the merge blind."
 
-M="$(cd "${REPO}" && gh pr view "${PR}" --json mergeCommit -q '.mergeCommit.oid // empty' 2>/dev/null)"
-[ -n "${M}" ] || die 8 "PR ${PR} reports no merge commit" "check the PR on the forge by hand; do not retry the merge blind."
+if [ "${FORGE}" = github ]; then
+  M="$(cd "${REPO}" && gh pr view "${PR}" --json mergeCommit -q '.mergeCommit.oid // empty' 2>/dev/null)"
+else
+  # The commit main gained: the merge commit, or on a fast-forward project
+  # (no merge commit) the squash commit.
+  M="$(cd "${REPO}" && gl_api "projects/${GL_ENC}/merge_requests/${MR}" 2>/dev/null | jq -r '.merge_commit_sha // .squash_commit_sha // empty' 2>/dev/null)"
+fi
+[ -n "${M}" ] || die 8 "${CH_NAME} reports no merge commit" "check the ${CH_NAME%% *} on the forge by hand; do not retry the merge blind."
 # Confirmed landed (confirm-merged), with its merge commit: that is the event,
-# whatever the parent/tree checks below then say about it.
-if [[ "${M}" =~ ^[0-9a-f]{40}$ ]]; then
+# whatever the parent/tree checks below then say about it. GitHub only: on
+# GitLab glab-athena records it (DND-1939).
+if [ "${FORGE}" = github ] && [[ "${M}" =~ ^[0-9a-f]{40}$ ]]; then
   LM_LANDED_AT="$(athena_telemetry_now)"; LM_LANDED_AFTER="${M}"; LM_BEFORE="${B}"
 fi
 git -C "${REPO}" fetch -q origin 2>/dev/null
@@ -479,7 +638,7 @@ parent="$(git -C "${REPO}" rev-parse "${M}^1")"
   || die 7 "LANDED UNGATED: merge ${M}'s tree differs from the expected tree ${EXPECTED_TREE} (${HEAD_SHA} merged into ${B})" \
        "re-run the gate on origin/${base} now and report the ungated landing to the coordinator."
 
-echo "MERGED ${PR} ${M} ON ${B} TREE-MATCH"
+echo "MERGED ${CH} ${M} ON ${B} TREE-MATCH"
 
 # ---- merge-driven teardown (DND-864) ----
 # The landing is confirmed, so the merged branch's worktree stack goes now,
@@ -490,8 +649,8 @@ echo "MERGED ${PR} ${M} ON ${B} TREE-MATCH"
 # recorded in the worktree's git dir (DND-1576). Release the merge lock first:
 # a teardown is not part of the critical section.
 exec 9>&-
-if ! "${AI_BIN}/teardown-stack" --pr "${PR}" --repo "${REPO}"; then
-  die 10 "PR ${PR} LANDED, but teardown-stack could not tear down its worktree stack" \
-    "the merge is done; do not re-merge. Read teardown-stack's Fix: above, then re-run ${AI_BIN}/teardown-stack --pr ${PR} --repo ${REPO}."
+if ! "${AI_BIN}/teardown-stack" "${CH_FLAG}" "${CH}" --repo "${REPO}"; then
+  die 10 "${CH_NAME} LANDED, but teardown-stack could not tear down its worktree stack" \
+    "the merge is done; do not re-merge. Read teardown-stack's Fix: above, then re-run ${AI_BIN}/teardown-stack ${CH_FLAG} ${CH} --repo ${REPO}."
 fi
 exit 0
