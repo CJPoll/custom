@@ -230,7 +230,7 @@ GitLab terms are primary; reach for the GitHub column only under this skill.
 | GitLab (default) | GitHub (this skill) |
 |---|---|
 | Merge Request / MR | Pull Request / PR |
-| `glab mr create --fill` | `gh-athena pr create --fill --base <target>` |
+| `glab mr create --title … --description …` | `gh-athena pr create --fill --base <target>` |
 | `glab mr update --target-branch <b>` (retarget) | `gh-athena pr edit <n> --base <b>` |
 | one **pipeline**; `glab ci status` / poll `.../pipelines/<id>` | Actions **checks** (per-workflow check-runs, no single pipeline object); `ai/bin/gh-ci-wait --repo <r> --sha <head>` |
 | `detailed_merge_status == mergeable` | every check on the exact head green, asserted by `gh-athena` itself (branch protection only where the plan has it) |

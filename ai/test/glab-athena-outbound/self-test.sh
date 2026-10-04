@@ -544,7 +544,8 @@ echo "--- DND-2014: text glab builds itself never reaches a PUBLIC project unsca
 # --title is empty, and into a branch it creates on the target when
 # --source-branch is empty; --copy-issue-labels copies its labels. --fill and
 # --fill-commit-body (mr create, mr update) write commit messages, --recover a
-# saved recovery file, --signoff the account's name and email. The scan never
+# saved recovery file, --signoff the account's name and email, and -d - an
+# editor's text started from a template or the commit list. The scan never
 # sees any of it, so on a target that is not PRIVATE it is refused.
 refused_authored() { [ "${RC}" = 3 ] && ! sent && [[ "${OUT}" == *"text glab builds itself"* ]] && [[ "${OUT}" == *"Fix:"* ]]; }
 ISSUE_URL="https://gitlab.com/synth-group/priv/-/issues/7"
@@ -557,6 +558,8 @@ for argv in "mr create --related-issue 7 --yes" "mr create -i ${ISSUE_URL} -t T 
   "mr create -t T -d D --recover" "mr create -t T -d D --signoff" \
   "mr update 5 --fill --yes" "mr update 5 -fy" "mr update 5 --fill --fill-commit-body -y" \
   "issue create -t T -d D --recover" "issue new -t T -d D --recover=true" \
+  "mr create -t T -d -" "mr create -t T --description=-" "mr update 5 -d -" "issue create -t T -d -" \
+  "issue update 3 --description -" "mr create -t T -d D -d -" \
   "-R synth-group/pub mr create --fill --yes"; do
   # shellcheck disable=SC2086
   gla ${argv}
@@ -577,7 +580,7 @@ if [[ "${OUT}" == *"--related-issue"* ]] && [[ "${OUT}" == *"--title"* ]] && [[ 
 for argv in "mr create -i 7 -t T -s br -d D" "mr create -i ${ISSUE_URL} --title T --source-branch br -d D" \
   "mr create --related-issue=${ISSUE_URL} -s br -t T -d D" "mr create --fill=false -t T -d D" "mr create -f=0 -t T -d D" "mr create --fill --fill=false -t T -d D" \
   "mr create --related-issue= -t T -d D" "mr create -t T -d D --recover=false --signoff=false" "mr update 5 --fill=FALSE -t T" \
-  "issue create -t T -d D"; do
+  "issue create -t T -d D" "mr create -t T -d - -d D" "issue update 3 -d a-b"; do
   # shellcheck disable=SC2086
   gla ${argv}
   if [ "${RC}" = 0 ] && sent; then ok "DND-2014 explicit text passes: ${argv}"; else bad "DND-2014 explicit: ${argv}" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi

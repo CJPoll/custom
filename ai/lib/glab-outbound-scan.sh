@@ -99,35 +99,44 @@
 # the scan can never see it. On a target that is not PRIVATE each is REFUSED
 # (exit 3, Fix: pass the text explicitly with --title/--description), even when
 # the command carries no text of its own. Read from glab 1.92.1:
-#   mr create --related-issue/-i   with an empty or absent --title, the
-#                                  issue's title (fetched from the server,
-#                                  possibly a PRIVATE issue in another project)
-#                                  is the MR title; with an empty or absent
-#                                  --source-branch, glab creates a branch named
-#                                  after that title on the target. So it needs
-#                                  a non-empty --title AND --source-branch.
+#   mr create --related-issue/-i   with an empty or absent --title, the MR
+#                                  title is `Resolve "<the issue's title>"`,
+#                                  fetched from the server, possibly from a
+#                                  PRIVATE issue in another project; with an
+#                                  empty or absent --source-branch, glab creates
+#                                  a branch named after that title on the
+#                                  target. So it needs a non-empty --title AND
+#                                  --source-branch.
 #   mr create --copy-issue-labels  the related issue's labels
 #   mr create, mr update --fill/-f, --fill-commit-body
 #                                  commit messages and the branch name
 #   mr create, issue create --recover
 #                                  a title and description from glab's recovery
-#                                  file
-#   mr create --signoff            the account's name and email, from the server
+#                                  file, which override the flags
+#   mr create --signoff            the account's name and email, from the
+#                                  server (added only on the template path that
+#                                  -d - or a prompt starts; refused whatever the
+#                                  path, the stricter reading)
+#   mr create, mr update, issue create, issue update --description/-d -
+#                                  an editor's text, started from a template
+#                                  file, the commit list or the current
+#                                  description
 # A switch is on unless its last occurrence is 0, f, F, false, FALSE or False
-# (pflag's ParseBool; any other value makes glab fail, so it reads as on). The
-# scan does not fetch that text to scan it: matching what glab would build
+# (pflag's ParseBool; any other value makes glab fail, so it reads as on). A
+# value is the last occurrence's, as pflag keeps it. The scan does not fetch
+# that text to scan it: matching what glab would build
 # (issueutils.IssueFromArg, git.Commits between remote-tracking refs, the
 # recovery file's path) is a second implementation that could drift. What glab
 # still adds and is not refused: `Closes #<iid>` (a number) in the description,
 # and `Draft: ` before the title.
 #
-# Residuals, stated: an interactive editor (`-d -`, a note with no -m) or
-# --web, the CONTENT of release asset files (their paths
-# are scanned as positionals), other commands (snippets, wiki, label and repo
-# descriptions, release update), names that are not free text (labels,
-# milestones), the text of an api endpoint's PATH (only its ?query is scanned;
-# a path segment can name a file or wiki page), a glab flag that changed
-# whether it takes a value since the
+# Residuals, stated: an interactive prompt (a command with no -t/-d on a
+# terminal, a note with no -m) or --web, the CONTENT of release asset files
+# (their paths are scanned as positionals), other commands (snippets, wiki,
+# label and repo descriptions, release update), names that are not free text
+# (labels, milestones, branch names given with -s), the text of an api
+# endpoint's PATH (only its ?query is scanned; a path segment can name a file
+# or wiki page), a glab flag that changed whether it takes a value since the
 # pinned version, a value no pattern describes, and the waiver. The scanner
 # run is the one beside the glab-athena invoked.
 #
@@ -284,7 +293,16 @@ glos_authored() {
   local f
   GLOS_AUTHORED="" GLOS_AUTHORED_WHAT=""
   case "$1" in
+    "mr create" | "mr update" | "issue create" | "issue update")
+      if [ "$(glos_value description)" = - ]; then
+        glos_authored_add "--description -" "an editor's text, started from a template, the commit list or the current description"
+      fi ;;
+  esac
+  case "$1" in
     "mr create")
+      # Both must be non-empty. With --create-source-branch and a title, glab
+      # names the branch after the (scanned) title, which is safe, but this
+      # still asks for -s: the stricter reading, and one rule to state.
       if [ -n "$(glos_value related-issue)" ] && { [ -z "$(glos_value title)" ] || [ -z "$(glos_value source-branch)" ]; }; then
         glos_authored_add "--related-issue without a non-empty --title and --source-branch" "the related issue's title, fetched from the server (in the MR title, and in a branch glab creates on the target)"
       fi
@@ -675,7 +693,7 @@ glos_guard() {
   done
   [ -n "$public" ] || return 0
   if [ -n "$GLOS_AUTHORED" ]; then
-    ots_refuse 3 "$GLOS_AUTHORED makes glab send text glab builds itself ($GLOS_AUTHORED_WHAT) to this PUBLIC (or unknown) project, after the outbound scan and never seen by it. Fix: pass the text explicitly, so it is scanned: --title \"…\" --description \"…\" (with --related-issue, a non-empty --title and --source-branch <name> too), and drop --fill, --fill-commit-body, --recover, --signoff and --copy-issue-labels."
+    ots_refuse 3 "$GLOS_AUTHORED makes glab send text glab builds itself ($GLOS_AUTHORED_WHAT) to this PUBLIC (or unknown) project, after the outbound scan and never seen by it. Fix: pass the text explicitly, so it is scanned: --title \"…\" --description \"…\" (with --related-issue, a non-empty --title and --source-branch <name> too), never -d - (an editor), and drop --fill, --fill-commit-body, --recover, --signoff and --copy-issue-labels."
   fi
   if [ -n "$GLOS_API_FILLED" ]; then
     ots_refuse 3 "$GLOS_API_FILLED holds a placeholder glab fills after this scan (:branch, :fullpath, :group, :id, :namespace, :repo, :user, :username), so the text sent to this PUBLIC (or unknown) project is not the text scanned. Fix: send the value with -f (raw; glab does not fill it), or write it out in full."

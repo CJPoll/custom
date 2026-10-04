@@ -38,10 +38,11 @@ for raw API calls. Examples:
 ```
 
 Pass MR and issue text explicitly. On a project that is not private, the
-wrapper scans every text it sends and refuses (exit 3) a flag that makes glab
+wrapper scans the text it sends and refuses (exit 3) a flag that makes glab
 build text itself: `--fill`, `--fill-commit-body`, `--recover`, `--signoff`,
-`--copy-issue-labels`, and `--related-issue` without `--title` and
-`--source-branch`. The list and the reasons are in
+`--copy-issue-labels`, `-d -` (an editor), and `--related-issue` unless both
+`--title` and `--source-branch` are given, non-empty. The list and the
+reasons are in
 `ai/lib/glab-outbound-scan.sh` → *Text glab builds itself*.
 
 ## Setup
