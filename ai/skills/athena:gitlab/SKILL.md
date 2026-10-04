@@ -136,8 +136,8 @@ refuses a command that writes a remote ref other than `git push` (`send-pack`,
 `http-push`, a `remote-<name>` helper, `subtree push`; push with `glab-athena
 git push` instead), a `git-<name>` program on PATH that is not git's own, and
 a subcommand git does not know (DND-1867), and a URL on any host but
-gitlab.com (DND-2000; a github.com remote goes through `gh-athena git` or
-`ai/bin/forge-push`). A missing
+gitlab.com (DND-2000; a github.com remote goes through `gh-athena git`, or
+`ai/bin/forge-push` once DND-1995 lands). A missing
 token file is refused too; `glab-athena refresh` is owner-gated, so do not run
 it. The mechanism and its named residuals (a command from config or a hook,
 git-lfs, …) are

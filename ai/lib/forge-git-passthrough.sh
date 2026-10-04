@@ -161,9 +161,11 @@ EOF
 # this resolver for both hosts, sets 0), every URL fg_refuse_non_https
 # resolves must be a local path (or file://) or on the route's host (a
 # subdomain counts, as for fg_reaches_forge_insecurely). Any other host is
-# REFUSED, exit 3, with a Fix: naming the matching wrapper and
-# ai/bin/forge-push (DND-1995). A URL git cannot resolve is COULD NOT LOOK,
-# also exit 3, never read as "no URL" or as the literal word.
+# REFUSED, exit 3, with a Fix: naming the matching wrapper, and
+# ai/bin/forge-push for when DND-1995 lands (it is not on main at DND-2000,
+# so the Fix: says to use the wrapper until then). A URL git cannot resolve
+# is COULD NOT LOOK, also exit 3, never read as "no URL" or as the literal
+# word.
 #
 # What a local path does is unchanged: git runs it under the route's
 # isolation (no owner credential helper, askpass or pager) with no credential
@@ -221,9 +223,9 @@ fg_refuse_foreign_host() {
   fi
   route="$(fg_host_route "$host")"
   if [ -n "$route" ] && [ "$route" != "$FG_TOOL" ]; then
-    fix="run it through that forge's own wrapper, \`~/dev/custom/ai/bin/$route git $1 …\`; to push, \`~/dev/custom/ai/bin/forge-push\` (DND-1995) picks the wrapper from the remote's host."
+    fix="run it through that forge's own wrapper, \`~/dev/custom/ai/bin/$route git $1 …\`. Once DND-1995 lands, \`~/dev/custom/ai/bin/forge-push\` picks the wrapper from the remote's host for a push; until then it does not exist, so use the wrapper."
   else
-    fix="no Athena route serves $host. If this is a local repository, name it by its path. If it is meant to be $FG_HOST, point the remote at https://$FG_HOST/<owner>/<repo>.git or git@$FG_HOST:<owner>/<repo>.git; for the other forge use its own wrapper (\`~/dev/custom/ai/bin/gh-athena git …\` / \`~/dev/custom/ai/bin/glab-athena git …\`) or \`~/dev/custom/ai/bin/forge-push\`."
+    fix="no Athena route serves $host. If this is a local repository, name it by its path. If it is meant to be $FG_HOST, point the remote at https://$FG_HOST/<owner>/<repo>.git or git@$FG_HOST:<owner>/<repo>.git; for the other forge use its own wrapper (\`~/dev/custom/ai/bin/gh-athena git …\` / \`~/dev/custom/ai/bin/glab-athena git …\`), or, once DND-1995 lands, \`~/dev/custom/ai/bin/forge-push\`."
   fi
   cat >&2 <<EOF
 $FG_TOOL: REFUSING \`git $1\`: '$2' resolves to $3, on host $host, which is not $FG_HOST. $FG_TOOL authenticates to $FG_HOST alone (as $FG_BOT), so this would reach $host with no Athena identity: over SSH it goes out with $FG_OWNER's key (DND-2000).
@@ -1060,7 +1062,6 @@ fg_refuse_non_https() {
       case "${1:-}" in
         update) mode=fetch ;;
         # These contact each remote they name (DND-2000); with none named
-        # they list locally, so no default remote is added.
         # they list locally, so no default remote is added. Every word that
         # is not an option is a remote name or URL (set-head: the first).
         show|prune|set-head)
