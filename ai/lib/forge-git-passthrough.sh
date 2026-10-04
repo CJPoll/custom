@@ -94,6 +94,11 @@
 
 FG_OWNER="the machine OWNER (CJPoll)"
 FG_CRED_RESOLVER=""
+# The mirror-seed sanction (DND-1983, ai/lib/glab-seed-mirror.sh): set only by
+# `glab-athena git seed-mirror`, in its own shell, after it proved every seed
+# condition. Reset here, so a value in the caller's environment never counts.
+FG_SEED_SHA=""
+FG_SEED_URL=""
 FG_ESCALATE='If it cannot be done as Athena, do not work around this with a plain `git push` or the owner'"'"'s credentials; escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can'"'"'t be done as Athena").'
 
 # The route's transport (DND-1868): a directory holding only
@@ -1617,6 +1622,12 @@ fg_refuse_red_main() {
 # LOOK). Every remote is judged, not only origin: the receipt is about the
 # commit. Like the red-main refusal it runs before the dry-run print, and it
 # has no skip flag.
+# One commit is covered without a receipt: the mirror seed (DND-1983). When
+# `glab-athena git seed-mirror` has proved its conditions (the pushed SHA is
+# the GitHub origin's main read fresh in that command, the target main absent
+# or an ancestor, origin not yet flipped, main not red; ai/lib/glab-seed-mirror.sh),
+# it sets FG_SEED_SHA and FG_SEED_URL, and exactly that SHA pushed to exactly
+# that URL is accepted, with a note. This file resets both when sourced.
 fg_refuse_ungated_main() {
   local common gitdir cur src sha landed="" decl_at gate rc r u
   [ -n "$FG_PUSH_URL" ] || return 0
@@ -1645,6 +1656,12 @@ fg_refuse_ungated_main() {
     # An unresolvable source fails in git itself; nothing lands. A source may
     # start with `-` (a refspec after `--`), hence --end-of-options (DND-1843).
     [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || continue
+    if [ -n "$FG_SEED_SHA" ] && [ "$sha" = "$FG_SEED_SHA" ] && [ -n "$FG_SEED_URL" ] \
+       && [ "$FG_PUSH_URL" = "athena-forge::$FG_SEED_URL" ]; then
+      printf '%s: note: %s is the GitHub origin main this seed-mirror command read fresh; it seeds %s main as a mirror (DND-1983), with no integration-gate receipt of its own\n' \
+        "$FG_TOOL" "$sha" "$FG_SEED_URL" >&2
+      continue
+    fi
     decl_at="${landed:-$sha}"
     rc=0
     if [ -n "$landed" ]; then

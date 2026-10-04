@@ -722,6 +722,181 @@ if [ "${RC}" = 0 ] && [ "$(git --git-dir="${O}" rev-parse main)" = "${AFTER}" ] 
   ok "L7. a local push URL that insteadOf rewrites for the probe: no probe reaches the other host, the skip is said, the push lands"
 else bad "L7. probe second rewrite" "rc=${RC} ssh='$(cat "${SSHLOG}")' events='$(landed "${S}")' err='${ERR}'"; fi
 
+echo "--- DND-1983: \`git seed-mirror\` seeds an empty GitLab main with the GitHub origin's main, under every condition ---"
+# A gated repo (bin/prep-commit.sh declares the gate), so a plain push of the
+# GitHub main to the GitLab project is refused NO RECEIPT (DND-1690), as in the
+# laptop's DND-1953 cutover. The source and target reads go to local bare
+# repos through the dry-run-only seams; every host check reads the checkout's
+# real config (origin = https://github.com/...).
+printf '%s\n' "glpat-SELFTESTPERSONAL0001" > "${TMP}/personal-token"; chmod 600 "${TMP}/personal-token"
+SM_TO="https://gitlab.com/cjpoll/seed.git"
+# sm_setup <name> : GH (bare, the GitHub origin's stand-in) with main at S, an
+# empty GL (bare, the GitLab project's stand-in), and a clone SW whose origin
+# URL is the GitHub project. Sets GH, GL, SW, S.
+sm_setup() {
+  GH="${TMP}/$1-gh.git"; GL="${TMP}/$1-gl.git"; SW="${TMP}/$1-wt"
+  git init -q --bare -b main "${GH}"; git init -q --bare -b main "${GL}"
+  git init -q -b main "${SW}" && git -C "${SW}" remote add origin "${GH}"
+  mkdir -p "${SW}/bin"; printf '#!/bin/sh\nexit 0\n' > "${SW}/bin/prep-commit.sh"
+  git -C "${SW}" add -A && git -C "${SW}" commit -q -m base
+  git -C "${SW}" commit -q --allow-empty -m "squash merge #1" && git -C "${SW}" push -q origin main
+  git -C "${SW}" fetch -q origin
+  git -C "${SW}" remote set-url origin "https://github.com/CJPoll/seed.git"
+  S="$(git -C "${SW}" rev-parse HEAD)"
+}
+# sm <dir> <seed-mirror args...> : dry-run seed-mirror with both seams.
+sm() {
+  local d="$1"; shift
+  OUT="$(cd "${d}" && GLAB_ATHENA_SEED_SOURCE_READ="${SM_SRC:-${GH}}" GLAB_ATHENA_SEED_TARGET_READ="${SM_TGT:-${GL}}" \
+    GLAB_ATHENA_GIT_DRY_RUN=1 "${WRAPPER}" git seed-mirror "$@" 2>"${TMP}/err")"; RC=$?
+  ERR="$(cat "${TMP}/err")"
+}
+sm_refused() { [ "${RC}" = 3 ] && [[ "${ERR}" == *"REFUSING \`git seed-mirror\` ($1)"* ]] && [[ "${ERR}" == *"Fix:"* ]] \
+  && [[ "${OUT}" != *"dry-run: exec git"* ]]; }
+
+sm_setup s1
+gla "${SW}" push "${SM_TO}" "${S}:refs/heads/main"
+[ "${RC}" = 3 ] && [[ "${ERR}" == *"NO RECEIPT"* ]] \
+  && ok "S0. the defect: a plain push of the GitHub main to an empty GitLab main is refused NO RECEIPT (DND-1690)" \
+  || bad "S0. plain seed push refused" "rc=${RC} out='${OUT}' err='${ERR}'"
+
+sm "${SW}" --to "${SM_TO}"
+if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: exec git"*"[push] [${SM_TO}] [${S}:refs/heads/main]"* ]] \
+  && [[ "${OUT}" == *"cred: granted (one forge URL: ${SM_TO})"* ]] \
+  && [[ "${ERR}" == *"seeds ${SM_TO} main as a mirror (DND-1983)"* ]] && [[ "${ERR}" != *"REFUSING"* ]]; then
+  ok "S1. empty target, pushed SHA = the fresh origin main: seed-mirror runs \`push <url> <sha>:refs/heads/main\` as the bot, past the gate refusal, with a note"
+else bad "S1. seed of an empty target" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+
+sm "${SW}" --from origin --to "${SM_TO}"
+[ "${RC}" = 0 ] && [[ "${OUT}" == *"[${S}:refs/heads/main]"* ]] \
+  && ok "S1b. --from origin is accepted (the source is always origin)" \
+  || bad "S1b. --from origin" "rc=${RC} err='${ERR}'"
+
+OUT="$(cd "${SW}" && FG_SEED_SHA="${S}" FG_SEED_URL="${SM_TO}" GLAB_ATHENA_GIT_DRY_RUN=1 "${WRAPPER}" git push "${SM_TO}" "${S}:refs/heads/main" 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"
+[ "${RC}" = 3 ] && [[ "${ERR}" == *"NO RECEIPT"* ]] \
+  && ok "S1c. FG_SEED_SHA/FG_SEED_URL in the caller's environment do not sanction a plain push (the library resets them)" \
+  || bad "S1c. env-injected sanction ignored" "rc=${RC} out='${OUT}' err='${ERR}'"
+
+# The pushed SHA is origin's main as read in this command, never the
+# checkout's HEAD or its stale origin/main.
+sm_setup s2
+OTHER="${TMP}/s2-other"; git clone -q "${GH}" "${OTHER}" && git -C "${OTHER}" commit -q --allow-empty -m "squash merge #2" \
+  && git -C "${OTHER}" push -q origin main; N="$(git -C "${OTHER}" rev-parse HEAD)"
+git -C "${SW}" fetch -q "${GH}" main
+sm "${SW}" --to "${SM_TO}"
+[ "${RC}" = 0 ] && [[ "${OUT}" == *"[${N}:refs/heads/main]"* ]] && [[ "${OUT}" != *"[${S}:refs/heads/main]"* ]] \
+  && ok "S2. GitHub main moved past the checkout's origin/main: the fresh main (${N:0:8}) is what is pushed" \
+  || bad "S2. fresh main pushed" "rc=${RC} out='${OUT}' err='${ERR}'"
+git -C "${OTHER}" commit -q --allow-empty -m "squash merge #3" && git -C "${OTHER}" push -q origin main
+sm "${SW}" --to "${SM_TO}"
+sm_refused "FRESH SHA" && [[ "${ERR}" == *"git fetch origin"* ]] \
+  && ok "S2b. the fresh origin main is not in this checkout: refused (FRESH SHA, Fix: git fetch origin)" \
+  || bad "S2b. fresh main missing locally" "rc=${RC} out='${OUT}' err='${ERR}'"
+sm "${SW}" --to "${SM_TO}" "${S}:refs/heads/main"
+sm_refused USAGE \
+  && ok "S2c. a caller-named refspec or SHA is refused (USAGE): the SHA is only ever the fresh read" \
+  || bad "S2c. extra arg refused" "rc=${RC} out='${OUT}' err='${ERR}'"
+
+# Fast-forward only.
+sm_setup s3
+git -C "${SW}" push -q "${GL}" "${S}~1:refs/heads/main"
+sm "${SW}" --to "${SM_TO}"
+[ "${RC}" = 0 ] && [[ "${OUT}" == *"[${S}:refs/heads/main]"* ]] && [[ "${ERR}" == *"is an ancestor of"* ]] \
+  && ok "S3. target main is an ancestor of the fresh origin main: a fast-forward seed proceeds" \
+  || bad "S3. ancestor target" "rc=${RC} out='${OUT}' err='${ERR}'"
+SIDE="$(git -C "${SW}" commit-tree "$(git -C "${SW}" rev-parse "HEAD^{tree}")" -m side)"
+git -C "${SW}" push -q -f "${GL}" "${SIDE}:refs/heads/main"
+sm "${SW}" --to "${SM_TO}"
+sm_refused FAST-FORWARD \
+  && ok "S3b. target main is not an ancestor: refused (FAST-FORWARD), nothing pushed, never forced" \
+  || bad "S3b. non-fast-forward refused" "rc=${RC} out='${OUT}' err='${ERR}'"
+git -C "${SW}" push -q -f "${GL}" "${S}:refs/heads/main"
+sm "${SW}" --to "${SM_TO}"
+[ "${RC}" = 0 ] && [[ "${ERR}" == *"nothing to push"* ]] && [[ "${OUT}" != *"dry-run: exec git"* ]] \
+  && ok "S3c. target main already equals the origin main: exit 0, nothing pushed" \
+  || bad "S3c. already seeded" "rc=${RC} out='${OUT}' err='${ERR}'"
+UNK="${TMP}/s3-unknown"; git init -q -b main "${UNK}" && git -C "${UNK}" commit -q --allow-empty -m elsewhere
+git -C "${UNK}" push -q -f "${GL}" main
+sm "${SW}" --to "${SM_TO}"
+sm_refused "COULD NOT LOOK" && [[ "${ERR}" == *"not in this checkout"* ]] \
+  && ok "S3d. target main is a commit this checkout lacks: refused COULD NOT LOOK (not read as absent)" \
+  || bad "S3d. unknown target main" "rc=${RC} out='${OUT}' err='${ERR}'"
+
+# Main-health: a RED source is not mirrored; an unreadable marker refuses.
+sm_setup s4
+SC="$(git -C "${SW}" rev-parse --path-format=absolute --git-common-dir)"
+mkdir -p "${SC}/main-health"
+printf 'schema=main-health-red/1\nsha=%s\nsince=2026-10-03T00:00:00Z\n' "${S}" > "${SC}/main-health/red"
+sm "${SW}" --to "${SM_TO}"
+sm_refused "RED SOURCE" && [[ "${ERR}" == *"main-health check"* ]] \
+  && ok "S4. main-health recorded origin/main RED: refused (RED SOURCE)" \
+  || bad "S4. red source refused" "rc=${RC} out='${OUT}' err='${ERR}'"
+printf 'garbage\n' > "${SC}/main-health/red"
+sm "${SW}" --to "${SM_TO}"
+sm_refused "COULD NOT LOOK" && [[ "${ERR}" == *"main-health marker"* ]] \
+  && ok "S4b. an unreadable red marker: refused COULD NOT LOOK (not read as no red)" \
+  || bad "S4b. unreadable marker" "rc=${RC} out='${OUT}' err='${ERR}'"
+
+# Reads that fail refuse.
+sm_setup s5
+SM_SRC="${TMP}/s5-no-such.git" sm "${SW}" --to "${SM_TO}"
+sm_refused "COULD NOT LOOK" && [[ "${ERR}" == *"fresh read of origin"* ]] \
+  && ok "S5. the source read fails: refused COULD NOT LOOK" \
+  || bad "S5. unreadable source" "rc=${RC} out='${OUT}' err='${ERR}'"
+SM_SRC="${GL}" sm "${SW}" --to "${SM_TO}"
+sm_refused "COULD NOT LOOK" && [[ "${ERR}" == *"lists no refs/heads/main"* ]] \
+  && ok "S5b. the source lists no main: refused COULD NOT LOOK (an empty list is not an empty repository)" \
+  || bad "S5b. source without main" "rc=${RC} out='${OUT}' err='${ERR}'"
+SM_TGT="${TMP}/s5-no-such-target.git" sm "${SW}" --to "${SM_TO}"
+sm_refused "COULD NOT LOOK" && [[ "${ERR}" == *"read of the target"* ]] \
+  && ok "S5c. the target read fails: refused COULD NOT LOOK (an unreadable target is not an empty one)" \
+  || bad "S5c. unreadable target" "rc=${RC} out='${OUT}' err='${ERR}'"
+
+# Post-flip, and a source that is not GitHub.
+sm_setup s6
+git -C "${SW}" remote set-url origin "${SM_TO}"
+sm "${SW}" --to "${SM_TO}"
+sm_refused POST-FLIP \
+  && ok "S6. origin is the GitLab project (after the flip): refused (POST-FLIP)" \
+  || bad "S6. post-flip refused" "rc=${RC} out='${OUT}' err='${ERR}'"
+git -C "${SW}" remote set-url origin "https://github.com/CJPoll/seed.git"
+git -C "${SW}" remote set-url --push origin "git@gitlab.com:cjpoll/seed.git"
+sm "${SW}" --to "${SM_TO}"
+sm_refused POST-FLIP \
+  && ok "S6b. origin's push URL reaches gitlab.com: refused (POST-FLIP)" \
+  || bad "S6b. gitlab pushurl refused" "rc=${RC} out='${OUT}' err='${ERR}'"
+git -C "${SW}" config --unset remote.origin.pushurl
+git -C "${SW}" remote set-url origin "https://example.org/CJPoll/seed.git"
+sm "${SW}" --to "${SM_TO}"
+sm_refused SOURCE && ok "S7. origin is not on github.com: refused (SOURCE)" \
+  || bad "S7. non-GitHub source refused" "rc=${RC} out='${OUT}' err='${ERR}'"
+git -C "${SW}" remote set-url origin "https://github.com/CJPoll/seed.git"
+sm "${SW}" --from upstream --to "${SM_TO}"
+sm_refused SOURCE && ok "S7b. --from a remote other than origin: refused (SOURCE)" \
+  || bad "S7b. --from upstream refused" "rc=${RC} out='${OUT}' err='${ERR}'"
+
+# The target.
+sm "${SW}" --to "https://gitlab.com/nobody-here/seed.git"
+sm_refused TARGET && [[ "${ERR}" == *"NO ENTRY"* ]] \
+  && ok "S8. a target namespace the identity map does not resolve: refused (TARGET, NO ENTRY)" \
+  || bad "S8. unmapped target" "rc=${RC} out='${OUT}' err='${ERR}'"
+sm "${SW}" --to "git@gitlab.com:cjpoll/seed.git"
+sm_refused TARGET && ok "S8b. a non-https target: refused (TARGET)" \
+  || bad "S8b. ssh target refused" "rc=${RC} out='${OUT}' err='${ERR}'"
+sm "${SW}" --to "https://github.com/CJPoll/seed.git"
+sm_refused TARGET && ok "S8c. a target off gitlab.com: refused (TARGET)" \
+  || bad "S8c. github target refused" "rc=${RC} out='${OUT}' err='${ERR}'"
+sm "${SW}"
+sm_refused USAGE && ok "S8d. no --to: refused (USAGE)" \
+  || bad "S8d. missing --to" "rc=${RC} out='${OUT}' err='${ERR}'"
+
+# A seam outside a dry run refuses before any read: it cannot redirect a read
+# behind a real push.
+OUT="$(cd "${SW}" && GLAB_ATHENA_SEED_SOURCE_READ="${GH}" "${WRAPPER}" git seed-mirror --to "${SM_TO}" 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"
+sm_refused USAGE && [[ "${ERR}" == *"GLAB_ATHENA_SEED_SOURCE_READ"* ]] \
+  && ok "S9. a read seam set outside a dry run: refused (USAGE), nothing read or pushed" \
+  || bad "S9. seam outside dry run" "rc=${RC} out='${OUT}' err='${ERR}'"
+
 # DND-1647: no gh/glab call may have fallen through past its stub.
 if fsg_verify; then ok "no gh/glab call fell through past its stub (DND-1647)"
 else bad "no gh/glab call fell through past its stub (DND-1647)" "see the forge-stub-guard FAIL above"; fi

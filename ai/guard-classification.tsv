@@ -63,6 +63,7 @@ ai/lib/forge_push_scan.rb	library	the pure push-reading rules (DND-2023) require
 ai/lib/gh-merge-guard.sh	guard	
 ai/lib/glab-merge-guard.sh	guard	
 ai/lib/glab-landing.sh	no-fail-path	the merge.landed record for an MR merge glab-athena ran (DND-1939), sourced by ai/bin/glab-athena after glab exits; it never fails or changes the exit code, and its one miss line (no landing recorded) carries Fix:
+ai/lib/glab-seed-mirror.sh	guard	
 ai/lib/eval_score.rb	guard	
 ai/lib/eval_subject.rb	guard	
 ai/lib/block_optimize.rb	guard	
