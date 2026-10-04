@@ -157,7 +157,7 @@ check("A5 no path past the project is %-encoded (DND-1936's endpoint key)") do
 end
 
 # ---- C: choosing the current pipelines on the sha -------------------------------
-check("C1 the newest pipeline per (source, ref) is current; older ones are superseded") do
+check("C1 the newest pipeline per ref is current; older ones are superseded") do
   c = W.current_pipelines([pl(12, "success"), pl(10, "failed")], T, next_page: nil)
   c[:current].map { |p| p["id"] } == [12] && c[:superseded].map { |p| p["id"] } == [10]
 end

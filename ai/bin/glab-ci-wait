@@ -145,6 +145,12 @@ rescue StrictArgv::UsageError => e
   usage(e.message, "see --help")
 rescue GlabCiWait::Usage => e
   usage(e.message, e.fix)
+rescue StandardError => e
+  # A bug must not exit 1, which reads as TIMEOUT ("still pending").
+  puts "VERDICT: COULD-NOT-LOOK glab-ci-wait crashed: #{e.class}: #{e.message}"
+  puts "Fix: this is a defect in glab-ci-wait, not a pipeline state: ticket it with this line, and read the " \
+       "pipeline once with `glab ci get` meanwhile"
+  EXIT.fetch(:could_not_look)
 end
 
 exit main(ARGV, ENV) if $PROGRAM_NAME == __FILE__

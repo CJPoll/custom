@@ -188,6 +188,18 @@ check("R4 read errors back off, doubling, and a run of only errors is COULD-NOT-
 end
 
 # ---- --include-children: a trigger child pipeline is followed ----------------------
+check("R5 the commit reads fine, then every pipelines read fails to the bound: COULD-NOT-LOOK, never a crash") do
+  err = W::Read.new(kind: :error, detail: "HTTP 502: Bad Gateway")
+  rig = Rig.new("/repository/commits/" => [COMMIT], "/pipelines?" => [err])
+  o = run(rig)
+  o.verdict == :could_not_look && o.line.start_with?("VERDICT: COULD-NOT-LOOK") && o.line.include?("502") && o.fix
+end
+check("R6 the commit reads fine, then the pipelines read stays rate-limited inside the bound: COULD-NOT-LOOK") do
+  rl = ->(now) { W::Read.new(kind: :rate_limited, status: 429, reset_at: now + 100, detail: "HTTP 429") }
+  rig = Rig.new("/repository/commits/" => [COMMIT], "/pipelines?" => [rl])
+  o = run(rig, max: 300)
+  o.verdict == :could_not_look && o.fix
+end
 check("C1 a green parent whose deploy child is still running is pending, then DONE when it succeeds") do
   rig = Rig.new("/repository/commits/" => [COMMIT], "/pipelines?" => [ok([pl(12, "success")])],
                 "/pipelines/12/bridges" => [ok([br("deploy", "running", ds(77, "running"))]),

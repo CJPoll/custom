@@ -222,8 +222,9 @@ module GlabCiWait
                               "check the network and ~/dev/custom/ai/bin/forge-preflight; this is not idle and not pending")
       end
       if last_error
-        return could_not_look("the reads after #{@last_ok_at.utc.iso8601} failed (last: #{last_error}); " \
-                              "the newest state seen then was: #{last_state&.summary || 'none'}",
+        since = @last_ok_at ? "the reads after #{@last_ok_at.utc.iso8601}" : "every poll"
+        return could_not_look("#{since} failed (last: #{last_error}); " \
+                              "the newest state seen was: #{last_state&.summary || 'none'}",
                               "re-run glab-ci-wait once the API answers; this is not idle, not pending and not green")
       end
       if last_state.nil?

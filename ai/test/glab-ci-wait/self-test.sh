@@ -202,6 +202,15 @@ run --project acme/app --sha "${SHA}"
 eq "an unreadable body exits 3" "${CODE}" "3"
 lacks "an unreadable body is never DONE" "${OUT}" "DONE"
 
+echo "== a crash is COULD-NOT-LOOK (exit 3), never exit 1 (TIMEOUT)"
+OUT="$(GLAB_CI_WAIT_GLAB="${FAKE}" /usr/bin/ruby -e '
+  load ARGV.shift
+  GlabCiWait::Waiter.define_method(:wait) { |*_a, **_k| raise "boom" }
+  exit main(ARGV, ENV)' "${BIN}" --project acme/app --sha "${SHA}" 2>&1)"; CODE=$?
+eq "a crash exits 3" "${CODE}" "3"
+has "a crash still prints a VERDICT line" "${OUT}" "VERDICT: COULD-NOT-LOOK glab-ci-wait crashed: RuntimeError: boom"
+has "a crash carries Fix:" "${OUT}" "Fix:"
+
 echo
 echo "glab-ci-wait self-test: ${PASS} passed, ${FAIL} failed"
 if [ "${FAIL}" -ne 0 ]; then
