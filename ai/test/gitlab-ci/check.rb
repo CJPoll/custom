@@ -5,11 +5,16 @@
 
 require "yaml"
 
-path = ARGV.fetch(0) { abort "usage: check.rb FILE\n  Fix: pass the .gitlab-ci.yml path." }
+path = ARGV.fetch(0) { abort "usage: check.rb FILE [DOCKERFILE SETUP]\n  Fix: pass the .gitlab-ci.yml path." }
 unless File.file?(path)
   warn "gitlab-ci check: #{path} is missing\n  Fix: restore .gitlab-ci.yml at the repo root."
   exit 1
 end
+# The CI image's definition (DND-1998), beside the file by default.
+image_dir = File.join(File.dirname(path), "dockerfiles", "ci-harness")
+dockerfile = ARGV[1] || File.join(image_dir, "Dockerfile")
+setup = ARGV[2] || File.join(image_dir, "setup.sh")
+SETUP_CMD = "dockerfiles/ci-harness/setup.sh"
 
 doc = YAML.safe_load_file(path, aliases: true)
 errors = []
@@ -80,6 +85,46 @@ else
   errors << "harness-gate: script must fetch origin/main explicitly" unless scripts.any? { |s| s.include?("git fetch") && s.include?("origin/main") }
   img = gate["image"].to_s
   errors << "harness-gate: image must be an exact tag pinned by @sha256 digest, got #{img.inspect}" unless img =~ /\A[^:@\s]+:\d+\.\d+\.\d+[^@\s]*@sha256:[0-9a-f]{64}\z/
+
+  # The pinned tool set: setup.sh runs as a command, before the gate.
+  setup_i = scripts.index { |s| s.strip == SETUP_CMD }
+  gate_i = scripts.index { |s| s.strip.end_with?("ai/bin/harness-gate") }
+  if setup_i.nil?
+    errors << "harness-gate: script must run `#{SETUP_CMD}` as a command (the pinned CI image setup)"
+  elsif gate_i && setup_i > gate_i
+    errors << "harness-gate: `#{SETUP_CMD}` must run before ai/bin/harness-gate"
+  end
+  # No ~/dev/custom link: a checkout there marks the machine as an inbox tenant.
+  errors << "harness-gate: script must not link a checkout at ~/dev/custom (dev/custom); the CI container is not an inbox tenant" if scripts.any? { |s| s.include?("dev/custom") }
+
+  # The Dockerfile builds the same image the job runs.
+  if File.file?(dockerfile)
+    dtext = File.read(dockerfile)
+    from = dtext[/^FROM\s+(\S+)/, 1]
+    errors << "Dockerfile: FROM must be exactly the job's image #{img.inspect}, got #{from.inspect}" unless from == img
+    errors << "Dockerfile: must COPY setup.sh and RUN it (the same setup as the job)" unless dtext.match?(/^COPY\s+setup\.sh\s+(\S+)\s*$/) && dtext.match?(/^RUN\s+#{Regexp.escape(dtext[/^COPY\s+setup\.sh\s+(\S+)/, 1].to_s)}\s*$/)
+  else
+    errors << "Dockerfile: #{dockerfile} is missing"
+  end
+end
+
+# setup.sh pins every input: one snapshot, exact package versions, a checked git.
+if File.file?(setup)
+  stext = File.read(setup)
+  snap = stext[/^SNAPSHOT=(\S+)$/, 1].to_s
+  errors << "setup.sh: SNAPSHOT must be a snapshot.debian.org timestamp (YYYYMMDDTHHMMSSZ), got #{snap.inspect}" unless snap.match?(/\A\d{8}T\d{6}Z\z/)
+  uris = stext.scan(/^URIs:\s*(\S+)$/).flatten
+  errors << "setup.sh: apt must read only snapshot.debian.org at ${SNAPSHOT}, got #{uris.inspect}" if uris.empty? || uris.any? { |u| !u.match?(%r{\Ahttps://snapshot\.debian\.org/archive/[a-z-]+/\$\{SNAPSHOT\}\z}) }
+  pkgs = stext[/^PACKAGES=\(\n(.*?)^\)/m, 1].to_s.lines.map(&:strip).reject { |l| l.empty? || l.start_with?("#") }
+  errors << "setup.sh: PACKAGES is empty" if pkgs.empty?
+  pkgs.reject { |p| p.match?(/\A[a-z0-9][a-z0-9.+-]*=[0-9][^\s=]*\z/) }.each do |p|
+    errors << "setup.sh: package #{p.inspect} must be pinned as name=exact-version"
+  end
+  errors << "setup.sh: GIT_VERSION must be an exact x.y.z release" unless stext.match?(/^GIT_VERSION=\d+\.\d+\.\d+$/)
+  errors << "setup.sh: GIT_SHA256 must be the tarball's 64-hex sha256" unless stext.match?(/^GIT_SHA256=[0-9a-f]{64}$/)
+  errors << "setup.sh: the git tarball must be checked with sha256sum -c against GIT_SHA256" unless stext.include?('echo "${GIT_SHA256}  ${src}/git.tar.xz" | sha256sum -c')
+else
+  errors << "setup.sh: #{setup} is missing"
 end
 
 if errors.empty?

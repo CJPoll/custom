@@ -6,9 +6,10 @@
 #
 #   docker build -t custom-ci-harness -f dockerfiles/ci-harness/Dockerfile dockerfiles/ci-harness
 #
-# then, in a container of it, a clone of the branch with origin/main present,
-# owned by `ci`, linked at /home/ci/dev/custom, and the job's last line:
-# `runuser -u ci -- env HOME=/home/ci ai/bin/harness-gate`.
+# then, in a container of it run with `--security-opt seccomp=unconfined
+# --security-opt systempaths=unconfined` (what the `ci` runner gives a job), a
+# clone of the branch with origin/main present, owned by `ci`, and the job's
+# last line: `runuser -u ci -- env HOME=/home/ci ai/bin/harness-gate`.
 #
 # The job does not pull a prebuilt image: building and publishing one needs a
 # registry write credential, and the job carries none. ai/test/gitlab-ci

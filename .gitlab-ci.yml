@@ -8,15 +8,15 @@
 #   - No credentials: no CI/CD variables, no secrets, no id_tokens.
 #   - Every job carries the role tag `ci` (never a per-host tag); the runner
 #     does not take untagged jobs.
+#   - The gate's tools come from dockerfiles/ci-harness/setup.sh, every input
+#     pinned, on the image digest its Dockerfile also builds FROM (DND-1998).
 
-# Known state (measured 2026-10-04, DND-1946): in a default unprivileged docker
-# container, 13 of 194 gate checks do not pass. bubblewrap needs unprivileged
-# user namespaces (the tool-sandbox suites), `git hook list` needs a newer git
-# than trixie's, and the proc-scan and process-group suites (suite-reaper,
-# test-slot, telemetry-shell) read host process state. The job stays a full,
-# unweakened gate: no allow_failure, no skipped check. Until the follow-up
-# (make the gate pass in the CI image: a runner that allows user namespaces and
-# a git with `git hook list`) lands, do not make this job a required check.
+# The job is a full, unweakened gate: no allow_failure, no skipped check.
+# What it needs from the runner (DND-1998): job containers with
+# seccomp=unconfined and systempaths=unconfined, so bubblewrap can create user
+# namespaces and mount /proc (the tool-sandbox suites). Measured 2026-10-04 in
+# dockerfiles/ci-harness/Dockerfile's image with those two options: 194 of 194
+# checks pass. Under docker's defaults the tool-sandbox suites fail.
 
 workflow:
   rules:
@@ -52,8 +52,10 @@ harness-gate:
     # `ci` user. The same script builds dockerfiles/ci-harness/Dockerfile.
     - dockerfiles/ci-harness/setup.sh
     # Run as `ci`, owning the tree: suites assert unreadable-path and ownership
-    # behavior, and git refuses a tree owned by another user.
-    - chown -R ci:ci "$CI_PROJECT_DIR" && ln -sfn "$CI_PROJECT_DIR" /home/ci/dev/custom && chown -h ci:ci /home/ci/dev/custom
+    # behavior, and git refuses a tree owned by another user. No ~/dev/custom
+    # link: a checkout there marks this machine as an inbox tenant, and the CI
+    # container is not one (check-inbox-registry; DND-1998).
+    - chown -R ci:ci "$CI_PROJECT_DIR"
     # The runner's clone may not create origin/main; the landed bars need it.
     - runuser -u ci -- env HOME=/home/ci git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
     - runuser -u ci -- env HOME=/home/ci git rev-parse --verify --quiet refs/remotes/origin/main

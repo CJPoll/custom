@@ -121,7 +121,7 @@ tar -xJf "${src}/git.tar.xz" -C "${src}"
 # contrib/subtree is installed too: Debian's git ships `git subtree`, and the
 # forge-identity suites refuse and pass `git subtree push` / `split` for real.
 build=(-s -j"$(nproc)" prefix=/usr NO_TCLTK=1 NO_GETTEXT=1 NO_PERL=1 NO_PYTHON=1)
-if dpkg-query -W -f='${Status}' git 2>/dev/null | grep -q 'install ok installed'; then
+if grep -q 'install ok installed' <<<"$(dpkg-query -W -f='${Status}' git 2>/dev/null || true)"; then
   echo "setup.sh: apt installed Debian's git, which the source build would overwrite" >&2
   echo "  Fix: find the package in PACKAGES that depends on git and drop it, or pin a release that does not." >&2
   exit 1
@@ -147,7 +147,6 @@ ln -sf "$(command -v ruby)" /usr/bin/ruby
 
 # The non-root user the gate runs as.
 id ci >/dev/null 2>&1 || useradd --create-home --shell /bin/bash ci
-mkdir -p /home/ci/dev && chown ci:ci /home/ci/dev
 runuser -u ci -- env HOME=/home/ci git config --global user.name ci
 runuser -u ci -- env HOME=/home/ci git config --global user.email ci@localhost
 runuser -u ci -- env HOME=/home/ci git config --global init.defaultBranch main
