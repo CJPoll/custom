@@ -58,8 +58,10 @@
 #
 # The TARGET is every project the write can reach: each -R/--repo value
 # (before or after the command path; OWNER/REPO, GROUP/NS/REPO, a full URL or a
-# git URL), `mr create --target-project`, the project of every MR or issue URL
-# given positionally, and the project glab resolves for the current directory
+# git URL), `mr create --target-project`, the project of every positional glab
+# reads as an MR or issue reference (an http(s) URL, and for an MR a
+# scheme-less `//host/…` one too; glos_positional names the forms, DND-2012),
+# and the project glab resolves for the current directory
 # (`projects/:id`) when none of these names one. An empty -R names no project:
 # glab then reads GITLAB_REPO, but glab-athena scrubs every GITLAB_* variable,
 # so the `projects/:id` read and glab's write both resolve the checkout
@@ -127,19 +129,22 @@ GLOS_VIS=""
 
 # glos_roles <group verb> : for a command this scan judges (or one of its
 # known aliases), sets GLOS_CMD to the command's own name and GLOS_TEXT,
-# GLOS_FILE, GLOS_TARGET to its text, file and target flags (" long long ").
-# Returns 1 for any other command.
+# GLOS_FILE, GLOS_TARGET to its text, file and target flags (" long long "),
+# and GLOS_REF to how glab reads its positional as an MR or issue reference:
+# mr (mrutils.MRFromArgs), issue (issueutils.IssueFromArg), or "" (no
+# reference: `release create` takes a tag and asset files, and `mr create` and
+# `issue create` take no positional). Returns 1 for any other command.
 glos_roles() {
-  GLOS_TEXT="" GLOS_FILE="" GLOS_TARGET=" repo "
+  GLOS_TEXT="" GLOS_FILE="" GLOS_TARGET=" repo " GLOS_REF=""
   case "$1" in
     "mr create" | "mr new") GLOS_CMD="mr create" GLOS_TEXT=" title description " GLOS_TARGET=" repo target-project " ;;
-    "mr update") GLOS_CMD="mr update" GLOS_TEXT=" title description " ;;
+    "mr update") GLOS_CMD="mr update" GLOS_TEXT=" title description " GLOS_REF=mr ;;
     "issue create" | "issue new") GLOS_CMD="issue create" GLOS_TEXT=" title description " ;;
-    "issue update") GLOS_CMD="issue update" GLOS_TEXT=" title description " ;;
-    "mr note" | "mr comment") GLOS_CMD="mr note" GLOS_TEXT=" message " ;;
-    "issue note" | "issue comment") GLOS_CMD="issue note" GLOS_TEXT=" message " ;;
-    "incident note" | "incident comment") GLOS_CMD="incident note" GLOS_TEXT=" message " ;;
-    "mr merge" | "mr accept") GLOS_CMD="mr merge" GLOS_TEXT=" message squash-message " ;;
+    "issue update") GLOS_CMD="issue update" GLOS_TEXT=" title description " GLOS_REF=issue ;;
+    "mr note" | "mr comment") GLOS_CMD="mr note" GLOS_TEXT=" message " GLOS_REF=mr ;;
+    "issue note" | "issue comment") GLOS_CMD="issue note" GLOS_TEXT=" message " GLOS_REF=issue ;;
+    "incident note" | "incident comment") GLOS_CMD="incident note" GLOS_TEXT=" message " GLOS_REF=issue ;;
+    "mr merge" | "mr accept") GLOS_CMD="mr merge" GLOS_TEXT=" message squash-message " GLOS_REF=mr ;;
     "release create") GLOS_CMD="release create" GLOS_TEXT=" name notes tag-message assets-links " GLOS_FILE=" notes-file " ;;
     *) return 1 ;;
   esac
@@ -156,17 +161,52 @@ glos_lower() { printf '%s' "$1" | LC_ALL=C tr ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefg
 # a message (a query can carry the very value the scan refuses to print).
 glos_shown() { printf '%s' "${1%%[?#]*}"; }
 
-# glos_positional <word> : a positional MR or issue URL adds its project to
-# the caller's `targets`; a URL with no /-/ path adds "?" (no nameable target).
+# Letters spelled out, not a range, so no locale can widen a bracket class.
+GLOS_ALPHA="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+# glos_positional <mr|issue> <word> : a positional glab reads as an MR or
+# issue reference adds its project to the caller's `targets`; one whose
+# project this guard cannot parse adds "?" (no nameable target, scanned as
+# PUBLIC). Any other word adds nothing, and the -R or cwd project is judged.
+#
+# glab 1.92.1 reads the word with Go's url.Parse (cmdutils.ParseGitLabURL for
+# mr, issueutils.issueMetadataFromURL for issue) and takes it as a reference
+# only when glrepo.FromURL finds a host (DND-2012):
+#   mr      the scheme, case-folded, is http, https or NONE, so
+#           `//host/<project>/-/merge_requests/N` is a reference
+#   issue   the scheme is http or https; a scheme-less word is "Invalid issue
+#           format" and nothing is sent
+#   both    the #fragment, then the ?query, is cut first; the host is the
+#           authority after `//`, past its last @ (the userinfo). A word with
+#           no host (`/<project>/-/merge_requests/N`, `https:/…`, `///…` with
+#           no scheme) is no reference: glab reads it as a branch name in the
+#           -R or cwd project, which is judged instead.
+# A word glab reads as a URL but whose path its regex rejects is a branch
+# name holding `//` or `:`, which no git branch can be, so glab finds no MR
+# and sends nothing.
 glos_positional() {
-  local w="$1" rest host p
-  # glab reads the scheme and host without case (DND-2009).
-  case "$(glos_lower "${w:0:8}")" in
-    http://* | https://*) ;;
+  local kind="$1" w="$2" u scheme="" rest auth host p
+  u="${w%%#*}"
+  if [[ "$u" =~ ^([$GLOS_ALPHA][${GLOS_ALPHA}0123456789+.-]*):(.*)$ ]]; then
+    # glab reads the scheme and host without case (DND-2009).
+    scheme="$(glos_lower "${BASH_REMATCH[1]}")" rest="${BASH_REMATCH[2]}"
+  else
+    rest="$u"
+  fi
+  case "$kind:$scheme" in
+    mr: | mr:http | mr:https | issue:http | issue:https) ;;
     *) return 0 ;;
   esac
-  rest="${w#*://}"; host="$(glos_lower "${rest%%/*}")"; p="${rest#*/}"
-  if [ "$p" = "$rest" ] || [[ "$p" != */-/* ]] || [ -z "$host" ]; then
+  rest="${rest%%\?*}"
+  case "$rest" in
+    ///*) [ -n "$scheme" ] || return 0 ;;
+    //*) ;;
+    *) return 0 ;;
+  esac
+  rest="${rest#//}"; auth="${rest%%/*}"; p="${rest#"$auth"}"; p="${p#/}"
+  host="$(glos_lower "${auth##*@}")"
+  [ -n "$host" ] || return 0
+  if [ -z "$p" ] || [[ "$p" != */-/* ]]; then
     targets+=("?:the URL '$(glos_shown "$w")' names no project this guard can parse")
   else
     targets+=("https://$host/${p%%/-/*}")
@@ -509,7 +549,10 @@ glos_guard() {
     # Rule 2 of ai/lib/outbound-text-scan.sh, and the sort into text, files
     # and targets.
     ots_collect "$table" "$GLOS_TEXT" "$GLOS_FILE" "$GLOS_TARGET"
-    for a in "${OTS_PO[@]}"; do pos+=("$a"); glos_positional "$a"; done
+    for a in "${OTS_PO[@]}"; do
+      pos+=("$a")
+      [ -z "$GLOS_REF" ] || glos_positional "$GLOS_REF" "$a"
+    done
     # A flag the table lacks may be a newer text flag whose value this parse
     # reads as a positional: every positional is then text.
     if [ -n "$OTS_POS_TEXT" ] || [ -n "$OTS_SAW_UNKNOWN" ] || [ "$((${#texts[@]} + ${#fsrc[@]}))" -gt 0 ]; then

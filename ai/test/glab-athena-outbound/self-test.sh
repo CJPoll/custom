@@ -472,6 +472,53 @@ gla api -X POST "projects/synth-group%2F%2Fpriv/issues/3/notes" -f "body=x${TOKE
 if refused3 "plainly"; then ok "DND-2009 regression: an empty segment in the project segment is refused"; else bad "DND-2009 regression: %2F%2F" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 gla api -X POST "api/v4/projects/synth-group%2Fpriv/issues/3/notes" -f "body=x${TOKEN}"
 if [ "${RC}" = 0 ] && sent && read_was "api projects/synth-group%2Fpriv"; then ok "DND-2009: an api/v4/ prefix is read as its project (glab sends it to /api/v4/api/v4/, a 404)"; else bad "DND-2009: api/v4 prefix" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+
+echo "--- DND-2012: every MR or issue reference form glab 1.92.1 reads names its project ---"
+# glab's MRFromArgs (cmdutils.ParseGitLabURL) reads its positional with Go's
+# url.Parse and takes it as a reference when the scheme is http, https or
+# NONE and the URL has a host: so `//host/<group>/<project>/-/merge_requests/N`
+# writes to <group>/<project>. The scan matched only http(s)://, judged the
+# cwd's (private) project, and sent the text. The cwd here is PRIVATE.
+gla mr note "//gitlab.com/synth-group/pub/-/merge_requests/1" -m "x${TOKEN}"
+if refused_hit && read_was "api projects/synth-group%2Fpub"; then ok "DND-2012 regression: a scheme-less //host MR URL names its project (mr note)"; else bad "DND-2012 regression: //host mr note" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+gla mr update "//GitLab.COM/synth-group/pub/-/merge_requests/1" -d "x${TOKEN}"
+if refused_hit && read_was "api projects/synth-group%2Fpub" && [[ "${CALLS}" != *"--hostname"* ]]; then ok "DND-2012 regression: a scheme-less MR URL's host is case-folded (mr update)"; else bad "DND-2012 regression: //GitLab.COM mr update" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+lib_guard mr "${MV}" "//gitlab.com/synth-group/pub/-/merge_requests/1" -m "x${TOKEN}"
+if refused_hit && read_was "api projects/synth-group%2Fpub"; then ok "DND-2012 regression: a scheme-less MR URL names its project (mr ${MV}, library)"; else bad "DND-2012 regression: //host mr ${MV}" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+# Go's url.Parse puts what precedes the last @ of the authority in the
+# userinfo; the host is what follows it.
+gla mr note "//someone@gitlab.com/synth-group/pub/-/merge_requests/1" -m "x${TOKEN}"
+if refused_hit && read_was "api projects/synth-group%2Fpub" && [[ "${CALLS}" != *"--hostname"* ]]; then ok "DND-2012 regression: userinfo is not part of the host"; else bad "DND-2012 regression: //user@host" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+gla mr note "https://someone@gitlab.com/synth-group/pub/-/merge_requests/1" -m "x${TOKEN}"
+if refused_hit && read_was "api projects/synth-group%2Fpub" && [[ "${CALLS}" != *"--hostname"* ]]; then ok "DND-2012: userinfo in an https MR URL is not part of the host"; else bad "DND-2012: https://user@host" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+# glab's regex takes `<project>/merge_requests/N` without the /-/ too.
+gla mr note "//gitlab.com/synth-group/pub/merge_requests/1" -m "x${TOKEN}"
+if refused_hit && [[ "${OUT}" == *"scanning as PUBLIC"* ]]; then ok "DND-2012 regression: a scheme-less MR URL with no /-/ is scanned as PUBLIC"; else bad "DND-2012 regression: //host no /-/" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+# Go cuts the #fragment and the ?query before it reads the path.
+gla mr note "//gitlab.com/synth-group/pub/-/merge_requests/1?from=/-/x#/-/y" -m "x${TOKEN}"
+if refused_hit && read_was "api projects/synth-group%2Fpub"; then ok "DND-2012: the query and fragment are cut before the path is read"; else bad "DND-2012: query/fragment" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+# Forms glab does NOT read as a reference (glrepo.FromURL needs a host): it
+# reads them as a branch name in the -R or cwd project, so that project is
+# the one judged. Probed read-only against glab 1.92.1 on 2026-10-04.
+gla mr note "/synth-group/pub/-/merge_requests/1" -m "x${TOKEN}"
+if [ "${RC}" = 0 ] && sent && read_was "api projects/:id" && ! read_was "synth-group%2Fpub"; then ok "DND-2012: a root-relative MR path is a branch name: the cwd project is judged"; else bad "DND-2012: root-relative" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+gla mr note "https:/gitlab.com/synth-group/pub/-/merge_requests/1" -m "x${TOKEN}"
+if [ "${RC}" = 0 ] && sent && read_was "api projects/:id" && ! read_was "synth-group%2Fpub"; then ok "DND-2012: https:/ (one slash) has no host: the cwd project is judged"; else bad "DND-2012: https:/ one slash" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+# glab's issue commands (issueutils.IssueFromArg) take only http(s) URLs; a
+# scheme-less one is "Invalid issue format" and nothing is sent.
+gla issue note "//gitlab.com/synth-group/pub/-/issues/1" -m "x${TOKEN}"
+if [ "${RC}" = 0 ] && sent && read_was "api projects/:id" && ! read_was "synth-group%2Fpub"; then ok "DND-2012: a scheme-less issue URL is no reference for glab: the cwd project is judged"; else bad "DND-2012: //host issue note" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+gla issue note "HTTPS://gitlab.com/synth-group/pub/-/issues/1" -m "x${TOKEN}"
+if refused_hit && read_was "api projects/synth-group%2Fpub"; then ok "DND-2012: an http(s) issue URL names its project (issue note)"; else bad "DND-2012: issue note URL" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+gla incident note "https://gitlab.com/synth-group/pub/-/issues/incident/1" -m "x${TOKEN}"
+if refused_hit && read_was "api projects/synth-group%2Fpub"; then ok "DND-2012: an incident URL names its project (incident note)"; else bad "DND-2012: incident note URL" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+# A positional is a reference only where glab reads one. `release create`'s
+# positionals are a tag and asset files: an MR URL there named a project glab
+# never writes to, and the cwd (the real target) was dropped.
+vis default public
+gla release create v1 "https://gitlab.com/synth-group/priv/-/merge_requests/1" -N "x${TOKEN}"
+if refused_hit && read_was "api projects/:id" && ! read_was "synth-group%2Fpriv"; then ok "DND-2012 regression: a release positional is no reference: the cwd (PUBLIC) project is judged"; else bad "DND-2012 regression: release positional URL" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+vis default private
 reset_vis
 
 echo "--- commands outside the list pass untouched ---"
