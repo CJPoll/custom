@@ -416,6 +416,42 @@ has "... with its Fix:" "${OUT}" "Fix: set the repo's idle_workflow to its post-
 CONFIG="${GS_CONFIG}"
 run "${TEL_EMPTY}" --summary --repo gen_saas
 lacks "a declared workflow file: no mismatch warning" "${OUT}" "idle_workflow none, but"
+
+echo "== a GitHub-era and a GitLab-era landing join under one repo key (DND-1952)"
+# The ledger key is the config's short repo name, never the forge: gen_saas's
+# rows from before and after its move to GitLab are one history. Each era's
+# ingest passes the repo's idle_workflow to lead-time as --idle-workflow.
+GL_SEL="gitlab:ref=main,source=push,child=deploy"
+cat >"${TMP}/rows-gh-era.json" <<JSON
+[ {"pr": 61, "title": "x", "branch": "dnd-9201-x", "landed_via": "merge", "landed_commit": null,
+   "merge_commit": "${HEAD_PUSH}", "head_commit": "${GS_PRHEAD}", "head_commit_unmeasured": null,
+   "merged": "2026-10-02T05:00:00Z", "closed_at": "2026-10-02T05:00:00Z", "start": "2026-10-02T04:00:00Z",
+   "end_kind": "deploy", "lead_seconds": 5400, "code_seconds": 3600, "tail_seconds": 1800, "unmeasured_reason": null} ]
+JSON
+cat >"${TMP}/rows-gl-era.json" <<JSON
+[ {"pr": 61, "title": "y", "branch": "dnd-9202-y", "landed_via": "merge", "landed_commit": null,
+   "merge_commit": "${HEAD_PR}", "head_commit": "${GS_PRHEAD}", "head_commit_unmeasured": null,
+   "merged": "2026-10-04T05:00:00Z", "closed_at": "2026-10-04T05:00:00Z", "start": "2026-10-04T04:30:00Z",
+   "end_kind": "deploy", "lead_seconds": 3600, "code_seconds": 1800, "tail_seconds": 1800, "unmeasured_reason": null} ]
+JSON
+printf '{"scanned_through":"2026-10-02T05:00:00Z","landings":1,"kept":1,"incomplete":false}\n' >"${TMP}/meta-gh-era.json"
+printf '{"scanned_through":"2026-10-04T05:00:00Z","landings":1,"kept":1,"incomplete":false}\n' >"${TMP}/meta-gl-era.json"
+STATE="${TMP}/state-join"; CONFIG="${TMP}/repos-join.json"
+printf '{"repos":[{"name":"gen_saas","path":"%s","mode":"improve","idle_workflow":"post-merge.yml"}],"window":20,"improvement_epic":"e"}\n' "${WATCH}" >"${CONFIG}"
+ROWS="${TMP}/rows-gh-era.json" META="${TMP}/meta-gh-era.json" run "${TEL_EMPTY}" --ingest --repo gen_saas --since 2026-10-01
+eq "the GitHub-era ingest exits 0" "${CODE}" "0"
+has "the GitHub-era ingest passes the workflow file to lead-time" "$(cat "${TMP}/args")" "--idle-workflow post-merge.yml"
+printf '{"repos":[{"name":"gen_saas","path":"%s","mode":"improve","idle_workflow":"%s"}],"window":20,"improvement_epic":"e"}\n' "${WATCH}" "${GL_SEL}" >"${CONFIG}"
+ROWS="${TMP}/rows-gl-era.json" META="${TMP}/meta-gl-era.json" run "${TEL_EMPTY}" --ingest --repo gen_saas --since 2026-10-03
+eq "the GitLab-era ingest exits 0" "${CODE}" "0"
+has "the GitLab-era ingest passes the selector to lead-time" "$(cat "${TMP}/args")" "--idle-workflow ${GL_SEL}"
+eq "the ledger holds both eras' rows (the same MR/PR number 61 does not collide)" "$(ledger_lines)" "2"
+eq "the GitHub-era row is under gen_saas" "$(row_field "${HEAD_PUSH}" repo)" "gen_saas"
+eq "the GitLab-era row is under gen_saas" "$(row_field "${HEAD_PR}" repo)" "gen_saas"
+run "${TEL_EMPTY}" --summary --repo gen_saas --json
+eq "the GitLab-era summary exits 0" "${CODE}" "0"
+JOIN="$(printf '%s' "${OUT}" | /usr/bin/ruby -rjson -e 'j = JSON.parse($stdin.read); t = j.dig("totals", "tail"); puts [t["n"], t["n_na"], j.dig("tail_ci", "source"), j.dig("tail_ci", "value")].join(",")')"
+eq "--json: one repo's summary counts both eras' tails, CI declared by the selector" "${JOIN}" "2,0,declared,true"
 CONFIG="${CONFIG_SAVE}"; STATE="${STATE_SAVE}"
 
 echo "== ingest + summary: landings worked on another machine are foreign (DND-1531)"

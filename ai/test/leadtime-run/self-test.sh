@@ -62,7 +62,7 @@ esac
 ALERTS="${ATHENA_INBOX_ROOT}/harness-alerts/to-custom"
 NOW_FIXED="$(date -d '2026-10-01 12:30 UTC' +%s)"
 G=(-c user.email=t@example.invalid -c user.name=t -c commit.gpgsign=false -c init.defaultBranch=main)
-RESOLVER_LIBS="strict_argv.rb lead_time_config.rb lead_time_config_io.rb leadtime_product.rb leadtime_product_io.rb lead_time_trailer.rb"
+RESOLVER_LIBS="strict_argv.rb lead_time_config.rb gitlab_pipeline_selector.rb lead_time_config_io.rb leadtime_product.rb leadtime_product_io.rb lead_time_trailer.rb"
 UNMEASURABLE_LIBS="notion_read.rb notion_write.rb notion_retry.rb next_mission_notion.rb next_mission.rb"
 
 # --- shared fakes ----------------------------------------------------------------

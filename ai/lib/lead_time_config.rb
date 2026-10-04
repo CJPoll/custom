@@ -31,6 +31,7 @@
 # Every error carries the message and a Fix: the caller prints.
 
 require "json"
+require_relative "gitlab_pipeline_selector"
 
 module LeadTimeConfig
   MODES = %w[improve watch].freeze
@@ -41,8 +42,11 @@ module LeadTimeConfig
   REPO_KEYS = %w[name path mode].freeze
   REPO_OPTIONAL = %w[product_epic idle_workflow].freeze
   NAME_RE = /\A[A-Za-z0-9][A-Za-z0-9_.-]*\z/.freeze
-  # idle_workflow (DND-1540): the post-merge workflow FILE a product-repo
-  # landing passes to locked-merge --require-idle-workflow, or "none".
+  # idle_workflow (DND-1540): the repo's post-merge CI. On GitHub, the
+  # post-merge workflow FILE a product-repo landing passes to locked-merge
+  # --require-idle-workflow; on GitLab, an idle pipeline selector
+  # (ai/lib/gitlab_pipeline_selector.rb, DND-1952); or "none". The accepted
+  # values have one home, idle_workflow_kind.
   IDLE_WORKFLOW_RE = /\A(none|[A-Za-z0-9][A-Za-z0-9_.-]*\.ya?ml)\z/.freeze
   SCHEMA_HINT = "repos: [{name, path, mode improve|watch, optional product_epic, idle_workflow (required for improve)}], window, improvement_epic"
 
@@ -298,8 +302,9 @@ module LeadTimeConfig
       source = "repo"
     end
     idle = entry["idle_workflow"]
-    if entry.key?("idle_workflow") && !(idle.is_a?(String) && IDLE_WORKFLOW_RE.match?(idle))
-      bad!(path, "repo #{name.inspect} idle_workflow #{idle.inspect} must be a workflow file name (post-merge.yml) or \"none\", or absent")
+    if entry.key?("idle_workflow") && idle_workflow_kind(idle).nil?
+      bad!(path, "repo #{name.inspect} idle_workflow #{idle.inspect} must be a workflow file name (post-merge.yml), " \
+                 "a GitLab idle pipeline selector (#{idle_selector_error(idle)}), or \"none\", or absent")
     end
     if mode == "improve" && idle.nil?
       raise Error.new("#{path}: repo #{name.inspect} is mode improve and declares no idle_workflow; the lead-time ingest would infer post-merge CI per batch and can write two lead definitions into one ledger",
@@ -310,6 +315,25 @@ module LeadTimeConfig
   end
 
   def nonblank?(value) = value.is_a?(String) && !value.strip.empty?
+
+  # The one home of the values idle_workflow accepts (DND-1671, DND-1952).
+  # -> :none, :workflow (a GitHub workflow file), :gitlab (a valid GitLab idle
+  # pipeline selector), or nil (not an idle_workflow value). A value that
+  # starts with "gitlab:" is a selector or nothing, never a file name.
+  def idle_workflow_kind(value)
+    return nil unless value.is_a?(String)
+    return (GitLabPipelineSelector.parse(value)[0] ? :gitlab : nil) if GitLabPipelineSelector.selector?(value)
+    return :none if value == "none"
+
+    IDLE_WORKFLOW_RE.match?(value) ? :workflow : nil
+  end
+
+  # Why a value is not a GitLab selector, for a refusal's message.
+  def idle_selector_error(value)
+    return GitLabPipelineSelector.form unless GitLabPipelineSelector.selector?(value)
+
+    GitLabPipelineSelector.parse(value)[1] || GitLabPipelineSelector.form
+  end
 
   def keys!(path, hash, wanted, optional, what)
     missing = wanted - hash.keys

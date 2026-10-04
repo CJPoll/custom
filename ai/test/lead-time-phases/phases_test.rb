@@ -764,7 +764,12 @@ check("D6 absent: tail_ci is inferred, with the inferred value") do
 end
 
 # The miss: a value that is not a declaration is a fault, never read as absent.
-["", "deploy", "../x.yml", " none", 7, true, :none, []].each do |bad|
+check("D7b a GitLab idle pipeline selector declares post-merge CI, named in the reason (DND-1952)") do
+  sel = "gitlab:ref=main,source=push,child=deploy"
+  d = L::TailCI.declare(sel, "gen_saas")
+  d.value == true && d.workflow == sel && L::TailCI.declared_desc(d) == "gen_saas declares post-merge CI (idle_workflow #{sel})"
+end
+["", "deploy", "../x.yml", " none", 7, true, :none, [], "gitlab:ref=main", "gitlab:"].each do |bad|
   check("D7 an unrecognised CI declaration #{bad.inspect} raises, never reads as absent") do
     L::Stats.summarize(custom_rows, idle_workflow: bad, repo: "custom")
     false

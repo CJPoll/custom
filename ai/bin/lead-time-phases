@@ -196,7 +196,10 @@ HELP = <<~TXT
                    before DND-1501, or a watch row).
                    Post-merge CI (DND-1614): the repo's idle_workflow
                    (ai/bin/lead-time-repos) also declares it for the tail.
-                     a workflow file  CI declared: every 0 tail with no
+                     a workflow file, or a GitLab idle pipeline selector
+                     (DND-1952; --ingest passes it to lead-time as
+                     --idle-workflow)
+                                      CI declared: every 0 tail with no
                                       post-merge run found (end kind
                                       merge, or none recorded) is n/a
                                       with a reason naming the
@@ -332,7 +335,7 @@ module Ingest
 
     bin = env["LEAD_TIME_PHASES_LEAD_TIME"].to_s
     bin = File.join(AI_DIR, "bin", "lead-time") if bin.empty?
-    res = io::LeadTimeRunner.run(bin, repo.path, since, env.to_h)
+    res = io::LeadTimeRunner.run(bin, repo.path, since, env.to_h, idle_workflow: repo.idle_workflow)
     scan = check_scan(res, repo, since)
     return scan if scan
 

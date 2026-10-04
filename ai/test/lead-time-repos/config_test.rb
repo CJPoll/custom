@@ -169,6 +169,19 @@ end
 check("S5 an idle_workflow with a path, or blank, or not .yml, is an error") do
   ["../x.yml", " ", "deploy", 7].all? { |v| raised { parse(doc([repo("a", idle_workflow: v)])) }&.message.to_s.include?("idle_workflow") }
 end
+check("S5b a GitLab idle pipeline selector is carried as given (DND-1952)") do
+  sel = "gitlab:ref=main,source=push,child=deploy"
+  parse(doc([repo("a", "improve", idle_workflow: sel)])).repos.first.idle_workflow == sel
+end
+check("S5b a malformed GitLab selector is an error naming the selector's own reason") do
+  e = raised { parse(doc([repo("a", "improve", idle_workflow: "gitlab:ref=main")])) }
+  e && e.message.include?("idle_workflow") && e.message.include?("names no source")
+end
+check("S5c idle_workflow_kind is the one home of the accepted values") do
+  C.idle_workflow_kind("none") == :none && C.idle_workflow_kind("post-merge.yml") == :workflow &&
+    C.idle_workflow_kind("gitlab:ref=main,source=push") == :gitlab &&
+    [nil, "", "deploy", "gitlab:junk", "../x.yml", 5].all? { |v| C.idle_workflow_kind(v).nil? }
+end
 check("S6 an improve repo that does not declare idle_workflow is refused by name, with a Fix: naming the key (DND-1927)") do
   e = raised { parse(doc([repo("a", "improve")])) }
   e && e.message.include?("\"a\"") && e.message.include?("improve") && e.message.include?("idle_workflow") && e.fix.include?("idle_workflow")

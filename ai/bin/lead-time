@@ -33,7 +33,9 @@
 #   END   = 3-tier, matching Cody's definition exactly:
 #           (1) DEPLOY completed  -> the deploy step's completion time
 #                 github: completion of the deploy workflow run for the merge sha
-#                 gitlab: max finished_at over successful `deploy`-stage jobs
+#                 gitlab: max finished_at over successful `deploy`-stage jobs;
+#                   with --idle-workflow gitlab:... (DND-1952), the selected
+#                   pipeline's deploy CHILD pipeline's successful finish
 #           (2) else POST-MERGE PIPELINE completed -> its completion time
 #                 (a ticket that ran CI on main but shipped no deploy job)
 #           (3) else LANDING time (no post-merge CI at all, e.g. ~/dev/custom):
@@ -73,6 +75,7 @@ require_relative "../lib/dispatch_trackers_overlay"
 require_relative "../lib/ticket_ref"
 require_relative "../lib/since_rule"
 require_relative "../lib/lead_time_config_io"
+require_relative "../lib/lead_time_config"
 
 # Which workflow/stage counts as "the deploy" (overridable, not hardcoded to a
 # repo). GitHub: workflow name matches this regex. GitLab: job stage equals the
@@ -934,9 +937,12 @@ end
 # ---- GitLab (glab) --------------------------------------------------------
 
 class GitLabForge
-  def initialize(dir)
+  # selector: the repo's GitLab idle pipeline selector (DND-1952), a parsed
+  # GitLabPipelineSelector::Selector, or nil for the stage rule in ci_ends.
+  def initialize(dir, selector: nil)
     @dir = dir
     @proj = project_path(dir)
+    @selector = selector
   end
 
   def name
@@ -972,7 +978,7 @@ class GitLabForge
 
     commits = api("projects/#{@proj}/merge_requests/#{id}/commits") || []
     merge_sha = d["merge_commit_sha"] || d["squash_commit_sha"] || d["sha"]
-    deploy_at, pipeline_at = ci_ends(d)
+    deploy_at, pipeline_at, ci_why = @selector ? selector_ends(d) : ci_ends(d)
     # A closed, unmerged MR may still have landed by a push; that is only
     # detected on GitHub (DND-1317), so here it says so instead of reading open.
     unmeasured = if d["state"] == "closed" && d["merged_at"].nil?
@@ -988,8 +994,46 @@ class GitLabForge
       closed_at: d["merged_at"] || d["closed_at"],
       # authored_date survives a rebase; created_at is the committer date.
       commit_times: commits.flat_map { |c| [c["authored_date"], c["committed_date"], c["created_at"]] },
-      deploy_at: deploy_at, pipeline_at: pipeline_at,
+      deploy_at: deploy_at, pipeline_at: pipeline_at, ci_unmeasured: ci_why,
     }
+  end
+
+  # The post-merge end the repo's idle pipeline selector names (DND-1952):
+  # the landing's pipeline on the selector's ref and source, and, with child=,
+  # its trigger job's downstream pipeline (the deploy). The rules are
+  # GitLabPipelineSelector's; this only reads. -> [deploy_at, pipeline_at,
+  # reason]: reason is nil when the end concluded, else why it is not
+  # measured (busy, or the selector matched nothing). A failed read is a
+  # recorded probe (run_json), so the scan reports INCOMPLETE.
+  def selector_ends(mr)
+    shas = [mr["merge_commit_sha"], mr["squash_commit_sha"], mr["sha"]].compact.uniq
+    listed = []
+    shas.each do |sha|
+      q = URI.encode_www_form("sha" => sha, "ref" => @selector.ref, "source" => @selector.source, "per_page" => 100)
+      got = api("projects/#{@proj}/pipelines?#{q}")
+      return [nil, nil, nil] if got.nil?
+
+      listed.concat(got)
+    end
+    pipeline, why = GitLabPipelineSelector.pick_pipeline(@selector, shas, listed)
+    return [nil, nil, why] unless pipeline
+
+    parent = api("projects/#{@proj}/pipelines/#{pipeline['id']}") or return [nil, nil, nil]
+    out = selector_outcome(parent)
+    out ? [out.deploy_at, out.pipeline_at, out.state == :concluded ? nil : out.reason] : [nil, nil, nil]
+  end
+
+  # -> a GitLabPipelineSelector::Outcome, or nil when a read failed.
+  def selector_outcome(parent)
+    return GitLabPipelineSelector.judge(@selector, pipeline: parent) unless @selector.child
+
+    bridges = api("projects/#{@proj}/pipelines/#{parent['id']}/bridges?per_page=100") or return nil
+    bridge, why = GitLabPipelineSelector.pick_bridge(@selector, parent, bridges)
+    return GitLabPipelineSelector::Outcome.new(state: :unmeasured, reason: why) unless bridge
+
+    child_id = bridge.dig("downstream_pipeline", "id")
+    child = child_id && (api("projects/#{@proj}/pipelines/#{child_id}") or return nil)
+    GitLabPipelineSelector.judge(@selector, pipeline: parent, bridge: bridge, child: child)
   end
 
   # Find the post-merge pipeline on the default branch for the merge and read
@@ -1227,11 +1271,30 @@ def notion_start
   TicketStarts.new(dnd: notion_start_for(DispatchTrackers::DND), work: work)
 end
 
-def forge_for(dir)
+def forge_for(dir, idle_workflow: nil)
   case detect_forge(dir)
   when :github then GitHubForge.new(dir)
-  when :gitlab then GitLabForge.new(dir)
+  when :gitlab then GitLabForge.new(dir, selector: idle_workflow && GitLabPipelineSelector.parse(idle_workflow)[0])
   end
+end
+
+# Whether --idle-workflow fits the repo's forge (DND-1952). The value was
+# already refused unless LeadTimeConfig accepts it. A GitHub workflow file on
+# a GitLab origin, or a GitLab selector on a GitHub origin, names CI the forge
+# cannot have, so reading on would measure the wrong thing in silence.
+# -> nil when it fits, else [reason, fix].
+def idle_workflow_mismatch(forge_kind, idle_workflow)
+  kind = LeadTimeConfig.idle_workflow_kind(idle_workflow)
+  where = "the repo's idle_workflow in the lead-time config (ai/bin/lead-time-repos --help)"
+  if forge_kind == :gitlab && kind == :workflow
+    return ["idle_workflow #{idle_workflow} is a GitHub workflow file, but the repo's origin is GitLab",
+            "set #{where} to a GitLab idle pipeline selector, #{GitLabPipelineSelector.form}"]
+  end
+  if forge_kind == :github && kind == :gitlab
+    return ["idle_workflow #{idle_workflow} is a GitLab idle pipeline selector, but the repo's origin is GitHub",
+            "set #{where} to the repo's post-merge workflow file (post-merge.yml), or \"none\""]
+  end
+  nil
 end
 
 # starts: the START source (NotionStart, or a test double answering lookup
@@ -1251,7 +1314,7 @@ def analyze(forge, id, starts)
   LeadTime.compute(start_at: start_at, start_source: source, start_unmeasured: start_why,
                    first_commit_times: f[:commit_times], deploy_at: f[:deploy_at],
                    pipeline_at: f[:pipeline_at], merged_at: f[:merged_at],
-                   closed: f[:closed], unmeasured: f[:unmeasured])
+                   closed: f[:closed], unmeasured: f[:unmeasured] || f[:ci_unmeasured])
           .merge(pr: f[:number], title: f[:title], branch: f[:branch], landed_via: f[:landed_via])
           .merge(landing_commit_keys(f[:landed_via], f[:merge_sha], f[:merge_sha_field],
                                      closed: f[:closed], unmeasured: f[:unmeasured]))
@@ -1635,7 +1698,7 @@ require_relative "../lib/strict_argv"
 # silently dropped the outlier filter.
 CLI_SPEC = { "--self-test" => :switch, "--json" => :switch, "--repo" => :value,
              "--pr" => :value, "--mr" => :value, "--since" => :value,
-             "--slow" => :integer, "--meta" => :value }.freeze
+             "--slow" => :integer, "--meta" => :value, "--idle-workflow" => :value }.freeze
 
 # -> [opts, nil] on success, [nil, reason] on a usage error.
 def parse_cli(argv)
@@ -1648,6 +1711,11 @@ def parse_cli(argv)
     return [nil, "--since scans a window and --pr/--mr reads one request; pass one"]
   end
   return [nil, "--meta reports a window scan; pass it with --since"] if opts.key?("--meta") && !opts.key?("--since")
+  idle = opts["--idle-workflow"]
+  if idle && LeadTimeConfig.idle_workflow_kind(idle).nil?
+    return [nil, "--idle-workflow #{idle.inspect} is not a workflow file name, a GitLab idle pipeline selector " \
+                 "(#{LeadTimeConfig.idle_selector_error(idle)}) or none"]
+  end
 
   [opts, nil]
 rescue StrictArgv::UsageError => e
@@ -1790,7 +1858,14 @@ def main(argv)
     return 1
   end
 
-  forge = forge_for(repo)
+  idle = opts["--idle-workflow"]
+  if idle && (bad = idle_workflow_mismatch(detect_forge(repo), idle))
+    warn "lead-time: #{bad[0]}; nothing was measured."
+    warn "Fix: #{bad[1]}."
+    return 1
+  end
+
+  forge = forge_for(repo, idle_workflow: idle)
   unless forge
     warn "lead-time: could not detect a supported forge from #{repo}'s origin remote"
     warn "Fix: this tool supports github.com (gh) and gitlab.com (glab) origins."
@@ -1830,6 +1905,19 @@ if $PROGRAM_NAME == __FILE__
                        mention). WHEN is YYYY-MM-DD (00:00:00Z that
                        day) or RFC 3339 with a zone; anything else exits 1.
         --slow MIN     only report tickets slower than MIN minutes
+        --idle-workflow V
+                       the repo's idle_workflow as ai/bin/lead-time-repos
+                       resolves it (lead-time-phases passes it). On a GitLab
+                       origin, a selector gitlab:ref=R,source=S[,child=J]
+                       ends each landing at its pipeline on ref R from source
+                       S, or, with child=, at the successful finish of the
+                       child pipeline trigger job J started (the deploy). A
+                       selector that matches no pipeline, or a pipeline still
+                       waiting or running (waiting_for_resource included),
+                       reads could not measure, with why. A GitHub workflow
+                       file on a GitLab origin, or a selector on a GitHub
+                       origin, exits 1. "none", a workflow file on GitHub,
+                       or no flag keeps the forge's own deploy rule.
         --json         emit JSON instead of the human table
         --meta FILE    with --since: write {scanned_through, landings, kept,
                        incomplete} to FILE. scanned_through is the newest

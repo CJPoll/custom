@@ -52,10 +52,22 @@ exists**. This maps exactly onto Cody's definition:
      `/deploy/i`; `gen_saas`'s `Post-Merge Deploy` matches).
    - GitLab: the latest `finished_at` among **successful jobs in the `deploy`
      stage** of the merge commit's pipeline on the default branch.
+   - GitLab, for a repo whose `idle_workflow` is an idle pipeline selector
+     (`gitlab:ref=main,source=push,child=deploy`, DND-1952): the successful
+     finish of the child pipeline that the merge commit's pipeline (on that
+     ref, from that source) started through the named trigger job. A deploy
+     that runs as a child pipeline (`trigger: include … strategy: depend`) has
+     no jobs in its parent's job list, so the stage rule cannot see it.
 2. **POST-MERGE PIPELINE completed** — if no deploy step ran (a doc-/test-only
    ticket), the completion of the post-merge pipeline/run itself.
    - GitHub: latest successful non-deploy run for the merge commit.
-   - GitLab: latest `finished_at` among all successful jobs in that pipeline.
+   - GitLab: latest `finished_at` among all successful jobs in that pipeline;
+     with a selector, the selected pipeline's own successful `finished_at`.
+
+With a selector, a landing whose pipeline the selector does not match, whose
+pipeline lacks the named trigger job, or whose pipeline or deploy child is still
+waiting or running (`waiting_for_resource` included) reads **could not
+measure**, with the reason. It never falls through to tier 3.
 3. **LANDING time** — if there is no post-merge CI at all (e.g. `~/dev/custom`,
    no CI, no deploy), the time the change landed on the base branch: the forge
    merge (`mergedAt` / `merged_at`), or, for a GitHub PR that is CLOSED without a

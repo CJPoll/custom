@@ -68,7 +68,7 @@ chmod +x "$IR/scripts/athena-leadtime-run.sh"
 printf -- '---\nname: athena:lead-time-improve\n---\n' >"$IR/ai/skills/athena:lead-time-improve/SKILL.md"
 # The real resolver (DND-1526): the installer reads the repo list only through it.
 cp "${REPO_ROOT}/ai/bin/lead-time-repos" "$IR/ai/bin/"
-for f in strict_argv.rb lead_time_config.rb lead_time_config_io.rb; do cp "${REPO_ROOT}/ai/lib/$f" "$IR/ai/lib/"; done
+for f in strict_argv.rb lead_time_config.rb gitlab_pipeline_selector.rb lead_time_config_io.rb; do cp "${REPO_ROOT}/ai/lib/$f" "$IR/ai/lib/"; done
 # The checkouts the config points at: temp repos named as the repos are.
 CO="${TMP}/checkouts"
 for r in custom gen_saas walt_ui; do git init -q "$CO/$r" >&2; done

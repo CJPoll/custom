@@ -106,6 +106,29 @@ accepted "--repo --mr still parses" --repo "${NOREPO}" --mr 1188
 accepted "--repo --pr --json still parses" --repo "${NOREPO}" --pr 14 --json
 accepted "flag order does not matter" --json --slow 90 --since "${SINCE}" --repo "${NOREPO}"
 
+# 2b2. DND-1952: --idle-workflow takes what LeadTimeConfig accepts, and a value
+#      that names the other forge's CI is refused before any forge read.
+SEL="gitlab:ref=main,source=push,child=deploy"
+refused "a malformed GitLab selector is refused, naming why" "names no source" --repo "${NOREPO}" --since "${SINCE}" --idle-workflow gitlab:ref=main
+refused "a valueless --idle-workflow is refused" "--idle-workflow" --repo "${NOREPO}" --since "${SINCE}" --idle-workflow
+accepted "--idle-workflow with a GitLab selector parses" --repo "${NOREPO}" --since "${SINCE}" --idle-workflow "${SEL}"
+accepted "--idle-workflow with a workflow file parses" --repo "${NOREPO}" --since "${SINCE}" --idle-workflow post-merge.yml
+mismatch() { # mismatch <label> <origin> <idle> <needle>
+  local d; d="$(mktemp -d "${TMP}/origin.XXXXXX")"
+  env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git init -q "$d" &&
+    env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "$d" remote add origin "$2"
+  run --repo "$d" --since "${SINCE}" --idle-workflow "$3"
+  if [ "${CODE}" -eq 1 ] && grep -qF -- "$4" <<<"${ERR}" && grep -q 'Fix:' <<<"${ERR}" && [ -z "${OUT}" ]; then
+    ok "$1"
+  else
+    bad "$1" "code=${CODE} err=$(head -c 240 <<<"${ERR}")"
+  fi
+}
+mismatch "a GitHub workflow file on a GitLab origin is refused with a Fix (never measured as the stage rule)" \
+  "https://gitlab.com/group/repo.git" post-merge.yml "is a GitHub workflow file, but the repo's origin is GitLab"
+mismatch "a GitLab selector on a GitHub origin is refused with a Fix" \
+  "https://github.com/owner/repo.git" "${SEL}" "is a GitLab idle pipeline selector, but the repo's origin is GitHub"
+
 refused "a valueless --meta is refused, naming the flag" "--meta" --repo "${NOREPO}" --since "${SINCE}" --meta
 refused "--meta without --since is refused (it reports a window scan)" "--meta" --repo "${NOREPO}" --pr 1 --meta "${TMP}/m.json"
 accepted "--since --slow --json --meta parses" --repo "${NOREPO}" --since "${SINCE}" --slow 90 --json --meta "${TMP}/m.json"

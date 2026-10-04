@@ -364,10 +364,14 @@ module LeadTimePhasesIO
 
     module_function
 
-    def run(bin, repo, since, env)
+    # idle_workflow: the repo's declared post-merge CI (DND-1952), passed on so
+    # lead-time reads a GitLab repo's pipeline by its selector; nil passes none.
+    def run(bin, repo, since, env, idle_workflow: nil)
       Dir.mktmpdir("lead-time-phases-") do |tmp|
         meta_file = File.join(tmp, "meta.json")
-        out, err, st = Open3.capture3(LeadTimeConfigIO::GIT_ENV_UNSET.merge(env), bin, "--repo", repo, "--since", since, "--json", "--meta", meta_file)
+        idle = idle_workflow ? ["--idle-workflow", idle_workflow] : []
+        out, err, st = Open3.capture3(LeadTimeConfigIO::GIT_ENV_UNSET.merge(env), bin, "--repo", repo, "--since", since,
+                                      "--json", "--meta", meta_file, *idle)
         meta = File.exist?(meta_file) ? (JSON.parse(File.read(meta_file)) rescue :malformed) : nil
         rows = out.strip.empty? ? nil : (JSON.parse(out) rescue :malformed)
         Result.new(code: st.exitstatus, signal: st.termsig, rows: rows, meta: meta, stderr: err)

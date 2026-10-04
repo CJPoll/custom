@@ -101,8 +101,8 @@ module LeadTimeProduct
       bad_manifest("#{r['name']}: lane and lock must be <lanes_dir>/#{run_id} and its .lock")
     end
     idle = r["idle_workflow"]
-    unless idle.nil? || (idle.is_a?(String) && idle.match?(LeadTimeConfig::IDLE_WORKFLOW_RE))
-      bad_manifest("#{r['name']}: idle_workflow #{idle.inspect} is not a workflow file name or none")
+    unless idle.nil? || LeadTimeConfig.idle_workflow_kind(idle)
+      bad_manifest("#{r['name']}: idle_workflow #{idle.inspect} is not a workflow file name, a GitLab idle pipeline selector or none")
     end
     RepoLane.new(name: r["name"], path: r["path"], common: r["common"], lanes_dir: r["lanes_dir"],
                  lane: r["lane"], lock: r["lock"], idle_workflow: idle)
@@ -113,9 +113,19 @@ module LeadTimeProduct
   # locked-merge's idle flag for R (athena:merge-boarding -> The merge bar: on
   # gen_saas pass --require-idle-workflow post-merge.yml). Undeclared refuses
   # the landing: deny by default, never a merge without the repo's own bar.
+  # A GitLab idle pipeline selector (DND-1952) names a merge bar locked-merge
+  # cannot yet check (its GitLab path refuses --require-idle-workflow), so it
+  # refuses too: never a GitLab landing without its idle check.
   def idle_args(idle)
-    return [] if idle == "none"
-    return ["--require-idle-workflow", idle] if idle.is_a?(String) && idle.match?(LeadTimeConfig::IDLE_WORKFLOW_RE)
+    case LeadTimeConfig.idle_workflow_kind(idle)
+    when :none then return []
+    when :workflow then return ["--require-idle-workflow", idle]
+    when :gitlab
+      raise Error.new("the repo's idle_workflow #{idle} is a GitLab idle pipeline selector, and locked-merge has no GitLab " \
+                      "idle-pipeline check, so its merge bar cannot be held; nothing lands",
+                      "land this repo's PRs by hand until the product lane has a GitLab path (a GitLab idle-pipeline " \
+                      "check in locked-merge, then a forge dispatch in leadtime-product); never drop the idle_workflow to land.")
+    end
 
     raise Error.new("the repo declares no idle_workflow, so its merge bar (locked-merge --require-idle-workflow) is unknown; nothing lands",
                     "add \"idle_workflow\": \"<its post-merge workflow file>\" (or \"none\" when it has none) to the repo's entry in this machine's lead-time config (ai/bin/lead-time-repos --help).")

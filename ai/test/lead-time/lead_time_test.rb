@@ -608,6 +608,76 @@ check("a closed-unmerged GitLab MR names why it has no landed commit (DND-1491)"
   analyze(gl, 5, stamped)[:landing_commit_unmeasured].to_s.include?("landing by push is only detected on GitHub")
 end
 
+# --- DND-1952: a GitLab idle pipeline selector reads the post-merge pipeline
+# and its deploy child (a trigger job with `strategy: depend`). Stubbed REST
+# answers, shaped like GitLab's; the project path is URL-encoded.
+SEL_TEXT = "gitlab:ref=main,source=push,child=deploy"
+MERGE_SHA = "34" * 20
+def selector_forge(pipelines:, parent:, bridges:, child:, calls: [])
+  f = GitLabForge.allocate
+  f.instance_variable_set(:@dir, ".")
+  f.instance_variable_set(:@proj, "group%2Frepo")
+  f.instance_variable_set(:@selector, GitLabPipelineSelector.parse(SEL_TEXT)[0])
+  mr = { "iid" => 6, "title" => "DND-1203: t", "source_branch" => "dnd-1203-b", "state" => "merged",
+         "merged_at" => "2026-09-30T03:30:00Z", "closed_at" => nil, "sha" => "ef" * 20,
+         "merge_commit_sha" => MERGE_SHA, "squash_commit_sha" => nil }
+  f.define_singleton_method(:api) do |path|
+    calls << path
+    next mr if path == "projects/group%2Frepo/merge_requests/6"
+    next [] if path.end_with?("/merge_requests/6/commits")
+    next pipelines if path.start_with?("projects/group%2Frepo/pipelines?")
+    next parent if path == "projects/group%2Frepo/pipelines/10"
+    next bridges if path == "projects/group%2Frepo/pipelines/10/bridges?per_page=100"
+    next child if path == "projects/group%2Frepo/pipelines/77"
+
+    raise "unexpected glab call: #{path}"
+  end
+  f
+end
+GL_PUSH = { "id" => 10, "sha" => MERGE_SHA, "ref" => "main", "source" => "push", "status" => "success" }.freeze
+GL_PARENT = GL_PUSH.merge("project_id" => 9, "finished_at" => "2026-09-30T04:31:00Z").freeze
+GL_BRIDGE = { "id" => 2, "name" => "deploy", "status" => "success",
+              "downstream_pipeline" => { "id" => 77, "project_id" => 9, "status" => "success" } }.freeze
+GL_CHILD = { "id" => 77, "project_id" => 9, "status" => "success", "finished_at" => "2026-09-30T04:30:00Z" }.freeze
+
+idle_calls = []
+r_idle = analyze(selector_forge(pipelines: [GL_PUSH], parent: GL_PARENT, bridges: [GL_BRIDGE], child: GL_CHILD,
+                                calls: idle_calls), 6, stamped)
+check("GL1 an idle deploy child: the row ends at the child's finish, a deploy end") do
+  r_idle[:end_kind] == :deploy && r_idle[:end] == "2026-09-30T04:30:00Z" && r_idle[:tail_seconds] == 3600 &&
+    r_idle[:unmeasured_reason].nil? && r_idle[:merge_commit] == MERGE_SHA
+end
+check("GL2 the reads are REST on the URL-encoded path, the selector's ref and source in the query") do
+  idle_calls.include?("projects/group%2Frepo/pipelines?sha=#{MERGE_SHA}&ref=main&source=push&per_page=100") &&
+    idle_calls.none? { |c| c.include?("graphql") || c.match?(%r{projects/\d}) }
+end
+r_busy = analyze(selector_forge(pipelines: [GL_PUSH.merge("status" => "running")],
+                                parent: GL_PARENT.merge("status" => "running", "finished_at" => nil),
+                                bridges: [GL_BRIDGE.merge("status" => "waiting_for_resource", "downstream_pipeline" => nil)],
+                                child: nil), 6, stamped)
+check("GL3 a busy deploy (waiting_for_resource) is not concluded: no lead, and the row says why") do
+  r_busy[:lead_seconds].nil? && r_busy[:end].nil? && r_busy[:end_kind] == :unmeasured &&
+    r_busy[:unmeasured_reason].to_s.include?("waiting_for_resource") && r_busy[:merge_commit] == MERGE_SHA
+end
+r_running = analyze(selector_forge(pipelines: [GL_PUSH], parent: GL_PARENT.merge("status" => "running", "finished_at" => nil),
+                                   bridges: [GL_BRIDGE.merge("status" => "running")],
+                                   child: GL_CHILD.merge("status" => "running", "finished_at" => nil)), 6, stamped)
+check("GL4 a busy deploy (the child running) is not concluded") do
+  r_running[:end_kind] == :unmeasured && r_running[:unmeasured_reason].to_s.include?("child pipeline 77 is running")
+end
+r_none = analyze(selector_forge(pipelines: [GL_PUSH.merge("source" => "web")], parent: nil, bridges: [], child: nil), 6, stamped)
+check("GL5 a selector matching no pipeline is a named could-not-measure, never idle or a landing end") do
+  r_none[:end_kind] == :unmeasured && r_none[:lead_seconds].nil? &&
+    r_none[:unmeasured_reason].to_s.include?("matched no pipeline") && r_none[:unmeasured_reason].to_s.include?(SEL_TEXT)
+end
+r_nobridge = analyze(selector_forge(pipelines: [GL_PUSH], parent: GL_PARENT, bridges: [GL_BRIDGE.merge("name" => "other")],
+                                    child: nil), 6, stamped)
+check("GL6 a pipeline without the named trigger job is a named could-not-measure") do
+  r_nobridge[:end_kind] == :unmeasured && r_nobridge[:unmeasured_reason].to_s.include?("no trigger job named \"deploy\"")
+end
+check("GL7 no failed probe on readable stubs") { !ProbeFailures.any? }
+check("GL8 a start the CI reason replaced is still read: the row keeps its start") { r_busy[:start] == r_idle[:start] && r_idle[:start] }
+
 unstamped = NotionStart.new(FakeNotion.new(1203 => at_prop(nil)))
 ru = analyze(gh129, 129, unstamped)
 check("a ticket with no In Progress date has no lead (never the commit date)") { ru[:lead_seconds].nil? && ru[:start].nil? }

@@ -1208,15 +1208,18 @@ module LeadTimePhases
     # fault, and reading it as absent would hide it.
     def declare(idle_workflow, repo)
       return nil if idle_workflow.nil?
-      # IDLE_WORKFLOW_RE matches "none" too: test it first, or "none" would
-      # read as a workflow file.
-      return Declared.new(value: false, workflow: "none", repo: repo) if idle_workflow == "none"
-      if idle_workflow.is_a?(String) && LeadTimeConfig::IDLE_WORKFLOW_RE.match?(idle_workflow)
-        return Declared.new(value: true, workflow: idle_workflow, repo: repo)
+
+      # LeadTimeConfig.idle_workflow_kind is the one home of the accepted
+      # values: a workflow file (GitHub) or an idle pipeline selector
+      # (GitLab, DND-1952) declares CI, "none" declares none.
+      case LeadTimeConfig.idle_workflow_kind(idle_workflow)
+      when :none then return Declared.new(value: false, workflow: "none", repo: repo)
+      when :workflow, :gitlab then return Declared.new(value: true, workflow: idle_workflow, repo: repo)
       end
 
       raise DeclarationError.new(
-        "idle_workflow #{idle_workflow.inspect} for #{repo} is not a workflow file name, \"none\" or absent, " \
+        "idle_workflow #{idle_workflow.inspect} for #{repo} is not a workflow file name, a GitLab idle pipeline " \
+        "selector, \"none\" or absent, " \
         "so whether #{repo} has post-merge CI is unknown",
         "pass the repo's idle_workflow as ai/bin/lead-time-repos resolves it (LeadTimeConfig refuses any other " \
         "value, so this is a caller bug: file a DND ticket with this line)"

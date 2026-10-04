@@ -736,8 +736,12 @@ Each run, for every resolved `watch` repo (forge auto-detected),
 scan for outliers newer than your **watch cursor**:
 
 ```
-ai/bin/lead-time --repo <R> --since "$(cat "<state>/watch-cursor.<repo>.txt")" --slow 90 --json --meta "<state>/watch-meta.<repo>.json"
+ai/bin/lead-time --repo <R> --since "$(cat "<state>/watch-cursor.<repo>.txt")" --slow 90 --json --meta "<state>/watch-meta.<repo>.json" [--idle-workflow <its idle_workflow>]
 ```
+
+Pass `--idle-workflow` whenever `ai/bin/lead-time-repos --json` gives the
+repo one. On a GitLab repo it is the idle pipeline selector that finds the
+deploy child pipeline (DND-1952); without it the tail reads the wrong end.
 
 `watch-cursor.<repo>.txt` lives in the state dir (main checkout)
 — **one cursor per repo**, set to `scanned_through` from that

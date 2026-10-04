@@ -177,6 +177,17 @@ Lead time is the owner's definition: captain dispatch (the ticket's
    after the override inherits the tracked default's keys. A `watch` repo may
    still omit it.
 
+   **Later (2026-10-04, DND-1952):** on GitLab, `idle_workflow` is an idle
+   pipeline selector, `gitlab:ref=main,source=push[,child=<trigger job>]`
+   (`ai/lib/gitlab_pipeline_selector.rb`). It declares post-merge CI like a
+   workflow file, and the ingest passes it to `ai/bin/lead-time` as
+   `--idle-workflow`, which ends each landing at its deploy child pipeline's
+   successful finish. A selector that matches nothing, or a deploy still
+   waiting or running, reads could not measure. Ledger rows keep the config's
+   short repo name, so a repo's GitHub-era and GitLab-era rows are one
+   history. `leadtime-product` refuses to land under a selector until
+   `locked-merge` has a GitLab idle check.
+
    **Later (2026-10-03, DND-1924):** the experiment judge reads `lead_s` from
    the ledger row, not from the summary, so ingest now applies the same rule:
    a no-run landing in a CI repo is written with `lead_s` null and the

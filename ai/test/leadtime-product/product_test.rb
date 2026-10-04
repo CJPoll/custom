@@ -87,13 +87,12 @@ end
 check("M7 a bad run id is refused") { raised { P.parse_manifest(manifest_doc(run_id: "../x")) } }
 check("M8 idle_workflow is carried: absent is nil, a file or none as given") do
   base = JSON.parse(manifest_doc)["repos"][0]
-  [nil, "post-merge.yml", "none"].all? do |v|
+  [nil, "post-merge.yml", "none", "gitlab:ref=main,source=push,child=deploy"].all? do |v|
     r = v ? base.merge("idle_workflow" => v) : base
     P.parse_manifest(manifest_doc(repos: [r])).repo("prod").idle_workflow == v
   end
 end
 check("M8b idle_workflow has ONE home: a value one refuses the other refuses (DND-1671)") do
-  home = LeadTimeConfig::IDLE_WORKFLOW_RE
   config_refuses = lambda do |v|
     doc = JSON.generate("repos" => [{ "name" => "prod", "path" => "/src/prod", "mode" => "improve", "idle_workflow" => v }],
                         "window" => 20, "improvement_epic" => "epic")
@@ -106,10 +105,11 @@ check("M8b idle_workflow has ONE home: a value one refuses the other refuses (DN
     base = JSON.parse(manifest_doc)["repos"][0].merge("idle_workflow" => v)
     !raised { P.parse_manifest(manifest_doc(repos: [base])) }.nil?
   end
-  !P.const_defined?(:IDLE_WORKFLOW_RE, false) && home.frozen? &&
-    ["post-merge.yml", "none", "../x.yml", "a/b.yml", "x.txt", "", ".hidden.yml", "none ", 5, ["a.yml"]].all? do |v|
+  !P.const_defined?(:IDLE_WORKFLOW_RE, false) &&
+    ["post-merge.yml", "none", "../x.yml", "a/b.yml", "x.txt", "", ".hidden.yml", "none ", 5, ["a.yml"],
+     "gitlab:ref=main,source=push,child=deploy", "gitlab:ref=main", "gitlab:x.yml"].all? do |v|
       config_refuses.call(v) == product_refuses.call(v) &&
-        config_refuses.call(v) == !(v.is_a?(String) && home.match?(v))
+        config_refuses.call(v) == LeadTimeConfig.idle_workflow_kind(v).nil?
     end
 end
 check("M9 an idle_workflow with a path in it is refused") do
@@ -126,6 +126,10 @@ check("I2 none (declared: no post-merge workflow) passes no flag") { P.idle_args
 check("I3 undeclared refuses the landing with a Fix naming idle_workflow") do
   e = raised { P.idle_args(nil) }
   e && e.message.include?("idle_workflow") && e.fix.include?("idle_workflow")
+end
+check("I3b a GitLab idle pipeline selector refuses the landing: locked-merge has no GitLab idle check (DND-1952)") do
+  e = raised { P.idle_args("gitlab:ref=main,source=push,child=deploy") }
+  e && e.message.include?("GitLab") && e.message.include?("nothing lands") && e.fix.include?("GitLab")
 end
 check("I4 base deploy: the latest completed run failed holds the line") do
   r = P.base_deploy_hold([{ "status" => "completed", "conclusion" => "failure", "headSha" => H1 }])
