@@ -178,6 +178,30 @@ which); it never means the push failed). Handle a 1, a 4, and a refusal by
 **athena:github** → *When a forge write can't be done as
 Athena*.
 
+## Waiting on a pipeline
+
+Wait with `~/dev/custom/ai/bin/glab-ci-wait` (DND-1940), never with
+`glab ci status --live`, `glab ci view`, `watch glab …` or a sleeping loop
+around a glab read, and never a `Monitor` that polls glab.
+`ai/hooks/safe-wait-guard.sh` denies those forms in a Bash call (directly, in
+`watch`, or in `sh -c`); it does not see a `Monitor`. A single `glab ci status`
+or `glab mr view` read is fine.
+
+```sh
+# an MR head pipeline
+~/dev/custom/ai/bin/glab-ci-wait --project <namespace>/<project> --sha <head> --source merge_request_event
+# a merge to main and its deploy child pipeline (trigger: include, strategy: depend)
+~/dev/custom/ai/bin/glab-ci-wait --project <namespace>/<project> --sha <merged sha> --ref main --source push --include-children
+```
+
+It reads through `glab-athena` every 60 s (floor 30), stops at `--timeout`
+(default 570 s), honors GitLab's RateLimit headers, and prints one `VERDICT:`
+line: DONE, FAILED or CANCELED (with `JOB:` lines), TIMEOUT, NOT-FOUND (the
+commit exists, no pipeline is listed for it) or COULD-NOT-LOOK (an unknown
+project or sha, a refusal, a rate limit past the bound). A merged-results
+pipeline runs on a merge commit, so wait on it by that pipeline's own sha
+(`.head_pipeline.sha`). `--help` has the exit codes.
+
 ## Merging (athena-admiral only)
 
 **The rule:** a merge pins the MR's exact head SHA, the MR's head pipeline

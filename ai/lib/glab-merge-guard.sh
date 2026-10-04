@@ -363,7 +363,7 @@ glmg_check_head() {
   hp_id="$(jq -r '.head_pipeline.id // "?"' <<<"$mr")"
   if [ "$hp_status" != success ]; then
     glmg_refuse "$shown" "!$iid's head pipeline $hp_id is '${hp_status:-unknown}', not success" \
-      "wait for it to finish (\`glab ci status\`, \`glab mr view $iid -F json\`) and fix it if it failed, then $GLMG_SAFE_PATH"
+      "wait for it to finish with \`~/dev/custom/ai/bin/glab-ci-wait --project <namespace>/<project> --sha <its sha> --source merge_request_event\` (one read: \`glab mr view $iid -F json\`) and fix it if it failed, then $GLMG_SAFE_PATH"
   fi
   [ "$hp_sha" = "$head" ] && return 0
   if [ "$hp_ref" != "refs/merge-requests/$iid/merge" ] || ! [[ "$hp_sha" =~ ^[0-9a-f]{7,64}$ ]]; then

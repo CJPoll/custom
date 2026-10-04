@@ -1130,7 +1130,9 @@ train)*.
   INSTANCE HEALTH ONLY), so cut-over health is MIG/serving only right now.
 - Before merging, check whether another lane is mid-batch (main's newest pipeline
   has a labeled tail pending) and join it (merge unlabeled before their tail) or
-  wait for it.
+  wait for it with `~/dev/custom/ai/bin/glab-ci-wait --project <p> --sha <tail sha>
+  --ref main --source push` (`athena:gitlab` → *Waiting on a pipeline*), never a
+  polling loop.
 
 **Label assertion before the batch tail boards:** a batch where NO MR carries
 `Auto-Deploy` merges into a SILENT no-deploy — `release:create` fails its gate

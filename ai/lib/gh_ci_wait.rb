@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "json"
+require_relative "ci_wait"
 
 # gh_ci_wait.rb -- DOMAIN for ai/bin/gh-ci-wait (DND-1708, DND-1706).
 #
@@ -16,28 +17,20 @@ require "json"
 #     --watch` every 10 s) exhausted the owner's 5000/h core budget. Here the
 #     interval has a floor (MIN_INTERVAL) and errors back off.
 module GhCiWait
-  MIN_INTERVAL = 30
-  DEFAULT_INTERVAL = 60
-  DEFAULT_MAX = 570
-  MAX_BACKOFF = 300
+  # The cadence, the backoff, the wait decision, split_http and the shared
+  # key checks live in ai/lib/ci_wait.rb, shared with glab-ci-wait (DND-1940).
+  MIN_INTERVAL = CiWait::MIN_INTERVAL
+  DEFAULT_INTERVAL = CiWait::DEFAULT_INTERVAL
+  DEFAULT_MAX = CiWait::DEFAULT_MAX
+  MAX_BACKOFF = CiWait::MAX_BACKOFF
   # GitHub's documented wait for a secondary limit that sends no Retry-After.
   SECONDARY_FALLBACK_S = 60
   SUCCESS_CONCLUSIONS = %w[success skipped neutral].freeze
   # gh-athena's refusals that no re-read can fix (its `die` texts).
   GH_ATHENA_PERMANENT = /missing App ID|missing private key|has no installation|not found\. Fix: install|cannot load|JWT signing failed/.freeze
 
-  # A usage error: a key that is malformed for its type. Carries its Fix.
-  class Usage < StandardError
-    attr_reader :fix
-
-    def initialize(message, fix)
-      super(message)
-      @fix = fix
-    end
-  end
-
-  # A 2xx body that does not hold what the read asked for. Never read as empty.
-  class Unreadable < StandardError; end
+  Usage = CiWait::Usage
+  Unreadable = CiWait::Unreadable
 
   Read = Struct.new(:kind, :status, :body, :resource, :reset_at, :secondary, :detail, keyword_init: true)
   State = Struct.new(:state, :total, :pending, :failed, :summary, keyword_init: true)
@@ -74,17 +67,7 @@ module GhCiWait
 
   # -> [status Integer or nil, headers Hash (downcased keys), body String]
   def split_http(text)
-    head, body = text.split(/\r?\n\r?\n/, 2)
-    first, *lines = head.to_s.split(/\r?\n/)
-    m = first.to_s.match(%r{\AHTTP/[\d.]+\s+(\d{3})})
-    return [nil, {}, ""] unless m
-
-    headers = {}
-    lines.each do |line|
-      k, v = line.split(":", 2)
-      headers[k.strip.downcase] = v.to_s.strip if v
-    end
-    [m[1].to_i, headers, body.to_s]
+    CiWait.split_http(text)
   end
 
   def json_message(body)
@@ -383,22 +366,9 @@ module GhCiWait
   # next_wait(...) -> [:sleep, seconds], [:stop] (deadline reached) or
   # [:give_up] (rate limited past the deadline: polling into it only burns
   # the budget, and the caller must say COULD-NOT-LOOK with the reset time).
+  # The rule is CiWait.next_wait (ai/lib/ci_wait.rb).
   def next_wait(read:, now:, deadline:, interval:, errors_in_row:)
-    if read.kind == :rate_limited
-      # Never re-read a limit sooner than MIN_INTERVAL: a Retry-After of 0, or
-      # a reset our clock already passed, would otherwise poll into the limit
-      # once a second, the failure this tool exists to stop.
-      wait = [(read.reset_at - now).ceil, MIN_INTERVAL].max
-      return [:give_up] if now + wait > deadline
-
-      return [:sleep, wait]
-    end
-    left = (deadline - now).floor
-    return [:stop] if left <= 0
-
-    base = interval
-    base = [interval * (2**[errors_in_row - 1, 4].min), MAX_BACKOFF].min if read.kind == :error && errors_in_row > 1
-    [:sleep, [base, left].min]
+    CiWait.next_wait(read: read, now: now, deadline: deadline, interval: interval, errors_in_row: errors_in_row)
   end
 
   # ---- argument validation: a wrongly computed key is an error -------------
@@ -410,11 +380,7 @@ module GhCiWait
   end
 
   def sha!(value)
-    v = value.to_s.downcase
-    return v if v.match?(/\A[0-9a-f]{40}\z/)
-
-    raise Usage.new("--sha must be a full 40-hex commit sha, got #{value.to_s.inspect}",
-                    "pass the pushed head's full sha (git rev-parse HEAD); a prefix can match the wrong commit")
+    CiWait.sha!(value)
   end
 
   def run_id!(value)
@@ -425,11 +391,7 @@ module GhCiWait
   end
 
   def interval!(value)
-    n = positive_int(value, "--interval")
-    return n if n >= MIN_INTERVAL
-
-    raise Usage.new("--interval #{n} is under the #{MIN_INTERVAL} s floor (DND-1706: fast polls exhaust the API budget)",
-                    "pass --interval #{MIN_INTERVAL} or more, or omit it for #{DEFAULT_INTERVAL}")
+    CiWait.interval!(value)
   end
 
   def max!(value)
@@ -441,10 +403,7 @@ module GhCiWait
   end
 
   def positive_int(value, flag)
-    v = value.to_s
-    return v.to_i if v.match?(/\A\d+\z/) && v.to_i.positive?
-
-    raise Usage.new("#{flag} must be a positive integer, got #{v.inspect}", "pass #{flag} N with N >= 1")
+    CiWait.positive_int(value, flag)
   end
 
   # ---- what to wait on, and how to read and judge it -----------------------

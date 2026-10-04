@@ -1,0 +1,156 @@
+#!/usr/bin/ruby
+# frozen_string_literal: true
+
+# glab-ci-wait -- the one bounded, slow GitLab pipeline waiter for the fleet
+# (DND-1940). Blocks until the pipelines on one commit reach a verdict, or a
+# --timeout bound passes. The GitLab counterpart of ai/bin/gh-ci-wait.
+#
+# Buckets: FRAMEWORK (argv, output, exit codes) here; MANAGER and SIDE
+# EFFECTS in ai/lib/glab_ci_wait_io.rb; DOMAIN in ai/lib/glab_ci_wait.rb and
+# the shared ai/lib/ci_wait.rb. Read-only: it only GETs from the forge.
+
+require_relative "../lib/strict_argv"
+require_relative "../lib/glab_ci_wait"
+require_relative "../lib/glab_ci_wait_io"
+
+HELP = <<~TXT
+  Usage:
+    ai/bin/glab-ci-wait --project NAMESPACE/PROJECT --sha SHA [--ref REF]
+                        [--source push|merge_request_event] [--include-children]
+                        [--interval S] [--timeout S] [--grace S]
+
+  Block until the GitLab pipelines on one commit reach a verdict, then print
+  one VERDICT: line on stdout. Use it for every CI, merge or deploy wait on a
+  GitLab project, in place of `glab ci status --live`, `glab ci view` (a live
+  view that refreshes until the pipeline ends) and hand-rolled loops around
+  glab. The guard ai/hooks/safe-wait-guard.sh denies those in a Bash call
+  and names this.
+
+  What it waits on:
+    every pipeline on --sha in --project, filtered by --ref and --source when
+    given. The newest pipeline per ref is current; an older one on that ref (a
+    re-push, or one a "Run pipeline" re-ran) is named as superseded, so an MR
+    pipeline and a branch pipeline are both judged. Pipelines another pipeline
+    started (source parent_pipeline or pipeline) are not top level.
+      MR head pipeline:   --sha <head> --source merge_request_event
+      main / deploy:      --sha <merged sha> --ref main --source push --include-children
+    A merged-results pipeline runs on a merge commit, not the MR head: wait on
+    it by that pipeline's own sha (`glab mr view <iid> -F json`, .head_pipeline.sha).
+    --include-children   also follow each pipeline's trigger bridges to their
+                         downstream (child or multi-project) pipelines, to a
+                         depth of 3. A post-merge deploy run as `trigger:
+                         include: ... strategy: depend` is such a child. A bridge
+                         not yet triggered (pending, waiting_for_resource) is
+                         pending; a manual or skipped one is named, not waited on.
+    waiting_for_resource (a resource_group) is pending, not stuck. A pipeline
+    that is `manual` is pending too, and waits for a person.
+
+  Options:
+    --interval S   seconds between polls; default #{GlabCiWait::DEFAULT_INTERVAL}, floor #{GlabCiWait::MIN_INTERVAL}.
+    --timeout S    the wait's hard bound in seconds; default #{GlabCiWait::DEFAULT_MAX}, which fits under a
+                   600 s foreground tool call.
+    --grace S      how long a commit with no pipeline listed is waited on before
+                   NOT-FOUND; default #{GlabCiWait::DEFAULT_GRACE}. 0 says NOT-FOUND on the first
+                   read that lists none.
+
+  Reads go through ~/dev/custom/ai/bin/glab-athena, never the owner's glab, so
+  they run as whichever bot glab-athena resolves for the project (one bot
+  before DND-1936; the namespace's bot after it). They are REST GETs with the
+  project named by its %2F-encoded path, which DND-1936's routing needs (it
+  refuses numeric project ids and `api graphql`). GLAB_CI_WAIT_GLAB names another glab
+  executable; the test suite uses it for a fake. Each read is `glab api -i`, so
+  GitLab's RateLimit headers are read: a 429 waits to its Retry-After or
+  RateLimit-Reset when that falls inside --timeout, and otherwise stops with
+  COULD-NOT-LOOK naming the reset time; a 200 with RateLimit-Remaining: 0
+  waits to the reset before the next poll. Read errors back off: the interval,
+  doubled per error in a row, up to 300 s. Progress goes to stderr.
+
+  A key computed wrongly is never NOT-FOUND: a malformed --project (a URL, a
+  numeric id, a %-encoded path, a .git suffix) is a usage error, and a project
+  or sha GitLab does not know is COULD-NOT-LOOK naming it. The commit is read
+  first, so NOT-FOUND means the commit exists and no pipeline is listed for it.
+
+  Exit codes and VERDICT lines (stdout):
+    0  DONE            every judged pipeline succeeded
+    1  TIMEOUT         read fine, still pending at --timeout; nothing failed yet
+    2  usage error
+    3  COULD-NOT-LOOK  rate-limited past --timeout, the bot refused or
+                       unrouted, an unknown project or sha, an unreadable body,
+                       or no read succeeded. Never idle, never green.
+    4  FAILED          a judged pipeline failed or was skipped, or a bridge
+                       failed with no downstream pipeline
+    5  CANCELED        a judged pipeline was canceled, and none failed
+    6  NOT-FOUND       the commit exists, and no pipeline is listed for it
+                       (with --ref/--source: none matching them) within --grace
+  FAILED and CANCELED are followed by one JOB: line per failing job. Every
+  verdict but DONE is followed by a Fix: line.
+TXT
+
+SPEC = {
+  "--project" => :value, "--sha" => :value, "--ref" => :value, "--source" => :value,
+  "--include-children" => :switch, "--interval" => :value, "--timeout" => :value, "--grace" => :value,
+  "--help" => :switch
+}.freeze
+
+EXIT = { done: 0, timeout: 1, could_not_look: 3, failed: 4, canceled: 5, not_found: 6 }.freeze
+
+def usage(what, fix)
+  warn "glab-ci-wait: usage error: #{what}"
+  warn "Fix: #{fix}"
+  2
+end
+
+def target_from(opts)
+  raise GlabCiWait::Usage.new("--project is required", "pass --project <namespace>/<project>") unless opts["--project"]
+  raise GlabCiWait::Usage.new("--sha is required", "pass the pushed head's full sha (git rev-parse HEAD)") unless opts["--sha"]
+
+  GlabCiWait::Target.new(project: GlabCiWait.project!(opts["--project"]), sha: GlabCiWait.sha!(opts["--sha"]),
+                         ref: opts["--ref"] && GlabCiWait.ref!(opts["--ref"]),
+                         source: opts["--source"] && GlabCiWait.source!(opts["--source"]),
+                         include_children: opts["--include-children"] == true)
+end
+
+def glab_command(env)
+  override = env["GLAB_CI_WAIT_GLAB"]
+  return [File.expand_path("glab-athena", __dir__)] if override.nil?
+  raise GlabCiWait::Usage.new("GLAB_CI_WAIT_GLAB must be an absolute path to an executable, got #{override.inspect}",
+                              "unset GLAB_CI_WAIT_GLAB to read through glab-athena") \
+    unless override.start_with?("/") && File.executable?(override)
+
+  [override]
+end
+
+def main(argv, env)
+  opts = StrictArgv.parse(argv, SPEC)
+  if opts["--help"]
+    puts HELP
+    return 0
+  end
+  target = target_from(opts)
+  interval = opts["--interval"] ? GlabCiWait.interval!(opts["--interval"]) : GlabCiWait::DEFAULT_INTERVAL
+  timeout = opts["--timeout"] ? GlabCiWait.timeout!(opts["--timeout"]) : GlabCiWait::DEFAULT_MAX
+  grace = opts["--grace"] ? GlabCiWait.grace!(opts["--grace"]) : GlabCiWait::DEFAULT_GRACE
+  clock = -> { Time.now.utc }
+  reader = GlabCiWait::GlabApiReader.new(glab: glab_command(env), clock: clock)
+  log = ->(line) { warn "glab-ci-wait #{clock.call.strftime('%H:%M:%SZ')}: #{line}" }
+  outcome = GlabCiWait::Waiter.new(reader: reader, clock: clock, sleeper: ->(s) { sleep(s) }, log: log)
+                              .wait(target, interval: interval, max: timeout, grace: grace)
+  puts outcome.line
+  outcome.jobs.each do |j|
+    puts "JOB: pipeline=#{j[:pipeline]} #{j[:id] ? "id=#{j[:id]} " : ''}#{j[:words]}#{j[:web_url] ? " #{j[:web_url]}" : ''}"
+  end
+  puts "Fix: #{outcome.fix}" if outcome.fix
+  EXIT.fetch(outcome.verdict)
+rescue StrictArgv::UsageError => e
+  usage(e.message, "see --help")
+rescue GlabCiWait::Usage => e
+  usage(e.message, e.fix)
+rescue StandardError => e
+  # A bug must not exit 1, which reads as TIMEOUT ("still pending").
+  puts "VERDICT: COULD-NOT-LOOK glab-ci-wait crashed: #{e.class}: #{e.message}"
+  puts "Fix: this is a defect in glab-ci-wait, not a pipeline state: ticket it with this line, and read the " \
+       "pipeline once with `glab ci get` meanwhile"
+  EXIT.fetch(:could_not_look)
+end
+
+exit main(ARGV, ENV) if $PROGRAM_NAME == __FILE__
