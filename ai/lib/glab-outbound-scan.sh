@@ -146,6 +146,12 @@ glos_roles() {
   return 0
 }
 
+# glos_lower <text> : <text> with only the ASCII letters A-Z lower-cased. A
+# scheme or host is folded with this, never with ${x,,}: in a UTF-8 locale bash
+# folds U+0130 to `i`, which would read a host glab sends elsewhere (an IDNA
+# name) as gitlab.com (DND-2009 review).
+glos_lower() { printf '%s' "$1" | LC_ALL=C tr ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz; }
+
 # glos_shown <endpoint or URL> : the text without its ?query or #fragment, for
 # a message (a query can carry the very value the scan refuses to print).
 glos_shown() { printf '%s' "${1%%[?#]*}"; }
@@ -155,11 +161,11 @@ glos_shown() { printf '%s' "${1%%[?#]*}"; }
 glos_positional() {
   local w="$1" rest host p
   # glab reads the scheme and host without case (DND-2009).
-  case "${w,,}" in
+  case "$(glos_lower "${w:0:8}")" in
     http://* | https://*) ;;
     *) return 0 ;;
   esac
-  rest="${w#*://}"; host="${rest%%/*}"; host="${host,,}"; p="${rest#*/}"
+  rest="${w#*://}"; host="$(glos_lower "${rest%%/*}")"; p="${rest#*/}"
   if [ "$p" = "$rest" ] || [[ "$p" != */-/* ]] || [ -z "$host" ]; then
     targets+=("?:the URL '$(glos_shown "$w")' names no project this guard can parse")
   else
@@ -218,7 +224,7 @@ glos_target_vis() {
     *)
       path="$t" ;;
   esac
-  host="${host,,}"
+  host="$(glos_lower "$host")"
   path="${path%/}"; path="${path%%/-/*}"; path="${path%.git}"
   if ! [[ "$path" =~ ^[0-9]+$ || "$path" =~ ^[A-Za-z0-9_.][A-Za-z0-9_.-]*(/[A-Za-z0-9_.][A-Za-z0-9_.-]*)+$ ]]; then
     ots_refuse 3 "COULD NOT LOOK: '$(glos_shown "$t")' does not name a project this guard can read (OWNER/REPO, GROUP/NAMESPACE/REPO, a project id, a project URL or a git URL), so its visibility is unknown. Fix: pass -R <group>/<project>, then retry."
@@ -290,7 +296,7 @@ glos_unescape() {
 # same text, so glab fills it the same way): a fill can move where the call
 # routes, so any other is REFUSED whatever the visibility.
 glos_api_target() {
-  local ep="$1" shown path lower r ph host="" root rest ref dec want scheme auth
+  local ep="$1" shown path lower r host="" root rest ref dec want scheme auth
   shown="$(glos_shown "$ep")"
   GLOS_API_HOST=""
   if ! path="$(fas_path "$ep" api v4)"; then
@@ -298,21 +304,13 @@ glos_api_target() {
   fi
   lower="${path,,}"
   r="${ep%%[?#]*}"
-  # Placeholders: the path with a leading projects/:id or projects/:fullpath
-  # set aside (only a lower-case, plain prefix qualifies), and the query.
-  ph="$r"
-  if [[ "$ph" =~ ^(([A-Za-z][A-Za-z0-9+.-]*://[^/]*)?/?(api/v4/)?projects/)(:id|:fullpath)(/.*)?$ ]]; then
-    ph="${BASH_REMATCH[1]}${BASH_REMATCH[5]}"
-  fi
-  if glos_has_placeholder "$ph" || { [[ "$ep" == *[?#]* ]] && glos_has_placeholder "${ep#*[?#]}"; }; then
-    glos_refuse_placeholder "$shown"
-  fi
+  glos_endpoint_placeholder "$ep"
   if [[ "$ep" == *://* ]]; then
     if ! [[ "$r" =~ ^([A-Za-z][A-Za-z0-9+.-]*)://([^/]*)(.*)$ ]]; then
       GLOS_API_HOST="?"
       targets+=("?:the endpoint '$shown' holds :// but is not a URL this guard can read"); return 0
     fi
-    scheme="${BASH_REMATCH[1],,}" auth="${BASH_REMATCH[2],,}" r="${BASH_REMATCH[3]}"
+    scheme="$(glos_lower "${BASH_REMATCH[1]}")" auth="$(glos_lower "${BASH_REMATCH[2]}")" r="${BASH_REMATCH[3]}"
     if { [ "$scheme" != https ] && [ "$scheme" != http ]; } || [ "$auth" != gitlab.com ]; then
       GLOS_API_HOST="?"
       targets+=("?:the endpoint '$shown' is a full URL to a host other than gitlab.com"); return 0
@@ -323,12 +321,13 @@ glos_api_target() {
     fi
     r="${r#/api/v4/}"
   else
+    if [ -n "$FAS_HOSTNAME" ] && [ "$(glos_lower "$FAS_HOSTNAME")" != gitlab.com ]; then host="$FAS_HOSTNAME"; fi
+    GLOS_API_HOST="$host"
     # glab sends ONLY the bare endpoint `graphql` to the GraphQL API; any other
     # path ending in graphql (a wiki slug, a repository file) is a REST write.
     if [ "$ep" = graphql ]; then glos_api_graphql; return 0; fi
     r="${r#/}"
     if [[ "${r,,}" == api/v4/* ]]; then r="${r:7}"; fi
-    if [ -n "$FAS_HOSTNAME" ] && [ "${FAS_HOSTNAME,,}" != gitlab.com ]; then host="$FAS_HOSTNAME"; fi
   fi
   GLOS_API_HOST="$host"
   root="${r%%/*}"; rest="${r#*/}"; ref="${rest%%/*}"
@@ -368,6 +367,23 @@ glos_api_graphql() {
   return 0
 }
 
+# glos_endpoint_placeholder <endpoint> : exits 3 when glab would fill a
+# placeholder in the endpoint after this scan: in its query, or in its path
+# with a leading projects/:id or projects/:fullpath set aside (only a
+# lower-case, plain prefix qualifies). Called for every api write, with text or
+# not, before anything else judges the endpoint.
+glos_endpoint_placeholder() {
+  local ep="$1" ph
+  ph="${ep%%[?#]*}"
+  if [[ "$ph" =~ ^(([A-Za-z][A-Za-z0-9+.-]*://[^/]*)?/?(api/v4/)?projects/)(:id|:fullpath)(/.*)?$ ]]; then
+    ph="${BASH_REMATCH[1]}${BASH_REMATCH[5]}"
+  fi
+  if glos_has_placeholder "$ph" || { [[ "$ep" == *[?#]* ]] && glos_has_placeholder "${ep#*[?#]}"; }; then
+    glos_refuse_placeholder "$(glos_shown "$ep")"
+  fi
+  return 0
+}
+
 # glos_refuse_placeholder <shown endpoint> : exits 3 for an endpoint that holds
 # a placeholder glab fills after this scan.
 glos_refuse_placeholder() {
@@ -387,6 +403,9 @@ glos_api() {
   # What a write is, which fields it sends, and the GraphQL copy step are
   # shared with gh-athena (ai/lib/outbound-text-scan.sh, DND-1976).
   ots_api_collect GLOS_ARGV "$off" api v4 || return 0
+  # A placeholder in a write's endpoint is refused even when the write carries
+  # no text: a fill can move where it routes (DND-2009).
+  for ep in "${FAS_POS[@]}"; do glos_endpoint_placeholder "$ep"; done
   [ "$((${#texts[@]} + ${#fsrc[@]}))" -gt 0 ] || return 0
 
   # glab fills a placeholder in a typed -F value AFTER this scan (DND-2009):

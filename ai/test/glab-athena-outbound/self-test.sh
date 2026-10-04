@@ -416,6 +416,18 @@ gla api -X POST "HTTPS://public.example/api/graphql" -f "query=query { project(f
 if refused_hit && [[ "${OUT}" == *"scanning as PUBLIC"* ]]; then ok "DND-2009 regression: a full URL to another host is never a GraphQL read"; else bad "DND-2009 regression: other-host graphql" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 gla api -X POST "HTTPS://GitLab.com/api/v4/projects/synth-group%2Fpriv/issues/3/notes" -f "body=x${TOKEN}"
 if [ "${RC}" = 0 ] && sent && read_was "api projects/synth-group%2Fpriv" && [[ "${CALLS}" != *"--hostname"* ]]; then ok "DND-2009: an upper-case gitlab.com URL reads its project's visibility"; else bad "DND-2009: HTTPS://GitLab.com api" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+# A host is folded as ASCII only: bash's ${x,,} in a UTF-8 locale folds U+0130
+# to `i`, and glab sends gİtlab.com to an IDNA name, not gitlab.com.
+gla api -X POST "https://gİtlab.com/api/v4/projects/synth-group%2Fpriv/issues/3/notes" -f "body=x${TOKEN}"
+if refused_hit && [[ "${OUT}" == *"scanning as PUBLIC"* ]]; then ok "DND-2009 review regression: a non-ASCII host never folds into gitlab.com"; else bad "DND-2009 review regression: gİtlab.com URL" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+gla api -X POST --hostname gİtlab.com projects/synth-group%2Fpriv/issues/3/notes -f "body=x${TOKEN}"
+if read_was "api --hostname gİtlab.com projects/synth-group%2Fpriv"; then ok "DND-2009 review regression: a non-ASCII --hostname is read on that host"; else bad "DND-2009 review regression: --hostname gİtlab.com" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+gla api -X POST --hostname GitLab.COM projects/synth-group%2Fpriv/issues/3/notes -f "body=x${TOKEN}"
+if [ "${RC}" = 0 ] && sent && [ "$(head -n1 <<<"${CALLS}")" = "api projects/synth-group%2Fpriv" ]; then ok "DND-2009: --hostname GitLab.COM is gitlab.com"; else bad "DND-2009: --hostname GitLab.COM" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+gla mr note "https://gİtlab.com/synth-group/pub/-/merge_requests/1" -m "x${TOKEN}"
+if refused_hit && read_was "api --hostname gİtlab.com projects/synth-group%2Fpub"; then ok "DND-2009: an MR URL's non-ASCII host is read on that host"; else bad "DND-2009: gİtlab.com MR URL" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+gla api -X POST "https://public.example/api/v4/projects/synth-group%2Fpriv/merge_requests" -f target_project_id=4242 -f "description=x${TOKEN}"
+if refused_hit && [[ "${OUT}" == *"target_project_id field names a project on a host"* ]] && ! read_was "api projects/4242"; then ok "DND-2009: target_project_id under another host's URL is unknown"; else bad "DND-2009: target_project_id other host" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 gla api -X POST "https://gitlab.com/projects/synth-group%2Fpriv/issues/3/notes" -f "body=x${TOKEN}"
 if refused_hit && [[ "${OUT}" == *"scanning as PUBLIC"* ]]; then ok "DND-2009: a gitlab.com URL outside /api/v4/ names no project"; else bad "DND-2009: URL without api/v4" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 
@@ -434,6 +446,10 @@ gla api -X POST "projects/:id/issues/3/notes?x=:repo" -f "body=clean"
 if refused3 "placeholder"; then ok "DND-2009: projects/:id still refuses a placeholder in its query"; else bad "DND-2009: :id + query :repo" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 gla api -X POST "https://public.example/api/v4/projects/:branch/notes" -f "body=clean"
 if refused3 "placeholder"; then ok "DND-2009: a placeholder in a full URL to another host is refused"; else bad "DND-2009: other-host :branch" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+gla api -X POST projects/synth-group%2Fpriv/issues/:branch/approve
+if refused3 "placeholder"; then ok "DND-2009: a path placeholder is refused on a write with no text"; else bad "DND-2009: field-less :branch" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+gla api -X POST groups/:group/epics/1/notes -f "body=clean"
+if refused3 "placeholder"; then ok "DND-2009: groups/:group is refused (only projects/:id and :fullpath are read as filled)"; else bad "DND-2009: groups/:group" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 gla api -X POST projects/synth-group%2Fpub/issues/3/notes -F "body=:username"
 if refused3 "placeholder"; then ok "DND-2009: -F :username is refused (PUBLIC)"; else bad "DND-2009: -F :username" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 gla api -X POST projects/synth-group%2Fpub/issues/3/notes -F "body=:idle" -f "x=:branch"
@@ -455,7 +471,7 @@ vis "synth-group%2F%2Fpriv" private
 gla api -X POST "projects/synth-group%2F%2Fpriv/issues/3/notes" -f "body=x${TOKEN}"
 if refused3 "plainly"; then ok "DND-2009 regression: an empty segment in the project segment is refused"; else bad "DND-2009 regression: %2F%2F" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 gla api -X POST "api/v4/projects/synth-group%2Fpriv/issues/3/notes" -f "body=x${TOKEN}"
-if [ "${RC}" = 0 ] && sent && read_was "api projects/synth-group%2Fpriv"; then ok "DND-2009: a plain api/v4/ prefix still names its project"; else bad "DND-2009: api/v4 prefix" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+if [ "${RC}" = 0 ] && sent && read_was "api projects/synth-group%2Fpriv"; then ok "DND-2009: an api/v4/ prefix is read as its project (glab sends it to /api/v4/api/v4/, a 404)"; else bad "DND-2009: api/v4 prefix" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 reset_vis
 
 echo "--- commands outside the list pass untouched ---"
