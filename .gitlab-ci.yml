@@ -30,17 +30,24 @@ harness-gate:
   tags: [ci]
   interruptible: true
   # Pinned by exact tag and digest: a public Docker Hub image the runner can
-  # pull, Ruby 3.4 (the harness floor, DND-931) with no build step.
-  image: ruby:3.4.10-slim-bookworm@sha256:a53b923c4d7ae2a927f766b3e71a9512d034ebec65931c0c34254de8768e7671
+  # pull, Ruby 3.4 (the harness floor, DND-931) on Debian trixie (its apt has
+  # gh, bubblewrap and nodejs, which the suites need), with no build step.
+  image: ruby:3.4.10-slim-trixie@sha256:b573616eed67613e1d380ebb777d87aa094fad7505bdbc2d1b45dca9dd9116b9
   variables:
     # Full history, so a check that reads the landed bar from origin/main can.
     GIT_DEPTH: "0"
   script:
-    - apt-get update -qq && apt-get install -y -qq --no-install-recommends git jq python3 procps ca-certificates
+    - apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends git jq python3 procps ca-certificates curl gawk bubblewrap util-linux gh nodejs inotify-tools openssh-client
     # Harness Ruby executables carry the absolute #!/usr/bin/ruby shebang.
     - ln -sf "$(command -v ruby)" /usr/bin/ruby
-    - git config --global user.name "ci" && git config --global user.email "ci@localhost" && git config --global init.defaultBranch main
+    # Run as a non-root user that owns the tree: suites assert unreadable-path
+    # and ownership behavior, and git refuses a tree owned by another user.
+    - useradd --create-home --shell /bin/bash ci
+    - chown -R ci:ci "$CI_PROJECT_DIR" && mkdir -p /home/ci/dev && ln -sfn "$CI_PROJECT_DIR" /home/ci/dev/custom && chown -h ci:ci /home/ci/dev /home/ci/dev/custom
+    - runuser -u ci -- env HOME=/home/ci git config --global user.name ci
+    - runuser -u ci -- env HOME=/home/ci git config --global user.email ci@localhost
+    - runuser -u ci -- env HOME=/home/ci git config --global init.defaultBranch main
     # The runner's clone may not create origin/main; the landed bars need it.
-    - git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
-    - git rev-parse --verify --quiet refs/remotes/origin/main
-    - ai/bin/harness-gate
+    - runuser -u ci -- env HOME=/home/ci git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+    - runuser -u ci -- env HOME=/home/ci git rev-parse --verify --quiet refs/remotes/origin/main
+    - runuser -u ci -- env HOME=/home/ci ai/bin/harness-gate

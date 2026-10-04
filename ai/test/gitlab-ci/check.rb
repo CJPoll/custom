@@ -56,7 +56,7 @@ if gate.nil?
   errors << "harness-gate: job is missing"
 else
   scripts = Array(gate["script"]).flatten.map(&:to_s)
-  errors << "harness-gate: script must run `ai/bin/harness-gate` as a command" unless scripts.any? { |s| s.strip == "ai/bin/harness-gate" }
+  errors << "harness-gate: script must run `ai/bin/harness-gate` as a command" unless scripts.any? { |s| s.strip == "ai/bin/harness-gate" || s.strip.end_with?(" ai/bin/harness-gate") }
   errors << "harness-gate: variables must set GIT_DEPTH \"0\" (landed bars read origin/main)" unless gate.dig("variables", "GIT_DEPTH").to_s == "0"
   errors << "harness-gate: script must fetch origin/main explicitly" unless scripts.any? { |s| s.include?("git fetch") && s.include?("origin/main") }
   img = gate["image"].to_s
