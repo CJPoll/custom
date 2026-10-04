@@ -366,6 +366,7 @@ TOKEN=""
 if [ -r "$TOKEN_FILE" ]; then TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE" 2>/dev/null)" || TOKEN=""; fi
 # Read before the scrub below, which removes every GLAB_* variable.
 MERGE_DRY_RUN="${GLAB_ATHENA_MERGE_DRY_RUN:-}"
+LANDING_TRIES="${GLAB_ATHENA_LANDING_TRIES:-}" LANDING_SLEEP="${GLAB_ATHENA_LANDING_SLEEP:-}"
 fci_require_token 1 glab-athena "$GA_BOT" "token file $TOKEN_FILE" "$TOKEN"
 # Every GITLAB_*/GLAB_*/GL_* variable (token sources, GITLAB_URI/GITLAB_API_HOST
 # host overrides, GLAB_CONFIG_DIR, CI autologin), plus OAUTH_TOKEN and
@@ -428,7 +429,28 @@ GLOS_LIB="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/glab-outbound-s
 glos_guard "$@"
 set -- "${GLOS_ARGV[@]}"
 
+# ---- The landing record (DND-1939) ------------------------------------------
+# An `mr merge` / `mr accept` the guard let through is recorded as one
+# merge.landed (via=mr) once confirm-merged sees the MR merged; anything else
+# records nothing. Mechanism, outcomes and residuals: ai/lib/glab-landing.sh.
+# Fails open: glab's exit code and output are unchanged.
+#
+# Test seams: GLAB_ATHENA_LANDING_TRIES / GLAB_ATHENA_LANDING_SLEEP replace
+# the confirm reads' count (default 6) and spacing in seconds (default 10).
+GLL_LIB="$GA_DIR/../lib/glab-landing.sh"
+# shellcheck source=../lib/glab-landing.sh
+if ! . "$GLL_LIB" 2>/dev/null; then
+	gll_record_mr_landing() {
+		[ -n "$GLMG_LAND_IID" ] || return 0
+		echo "glab-athena: no merge.landed recorded for !$GLMG_LAND_IID: cannot load $GLL_LIB." >&2
+		echo "  Fix: run glab-athena from a full ~/dev/custom checkout (ai/bin and ai/lib side by side)." >&2
+	}
+fi
+[[ "$LANDING_TRIES" =~ ^[1-9][0-9]?$ ]] && GLL_TRIES="$LANDING_TRIES"
+[[ "$LANDING_SLEEP" =~ ^[0-9]{1,3}$ ]] && GLL_SLEEP="$LANDING_SLEEP"
+
 # A child, not exec: fci_isolate's trap removes the config dir when glab exits.
 rc=0
 glab "$@" || rc=$?
+gll_record_mr_landing "$rc" || true
 exit "$rc"

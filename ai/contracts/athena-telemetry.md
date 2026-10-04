@@ -74,8 +74,9 @@ The writer resolves the unit once, in this order:
 In steps 3 and 4, a caller may name the branch instead of the checked-out
 one: `unit_branch:` in Ruby, `--unit-branch` on the CLI (DND-1475). It is for
 a tool that knows the work's branch but runs elsewhere: `locked-merge` names
-the PR's head branch, and the `gh-athena` push names the local branch at the
-pushed commit. Empty is no hint.
+the PR's head branch, a `gh-athena` or `glab-athena` push names the local
+branch at the pushed commit, and a `glab-athena` MR merge names the MR's
+source branch. Empty is no hint.
 
 The branch, `repo` and `head` come from one `git rev-parse`. Outside a repo
 they are `null` with nothing counted. Any other git failure (no git, a git

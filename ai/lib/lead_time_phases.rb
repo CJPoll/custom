@@ -16,7 +16,8 @@
 #   --integrate--> integrate_end --queue--> land_start --merge--> landed
 #
 # land_start is the first merge.lock_wait after the run ended, or the start
-# of a timed merge.landed push (gh-athena, DND-1501), whichever is earlier.
+# of a timed merge.landed push (gh-athena or glab-athena, DND-1501),
+# whichever is earlier.
 #
 # gate_first is the unit's first run of its repo's declared gate: a
 # harness_gate.run (custom) or a gate.run that test-slot writes for any other

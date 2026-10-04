@@ -44,6 +44,11 @@ FAKE_TOKEN="glpat-SELFTESTFAKETOKEN0000"
 printf '%s\n' "${FAKE_TOKEN}" > "${TMP}/token"; chmod 600 "${TMP}/token"
 export GITLAB_ATHENA_TOKEN_FILE="${TMP}/token"
 unset GLAB_ATHENA_MERGE_DRY_RUN GLAB_ATHENA_GIT_DRY_RUN
+# DND-1939: a merge glab-athena runs is confirmed with confirm-merged and
+# recorded as merge.landed. Never into the machine's real store, and with no
+# wait between confirm tries (the cases stage the forge's answer up front).
+export ATHENA_TELEMETRY_DIR="${TMP}/telemetry" GLAB_ATHENA_LANDING_TRIES=2 GLAB_ATHENA_LANDING_SLEEP=0
+unset ATHENA_UNIT
 # DND-1936: glab-athena resolves the bot from the project's (host, namespace)
 # before the merge guard runs. A fixture map gives every (host, namespace) the
 # receipt-project cases below use the one synthetic bot, so each case still
@@ -75,6 +80,9 @@ answer() {
   # stage shows up as an exec and fails the case loudly.
   [ -f "${STUB_FX}/$k.out" ] || [ -f "${STUB_FX}/$k.rc" ] || return 0
   printf '%s\n' "$*" >> "${STUB_READS}"
+  # DND-1939: once something ran (the merge), a staged <kind>.after.out is
+  # the forge's answer: the MR as merged.
+  if [ -s "${STUB_EXECS}" ] && [ -f "${STUB_FX}/$k.after.out" ]; then cat "${STUB_FX}/$k.after.out"; exit 0; fi
   [ -f "${STUB_FX}/$k.rc" ] && rc="$(cat "${STUB_FX}/$k.rc")"
   [ -f "${STUB_FX}/$k.err" ] && cat "${STUB_FX}/$k.err" >&2
   [ -f "${STUB_FX}/$k.out" ] && cat "${STUB_FX}/$k.out"
@@ -102,6 +110,8 @@ if [[ "$all" =~ ^api\ (--hostname\ [^\ ]+\ )?(projects|groups)/[^/\ ]+$ ]]; then
 fi
 printf '%s\n' "$all" >> "${STUB_EXECS}"
 echo "stub: ran $all"
+# DND-1939: a staged exec.rc is the exit of what ran (a merge glab refused).
+[ -f "${STUB_FX}/exec.rc" ] && exit "$(cat "${STUB_FX}/exec.rc")"
 exit 0
 STUB
 chmod +x "${TMP}/bin/glab"
@@ -1014,6 +1024,76 @@ out="$(key_rc "cj poll" gen_saas)"; [[ "${out}" == rc=2* ]] && ok "K3. whitespac
 out="$(key_rc CJPoll gen_saas)"; [[ "${out}" == rc=0*"apps/"* ]] && ok "K4. GitHub's CJPoll/gen_saas resolves the entry (case-folded)" || bad "K4. github key" "${out}"
 out="$(key_rc cjpoll gen_saas)"; [[ "${out}" == rc=0*"apps/"* ]] && ok "K5. GitLab's cjpoll/gen_saas resolves the same entry" || bad "K5. gitlab key" "${out}"
 out="$(key_rc example-group/sub example-app)"; [[ "${out}" == "rc=0 re= key=example-group/sub/example-app"* ]] && ok "K6. a nested GitLab group is one key, and an undeclared one is named" || bad "K6. nested key" "${out}"
+
+echo "--- DND-1939: a merge glab-athena ran is merge.landed once confirm-merged sees it ---"
+LANDED_SHA="5b3a7d0c9e8f6a4b2c1d0e9f8a7b6c5d4e3f2a1b"
+landed() { cat "$1"/*.jsonl 2>/dev/null | jq -c 'select(.event == "merge.landed")'; }
+landed_n() { local n; n="$(landed "$1" | grep -c .)"; printf '%s' "${n:-0}"; }
+# merged_fx [merge sha] [squash sha] : the forge's answer after the merge ran.
+merged_fx() {
+  local m="${1:-null}" q="${2:-null}"
+  [ "${m}" = null ] || m="\"${m}\""; [ "${q}" = null ] || q="\"${q}\""
+  for f in mrview mrapi; do
+    jq -c --argjson m "${m}" --argjson q "${q}" \
+      '.state = "merged" | .merged_at = "2026-10-03T12:00:00Z" | .merge_commit_sha = $m | .squash_commit_sha = $q | .source_branch = "dnd-1-synthetic-unit"' \
+      "${FX}/${f}.out" > "${FX}/${f}.after.out"
+  done
+}
+# land_run <store> <args…> : the wrapper with its own telemetry store.
+land_run() { local s="$1"; shift; OUT="$(ATHENA_TELEMETRY_DIR="${s}" "${WRAPPER}" "$@" 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"; }
+
+reset_fx; green_fx; merged_fx "${LANDED_SHA}"; S="${TMP}/m1-store"
+land_run "${S}" "${MERGE_ARGS[@]}"
+EV="$(landed "${S}")"
+if ran_once "${MERGE_ARGS[@]}" && [ "$(landed_n "${S}")" = 1 ] \
+  && [ "$(jq -cS .attrs <<<"${EV}")" = "$(jq -cnS --arg b "${TIP_FX}" --arg a "${LANDED_SHA}" '{via:"mr",mr:4242,before:$b,after:$a}')" ] \
+  && [ "$(jq -r .head <<<"${EV}")" = "${HEAD_SHA}" ] && [ "$(jq -r .repo <<<"${EV}")" = example-app ] \
+  && [[ "$(reads)" == *"mr view 4242 -F json"* ]] && [ ! -e "${S}/write-failures" ]; then
+  ok "ML1. a merge glab ran and confirm-merged then sees: one merge.landed via=mr (mr, before = the target tip the guard read, after = the merge commit, head = the MR head), repo = the checkout's key"
+else bad "ML1. merge.landed on a confirmed MR merge" "$(detail) ev='${EV}' failures='$(cat "${S}/write-failures" 2>/dev/null)'"; fi
+
+reset_fx; green_fx; merged_fx null "${LANDED_SHA}"; S="${TMP}/m2-store"
+land_run "${S}" "${MERGE_ARGS[@]}"
+[ "${RC}" = 0 ] && [ "$(landed_n "${S}")" = 1 ] && [ "$(landed "${S}" | jq -r .attrs.after)" = "${LANDED_SHA}" ] \
+  && ok "ML2. a squash with no merge commit (fast-forward method): after = the squash commit" \
+  || bad "ML2. squash commit as after" "$(detail) ev='$(landed "${S}")'"
+
+reset_fx; green_fx; merged_fx; S="${TMP}/m3-store"
+land_run "${S}" "${MERGE_ARGS[@]}"
+[ "${RC}" = 0 ] && [ "$(landed_n "${S}")" = 1 ] && [ "$(landed "${S}" | jq -r .attrs.after)" = "${HEAD_SHA}" ] \
+  && ok "ML3. a fast-forward merge (no merge or squash commit): after = the MR head itself" \
+  || bad "ML3. ff merge after" "$(detail) ev='$(landed "${S}")'"
+
+reset_fx; green_fx; S="${TMP}/m4-store"
+land_run "${S}" "${MERGE_ARGS[@]}"
+if ran_once "${MERGE_ARGS[@]}" && [ "$(landed_n "${S}")" = 0 ] && [ "$(grep -c 'mr view 4242 -F json' "${STUB_READS}")" -ge 3 ] \
+  && [[ "${ERR}" == *"no merge.landed"* ]] && [[ "${ERR}" == *"Fix:"* ]] && [[ "${ERR}" == *"confirm-merged --mr 4242"* ]]; then
+  ok "ML4. glab returned 0 but confirm-merged never sees the merge (bounded tries): no event, exit 0 kept, the miss is said with a Fix:"
+else bad "ML4. unconfirmed merge" "$(detail)"; fi
+
+reset_fx; green_fx; printf '1' > "${FX}/exec.rc"; S="${TMP}/m5-store"
+land_run "${S}" "${MERGE_ARGS[@]}"
+[ "${RC}" = 1 ] && [ "$(landed_n "${S}")" = 0 ] && [ "$(execs)" = "${MERGE_ARGS[*]}" ] \
+  && ok "ML5. a merge glab refused (exit 1), not merged: exit 1 passed through, no event" \
+  || bad "ML5. refused merge" "$(detail)"
+
+reset_fx; green_fx; printf '1' > "${FX}/exec.rc"; merged_fx "${LANDED_SHA}"; S="${TMP}/m6-store"
+land_run "${S}" "${MERGE_ARGS[@]}"
+[ "${RC}" = 1 ] && [ "$(landed_n "${S}")" = 1 ] \
+  && ok "ML6. a merge call that failed but landed anyway (DND-1324's shape): exit 1 kept, the confirmed landing is recorded" \
+  || bad "ML6. failed call that landed" "$(detail) ev='$(landed "${S}")'"
+
+reset_fx; green_fx; merged_fx "${LANDED_SHA}"; jq -c '.state = "opened"' "${FX}/mrapi.out" > "${FX}/mrapi.after.out"; S="${TMP}/m7-store"
+land_run "${S}" "${MERGE_ARGS[@]}"
+[ "${RC}" = 0 ] && [ "$(landed_n "${S}")" = 0 ] && [[ "${ERR}" == *"no merge.landed"* ]] && [[ "${ERR}" == *"Fix:"* ]] \
+  && ok "ML7. confirm-merged says merged but the project-keyed MR read does not: no event, said with a Fix:" \
+  || bad "ML7. disagreeing reads" "$(detail) ev='$(landed "${S}")'"
+
+reset_fx; green_fx; merged_fx "${LANDED_SHA}"; S="${TMP}/m8-store"
+land_run "${S}" mr list
+[ "${RC}" = 0 ] && [ "$(landed_n "${S}")" = 0 ] && [ ! -s "${STUB_READS}" ] \
+  && ok "ML8. a command that is not a merge: no confirm read, no event" \
+  || bad "ML8. non-merge command" "$(detail)"
 
 echo
 echo "--- the dry-run seam ---"

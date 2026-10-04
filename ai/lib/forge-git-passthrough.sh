@@ -1323,8 +1323,9 @@ fg_refuse_non_https() {
 }
 
 # ---- Landing telemetry (DND-1475) -------------------------------------------
-# With FG_LANDING_TELEMETRY=1 (gh-athena sets it; glab-athena does not), a
-# `push` runs git as a CHILD instead of exec'ing it, so that after a push that
+# With FG_LANDING_TELEMETRY=1 (gh-athena and glab-athena set it; glab-athena
+# since DND-1939), a `push` runs git as a CHILD instead of exec'ing it, so
+# that after a push that
 # exits 0 the wrapper can tell whether the remote's default branch moved, and
 # record that as one `merge.landed` event (via=push, before, after). That is
 # how ~/dev/custom lands (athena:merge-boarding, the no-CI ff push). The event

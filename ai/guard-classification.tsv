@@ -61,7 +61,8 @@ ai/lib/forge-transport/refuse-signing	guard
 ai/lib/forge-push-scan	guard	
 ai/lib/forge_push_scan.rb	library	the pure push-reading rules (DND-2023) required by ai/lib/forge-push-scan; raises ForgePushScan::Unreadable naming the reason, and forge-push-scan prints the refusal that carries Fix:
 ai/lib/gh-merge-guard.sh	guard	
-ai/lib/glab-merge-guard.sh	guard	
+ai/lib/glab-merge-guard.sh	guard
+ai/lib/glab-landing.sh	no-fail-path	the merge.landed record for an MR merge glab-athena ran (DND-1939), sourced by ai/bin/glab-athena after glab exits; it never fails or changes the exit code, and its one miss line (no landing recorded) carries Fix:
 ai/lib/eval_score.rb	guard	
 ai/lib/eval_subject.rb	guard	
 ai/lib/block_optimize.rb	guard	

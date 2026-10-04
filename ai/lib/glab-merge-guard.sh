@@ -198,6 +198,9 @@ GLMG_IG="~/dev/custom/ai/bin/integration-gate"
 GLMG_BOARD="read the MR's head and its head pipeline (\`glab mr view <iid> -F json\`: .sha and .head_pipeline.status must be success), then board it on the merge train — \`~/dev/custom/ai/bin/$GLMG_TOOL api -X POST \"projects/:id/merge_trains/merge_requests/<iid>\" -f sha=<head sha>\` — or, on a project with no merge train, \`~/dev/custom/ai/bin/$GLMG_TOOL mr merge <iid> --sha <head sha> --auto-merge=false --yes\`, running either from a checkout of the MR's project"
 GLMG_SAFE_PATH="gate the MR's head with \`$GLMG_IG\` (athena:merge-boarding -> Landing onto a moving main), then $GLMG_BOARD"
 GLMG_HOST=""
+# Set by glmg_mr_merge for an `mr merge` / `mr accept` it lets through, and
+# read by ai/lib/glab-landing.sh after glab ran (DND-1939). Empty otherwise.
+GLMG_LAND_IID="" GLMG_LAND_PID="" GLMG_LAND_HEAD="" GLMG_LAND_TOP="" GLMG_LAND_BEFORE=""
 GLMG_MERGE_MUTATIONS="mergeRequestAccept"
 # GitLab's GraphQL mutations that create or move a ref, or change a branch's
 # protection (DND-1941; the mutation list of gitlab.com's schema, read
@@ -515,6 +518,8 @@ glmg_receipt_gate() {
     glmg_refuse "$shown" "$IR_KIND: !$iid's head $head (target '$branch' at $tip): $IR_WHY" \
       "${IR_HOW:+$IR_HOW }$fix"
   fi
+  # The target tip this merge was judged on: a landing's `before` (DND-1939).
+  GLMG_LAND_BEFORE="$tip"
   if [ "$IR_BASE_MOVED" = 1 ]; then
     printf '%s: RECEIPT %s base %s recorded %s; BASE MOVED: %s is an ancestor of the tip %s, so the head with the newer %s commits was never gated (DND-1463)\n' \
       "$GLMG_TOOL" "$IR_RECEIPT" "$IR_BASE" "$IR_RECORDED_AT" "$IR_BASE" "$tip" "$branch" >&2
@@ -735,6 +740,11 @@ glmg_mr_merge() {
   glmg_check_head "$shown" "$mr" "$GLMG_SHA" "pass --sha <the MR's head sha>: $GLMG_SAFE_PATH"
   glmg_receipt_gate "$shown" "$mr"
   glmg_tip_gate "$shown"
+  # What a landing record needs once glab has run (DND-1939,
+  # ai/lib/glab-landing.sh): set only here, so only an `mr merge` / `mr
+  # accept` the guard let through is ever recorded.
+  GLMG_LAND_IID="$(jq -r .iid <<<"$mr")" GLMG_LAND_PID="$(jq -r .project_id <<<"$mr")"
+  GLMG_LAND_HEAD="$(jq -r .sha <<<"$mr")" GLMG_LAND_TOP="$GLMG_TOP"
 }
 
 # glmg_route <lower-cased normalised path> : classifies a REST path. Sets

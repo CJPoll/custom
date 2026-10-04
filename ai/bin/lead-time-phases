@@ -84,7 +84,8 @@ HELP = <<~TXT
     merge      the landing start -> landing
   The landing start is the earliest, at or after the run's end, of the
   first merge.lock_wait (locked-merge) and the start of a timed
-  merge.landed push (gh-athena: at = push start, duration_s = its wall).
+  merge.landed push (gh-athena or glab-athena: at = push start,
+  duration_s = its wall).
   A push before DND-1501 was a point event, so those landings have no
   landing start: queue and merge are n/a with that reason. The custom ff
   landing's hand-held lock writes no merge.lock_wait (DND-1370), so its
