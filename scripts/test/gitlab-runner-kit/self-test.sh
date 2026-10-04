@@ -238,6 +238,8 @@ else ok "lib: a ci entry without systempaths does not match its role"; fi
 spaced_ci="$(sed 's/^    security_opt = .*$/  security_opt=[ "seccomp:unconfined","apparmor:unconfined",  "systempaths=unconfined" ]/' <<<"${ci_render}")"
 check "lib: security_opt_matches ignores whitespace inside the array" grk_security_opt_matches ci alpha-ci <<<"${spaced_ci}"
 commented_dp="$(sed 's/^  \[runners.docker\]$/&\n    # security_opt = ["seccomp:unconfined"]/' <<<"${dp_render}")"
+trailing_ci="$(sed 's/^    security_opt = .*$/& # set by hand/' <<<"${ci_render}")"
+check "lib: a # comment after the value is not part of it" grk_security_opt_matches ci alpha-ci <<<"${trailing_ci}"
 check "lib: a commented-out security_opt is not read as one" grk_security_opt_matches deploy charlie-deploy <<<"${commented_dp}"
 case "$(grk_render_runner_confd gitlab-runner /home/gitlab-runner)" in
   *RUNNER_USER=*|*RUNNER_HOME=*|*RUNNER_CONFIG=*) bad "lib: the default user's runner conf.d sets no user/home/config (instances inherit it)" ;;
@@ -575,7 +577,7 @@ sed -e 's/charlie/golf/g' -e 's/^  \[runners.docker\]$/&\n    security_opt = ["s
 old_deploy_before="$(cat "${G_CFG_DIR}/config.toml")"
 kit setup-gitlab-runner --user gitlab-runner-golf --runner golf-deploy:deploy "${NOIN}"
 expect_rc "runner golf: a re-run over a pre-DND-1999 deploy entry succeeds (it reads no token)" 0
-case "${ERR}" in *golf-deploy*security_opt*seccomp:unconfined*Fix:*"delete"*) ok "runner golf: the kept deploy entry's unconfined security_opt is named, with Fix:" ;;
+case "${ERR}" in *golf-deploy*security_opt*seccomp:unconfined*Fix:*"delete its [runners.docker] security_opt line"*) ok "runner golf: the kept deploy entry's unconfined security_opt is named, with Fix:" ;;
   *) bad "runner golf: the kept deploy entry's unconfined security_opt is named, with Fix:" "${ERR}" ;; esac
 eq "runner golf: the kept entry is left as is" "$(cat "${G_CFG_DIR}/config.toml")" "${old_deploy_before}"
 # A ci or deploy entry needs the user's builds dir (setup-gitlab-runner-user
