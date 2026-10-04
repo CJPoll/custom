@@ -497,6 +497,23 @@ if refused_hit && [[ "${OUT}" == *"scanning as PUBLIC"* ]]; then ok "DND-2012 re
 # Go cuts the #fragment and the ?query before it reads the path.
 gla mr note "//gitlab.com/synth-group/pub/-/merge_requests/1?from=/-/x#/-/y" -m "x${TOKEN}"
 if refused_hit && read_was "api projects/synth-group%2Fpub"; then ok "DND-2012: the query and fragment are cut before the path is read"; else bad "DND-2012: query/fragment" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+gla mr note "//gitlab.com/synth-group/pub/merge_requests/1#/-/x" -m "x${TOKEN}"
+if refused_hit && [[ "${OUT}" == *"scanning as PUBLIC"* ]] && ! read_was "synth-group%2Fpub"; then ok "DND-2012: a /-/ in the fragment is not read as the path's"; else bad "DND-2012: fragment /-/" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+gla mr note "//gitlab.com/synth-group/pub/merge_requests/1?x=/-/y" -m "x${TOKEN}"
+if refused_hit && [[ "${OUT}" == *"scanning as PUBLIC"* ]] && ! read_was "synth-group%2Fpub"; then ok "DND-2012: a /-/ in the query is not read as the path's"; else bad "DND-2012: query /-/" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+# Go's url.Parse does not check UTF-8, so a byte that is not UTF-8 leaves the
+# word a reference for glab. In a UTF-8 locale a bash regex `.` does not match
+# that byte, and the review-round draft read such a word as no reference at
+# all. The locale is pinned: the suite's own decides whether this can fail.
+export LC_ALL=C.UTF-8
+gla mr note $'https://gitlab.com/synth-group/pub/-/merge_requests/1/\xff' -m "x${TOKEN}"
+if refused_hit && read_was "api projects/synth-group%2Fpub"; then ok "DND-2012 review regression: a non-UTF-8 byte in an MR URL still names its project"; else bad "DND-2012 review regression: \\xff in an MR URL" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+gla issue note $'https://gitlab.com/synth-group/pub/-/issues/1?\xff' -m "x${TOKEN}"
+if refused_hit && read_was "api projects/synth-group%2Fpub"; then ok "DND-2012 review regression: a non-UTF-8 byte in an issue URL's query still names its project"; else bad "DND-2012 review regression: \\xff in an issue URL" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+unset LC_ALL
+# A userinfo may hold a credential: the message never shows it.
+gla mr note "//someone:SECRETPW@gitlab.com/synth-group/pub/merge_requests/1" -m "x${TOKEN}"
+if refused_hit && [[ "${OUT}" == *"scanning as PUBLIC"* ]] && [[ "${OUT}" != *"SECRETPW"* ]]; then ok "DND-2012 review: a URL's userinfo is never echoed"; else bad "DND-2012 review: userinfo echoed" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 # Forms glab does NOT read as a reference (glrepo.FromURL needs a host): it
 # reads them as a branch name in the -R or cwd project, so that project is
 # the one judged. Probed read-only against glab 1.92.1 on 2026-10-04.

@@ -87,8 +87,8 @@
 #   unreadable, or any   REFUSED, exit 3, COULD NOT LOOK: a failed read is never
 #   other value          read as private. gh-athena scans an unreadable target
 #                        as PUBLIC instead; this refusal is stricter.
-#   no nameable target   scanned as PUBLIC, said on stderr: a positional URL
-#                        with no /-/ path, a GraphQL mutation (its target is
+#   no nameable target   scanned as PUBLIC, said on stderr: a positional MR
+#                        or issue reference with no /-/ path, a GraphQL mutation (its target is
 #                        inside the query), an api write outside projects/
 #                        and groups/ (snippets, user, …), or a full URL to a
 #                        host other than gitlab.com.
@@ -178,20 +178,31 @@ GLOS_ALPHA="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 #           format" and nothing is sent
 #   both    the #fragment, then the ?query, is cut first; the host is the
 #           authority after `//`, past its last @ (the userinfo). A word with
-#           no host (`/<project>/-/merge_requests/N`, `https:/…`, `///…` with
-#           no scheme) is no reference: glab reads it as a branch name in the
-#           -R or cwd project, which is judged instead.
-# A word glab reads as a URL but whose path its regex rejects is a branch
-# name holding `//` or `:`, which no git branch can be, so glab finds no MR
-# and sends nothing.
+#           no host (`/<project>/-/merge_requests/N`, `https:/…`, `///…`) is
+#           no reference: glab reads it as a branch name in the -R or cwd
+#           project, which is judged instead.
+# A word with a host whose path this guard cannot split at `/-/` adds "?".
+# glab also takes `<project>/merge_requests/N` with no /-/, and writes there.
+# Where glab's regex rejects the path, an MR word becomes a branch name
+# holding `//` or `:`, which no git branch can be, so glab sends nothing and
+# the scan is only stricter.
+#
+# The word is split with parameter expansion, never a regex `.`: Go does not
+# check UTF-8, and in a UTF-8 locale `.` does not match a byte that is not
+# UTF-8, so a regex split read such a word as no reference (DND-2012 review).
 glos_positional() {
-  local kind="$1" w="$2" u scheme="" rest auth host p
-  u="${w%%#*}"
-  if [[ "$u" =~ ^([$GLOS_ALPHA][${GLOS_ALPHA}0123456789+.-]*):(.*)$ ]]; then
-    # glab reads the scheme and host without case (DND-2009).
-    scheme="$(glos_lower "${BASH_REMATCH[1]}")" rest="${BASH_REMATCH[2]}"
-  else
-    rest="$u"
+  local kind="$1" w="$2" u s scheme="" rest auth host p
+  u="${w%%#*}" rest="${w%%#*}"
+  # Go's getScheme: [A-Za-z][A-Za-z0-9+.-]* up to the first `:`.
+  if [[ "$u" == *:* ]]; then
+    s="${u%%:*}"
+    case "$s" in
+      [$GLOS_ALPHA]*)
+        if [ -z "${s//[${GLOS_ALPHA}0123456789+.-]/}" ]; then
+          # glab reads the scheme and host without case (DND-2009).
+          scheme="$(glos_lower "$s")" rest="${u#*:}"
+        fi ;;
+    esac
   fi
   case "$kind:$scheme" in
     mr: | mr:http | mr:https | issue:http | issue:https) ;;
@@ -199,7 +210,6 @@ glos_positional() {
   esac
   rest="${rest%%\?*}"
   case "$rest" in
-    ///*) [ -n "$scheme" ] || return 0 ;;
     //*) ;;
     *) return 0 ;;
   esac
@@ -207,7 +217,8 @@ glos_positional() {
   host="$(glos_lower "${auth##*@}")"
   [ -n "$host" ] || return 0
   if [ -z "$p" ] || [[ "$p" != */-/* ]]; then
-    targets+=("?:the URL '$(glos_shown "$w")' names no project this guard can parse")
+    # The userinfo may hold a credential: it is never shown.
+    targets+=("?:the URL '$(glos_shown "${scheme:+$scheme:}//$host/$p")' names no project this guard can parse")
   else
     targets+=("https://$host/${p%%/-/*}")
   fi
