@@ -25,21 +25,40 @@ jobs = doc.reject { |k, v| RESERVED.include?(k) || k.start_with?(".") || !v.is_a
 rules = doc.dig("workflow", "rules")
 first = rules.is_a?(Array) ? rules.first : nil
 guard = first.is_a?(Hash) ? first["if"].to_s : ""
-unless guard.include?("CI_MERGE_REQUEST_SOURCE_PROJECT_PATH") && guard.include?("!= $CI_PROJECT_PATH") && first["when"] == "never"
+unless first.is_a?(Hash) && guard.include?("CI_MERGE_REQUEST_SOURCE_PROJECT_PATH") && guard.include?("!= $CI_PROJECT_PATH") && first["when"] == "never"
   errors << "fork guard: workflow:rules must open with an `if` comparing $CI_MERGE_REQUEST_SOURCE_PROJECT_PATH to $CI_PROJECT_PATH, `when: never`"
 end
 ifs = Array(rules).map { |r| r.is_a?(Hash) ? r["if"].to_s : "" }
-errors << "workflow: no merge_request_event rule" unless ifs.any? { |i| i.include?("merge_request_event") }
-dup = Array(rules).find { |r| r.is_a?(Hash) && r["if"].to_s.include?("CI_OPEN_MERGE_REQUESTS") }
-errors << "workflow: no rule using $CI_OPEN_MERGE_REQUESTS with `when: never` (CI_OPEN_MERGE_REQUESTS; duplicate branch+MR pipelines)" unless dup && dup["when"] == "never"
-errors << "workflow: no branch pipeline rule ($CI_COMMIT_BRANCH)" unless ifs.any? { |i| i.strip == "$CI_COMMIT_BRANCH" }
+# Order matters: fork guard, MR rule, open-MR never-rule, branch rule.
+mr_i = ifs.index { |i| i.include?("merge_request_event") }
+dup_i = ifs.index { |i| i.include?("CI_OPEN_MERGE_REQUESTS") }
+br_i = ifs.index { |i| i.strip == "$CI_COMMIT_BRANCH" }
+errors << "workflow: no merge_request_event rule" if mr_i.nil?
+errors << "workflow: no rule using $CI_OPEN_MERGE_REQUESTS (CI_OPEN_MERGE_REQUESTS; duplicate branch+MR pipelines)" if dup_i.nil?
+errors << "workflow: no branch pipeline rule ($CI_COMMIT_BRANCH)" if br_i.nil?
+if mr_i && dup_i && br_i
+  errors << "workflow: rules must run in order: fork guard, MR rule, CI_OPEN_MERGE_REQUESTS never-rule, branch rule" unless mr_i < dup_i && dup_i < br_i
+  errors << "workflow: the CI_OPEN_MERGE_REQUESTS rule must be `when: never`" unless rules[dup_i]["when"] == "never"
+  errors << "workflow: the MR rule and the branch rule must not be `when: never`" if rules[mr_i]["when"] == "never" || rules[br_i]["when"] == "never"
+end
+
+# No credentials or remote code anywhere, hidden jobs and default included.
+walk = lambda do |node, where|
+  case node
+  when Hash
+    node.each do |k, v|
+      errors << "#{where}#{k}: id_tokens, secrets, include and trigger are not allowed anywhere (no credentials, no remote YAML)" if %w[id_tokens secrets include trigger].include?(k.to_s)
+      walk.call(v, "#{where}#{k}.")
+    end
+  when Array then node.each { |v| walk.call(v, where) }
+  end
+end
+walk.call(doc, "")
 
 errors << "no jobs found" if jobs.empty?
 jobs.each do |name, job|
   tags = job["tags"]
   errors << "#{name}: tags must be exactly [ci] (the role tag; no untagged job, no per-host tag), got #{tags.inspect}" unless tags == ["ci"]
-  errors << "#{name}: id_tokens is not allowed (no credentials on the ci runner)" if job.key?("id_tokens")
-  errors << "#{name}: secrets is not allowed (no credentials on the ci runner)" if job.key?("secrets")
   errors << "#{name}: interruptible must be true" unless job["interruptible"] == true
 end
 
@@ -56,7 +75,7 @@ if gate.nil?
   errors << "harness-gate: job is missing"
 else
   scripts = Array(gate["script"]).flatten.map(&:to_s)
-  errors << "harness-gate: script must run `ai/bin/harness-gate` as a command" unless scripts.any? { |s| s.strip == "ai/bin/harness-gate" || s.strip.end_with?(" ai/bin/harness-gate") }
+  errors << "harness-gate: script must run `ai/bin/harness-gate` as a command" unless scripts.any? { |s| s.strip.match?(%r{\A(runuser -u \S+ -- (env \S+ )?)?ai/bin/harness-gate\z}) }
   errors << "harness-gate: variables must set GIT_DEPTH \"0\" (landed bars read origin/main)" unless gate.dig("variables", "GIT_DEPTH").to_s == "0"
   errors << "harness-gate: script must fetch origin/main explicitly" unless scripts.any? { |s| s.include?("git fetch") && s.include?("origin/main") }
   img = gate["image"].to_s

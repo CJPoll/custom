@@ -40,7 +40,7 @@ mutate() {
 
 mutate "fork guard removed fails"        "fork guard"      's/CI_MERGE_REQUEST_SOURCE_PROJECT_PATH/CI_SOMETHING_ELSE/g'
 mutate "untagged job fails"              "tags"            's/tags: \[ci\]/tags: []/'
-mutate "per-host tag fails"              "tags"            's/tags: \[ci\]/tags: [poll-server]/'
+mutate "per-host tag fails"              "tags"            's/tags: \[ci\]/tags: [host-a]/'
 mutate "id_tokens fails"                 "id_tokens"       's/^  interruptible: true$/  interruptible: true\n  id_tokens: {}/'
 mutate "secrets key fails"               "secrets"         's/^  stage: test$/  stage: test\n  secrets: {}/'
 mutate "gate not run fails"              "harness-gate"    's#ai/bin/harness-gate$#true#'
@@ -48,6 +48,14 @@ mutate "shallow clone fails"             "GIT_DEPTH"       's/GIT_DEPTH: "0"/GIT
 mutate "duplicate-pipeline guard removed fails" "CI_OPEN_MERGE_REQUESTS" 's/CI_OPEN_MERGE_REQUESTS/CI_X/'
 mutate "job not interruptible fails"     "interruptible"   's/^  interruptible: true$/  interruptible: false/'
 mutate "unpinned image fails"            "image"           's/@sha256:[0-9a-f]*//'
+mutate "default id_tokens fails"         "id_tokens"       's/^default:$/default:\n  id_tokens: {}/'
+mutate "include fails"                   "include"         's/^default:$/include: https:\/\/example.invalid\/x.yml\ndefault:/'
+mutate "fork guard operator flipped fails" "fork guard"    's/!= \$CI_PROJECT_PATH/== $CI_PROJECT_PATH/'
+mutate "MR rule removed fails"           "merge_request_event" 's/merge_request_event/pipeline_event/'
+mutate "branch rule removed fails"       "branch pipeline" "s/^    - if: '\$CI_COMMIT_BRANCH'\$/    - if: '\$CI_COMMIT_TAG'/"
+mutate "branch rule never fails"         "must not be"     "s/^    - if: '\$CI_COMMIT_BRANCH'\$/    - if: '\$CI_COMMIT_BRANCH'\n      when: never/"
+mutate "origin/main fetch removed fails" "fetch origin/main" 's/git fetch --no-tags origin/git status --no-tags origin/'
+mutate "gate echoed not run fails"       "harness-gate"    's#env HOME=/home/ci ai/bin/harness-gate$#echo ai/bin/harness-gate#'
 mutate "credential-named variable fails" "credential"      's/GIT_DEPTH: "0"/GIT_DEPTH: "0"\n    DEPLOY_TOKEN: "x"/'
 
 # A missing file is an error, not a pass.
