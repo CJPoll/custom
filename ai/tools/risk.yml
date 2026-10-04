@@ -78,6 +78,9 @@ tools:
   confirm-merged:          { class: readOnly, reason: query }
   # gh-ci-wait (DND-1708) only GETs check-runs and runs through gh-athena api.
   gh-ci-wait:              { class: readOnly, reason: query }
+  # glab-ci-wait (DND-1940) only GETs commits, pipelines, bridges and jobs
+  # through glab-athena api.
+  glab-ci-wait:            { class: readOnly, reason: query }
   critic-eval:             { class: readOnly, reason: eval }
   critic-review:           { class: readOnly, reason: review }
   contention-census:       { class: readOnly, reason: census }

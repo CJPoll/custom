@@ -29,6 +29,11 @@
 #                            --watch` (10 s) as a command, gh or gh-athena;
 #                            they exhausted the GitHub API budget
 #                            (DND-1706/DND-1708). Use ai/bin/gh-ci-wait.
+#   7. GitLab pipeline poll — `glab ci status --live`, `glab ci view` (a live
+#                            TUI), `watch glab …`, or a sleeping loop around a
+#                            glab CI/MR/api read, glab or glab-athena
+#                            (DND-1940). Use ai/bin/glab-ci-wait. One
+#                            `glab ci status` read is allowed.
 # (Rule #3, the foreground-`sleep`-returns-immediately gotcha, is surfaced inside
 #  the messages above rather than as a standalone block, because every sanctioned
 #  poll uses a foreground `sleep` — blocking on it would nuke the good pattern.)
@@ -427,6 +432,137 @@ forge_watcher_hit() {
 WATCH_HIT=$(forge_watcher_hit)
 if [ -n "$WATCH_HIT" ]; then
   deny 'SAFE-WAIT (fast forge watcher): `'"$WATCH_HIT"'` polls GitHub every few seconds (`gh run watch` 3 s, `gh pr checks --watch` 10 s). A few at once exhausted the 5000/h API budget on 2026-10-02 (DND-1706/DND-1708): every plain-gh read went 403 for an hour, and watchers read the 403 as terminal or as no runs. Fix: wait with `~/dev/custom/ai/bin/gh-ci-wait --repo OWNER/NAME --sha <head>` (every check-run on the commit), `--run-id <id> [--sha <head>]` (one run), or `--workflow NAME --sha <head>` (a deploy run). It reads through gh-athena every 60 s, backs off on errors, prints one VERDICT: line, and reports a rate limit as COULD-NOT-LOOK with its reset time. For a one-off look, `gh pr checks <n>` without --watch is fine.'
+fi
+
+# ---- Shape 7: a GitLab pipeline watcher or a hand-rolled glab poll (DND-1940)
+# `glab ci status --live` and `glab ci view` (a TUI that refreshes until the
+# pipeline ends) poll GitLab for as long as a pipeline runs, and `watch glab
+# …` or a sleeping loop around a glab CI read is the same poll with no bound
+# on the API budget. All three are denied; the replacement is glab-ci-wait.
+# One `glab ci status` (or `ci get`, `ci list`, `mr view`, `api …`) read is
+# allowed. The test is the command word, found with split_commands like
+# shapes 5 and 6, so glab named inside quoted text passes.
+
+# glab_cli_args <words…> : after the wrappers, when the command is glab or
+# glab-athena, print its arguments joined by \037; else nothing.
+glab_cli_args() {
+  _k=$(wrapper_len "$@")
+  shift "$_k"
+  # `watch [opts] glab …` is a poll with no bound: read the command it runs.
+  case ${1-} in
+    watch|*/watch)
+      shift
+      while [ $# -gt 0 ]; do
+        case $1 in
+          -n|--interval|-q|--equexit) shift 2 ;;
+          --) shift; break ;;
+          -*) shift ;;
+          *) break ;;
+        esac
+      done
+      _w=watch ;;
+    *) _w='' ;;
+  esac
+  case ${1-} in glab|*/glab|glab-athena|*/glab-athena) shift ;; *) return 0 ;; esac
+  _us=$(printf '\037')
+  _o=''
+  [ -n "$_w" ] && _o="$_w$_us"
+  _o="$_o${1-}"
+  [ $# -gt 0 ] && shift
+  for _a in "$@"; do _o="$_o$_us$_a"; done
+  printf '%s\n' "$_o"
+}
+
+# glab_live_watcher <glab args…> : print the live form, else nothing.
+glab_live_watcher() {
+  case ${1-} in ci|pipe|pipeline) ;; *) return 0 ;; esac
+  [ $# -ge 2 ] || return 0
+  _sub=$2
+  shift 2
+  case $_sub in
+    status)
+      for _a in "$@"; do
+        case $_a in
+          --live|--live=true) printf 'glab ci status --live\n'; return 0 ;;
+          --*) ;;
+          -*)
+            # A short cluster: l before any value-taking flag (b, F, R) is --live.
+            _c=${_a#-}
+            while [ -n "$_c" ]; do
+              _h=${_c%"${_c#?}"}
+              case $_h in
+                l) printf 'glab ci status --live\n'; return 0 ;;
+                b|F|R) break ;;
+              esac
+              _c=${_c#?}
+            done
+            ;;
+        esac
+      done
+      ;;
+    view)
+      # `--web` only opens a browser; every other form is the live TUI.
+      for _a in "$@"; do
+        case $_a in --web|--web=true|-w) return 0 ;; esac
+      done
+      printf 'glab ci view\n'
+      ;;
+  esac
+  return 0
+}
+
+# glab_ci_read <glab args…> : 0 when the command reads CI or MR state.
+glab_ci_read() {
+  case ${1-} in
+    ci|pipe|pipeline|api) return 0 ;;
+    mr) case ${2-} in view|list) return 0 ;; esac ;;
+  esac
+  return 1
+}
+
+# glab_watch_hit : print what shape 7 denies in SCAN, else nothing.
+glab_watch_hit() {
+  case $SCAN in *glab*) ;; *) return 0 ;; esac
+  _us=$(printf '\037')
+  _loop=false
+  if [ "$HAS_LOOP_KW" = true ] && [ "$HAS_DO_DONE" = true ] && has_word 'sleep'; then _loop=true; fi
+  # The loop depth is tracked over the simple commands in order: a command
+  # that starts with while, until or for opens a loop (its condition is
+  # inside it), one that starts with done closes it. So only a glab read
+  # inside a loop counts as a poll, not one before or after it.
+  _depth=0
+  split_commands "$SCAN" | while IFS= read -r _line; do
+    _first=${_line%%"$_us"*}
+    case $_first in
+      while|until|for) _depth=$((_depth + 1)) ;;
+      done) [ "$_depth" -gt 0 ] && _depth=$((_depth - 1)); continue ;;
+    esac
+    case $_line in *glab*) ;; *) continue ;; esac
+    _inloop=false
+    if [ "$_loop" = true ] && [ "$_depth" -gt 0 ]; then _inloop=true; fi
+    _hit=$(
+      IFS=$_us; set -f
+      # shellcheck disable=SC2086
+      set -- $_line
+      _args=$(glab_cli_args "$@")
+      [ -n "$_args" ] || exit 0
+      # shellcheck disable=SC2086
+      set -- $_args
+      _watch=false
+      if [ "${1-}" = watch ]; then _watch=true; shift; fi
+      _live=$(glab_live_watcher "$@")
+      if [ -n "$_live" ]; then printf '%s\n' "$_live"; exit 0; fi
+      if glab_ci_read "$@"; then
+        if [ "$_watch" = true ]; then printf 'watch glab %s\n' "$1"; exit 0; fi
+        if [ "$_inloop" = true ]; then printf 'a sleeping loop around glab %s\n' "$1"; exit 0; fi
+      fi
+    )
+    if [ -n "$_hit" ]; then printf '%s\n' "$_hit"; break; fi
+  done
+}
+GLAB_HIT=$(glab_watch_hit)
+if [ -n "$GLAB_HIT" ]; then
+  deny 'SAFE-WAIT (GitLab pipeline poll): `'"$GLAB_HIT"'` polls GitLab for as long as the pipeline runs, with no bound on the bot'"'"'s API budget and no verdict a script can read (DND-1940; the GitHub forms exhausted the 5000/h budget on 2026-10-02, DND-1706). Fix: wait with `~/dev/custom/ai/bin/glab-ci-wait --project <namespace>/<project> --sha <head>` (every pipeline on the commit; add `--source merge_request_event` for an MR head, or `--ref main --source push --include-children` for a merge and its deploy child pipeline). It reads through glab-athena every 60 s with a hard --timeout, honours GitLab'"'"'s RateLimit headers, and prints one VERDICT: line (DONE, FAILED, CANCELED, TIMEOUT, NOT-FOUND or COULD-NOT-LOOK) with the failing jobs. For a one-off look, a single `glab ci status` (no --live) or `glab ci get` is fine.'
 fi
 
 # No dangerous construct detected -> allow silently.

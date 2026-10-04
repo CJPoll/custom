@@ -32,6 +32,8 @@ HELP = <<~TXT
     started (source parent_pipeline or pipeline) are not top level.
       MR head pipeline:   --sha <head> --source merge_request_event
       main / deploy:      --sha <merged sha> --ref main --source push --include-children
+    A merged-results pipeline runs on a merge commit, not the MR head: wait on
+    it by that pipeline's own sha (`glab mr view <iid> -F json`, .head_pipeline.sha).
     --include-children   also follow each pipeline's trigger bridges to their
                          downstream (child or multi-project) pipelines, to a
                          depth of 3. A post-merge deploy run as `trigger:

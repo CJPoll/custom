@@ -261,6 +261,75 @@ check "M25. the watcher named inside quoted text" allow
 run "$(bash_json 'ai/bin/gh-ci-wait --repo a/b --sha "$SHA" --max 570')"
 check "M26. the sanctioned waiter" allow
 
+# Shape 7 (DND-1940): a GitLab pipeline poll. `glab ci status --live` and
+# `glab ci view` poll for as long as the pipeline runs; `watch glab …` and a
+# sleeping loop around a glab CI read are the same poll by hand.
+# check7 <label> : a deny, and by shape 7 (not an earlier shape's message).
+check7() {
+  check "$1" deny
+  case $OUT in
+    *'GitLab pipeline poll'*) PASS=$((PASS + 1)); echo "  PASS  $1 -- denied by shape 7" ;;
+    *) FAIL=$((FAIL + 1)); echo "  FAIL  $1 -- not denied by shape 7: [$OUT]" ;;
+  esac
+}
+run "$(bash_json 'glab ci status --live')"
+check "7a. glab ci status --live" deny
+case $OUT in
+  *glab-ci-wait*) PASS=$((PASS + 1)); echo "  PASS  7a'. the deny names the replacement, glab-ci-wait" ;;
+  *) FAIL=$((FAIL + 1)); echo "  FAIL  7a'. the deny names the replacement, glab-ci-wait: [$OUT]" ;;
+esac
+
+run "$(bash_json 'cd /w && timeout 590 glab ci status -R acme/app -b main -l 2>&1 | tail -5')"
+check7 "7b. -l after -R and -b, behind cd and timeout"
+
+run "$(bash_json 'glab pipeline status -cl')"
+check7 "7c. the pipeline alias with -l in a short cluster"
+
+run "$(bash_json '~/dev/custom/ai/bin/glab-athena ci status --live -R acme/app')"
+check7 "7d. glab-athena ci status --live (the bot budget is finite too)"
+
+run "$(bash_json 'glab ci view -R acme/app main')"
+check7 "7e. glab ci view (a live TUI)"
+
+run "$(bash_json 'until glab ci status -F json | grep -q success; do sleep 30; done')"
+check7 "7f. a sleeping until-loop around glab ci status"
+
+run "$(bash_json 'for i in $(seq 1 20); do glab-athena api "projects/acme%2Fapp/pipelines?sha=$SHA"; sleep 30; done')"
+check7 "7g. a sleeping for-loop around glab-athena api"
+
+run "$(bash_json 'while true; do glab mr view 7 -R acme/app; sleep 60; done')"
+check7 "7h. a sleeping while-loop around glab mr view"
+
+run "$(bash_json 'watch -n 30 glab ci status')"
+check7 "7i. watch -n 30 glab ci status"
+
+run "$(bash_json 'glab ci status -R acme/app -b main')"
+check "M27. one glab ci status read (no --live)" allow
+
+run "$(bash_json 'glab ci status -b l')"
+check "M28. a branch named l is a value, not --live" allow
+
+run "$(bash_json 'glab ci get -R acme/app -b main -F json')"
+check "M29. one glab ci get read" allow
+
+run "$(bash_json 'glab ci view --web')"
+check "M30. glab ci view --web only opens a browser" allow
+
+run "$(bash_json 'for p in a b c; do glab api "projects/acme%2F$p"; done')"
+check "M31. a for-loop of one-off glab reads that never sleeps" allow
+
+run "$(bash_json 'git commit -m "never use glab ci status --live or glab ci view"')"
+check "M32. the watcher named inside quoted text" allow
+
+run "$(bash_json '~/dev/custom/ai/bin/glab-ci-wait --project acme/app --sha "$SHA" --include-children')"
+check "M33. the sanctioned GitLab waiter" allow
+
+run "$(bash_json 'for f in *.log; do sleep 1; done; glab ci status')"
+check "M34. a sleeping loop that ends before one glab read" allow
+
+run "$(bash_json 'glab ci status; while true; do sleep 30; date; done')"
+check "M35. one glab read before a loop that does not read glab" allow
+
 echo
 echo "--- HEREDOC cases (only a one-line send-mail shape is exempt) ---"
 

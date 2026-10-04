@@ -7,8 +7,9 @@
 # both tools take. Each forge's own rules stay in its own module.
 module CiWait
   # The poll floor. Default-cadence watchers (`gh run watch` 3 s, `gh pr
-  # checks --watch` 10 s, `glab ci status --live`) exhausted API budgets
-  # (DND-1706); no waiter reads more often than this.
+  # checks --watch` 10 s) exhausted the GitHub API budget (DND-1706);
+  # `glab ci status --live` is the same shape on GitLab. No waiter reads more
+  # often than this.
   MIN_INTERVAL = 30
   DEFAULT_INTERVAL = 60
   # Fits under a 600 s foreground tool call.
