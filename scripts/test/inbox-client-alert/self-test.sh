@@ -102,7 +102,7 @@ REG_ROOT="${TMP}/reg-root"
 REG_FIX="${TMP}/reg-fixture"
 # shellcheck source=ai/test/lib/landed-fixture.bash
 . "${WF_REPO}/ai/test/lib/landed-fixture.bash"
-if ! landed_fixture "${WF_REPO}" "${REG_FIX}" ai/bin/check-inbox-registry ai/inbox/lib/registry.rb ai/lib/landed.rb \
+if ! landed_fixture "${WF_REPO}" "${REG_FIX}" ai/bin/check-inbox-registry ai/inbox/lib/registry.rb ai/lib/landed.rb ai/bin/forge-git \
        scripts/setup-inbox-registry "ai/skills/athena:inbox/lib" ai/inbox/registry.json 2>"${TMP}/fix.out"; then
   bad "check-inbox-registry passes against a temp root" "fixture repo not built: $(cat "${TMP}/fix.out")"
 elif ATHENA_INBOX_ROOT="${REG_ROOT}" "${REG_FIX}/scripts/setup-inbox-registry" --install >"${TMP}/reg.out" 2>&1 \

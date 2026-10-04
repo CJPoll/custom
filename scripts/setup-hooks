@@ -577,7 +577,7 @@ case "$ACTION" in
     # shellcheck source=ai/test/lib/landed-fixture.bash
     . "${REPO_DIR}/ai/test/lib/landed-fixture.bash"
     fix="${tmp}/fixture"
-    landed_fixture "$REPO_DIR" "$fix" scripts/setup-hooks ai/bin/check-hooks-registered ai/lib/landed.rb ai/lib/strict_argv.rb ai/lib/agent_stash_env.rb ai/agent-env/session-env.sh ai/hooks \
+    landed_fixture "$REPO_DIR" "$fix" scripts/setup-hooks ai/bin/check-hooks-registered ai/lib/landed.rb ai/bin/forge-git ai/lib/strict_argv.rb ai/lib/agent_stash_env.rb ai/agent-env/session-env.sh ai/hooks \
       || { echo "  FAIL could not build the fixture repo"; echo "SELF-TEST FAILED"; exit 1; }
     if [ "$REGISTRY" != "${REPO_DIR}/ai/hooks/registry.json" ]; then
       cp "$REGISTRY" "${fix}/ai/hooks/registry.json"
@@ -699,7 +699,7 @@ PY2
     # never drift) and --install skips a script the main checkout lacks, so a
     # synthetic registry that is neither landed nor on disk proves nothing.
     fix887="${tmp}/fixture-887"
-    landed_fixture "$REPO_DIR" "$fix887" scripts/setup-hooks ai/bin/check-hooks-registered ai/lib/landed.rb ai/lib/strict_argv.rb ai/lib/agent_stash_env.rb ai/hooks \
+    landed_fixture "$REPO_DIR" "$fix887" scripts/setup-hooks ai/bin/check-hooks-registered ai/lib/landed.rb ai/bin/forge-git ai/lib/strict_argv.rb ai/lib/agent_stash_env.rb ai/hooks \
       || { echo "  FAIL could not build the DND-887 fixture repo"; echo "SELF-TEST FAILED"; exit 1; }
     fix887="$(cd -- "$fix887" && pwd -P)"
     printf '#!/bin/sh\nexit 0\n' > "${fix887}/ai/hooks/dnd-887-two-matchers.sh"
@@ -824,7 +824,7 @@ PY3
     # a hook that left the registry stayed wired forever (DND-1487 had to keep
     # harness-event.sh as a no-op stub for that reason).
     fixret="${tmp}/fixture-retire"
-    landed_fixture "$REPO_DIR" "$fixret" scripts/setup-hooks ai/bin/check-hooks-registered ai/lib/landed.rb ai/lib/strict_argv.rb ai/lib/agent_stash_env.rb ai/hooks \
+    landed_fixture "$REPO_DIR" "$fixret" scripts/setup-hooks ai/bin/check-hooks-registered ai/lib/landed.rb ai/bin/forge-git ai/lib/strict_argv.rb ai/lib/agent_stash_env.rb ai/hooks \
       || { echo "  FAIL could not build the DND-1517 fixture repo"; echo "SELF-TEST FAILED"; exit 1; }
     fixret="$(cd -- "$fixret" && pwd -P)"
     for s in dnd-1517-kept.sh dnd-1517-retired.sh; do

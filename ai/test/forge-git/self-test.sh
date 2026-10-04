@@ -73,6 +73,12 @@ esac
 exec "${REAL_GIT}" "\$@"
 EOF
 chmod +x "${TRIP}/git"
+# The tripwire is a git stub on PATH: guard it (DND-1647/DND-1667). fsg_make,
+# not fsg_arm, because the suite runs the real git for its fixtures. A
+# missing or non-executable tripwire would let plain git reach origin.
+. "${ROOT}/ai/lib/forge-stub-guard.sh"
+fsg_make "${TMP}/git-guard" git
+fsg_require_stubs "${TRIP}" git
 
 reset_logs() { : > "${TMP}/routed.log"; : > "${TMP}/plain.log"; }
 
@@ -124,7 +130,7 @@ j=0
 for url in "ssh://git@github.com/CJPoll/custom.git" "ssh://git@gitlab.com/cjpoll/custom.git" "git@github.com-work:CJPoll/custom.git" \
            "gh:CJPoll/custom.git" "git@example.com:o/r.git" "https://example.com/o/r.git"; do
   j=$((j + 1)); r="${TMP}/refuse-${j}"; mkrepo "${r}" "${url}"; reset_logs
-  err="$(PATH="${TRIP}:${PATH}" "${FG}" -C "${r}" fetch origin 2>&1 >/dev/null)"; rc=$?
+  err="$(PATH="${TRIP}:${FSG_DIR}:${PATH}" "${FG}" -C "${r}" fetch origin 2>&1 >/dev/null)"; rc=$?
   if [ "${rc}" = 3 ] && [ ! -s "${TMP}/routed.log" ] && [ ! -s "${TMP}/plain.log" ] && grep -q 'Fix:' <<<"${err}"; then
     ok "${url} is refused (exit 3, Fix:), no route and no plain-git attempt"
   else
@@ -151,7 +157,7 @@ echo "B. refusals and unresolvable keys (exit 64, never plain git)"
 r="${TMP}/keys"; mkrepo "${r}" "git@gitlab.com:cjpoll/custom.git"
 expect64() { # expect64 <label> <args...>
   local label="$1"; shift; reset_logs
-  err="$(PATH="${TRIP}:${PATH}" "${FG}" "$@" 2>&1 >/dev/null)"; rc=$?
+  err="$(PATH="${TRIP}:${FSG_DIR}:${PATH}" "${FG}" "$@" 2>&1 >/dev/null)"; rc=$?
   if [ "${rc}" = 64 ] && [ ! -s "${TMP}/routed.log" ] && [ ! -s "${TMP}/plain.log" ] && grep -q 'Fix:' <<<"${err}"; then
     ok "${label}"
   else
@@ -203,7 +209,7 @@ git -C "${FX}" update-ref refs/remotes/origin/main "${SHA}"
 # first on PATH; pass when plain.log is empty and routed.log has the read.
 expect_routed() {
   local label="$1" want="$2"; shift 2; reset_logs
-  out="$(PATH="${TRIP}:${PATH}" "$@" 2>&1)"; rc=$?
+  out="$(PATH="${TRIP}:${FSG_DIR}:${PATH}" "$@" 2>&1)"; rc=$?
   if [ ! -s "${TMP}/plain.log" ] && grep -qF -- "${want}" "${TMP}/routed.log"; then
     ok "${label}"
   else
@@ -238,7 +244,7 @@ expect_routed "wt merge's pull, under WT_AGENT_PUSH=1, goes through forge-git" \
 
 # The owner's own wt use keeps plain git (attended; the owner's key is theirs).
 reset_logs
-PATH="${TRIP}:${PATH}" bash -c 'cd "$1" && . "$2/scripts/wt-lib/push.sh" && wt_git_pull origin main --ff-only' _ "${FX}" "${ROOT}" >/dev/null 2>&1
+PATH="${TRIP}:${FSG_DIR}:${PATH}" bash -c 'cd "$1" && . "$2/scripts/wt-lib/push.sh" && wt_git_pull origin main --ff-only' _ "${FX}" "${ROOT}" >/dev/null 2>&1
 [ -s "${TMP}/plain.log" ] && [ ! -s "${TMP}/routed.log" ] \
   && ok "wt's owner path (no WT_AGENT_PUSH) still pulls with plain git" \
   || bad "wt owner path" "plain=[$(cat "${TMP}/plain.log")] routed=[$(cat "${TMP}/routed.log")]"
@@ -296,6 +302,8 @@ got="$(grep '^PLAIN' <<<"${scan}" | sed -E 's/^PLAIN ([^:]+:[0-9]+:).*/\1/' | tr
 [ "${rc}" -eq 1 ] && [ "${got}" = "${want}" ] \
   && ok "the scanner finds plain reads (one-liner with || die, env prefix and -c, a split Ruby argv, a helper call) and skips messages and forge-git" \
   || bad "scanner fixture" "rc=${rc} want=[${want}] got=[${got}] scan=${scan}"
+if fsg_verify; then ok "no git call fell through past the tripwire (DND-1667)"
+else bad "no git call fell through past the tripwire (DND-1667)" "see the forge-stub-guard FAIL above"; fi
 echo
 echo "${pass} passed, ${fail} failed"
 [ "${fail}" -eq 0 ]

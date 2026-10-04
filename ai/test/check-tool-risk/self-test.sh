@@ -76,6 +76,9 @@ registry() {
   mkdir -p "${root}/ai/tools"
   {
     printf 'version: 1\ndefault: destructive\nclasses: [readOnly, idempotent, destructive]\ntools:\n'
+    # Every fixture carries ai/bin/forge-git, landed.rb's route to origin
+    # (DND-1977), so every registry classifies it as the live one does.
+    printf '  forge-git: { class: idempotent, reason: fetch }\n'
     local kv
     for kv in "$@"; do printf '  %s: { class: %s, reason: t }\n' "${kv%%=*}" "${kv#*=}"; done
   } > "${root}/ai/tools/risk.yml"
@@ -88,6 +91,8 @@ new_fixture() {
   mkdir -p "${root}/ai/bin" "${root}/ai/lib"
   cp "${BIN}" "${root}/ai/bin/check-tool-risk"; chmod +x "${root}/ai/bin/check-tool-risk"
   cp "${LIB_DIR}"/*.rb "${root}/ai/lib/"
+  # landed.rb reads origin through ai/bin/forge-git (DND-1977).
+  cp "${LIB_DIR}/../bin/forge-git" "${root}/ai/bin/forge-git"
   add_exec "${root}" "ai/${POST}"
   add_exec "${root}" "ai/${PEEK}"
   registry "${root}" check-tool-risk=readOnly "${POST}=destructive" "${PEEK}=readOnly"

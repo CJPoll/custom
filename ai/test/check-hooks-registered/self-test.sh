@@ -98,6 +98,8 @@ new_fixture() {
   cp "${SRC_ROOT}/scripts/lib/main-checkout.sh" "${d}/main/scripts/lib/main-checkout.sh"
   cp "${BIN}" "${d}/main/ai/bin/check-hooks-registered"
   cp "${LIB}" "${d}/main/ai/lib/landed.rb"
+  # landed.rb reads origin through ai/bin/forge-git (DND-1977).
+  cp "${SRC_ROOT}/ai/bin/forge-git" "${d}/main/ai/bin/forge-git"
   cp "${SRC_ROOT}/ai/lib/strict_argv.rb" "${d}/main/ai/lib/strict_argv.rb"
   cp "${SRC_ROOT}/ai/lib/agent_stash_env.rb" "${d}/main/ai/lib/agent_stash_env.rb"
   cp "${SETUP}" "${d}/main/scripts/setup-hooks"

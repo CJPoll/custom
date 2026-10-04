@@ -46,7 +46,7 @@ FHOME="${TMP}/home"
 STATE="${TMP}/state"
 mkdir -p "${REPO}/ai/bin" "${REPO}/ai/lib" "${REPO}/ai/secrets" "${REPO}/ai/inbox" "${REPO}/dotfiles" "${FHOME}" "${STATE}"
 for f in ai/bin/check-machine-secrets ai/bin/with-secret ai/lib/machine_secrets.rb ai/lib/machine_secrets_host.rb \
-         ai/lib/landed.rb ai/lib/strict_argv.rb ai/lib/private_overlay.rb ai/lib/private_overlay_resolver.rb; do
+         ai/lib/landed.rb ai/bin/forge-git ai/lib/strict_argv.rb ai/lib/private_overlay.rb ai/lib/private_overlay_resolver.rb; do
   cp "${SRC}/${f}" "${REPO}/${f}" || { echo "FAIL: copy ${f}"; exit 1; }
 done
 printf 'plain dotfile\n' > "${REPO}/dotfiles/.zshrc"

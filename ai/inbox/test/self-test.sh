@@ -48,7 +48,7 @@ TMP="$(mktemp -d)"; trap 'rm -rf "${TMP}"' EXIT
 fgit() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git "$@"; }
 FIX="${TMP}/fixture"
 GITC=(-c user.name=fixture -c user.email=fixture@example.invalid)
-for f in ai/bin/check-inbox-registry ai/inbox/lib/registry.rb ai/lib/landed.rb scripts/setup-inbox-registry \
+for f in ai/bin/check-inbox-registry ai/inbox/lib/registry.rb ai/lib/landed.rb ai/bin/forge-git scripts/setup-inbox-registry \
          "ai/skills/athena:inbox/lib/err.sh" "ai/skills/athena:inbox/lib/names.sh" \
          "ai/skills/athena:inbox/lib/descriptor.sh" ai/inbox/registry.json; do
   mkdir -p "$(dirname "${FIX}/${f}")"

@@ -4429,6 +4429,14 @@ def self_test_core
       FileUtils.mkdir_p(File.dirname(File.join(fixture, rel)))
       FileUtils.cp(dep, File.join(fixture, rel))
     end
+    # landed.rb runs its origin read through Landed::FORGE_GIT (DND-1977), an
+    # executable, not a require, so the scan above cannot see it.
+    forge_git_rel = Landed::FORGE_GIT.delete_prefix("#{CUSTOM_DIR}/")
+    expect.call(forge_git_rel != Landed::FORGE_GIT && File.executable?(Landed::FORGE_GIT),
+                "Landed::FORGE_GIT (#{Landed::FORGE_GIT}) is not an executable under #{CUSTOM_DIR}; " \
+                "the fixture cannot carry landed.rb's origin route")
+    FileUtils.cp(Landed::FORGE_GIT, File.join(fixture, forge_git_rel))
+    FileUtils.chmod(0o755, File.join(fixture, forge_git_rel))
     File.write(File.join(fixture, "some/test/self-test.sh"), "#!/bin/sh\nexit 0\n")
     FileUtils.chmod(0o755, File.join(fixture, "some/test/self-test.sh"))
     git.call("-c", "init.defaultBranch=main", "init", "-q", fixture)

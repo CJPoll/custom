@@ -82,6 +82,8 @@ new_fixture() {
   mkdir -p "${root}/ai/bin" "${root}/ai/lib"
   cp "${BIN}" "${root}/ai/bin/check-bin-help"; chmod +x "${root}/ai/bin/check-bin-help"
   cp "${LIB_DIR}"/*.rb "${root}/ai/lib/"
+  # landed.rb reads origin through ai/bin/forge-git (DND-1977).
+  cp "${LIB_DIR}/../bin/forge-git" "${root}/ai/bin/forge-git"
   add_exec "${root}" ai/bin/wrap "${HELPLESS}"
   add_exec "${root}" ai/bin/tool "${HELPFUL}"
   exempt "${root}" ai/bin/wrap

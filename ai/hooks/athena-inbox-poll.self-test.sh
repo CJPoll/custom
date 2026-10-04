@@ -1543,7 +1543,7 @@ SET="${CASE_DIR}/settings.json"
 HFIX="${CASE_DIR}/hooks-fixture"
 # shellcheck source=ai/test/lib/landed-fixture.bash
 . "${REPO_DIR}/ai/test/lib/landed-fixture.bash"
-landed_fixture "${REPO_DIR}" "${HFIX}" scripts/setup-hooks scripts/lib/main-checkout.sh ai/bin/check-hooks-registered ai/lib/landed.rb ai/lib/strict_argv.rb ai/lib/agent_stash_env.rb ai/hooks \
+landed_fixture "${REPO_DIR}" "${HFIX}" scripts/setup-hooks scripts/lib/main-checkout.sh ai/bin/check-hooks-registered ai/lib/landed.rb ai/bin/forge-git ai/lib/strict_argv.rb ai/lib/agent_stash_env.rb ai/hooks \
   || bad "F-11 the fixture repo is built" "landed_fixture failed; every F-11 installer case below is void"
 printf '{\n  "model": "x",\n  "permissions": {"allow": ["Bash(ls:*)"]}\n}\n' > "${SET}"
 suite_setup_hooks "${HFIX}" "${SET}" --install >/dev/null 2>&1

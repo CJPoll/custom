@@ -34,7 +34,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AI_DIR="$(cd "${HERE}/../.." && pwd)"
 BIN="${CHECK_INBOX_REGISTRY_UNDER_TEST:-${AI_DIR}/bin/check-inbox-registry}"
 SRC_ROOT="$(cd "$(dirname "${BIN}")/../.." && pwd)"
-SOURCES=(ai/bin/check-inbox-registry ai/inbox/lib/registry.rb ai/lib/landed.rb scripts/setup-inbox-registry
+SOURCES=(ai/bin/check-inbox-registry ai/inbox/lib/registry.rb ai/lib/landed.rb ai/bin/forge-git scripts/setup-inbox-registry
          "ai/skills/athena:inbox/lib/err.sh" "ai/skills/athena:inbox/lib/names.sh"
          "ai/skills/athena:inbox/lib/descriptor.sh")
 
