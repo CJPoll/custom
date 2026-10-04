@@ -35,7 +35,7 @@ HELP = <<~TXT
               commit for this change carries (DND-1529):
               `Lead-time-experiment: <R> <P> <M>`; --metric M is what the
               experiment will be recorded on (default: phase).
-    pr        push the lane's branch as Athena (gh-athena git push) and open the
+    pr        push the lane's branch as Athena (ai/bin/forge-push) and open the
               PR (gh-athena pr create) with --body-file as its evidence and
               the lane's trailer line appended. Refused (exit 2) when no lane
               commit carries that trailer: the squash merge keeps commit
@@ -89,7 +89,7 @@ HELP = <<~TXT
   (integration-gate's slot wait, default 1500); LEAD_TIME_DEPLOY_RE (the
   deploy-workflow rule ai/bin/lead-time uses, default "deploy"); LEADTIME_NOW
   (epoch seconds; a test seam). Test seams for each tool: LEADTIME_GH,
-  LEADTIME_GH_ATHENA, LEADTIME_INTEGRATION_GATE, LEADTIME_LOCKED_MERGE,
+  LEADTIME_GH_ATHENA, LEADTIME_FORGE_PUSH, LEADTIME_INTEGRATION_GATE, LEADTIME_LOCKED_MERGE,
   LEADTIME_CONFIRM_MERGED, LEADTIME_TEARDOWN_STACK, LEADTIME_PRODUCT_BOOTSTRAP,
   LEADTIME_PRODUCT_FORGE.
 

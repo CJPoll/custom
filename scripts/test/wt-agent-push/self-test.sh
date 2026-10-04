@@ -4,7 +4,8 @@
 # wt pushes as the OWNER by default: that is the owner's interactive use and a
 # human's push should be the human's. Only an explicit agent signal,
 # WT_AGENT_PUSH=1, routes a push through the Athena forge wrapper for the
-# remote's host (gh-athena git for github.com, glab-athena git for gitlab.com).
+# remote's host (gh-athena git for github.com, glab-athena git for gitlab.com),
+# through ai/bin/forge-push and forge-git's one host table (DND-1995).
 # Under the signal nothing ever falls back to a plain push, and a Graphite
 # `gt submit` (which pushes with the owner's credentials) is refused.
 #
@@ -83,6 +84,11 @@ echo "gt \$*" >> "${log}"
 exit 0
 EOF
 chmod +x "${shim}/git" "${shim}/gt" "${stubs}/gh-athena" "${stubs}/glab-athena"
+# wt's agent push runs the REAL ai/bin/forge-push (DND-1995), which asks the
+# real forge-git for the route and runs the wrapper its seams name: the stubs.
+ln -s "${scripts_dir}/../ai/bin/forge-push" "${stubs}/forge-push"
+ln -s "${scripts_dir}/../ai/bin/forge-git" "${stubs}/forge-git"
+export FORGE_GIT_GH_ATHENA="${stubs}/gh-athena" FORGE_GIT_GLAB_ATHENA="${stubs}/glab-athena"
 fsg_require_stubs "${shim}" git
 
 # make_repo <dir> <origin-url> : a repo on branch feat with one commit.
@@ -147,28 +153,28 @@ else fail "WT_AGENT_PUSH=0 [$out] log=[$(cat "${log}")]"; fi
 
 # --- 4. agent, github.com (scp form): through gh-athena, no plain push --------
 out="$(in_wt "${tmp}/r2" WT_AGENT_PUSH=1 -- 'push_branch feat false')"
-if has "$out" "rc=0" && logged "gh-athena git push origin feat GTP=0" && ! plain_pushed; then
+if has "$out" "rc=0" && logged "gh-athena git -C ${tmp}/r2 push origin feat GTP=0" && ! plain_pushed; then
   pass "agent: github.com (git@) push goes through gh-athena git, prompt disabled"
 else fail "agent: github.com push via gh-athena [$out] log=[$(cat "${log}")]"; fi
 
 # --- 5. agent, github.com (https form), force-with-lease ----------------------
 make_repo "${tmp}/r5" "https://github.com/owner/repo.git"
 out="$(in_wt "${tmp}/r5" WT_AGENT_PUSH=1 -- 'push_branch feat true')"
-if has "$out" "rc=0" && logged "gh-athena git push --force-with-lease origin feat GTP=0" && ! plain_pushed; then
+if has "$out" "rc=0" && logged "gh-athena git -C ${tmp}/r5 push --force-with-lease origin feat GTP=0" && ! plain_pushed; then
   pass "agent: github.com (https) force-with-lease goes through gh-athena git"
 else fail "agent: github.com https force [$out] log=[$(cat "${log}")]"; fi
 
 # --- 6. agent, gitlab.com: through glab-athena --------------------------------
 make_repo "${tmp}/r6" "${gl_url}"
 out="$(in_wt "${tmp}/r6" WT_AGENT_PUSH=1 -- 'push_branch feat false')"
-if has "$out" "rc=0" && logged "glab-athena git push origin feat GTP=0" && ! plain_pushed && ! logged "gh-athena"; then
+if has "$out" "rc=0" && logged "glab-athena git -C ${tmp}/r6 push origin feat GTP=0" && ! plain_pushed && ! logged "gh-athena"; then
   pass "agent: gitlab.com push goes through glab-athena git"
 else fail "agent: gitlab.com push via glab-athena [$out] log=[$(cat "${log}")]"; fi
 
 # --- 7. agent, wrapper refusal: loud failure, never a plain push --------------
 out="$(in_wt "${tmp}/r2" WT_AGENT_PUSH=1 STUB_RC=3 -- 'wt_git_push origin feat')"
 err="$(cat "${tmp}/stderr")"
-if has "$out" "rc=3" && logged "gh-athena git push origin feat" && ! plain_pushed \
+if has "$out" "rc=3" && logged "gh-athena git -C ${tmp}/r2 push origin feat" && ! plain_pushed \
    && has "$err" "Fix:" && has "$err" "REFUSING"; then
   pass "agent: a wrapper refusal fails loudly (exit 3, Fix:) with no plain-push fallback"
 else fail "agent: wrapper refusal [$out] err=[$err] log=[$(cat "${log}")]"; fi
@@ -210,8 +216,16 @@ out="$(cd "${tmp}/r2" && : > "${log}" && env PATH="${shim}:${FSG_DIR}:${PATH}" W
   bash -c 'source "'"${lib}"'/pr.sh"; ( wt_git_push origin feat ); echo "rc=$?"' 2>"${tmp}/stderr")"
 err="$(cat "${tmp}/stderr")"
 if has "$out" "rc=3" && ! any_push && has "$err" "Fix:"; then
-  pass "agent: a missing wrapper is refused, nothing pushed"
-else fail "agent: missing wrapper [$out] err=[$err] log=[$(cat "${log}")]"; fi
+  pass "agent: a missing forge-push is refused, nothing pushed"
+else fail "agent: missing forge-push [$out] err=[$err] log=[$(cat "${log}")]"; fi
+
+# --- 11b. an ssh:// form of a known host is refused too (forge-git's table) ---
+make_repo "${tmp}/r11" "ssh://git@github.com/owner/repo.git"
+out="$(in_wt "${tmp}/r11" WT_AGENT_PUSH=1 -- 'wt_git_push origin feat')"
+err="$(cat "${tmp}/stderr")"
+if has "$out" "rc=3" && ! any_push && has "$err" "Fix:"; then
+  pass "agent: an ssh:// github.com remote is refused (no Athena route), nothing pushed"
+else fail "agent: ssh:// github.com [$out] err=[$err] log=[$(cat "${log}")]"; fi
 
 # --- 12. merge's remote-branch delete follows the same routing ----------------
 out="$(in_wt "${tmp}/r2" -- 'wt_delete_remote_branch feat')"
@@ -220,7 +234,7 @@ if has "$out" "rc=0" && logged "git push origin --delete feat" && ! logged "athe
 else fail "owner: merge delete [$out] log=[$(cat "${log}")]"; fi
 
 out="$(in_wt "${tmp}/r2" WT_AGENT_PUSH=1 -- 'wt_delete_remote_branch feat')"
-if has "$out" "rc=0" && logged "gh-athena git push origin --delete feat" && ! plain_pushed; then
+if has "$out" "rc=0" && logged "gh-athena git -C ${tmp}/r2 push origin --delete feat" && ! plain_pushed; then
   pass "agent: merge's remote-branch delete goes through gh-athena git"
 else fail "agent: merge delete [$out] log=[$(cat "${log}")]"; fi
 

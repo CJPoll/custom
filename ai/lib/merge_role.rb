@@ -244,6 +244,7 @@ module MergeRole
   def git_intents(words, seg_dir, home)
     out = []
     words.each_with_index do |w, i|
+      next out.concat(forge_push_intents(words, i, seg_dir, home)) if base(w) == "forge-push"
       next unless base(w) == "git"
 
       prefix = words[0...i]
@@ -261,6 +262,24 @@ module MergeRole
       out.concat(git_sub_intents(words[j], words[(j + 1)..] || [], dir, cfg)) if words[j]
     end
     out
+  end
+
+  # `ai/bin/forge-push -C <dir> <git push args>` (DND-1995) runs `git push`
+  # in <dir> through the forge wrapper for the remote's host: the same push
+  # intent as `git -C <dir> push <args>`. A forge-push with no -C pushes
+  # nothing (it refuses), but reads as a push from the segment's directory so
+  # the guard never under-reads it. GIT_* assignments before it leave the
+  # destination unresolved, as for git.
+  def forge_push_intents(words, i, seg_dir, home)
+    prefix = words[0...i]
+    dir = prefix.any? { |p| p.match?(/\AGIT_(?:DIR|WORK_TREE)=/) } ? :unresolved : seg_dir
+    cfg = prefix.any? { |p| p.start_with?("GIT_CONFIG_") || base(p) == "xargs" }
+    args = words[(i + 1)..] || []
+    if args[0] == "-C"
+      dir = join_dir(dir, args[1].to_s, home)
+      args = args[2..] || []
+    end
+    [push_intent(args, dir, cfg)].compact
   end
 
   def git_sub_intents(sub, args, dir, cfg)

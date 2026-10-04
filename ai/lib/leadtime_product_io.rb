@@ -57,6 +57,7 @@ module LeadTimeProductIO
     def gh = seam("LEADTIME_GH", "gh")
     def gh_athena = seam("LEADTIME_GH_ATHENA", File.join(HARNESS, "ai/bin/gh-athena"))
     def forge_git = seam("LEADTIME_FORGE_GIT", File.join(HARNESS, "ai/bin/forge-git"))
+    def forge_push = seam("LEADTIME_FORGE_PUSH", File.join(HARNESS, "ai/bin/forge-push"))
     def integration_gate = seam("LEADTIME_INTEGRATION_GATE", File.join(HARNESS, "ai/bin/integration-gate"))
     def locked_merge = seam("LEADTIME_LOCKED_MERGE", File.join(HARNESS, "ai/skills/athena:merge-boarding/scripts/locked-merge"))
     def confirm_merged = seam("LEADTIME_CONFIRM_MERGED", File.join(HARNESS, "ai/bin/confirm-merged"))
@@ -317,12 +318,12 @@ module LeadTimeProductIO
            "gh run list --commit #{sha[0, 12]}")
     end
 
-    # Athena's push form (athena:github -> Pushing as Athena).
-    def push_argv(*refspec_args)
-      [Cmd.gh_athena, "git", "-c", "credential.helper=", "-c", "url.https://github.com/.insteadOf=git@github.com:", "push", *refspec_args]
-    end
+    # Athena's push (DND-1995): ai/bin/forge-push runs gh-athena or
+    # glab-athena by origin's host, from forge-git's one host table, so the
+    # push never names a wrapper by hand and never runs plain git.
+    def push_argv(dir, *refspec_args) = [Cmd.forge_push, "-C", dir, *refspec_args]
 
-    def push(dir, *refspec_args) = Run.call(push_argv(*refspec_args), chdir: dir, env: { "GIT_TERMINAL_PROMPT" => "0" }, timeout: 300)
+    def push(dir, *refspec_args) = Run.call(push_argv(dir, *refspec_args), chdir: dir, env: { "GIT_TERMINAL_PROMPT" => "0" }, timeout: 300)
 
     def close(dir, n, comment) = Run.call([Cmd.gh_athena, "pr", "close", n.to_s, "--comment", comment], chdir: dir, timeout: 120)
   end

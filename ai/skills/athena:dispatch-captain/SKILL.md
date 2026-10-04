@@ -354,9 +354,10 @@ how such tier-4 tickets get that captain cheaply. Do not batch any other tier.
     ([[athena:merge-boarding]] → *The merge bar*), not `locked-merge`. Ticket
     1 lands by its clean rebase. Each ticket above it: `git rebase --onto
     origin/main <old head SHA of the ticket below>`, then `integration-gate
-    --with-critic --rebase` on that head, then push. Its report's gate and
+    --with-critic --rebase` on that head, then push (`forge-push`, as
+    [[athena:merge-boarding]]'s no-CI landing says). Its report's gate and
     PASS were judged against the ticket below, so they do not cover main,
-    and `gh-athena` refuses the push `NO RECEIPT` without the re-gate.
+    and the forge wrapper refuses the push `NO RECEIPT` without the re-gate.
     Measured 2026-10-02 (DND-1800+1801+1812): DND-1801's push was refused;
     both stacked tickets were re-gated.
 

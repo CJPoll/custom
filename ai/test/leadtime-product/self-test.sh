@@ -81,6 +81,17 @@ fi
 if [ "$1 $2" = "pr close" ]; then exit "$(cat "$FAKE/close-rc" 2>/dev/null || echo 0)"; fi
 echo "fake gh-athena: unexpected $*" >&2; exit 64
 EOF
+# forge-push (DND-1995) is the product lane's only push route; its own routing
+# by origin's host is ai/test/forge-git's (Part D drives this lane's push
+# against a github.com and a gitlab.com origin). Here it records the call and
+# pushes to the temp bare origin.
+cat >"$FAKE/forge-push" <<'EOF'
+#!/usr/bin/env bash
+printf 'forge-push %s\n' "$*" >>"$FAKE/calls"
+[ "$1" = -C ] || { echo "fake forge-push: no -C" >&2; exit 64; }
+[ -e "$FAKE/push-rc" ] && exit "$(cat "$FAKE/push-rc")"
+d="$2"; shift 2; exec git -C "$d" push "$@"
+EOF
 cat >"$FAKE/integration-gate" <<'EOF'
 #!/usr/bin/env bash
 printf 'integration-gate %s\n' "$*" >>"$FAKE/calls"
@@ -101,7 +112,7 @@ exit "\$(cat "\$FAKE/$t-rc" 2>/dev/null || echo 0)"
 EOF
 done
 chmod +x "$FAKE"/*
-export FAKE LEADTIME_GH="$FAKE/gh" LEADTIME_GH_ATHENA="$FAKE/gh-athena" LEADTIME_INTEGRATION_GATE="$FAKE/integration-gate" \
+export FAKE LEADTIME_GH="$FAKE/gh" LEADTIME_GH_ATHENA="$FAKE/gh-athena" LEADTIME_FORGE_PUSH="$FAKE/forge-push" LEADTIME_INTEGRATION_GATE="$FAKE/integration-gate" \
        LEADTIME_LOCKED_MERGE="$FAKE/locked-merge" LEADTIME_CONFIRM_MERGED="$FAKE/confirm-merged" \
        LEADTIME_TEARDOWN_STACK="$FAKE/teardown-stack" LEADTIME_PRODUCT_FORGE=github LEADTIME_NOW="$NOW_FIXED"
 export LEADTIME_PRODUCT_BOOTSTRAP="echo bootstrapped >>\"$FAKE/calls\""
@@ -212,11 +223,11 @@ tip="$(git -C "$LANES/$RUN_ID" rev-parse HEAD)"
 rc="$(lp pr --repo prod --title "speed up verify" --body-file "$TMP/evidence.md")"
 rec="$(jq -c 'select(.event == "opened")' "$S/product-prs.jsonl" 2>/dev/null)"
 if [ "$rc" = 0 ] && [ "$(git -C "$ORIGIN" rev-parse leadtime/prod-verify-20261001T123000Z 2>/dev/null)" = "$tip" ] \
-   && grep -q '^gh-athena git -c credential.helper= -c url.https://github.com/.insteadOf=git@github.com: push -u origin HEAD' "$FAKE/calls" \
+   && grep -q "^forge-push -C $LANES/$RUN_ID -u origin HEAD\$" "$FAKE/calls" && ! grep -q '^gh-athena git' "$FAKE/calls" \
    && grep -q '^gh-athena pr create --base main --head leadtime/prod-verify-20261001T123000Z --title speed up verify' "$FAKE/calls" \
    && [ "$(jq -r .head <<<"$rec")" = "$tip" ] && [ "$(jq -r .pr <<<"$rec")" = 7 ] && [ "$(jq -r .phase <<<"$rec")" = verify ] \
    && [ "$(cat "$FAKE/body-7.md")" = "$(printf 'evidence\n\nLead-time-experiment: prod verify phase')" ] && [ "$(stat -c %a "$S/product-prs.jsonl")" = 600 ]; then
-  ok "pr: pushed as Athena (gh-athena git push), opened with gh-athena pr create (the body ends with the lane's Lead-time-experiment trailer, DND-1529), recorded (repo, pr, phase, head) in product-prs.jsonl"
+  ok "pr: pushed as Athena (forge-push, never a hard-coded wrapper), opened with gh-athena pr create (the body ends with the lane's Lead-time-experiment trailer, DND-1529), recorded (repo, pr, phase, head) in product-prs.jsonl"
 else bad "pr" "rc=$rc err=$(cat "${TMP}/err") rec=$rec calls=$(cat "$FAKE/calls")"; fi
 
 lane_commit more.txt
@@ -636,7 +647,7 @@ pr_json 7 OPEN "$HEAD7" "$GREEN"
 lp sweep >/dev/null
 newhead="$(jq -r 'select(.event=="head") | .head' "$S/product-prs.jsonl")"
 if [ "$(called locked-merge)" = 0 ] && [ -n "$newhead" ] && [ "$newhead" != "$HEAD7" ] \
-   && grep -q "push --force-with-lease=refs/heads/$BR7:$HEAD7 origin HEAD:refs/heads/$BR7" "$FAKE/calls" \
+   && grep -q "^forge-push -C .* --force-with-lease=refs/heads/$BR7:$HEAD7 origin HEAD:refs/heads/$BR7" "$FAKE/calls" \
    && [ "$(git -C "$ORIGIN" rev-parse "$BR7" 2>/dev/null)" = "$newhead" ]; then
   ok "a rebased head is pushed with --force-with-lease and recorded; it lands only once its own CI is green"
 else bad "rebased" "head=$newhead calls=$(cat "$FAKE/calls")"; fi

@@ -133,6 +133,14 @@ It does **not** see a command git runs from config or a hook, `clone
 header of `ai/lib/forge-git-passthrough.sh` (shared with `glab-athena git`)
 lists these. Handle a refusal by the rule in the next section.
 
+**An unattended push names no wrapper (DND-1995).** A cron lane, a landing,
+the lead-time product lane and wt under `WT_AGENT_PUSH=1` push with
+`~/dev/custom/ai/bin/forge-push -C <dir> <git push args>`. It asks
+`ai/bin/forge-git --route` for origin's route, so it runs `gh-athena git push`
+for a github.com remote and `glab-athena git push` for a gitlab.com one, and
+refuses (exit 3, `Fix:`) anything else, a local path included. Every refusal
+below still applies, because both wrappers share the passthrough.
+
 A push to `main` is also judged for its gate. While `ai/bin/main-health`
 records main RED, only a gated fix lands (DND-1482). On any main, in a repo
 that declares a gate, the push is refused (`NO RECEIPT`, exit 3, `Fix:`)
@@ -371,7 +379,7 @@ yourself.
 **A repo with no CI cannot take that path.** With no check reported on the
 head, the wrapper refuses the pinned merge, so `locked-merge` exits 4 however
 good the report is. `~/dev/custom` is such a repo: it lands by a fast-forward
-`gh-athena git push` of the gated head under the same merge lock, then the
+push of the gated head through `ai/bin/forge-push` under the same merge lock, then the
 landing's installers and `ai/bin/main-health check`. The steps are `athena:merge-boarding` → *In a
 no-CI GitHub repo the pinned merge cannot run*; this skill does not restate
 them.

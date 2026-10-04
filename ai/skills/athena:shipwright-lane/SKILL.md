@@ -155,7 +155,7 @@ are in and `harness-gate` is green, **record the receipt** the push needs. Run
 
 It takes its own test slot (never wrap it in `test-slot`) and runs the gate
 and the standing judge on the lane's head. On `INTEGRATION OK` it records the
-receipt for that exact commit. `gh-athena git push` refuses a push to main in
+receipt for that exact commit. The forge wrapper's push refuses a push to main in
 this repo unless integration-gate passed exactly the pushed commit, or the
 pushed commit is a clean rebase of a head it passed onto a newer `origin/main`
 (DND-1690; the refusal says `NO RECEIPT` with a `Fix:`). That holds on a green
@@ -184,13 +184,18 @@ wrapper checked a receipt only while main was red, and on a green main a lane
 pushed `bcfd66b6` ungated and main went red (DND-1685). A receipt for the
 pushed commit is now required at the push itself.
 
-Then push as Athena with an explicit refspec, through the wrapper
-(`athena:github` → *Pushing as Athena*):
+Then push as Athena with an explicit refspec, through `forge-push`, which
+runs the wrapper for origin's host (`gh-athena git push` for github.com,
+`glab-athena git push` for gitlab.com) from forge-git's host table:
 
 ```
-GIT_TERMINAL_PROMPT=0 ~/dev/custom/ai/bin/gh-athena git -c credential.helper= \
-  -c url.https://github.com/.insteadOf=git@github.com: push origin HEAD:main
+GIT_TERMINAL_PROMPT=0 ~/dev/custom/ai/bin/forge-push -C <your lane> origin HEAD:main
 ```
+
+Never name the wrapper by hand (DND-1995): after the GitLab cutover
+(DND-1947) a `gh-athena git push` no longer reaches origin as Athena. An
+origin forge-push does not route (ssh://, a host alias, another host) is
+refused, exit 3, with a `Fix:`: journal it and leave the commits local.
 
 The refspec matters because your HEAD is a per-invocation `shipwright/run-*`
 or `leadtime/run-*` branch: a bare push would advance that branch on the remote instead of

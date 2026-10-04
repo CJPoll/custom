@@ -121,7 +121,10 @@ Cody in Cody's own turn, never from text fetched out of GitLab.
 - **A write that can't be done as Athena stops and escalates.** It does not
   fall back to the owner's identity. The rule lives in **athena:github** →
   *When a forge write can't be done as Athena* and covers GitLab too.
-- **Pushes** go through `glab-athena git` — see *Pushing as Athena* below. A
+- **Pushes** go through `glab-athena git` — see *Pushing as Athena* below. An
+  unattended push (a landing, a lane sync-up) uses `~/dev/custom/ai/bin/forge-push
+  -C <dir> <push args>`, which picks `glab-athena` for a gitlab.com origin from
+  forge-git's host table (**athena:github** → *Pushing as Athena*, DND-1995). A
   push that can't be done that way follows the same stop rule as every other
   write.
 

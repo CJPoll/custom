@@ -108,7 +108,7 @@ tools:
   cli-flag-table:          { class: idempotent, reason: render }
   # forge-git (DND-1977) runs only fetch, ls-remote and pull, through the
   # forge wrappers' git passthrough (or plain git for a local path). It
-  # refuses push. A pull moves the local branch and working tree, so it is
+  # refuses push. --route <url> (DND-1995) prints a route and runs nothing. A pull moves the local branch and working tree, so it is
   # local mutation, not readOnly.
   forge-git:               { class: idempotent, reason: fetch }
   # forge-wire-capture (DND-2025) rewrites ai/lib/test/forge-wire/fixtures/
@@ -185,6 +185,9 @@ tools:
 
   # --- destructive: external/irreversible, or grants that capability ---
   gh-athena:               { class: destructive, reason: forge }
+  # forge-push (DND-1995) pushes to a forge through gh-athena or glab-athena,
+  # picked by the remote's host: the wrappers' class.
+  forge-push:              { class: destructive, reason: forge }
   glab-athena:             { class: destructive, reason: forge }
   # The Athena route's forge transport (DND-1868): git runs it for a routed
   # command, and it connects to the forge with the bot's header, so a push

@@ -30,8 +30,9 @@
 # refused (pass it as --opt=value); so are --all and --multiple, which reach
 # several remotes.
 #
-# Only reads: fetch, ls-remote and pull. A push goes through gh-athena /
-# glab-athena git push (athena:github -> "Pushing as Athena").
+# Only reads: fetch, ls-remote and pull. A push goes through ai/bin/forge-push,
+# which asks this tool for the route (--route <url>), so the table above is the
+# only one (DND-1995).
 #
 # Exit codes: the routed git's own exit code, or
 #   64 usage error, or the route key cannot be computed (no -C, not a git
@@ -55,6 +56,8 @@ forge-git — read a remote through Athena's forge route, never the owner's SSH 
 
 Usage:
   forge-git -C <dir> <fetch|ls-remote|pull> [git args...]
+  forge-git --route <url>    print the route for <url> (gh-athena, glab-athena
+                             or local) and run nothing; exit 3 when refused
   forge-git --help
 
   -C <dir>   the repository to run git in (required; never guessed from the cwd).
@@ -83,6 +86,49 @@ die() { # die <code> <what> <fix>
   exit "$1"
 }
 
+HERE="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+
+# is_local_path URL: git's own rule. A file:// URL is local; any other
+# scheme:// is remote; a ':' before the first '/' is the scp-like
+# host:path form (remote); anything else is a path.
+is_local_path() {
+  local u="$1" before
+  case "${u}" in
+    file://*) return 0 ;;
+    *://*) return 1 ;;
+    *:*) before="${u%%:*}"; [[ "${before}" == */* ]] ;;
+    *) return 0 ;;
+  esac
+}
+
+# route_of URL -> prints gh-athena, glab-athena or local; returns 1 (printing
+# nothing) for a URL no route takes. THE host table: forge-git's reads and
+# ai/bin/forge-push's pushes (through --route) both use it (DND-1995).
+route_of() {
+  local url="$1"
+  [ -n "${url}" ] || return 1
+  case "${url,,}" in
+    git@github.com:*|https://github.com/*) echo gh-athena ;;
+    git@gitlab.com:*|https://gitlab.com/*) echo glab-athena ;;
+    *) is_local_path "${url}" || return 1; echo local ;;
+  esac
+}
+
+# refuse_route <key> <dir>: exit 3 for a URL no route takes.
+refuse_route() {
+  die 3 "$1 is not a github.com or gitlab.com URL in a form the Athena route takes, nor a local path; refusing rather than reach a remote with the owner's credentials" \
+    "set the remote to the git@<host>:<owner>/<repo>.git or https://<host>/<owner>/<repo>.git form on github.com or gitlab.com (git -C '$2' remote set-url <name> <url>). An ssh:// URL, an ~/.ssh/config host alias, or another host has no Athena route."
+}
+
+# --route <url>: print the route for one URL and run nothing. ai/bin/forge-push
+# asks this, so a push and a read of one remote never take different routes.
+if [ "${1-}" = --route ]; then
+  [ $# -eq 2 ] || die 64 "--route takes exactly one URL" "pass forge-git --route <url>."
+  [ -n "$2" ] || die 64 "--route was given an empty URL" "pass the remote's URL (git remote get-url <name>)."
+  route_of "$2" || refuse_route "'$2'" "<repository>"
+  exit 0
+fi
+
 DIR=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -98,7 +144,7 @@ done
 SUB="$1"
 case "${SUB}" in
   fetch|ls-remote|pull) ;;
-  push) die 64 "forge-git does not push" "push as Athena with ai/bin/gh-athena git push (github.com) or ai/bin/glab-athena git push (gitlab.com); athena:github -> \"Pushing as Athena\"." ;;
+  push) die 64 "forge-git does not push" "push with ai/bin/forge-push -C <dir> <git push args>, which picks gh-athena or glab-athena by this same table (DND-1995)." ;;
   *) die 64 "'${SUB}' is not a subcommand forge-git routes" "forge-git routes only fetch, ls-remote and pull; run a local git command with plain git." ;;
 esac
 [ -n "${DIR}" ] || die 64 "no -C <dir>" "pass -C <repository dir>; forge-git never guesses the repository from the cwd."
@@ -147,33 +193,12 @@ else
 fi
 [ -n "${URL}" ] || die 64 "the route key is empty (${KEY})" "give the remote a URL."
 
-# is_local_path URL: git's own rule. A file:// URL is local; any other
-# scheme:// is remote; a ':' before the first '/' is the scp-like
-# host:path form (remote); anything else is a path.
-is_local_path() {
-  local u="$1" before
-  case "${u}" in
-    file://*) return 0 ;;
-    *://*) return 1 ;;
-    *:*) before="${u%%:*}"; [[ "${before}" == */* ]] ;;
-    *) return 0 ;;
-  esac
-}
-
-HERE="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 export GIT_TERMINAL_PROMPT=0
-LC_URL="${URL,,}"
-case "${LC_URL}" in
-  git@github.com:*|https://github.com/*)
-    exec "${FORGE_GIT_GH_ATHENA:-${HERE}/gh-athena}" git -C "${DIR}" "$@" ;;
-  git@gitlab.com:*|https://gitlab.com/*)
-    exec "${FORGE_GIT_GLAB_ATHENA:-${HERE}/glab-athena}" git -C "${DIR}" "$@" ;;
-  *)
-    if is_local_path "${URL}"; then
-      # A local repository: no forge, no identity. (git resolves a relative
-      # path against DIR, as it would for the command itself.)
-      exec git -C "${DIR}" "$@"
-    fi
-    die 3 "${KEY} is not a github.com or gitlab.com URL in a form the Athena route takes, nor a local path; refusing rather than reach a remote with the owner's credentials" \
-      "set the remote to the git@<host>:<owner>/<repo>.git or https://<host>/<owner>/<repo>.git form on github.com or gitlab.com (git -C '${DIR}' remote set-url <name> <url>). An ssh:// URL, an ~/.ssh/config host alias, or another host has no Athena route." ;;
+ROUTE="$(route_of "${URL}")" || refuse_route "${KEY}" "${DIR}"
+case "${ROUTE}" in
+  gh-athena) exec "${FORGE_GIT_GH_ATHENA:-${HERE}/gh-athena}" git -C "${DIR}" "$@" ;;
+  glab-athena) exec "${FORGE_GIT_GLAB_ATHENA:-${HERE}/glab-athena}" git -C "${DIR}" "$@" ;;
+  # A local repository: no forge, no identity. (git resolves a relative path
+  # against DIR, as it would for the command itself.)
+  local) exec git -C "${DIR}" "$@" ;;
 esac

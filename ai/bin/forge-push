@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+#
+# forge-push — push to a remote through Athena's forge wrapper for that
+# remote's host, never with plain git and never with a wrapper named by hand
+# (DND-1995).
+#
+# Every unattended push (the ~/dev/custom no-CI landing, the shipwright and
+# lead-time lane sync-up, the lead-time product lane, wt under WT_AGENT_PUSH)
+# used to name `gh-athena git push`. After the GitLab cutover (DND-1947) origin
+# is git@gitlab.com:..., and a push that names gh-athena no longer reaches it
+# as Athena. This tool asks ai/bin/forge-git for the route (`forge-git --route
+# <url>`), so the host table exists once and a read and a push of the same
+# remote always take the same route:
+#
+#   git@github.com:*  https://github.com/*   -> ai/bin/gh-athena git -C <dir> push ...
+#   git@gitlab.com:*  https://gitlab.com/*   -> ai/bin/glab-athena git -C <dir> push ...
+#   anything else                            -> REFUSED, exit 3 (ssh://, an
+#        ~/.ssh/config host alias, another host, AND a local path: a push has
+#        no plain-git route, because the wrappers hold the push refusals --
+#        RED MAIN, NO RECEIPT, HTTPS-only, identity -- in
+#        ai/lib/forge-git-passthrough.sh, and plain git would skip them all).
+#
+# The remote is the one git push itself reaches: the first argument that is
+# not an option, else branch.<current>.pushRemote, remote.pushDefault,
+# branch.<current>.remote, then origin. A configured remote routes by EVERY
+# push URL it has (`git remote get-url --push --all`), so a pushurl override
+# is routed by what the push really reaches; push URLs on two forges are
+# refused. Any other word is taken as the URL itself, as git takes it.
+#
+# Refused before any push (exit 64): --repo (it names the remote away from the
+# positional word), and an option whose value is a separate word (-o, and
+# --push-option / --receive-pack / --exec or a prefix of one): pass the value
+# attached (--push-option=<v>).
+#
+# Exit codes: the wrapper's own exit code (its refusals are exit 3 with a
+# Fix:), or
+#   64 usage error, or the route key cannot be computed (no -C, not a git
+#      repository, a remote with no URL, an unknown remote word). A key that
+#      cannot be resolved is an error, never "plain git".
+#   3  refused: the URL is in no form the Athena route takes.
+#
+# Test seams (tests only): FORGE_GIT_GH_ATHENA and FORGE_GIT_GLAB_ATHENA name
+# the wrapper to run, as for ai/bin/forge-git; FORGE_PUSH_FORGE_GIT names the
+# forge-git to ask for the route. The same user can redirect git's own
+# transport, so the seams widen nothing.
+set -uo pipefail
+
+PROG=forge-push
+
+usage() {
+  cat <<'EOF'
+forge-push — push through Athena's forge wrapper for the remote's host.
+
+Usage:
+  forge-push -C <dir> [git push args...]
+  forge-push --help
+
+  -C <dir>   the repository to push from (required; never guessed from the cwd).
+
+Everything after -C <dir> is passed to `git push` unchanged. The remote is the
+first non-option argument, else the current branch's pushRemote,
+remote.pushDefault, the branch's remote, then origin. A remote name routes by
+every push URL it has; any other word is the URL.
+
+Route (the host table in ai/bin/forge-git; forge-git --route <url>):
+  git@github.com:*, https://github.com/*   ai/bin/gh-athena git -C <dir> push ...
+  git@gitlab.com:*, https://gitlab.com/*   ai/bin/glab-athena git -C <dir> push ...
+  anything else (ssh://, a host alias,     refused, exit 3
+    another host, a local path)
+
+Refused (exit 64): --repo; -o or --push-option / --receive-pack / --exec with
+the value as a separate word (pass --opt=value); push URLs on two forges.
+
+Example (a lane landing on main):
+  forge-push -C <lane> origin HEAD:main
+
+Exit: the wrapper's own code; 64 usage or an unresolvable route key; 3 refused.
+EOF
+}
+
+die() { # die <code> <what> <fix>
+  printf '%s: %s\n  Fix: %s\n' "${PROG}" "$2" "$3" >&2
+  exit "$1"
+}
+
+DIR=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --help|-h) usage; exit 0 ;;
+    -C) [ $# -ge 2 ] || die 64 "-C needs a directory" "pass -C <repository dir>."
+        DIR="$2"; shift 2; break ;;
+    *) break ;;
+  esac
+done
+[ -n "${DIR}" ] || die 64 "no -C <dir> before the push arguments" "pass forge-push -C <repository dir> [git push args]; forge-push never guesses the repository from the cwd."
+[ "${1-}" = push ] && die 64 "the first push argument is 'push'" "drop the word 'push': forge-push -C <dir> <remote> <refspec>; everything after -C <dir> is git push's own arguments."
+git -C "${DIR}" rev-parse --git-dir >/dev/null 2>&1 \
+  || die 64 "'${DIR}' is not a git repository" "pass -C a directory inside the repository you push from."
+
+HERE="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+FORGE_GIT="${FORGE_PUSH_FORGE_GIT:-${HERE}/forge-git}"
+[ -x "${FORGE_GIT}" ] || die 64 "${FORGE_GIT} is missing or not executable, so no route can be chosen" "run forge-push from a full ~/dev/custom checkout (ai/bin/forge-git beside it)."
+
+# The remote word: the first non-option argument. git also accepts a unique
+# prefix of a long option, so a prefix of a value-taking option is refused like
+# the option itself.
+VALUE_OPTS="--push-option --receive-pack --exec"
+REMOTE_WORD=""
+for a in "$@"; do
+  case "${a}" in
+    --) die 64 "'--' in the push arguments" "drop the '--'; name the remote as the first non-option argument." ;;
+    --repo|--repo=*|--rep|--rep=*)
+      die 64 "push ${a%%=*} names the remote apart from the positional word, which the route would not see" "name the remote as the first non-option argument: forge-push -C <dir> <remote> <refspec>." ;;
+    -o) die 64 "push option '-o' takes its value as the next word, which would hide the remote" "pass it attached (-o<value>) or as --push-option=<value>." ;;
+    --*=*|-*)
+      if [[ "${a}" == --* && "${a}" != *=* && ${#a} -ge 4 ]]; then
+        for o in ${VALUE_OPTS}; do
+          [[ "${o}" == "${a}"* ]] && die 64 "push option '${a}' takes its value as the next word, which would hide the remote" "pass it as ${o}=<value>."
+        done
+      fi ;;
+    *) REMOTE_WORD="${a}"; break ;;
+  esac
+done
+
+if [ -z "${REMOTE_WORD}" ]; then
+  branch="$(git -C "${DIR}" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+  if [ -n "${branch}" ]; then
+    REMOTE_WORD="$(git -C "${DIR}" config --get "branch.${branch}.pushRemote" 2>/dev/null || true)"
+  fi
+  [ -n "${REMOTE_WORD}" ] || REMOTE_WORD="$(git -C "${DIR}" config --get remote.pushDefault 2>/dev/null || true)"
+  if [ -z "${REMOTE_WORD}" ] && [ -n "${branch}" ]; then
+    REMOTE_WORD="$(git -C "${DIR}" config --get "branch.${branch}.remote" 2>/dev/null || true)"
+  fi
+  REMOTE_WORD="${REMOTE_WORD:-origin}"
+fi
+
+if [ "${REMOTE_WORD}" != . ] && git -C "${DIR}" config --get "remote.${REMOTE_WORD}.url" >/dev/null 2>&1; then
+  URLS="$(git -C "${DIR}" remote get-url --push --all "${REMOTE_WORD}" 2>/dev/null)" \
+    || die 64 "remote '${REMOTE_WORD}' in '${DIR}' has no readable push URL" "check 'git -C ${DIR} remote -v'."
+  KEY="remote '${REMOTE_WORD}'"
+else
+  case "${REMOTE_WORD}" in
+    .|*/*|*:*) ;;
+    *) die 64 "'${REMOTE_WORD}' is neither a remote of '${DIR}' nor a URL or path, so no route can be chosen" "check 'git -C ${DIR} remote -v'; name a configured remote, or pass the URL." ;;
+  esac
+  URLS="${REMOTE_WORD}"
+  KEY="'${REMOTE_WORD}'"
+fi
+
+ROUTE=""
+seen=0
+while IFS= read -r url; do
+  [ -n "${url}" ] || continue
+  seen=$((seen + 1))
+  r="$("${FORGE_GIT}" --route "${url}" 2>/dev/null)" || r=""
+  case "${r}" in
+    gh-athena|glab-athena) ;;
+    local)
+      die 3 "${KEY} pushes to '${url}', a local path; a push has no plain-git route, because the push refusals (RED MAIN, NO RECEIPT, HTTPS-only, identity) live in the forge wrappers" \
+        "push to the github.com or gitlab.com remote (git@<host>:<owner>/<repo>.git or https://<host>/<owner>/<repo>.git). A push to a local repository is not an unattended forge push: run it with git yourself, outside the harness paths." ;;
+    *)
+      die 3 "${KEY} pushes to '${url}', which is not a github.com or gitlab.com URL in a form the Athena route takes; refusing rather than push with the owner's credentials" \
+        "set the remote to the git@<host>:<owner>/<repo>.git or https://<host>/<owner>/<repo>.git form on github.com or gitlab.com (git -C '${DIR}' remote set-url [--push] <name> <url>). An ssh:// URL, an ~/.ssh/config host alias, or another host has no Athena route." ;;
+  esac
+  if [ -n "${ROUTE}" ] && [ "${ROUTE}" != "${r}" ]; then
+    die 3 "${KEY} has push URLs on two forges (${ROUTE} and ${r}); one push cannot run as both identities" \
+      "give the remote push URLs on one forge, or push to each forge's remote by name, one forge-push call each."
+  fi
+  ROUTE="${r}"
+done <<< "${URLS}"
+[ "${seen}" -gt 0 ] && [ -n "${ROUTE}" ] \
+  || die 64 "${KEY} in '${DIR}' resolved to no push URL" "check 'git -C ${DIR} remote -v'; give the remote a URL."
+
+case "${ROUTE}" in
+  gh-athena) WRAPPER="${FORGE_GIT_GH_ATHENA:-${HERE}/gh-athena}" ;;
+  glab-athena) WRAPPER="${FORGE_GIT_GLAB_ATHENA:-${HERE}/glab-athena}" ;;
+esac
+[ -x "${WRAPPER}" ] || die 64 "the wrapper ${WRAPPER} is missing or not executable" "run forge-push from a full ~/dev/custom checkout (ai/bin/${ROUTE} beside it)."
+
+export GIT_TERMINAL_PROMPT=0
+exec "${WRAPPER}" git -C "${DIR}" push "$@"

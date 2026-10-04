@@ -75,8 +75,12 @@ quoted under the no-CI landing below.
 merge when no check has reported on the head (`ai/lib/gh-merge-guard.sh`, the
 `EMPTY` case), so `locked-merge` exits 4 there however good the report is. Do
 not retry it, and do not reach for `gh api`: the guard refuses API merges and
-ref writes too. `~/dev/custom` lands by a fast-forward `gh-athena git push` of
-the gated head (the guard's header names that path). That push is the merge
+ref writes too. `~/dev/custom` lands by a fast-forward push of the gated
+head through `~/dev/custom/ai/bin/forge-push`, which runs `gh-athena git push`
+for a github.com origin and `glab-athena git push` for a gitlab.com one, from
+forge-git's one host table (DND-1995; the guard's header names that path).
+Never name the wrapper by hand: after the GitLab cutover (DND-1947) a
+hand-written `gh-athena git push` no longer reaches origin as Athena. That push is the merge
 step, so it takes the same lock `locked-merge` does
 (`~/.local/state/athena/custom-merge.lock`, *Landing onto a moving main*).
 The landing, as Cody confirmed it (2026-10-01):
@@ -91,10 +95,11 @@ The landing, as Cody confirmed it (2026-10-01):
 3. A **clean** rebase (no textual or semantic conflict, *Merge one at a time*)
    lands with no re-gate. Run *Merge one at a time*'s migration-version
    check first; a collision is a semantic conflict, so go to step 4. Push the rebased head
-   fast-forward (`gh-athena git push origin <sha>:main`), still under the
-   lock, then release it. The pushed SHA is not the reported one; the clean
-   rebase carries the reported head's gate and verdict. `gh-athena` checks
-   that at the push (DND-1690): in a repo that declares a gate it refuses a
+   fast-forward (`~/dev/custom/ai/bin/forge-push -C <worktree> origin
+   <sha>:main`), still under the lock, then release it. The pushed SHA is not the reported one; the clean
+   rebase carries the reported head's gate and verdict. The wrapper
+   forge-push runs (gh-athena or glab-athena) checks that at the push
+   (DND-1690): in a repo that declares a gate it refuses a
    push to main (`NO RECEIPT`, exit 3) unless integration-gate passed exactly
    the pushed commit, or the pushed tree is the clean merge of a head it
    passed onto `origin/main`. So fetch before the rebase, as above: the
@@ -154,7 +159,7 @@ The landing, as Cody confirmed it (2026-10-01):
    target tip is named by the merge guard, never held (DND-2061; the
    paragraph ends with the label). In `~/dev/custom`, `main-health` exit 1 (or
    a `main-red` message on harness-alerts) means `main` is red. While it is,
-   `gh-athena git push` refuses any push to `main` (exit 3, `RED MAIN`) except
+   the forge wrappers' push refuses any push to `main` (exit 3, `RED MAIN`) except
    a gated fix: a head that contains the red SHA and has its own
    `INTEGRATION OK` receipt. Land the fix, then run `main-health check` again;
    GREEN clears the marker and unblocks the queue. A red you believe was

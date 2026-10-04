@@ -21,12 +21,22 @@
 # leadtime_product_io's branch fetch): no line runs plain git's fetch, pull or
 # ls-remote.
 #
+# Part F (DND-1995): ai/bin/forge-push, the push half. It asks forge-git for
+# the route (forge-git --route), so there is one host table: github.com ->
+# gh-athena git push, gitlab.com -> glab-athena git push, everything else
+# (ssh://, a host alias, another host, a local path) refused with a Fix:.
+# Part D also drives every unattended push (the landing / lane sync-up
+# command, the lead-time product lane, wt under WT_AGENT_PUSH=1) against a
+# github.com and a gitlab.com origin, and Part E scans the source for any
+# push that runs plain git or names a wrapper by hand.
+#
 # Functional only (DND-1222): no timing, no load, no network, no token.
 set -uo pipefail
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT="$(cd -- "${HERE}/../../.." && pwd -P)"
 FG="${ROOT}/ai/bin/forge-git"
+FP="${ROOT}/ai/bin/forge-push"
 
 pass=0; fail=0
 ok()  { pass=$((pass + 1)); printf '  ok    %s\n' "$1"; }
@@ -200,6 +210,126 @@ reset_logs; STUB_RC=0 "${FG}" -C "${r}" ls-remote https://github.com/CJPoll/cust
   || bad "URL word" "routed=[$(cat "${TMP}/routed.log")]"
 
 # ---------------------------------------------------------------------------
+echo "F. forge-push: the push half, routed by forge-git's table (DND-1995)"
+if out="$("${FP}" --help 2>/dev/null)" && grep -q '^Usage:' <<<"${out}"; then
+  ok "forge-push --help prints usage on stdout, exit 0"
+else
+  bad "forge-push --help" "${out}"
+fi
+
+i=0
+for case in \
+  "git@github.com:CJPoll/custom.git|gh-athena" \
+  "https://github.com/CJPoll/custom.git|gh-athena" \
+  "git@gitlab.com:cjpoll/custom.git|glab-athena" \
+  "https://gitlab.com/cjpoll/custom.git|glab-athena" \
+  "git@GitLab.com:cjpoll/custom.git|glab-athena"; do
+  i=$((i + 1)); url="${case%%|*}"; want="${case##*|}"
+  r="${TMP}/push-${i}"; mkrepo "${r}" "${url}"; reset_logs
+  STUB_RC=0 PATH="${TRIP}:${FSG_DIR}:${PATH}" "${FP}" -C "${r}" origin HEAD:main >/dev/null 2>&1; rc=$?
+  got="$(cat "${TMP}/routed.log")"
+  if [ "${rc}" = 0 ] && [ "${got}" = "${want} git -C ${r} push origin HEAD:main" ] && [ ! -s "${TMP}/plain.log" ]; then
+    ok "push: ${url} routes through ${want}"
+  else
+    bad "push: ${url} expected ${want}" "rc=${rc} routed=[${got}] plain=[$(cat "${TMP}/plain.log")]"
+  fi
+done
+
+r="${TMP}/push-fail"; mkrepo "${r}" "git@gitlab.com:cjpoll/custom.git"; reset_logs
+STUB_RC=3 "${FP}" -C "${r}" origin HEAD:main >/dev/null 2>&1; rc=$?
+[ "${rc}" = 3 ] && [ "$(wc -l < "${TMP}/routed.log")" = 1 ] \
+  && ok "push: a wrapper refusal (exit 3: RED MAIN, NO RECEIPT, ...) is returned as is, with no fallback attempt" \
+  || bad "push: wrapper refusal" "rc=${rc} routed=[$(cat "${TMP}/routed.log")]"
+
+pbare="${TMP}/push-bare.git"; git init -q --bare "${pbare}"
+j=0
+for url in "ssh://git@github.com/CJPoll/custom.git" "ssh://git@gitlab.com/cjpoll/custom.git" "git@gitlab.com-work:cjpoll/custom.git" \
+           "gh:CJPoll/custom.git" "git@example.com:o/r.git" "https://example.com/o/r.git" "${pbare}" "file://${pbare}"; do
+  j=$((j + 1)); r="${TMP}/push-refuse-${j}"; mkrepo "${r}" "${url}"; reset_logs
+  err="$(STUB_RC=0 PATH="${TRIP}:${FSG_DIR}:${PATH}" "${FP}" -C "${r}" origin HEAD:main 2>&1 >/dev/null)"; rc=$?
+  if [ "${rc}" = 3 ] && [ ! -s "${TMP}/routed.log" ] && [ ! -s "${TMP}/plain.log" ] && grep -q 'Fix:' <<<"${err}" && grep -qF -- "${url}" <<<"${err}"; then
+    ok "push: ${url} is refused (exit 3, Fix:, names the URL); no wrapper, no plain git"
+  else
+    bad "push: ${url} expected refusal" "rc=${rc} routed=[$(cat "${TMP}/routed.log")] plain=[$(cat "${TMP}/plain.log")] err=${err}"
+  fi
+done
+
+r="${TMP}/push-keys"; mkrepo "${r}" "git@gitlab.com:cjpoll/custom.git"
+expect64p() { # expect64p <label> <args...>
+  local label="$1"; shift; reset_logs
+  err="$(STUB_RC=0 PATH="${TRIP}:${FSG_DIR}:${PATH}" "${FP}" "$@" 2>&1 >/dev/null)"; rc=$?
+  if [ "${rc}" = 64 ] && [ ! -s "${TMP}/routed.log" ] && [ ! -s "${TMP}/plain.log" ] && grep -q 'Fix:' <<<"${err}"; then
+    ok "push: ${label}"
+  else
+    bad "push: ${label}" "rc=${rc} routed=[$(cat "${TMP}/routed.log")] plain=[$(cat "${TMP}/plain.log")] err=${err}"
+  fi
+}
+expect64p "no -C is refused" origin HEAD:main
+expect64p "a non-repository -C is refused" -C "${TMP}/nowhere" origin HEAD:main
+expect64p "a leading 'push' word is refused (the arguments are git push's own)" -C "${r}" push origin HEAD:main
+expect64p "--repo is refused (it names the remote apart from the routed word)" -C "${r}" --repo=git@github.com:o/r.git HEAD:main
+expect64p "-o with its value as the next word is refused" -C "${r}" -o ci.skip origin HEAD:main
+expect64p "an abbreviated --push-option with a separate value is refused" -C "${r}" --push-opt ci.skip origin HEAD:main
+expect64p "a word that is neither a remote nor a URL is refused" -C "${r}" nosuchremote HEAD:main
+
+r="${TMP}/push-url"; mkrepo "${r}" "git@github.com:CJPoll/custom.git"
+git -C "${r}" remote set-url --push origin "git@gitlab.com:cjpoll/custom.git"
+reset_logs; STUB_RC=0 "${FP}" -C "${r}" origin HEAD:main >/dev/null 2>&1
+[ "$(cat "${TMP}/routed.log")" = "glab-athena git -C ${r} push origin HEAD:main" ] \
+  && ok "push: a pushurl override routes by the URL the push really reaches (gitlab pushurl on a github url)" \
+  || bad "push: pushurl" "routed=[$(cat "${TMP}/routed.log")]"
+git -C "${r}" remote set-url --add --push origin "git@github.com:CJPoll/custom.git"
+reset_logs; err="$(STUB_RC=0 "${FP}" -C "${r}" origin HEAD:main 2>&1 >/dev/null)"; rc=$?
+[ "${rc}" = 3 ] && [ ! -s "${TMP}/routed.log" ] && grep -q 'two forges' <<<"${err}" && grep -q 'Fix:' <<<"${err}" \
+  && ok "push: push URLs on two forges are refused (exit 3, Fix:), nothing pushed" \
+  || bad "push: two forges" "rc=${rc} routed=[$(cat "${TMP}/routed.log")] err=${err}"
+
+r="${TMP}/push-two"; mkrepo "${r}" "git@gitlab.com:cjpoll/custom.git"
+git -C "${r}" remote add github "git@github.com:CJPoll/custom.git"
+reset_logs; STUB_RC=0 "${FP}" -C "${r}" github HEAD:main >/dev/null 2>&1
+[ "$(cat "${TMP}/routed.log")" = "gh-athena git -C ${r} push github HEAD:main" ] \
+  && ok "push: a named remote routes by its own URL (github beside a gitlab origin)" \
+  || bad "push: named remote" "routed=[$(cat "${TMP}/routed.log")]"
+reset_logs; STUB_RC=0 "${FP}" -C "${r}" --force-with-lease=refs/heads/main:abc -u github HEAD >/dev/null 2>&1
+[ "$(cat "${TMP}/routed.log")" = "gh-athena git -C ${r} push --force-with-lease=refs/heads/main:abc -u github HEAD" ] \
+  && ok "push: options before the remote are skipped and passed through unchanged" \
+  || bad "push: options" "routed=[$(cat "${TMP}/routed.log")]"
+for cfg in "branch.main.pushRemote" "remote.pushDefault" "branch.main.remote"; do
+  git -C "${r}" config "${cfg}" github
+  reset_logs; STUB_RC=0 "${FP}" -C "${r}" >/dev/null 2>&1
+  [ "$(cat "${TMP}/routed.log")" = "gh-athena git -C ${r} push" ] \
+    && ok "push: with no remote named, ${cfg} picks the route" \
+    || bad "push: ${cfg}" "routed=[$(cat "${TMP}/routed.log")]"
+  git -C "${r}" config --unset "${cfg}"
+done
+reset_logs; STUB_RC=0 "${FP}" -C "${r}" >/dev/null 2>&1
+[ "$(cat "${TMP}/routed.log")" = "glab-athena git -C ${r} push" ] \
+  && ok "push: with no remote named and no push config, origin picks the route" \
+  || bad "push: origin default" "routed=[$(cat "${TMP}/routed.log")]"
+
+# One table: forge-push routes by what forge-git --route says, never a copy.
+# A stand-in forge-git that routes EVERY URL to glab-athena must send a
+# github.com push to glab-athena.
+cat > "${TMP}/fg-glab" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = --route ] && { echo glab-athena; exit 0; }
+exit 64
+EOF
+chmod +x "${TMP}/fg-glab"
+r="${TMP}/push-1"
+reset_logs; STUB_RC=0 FORGE_PUSH_FORGE_GIT="${TMP}/fg-glab" "${FP}" -C "${r}" origin HEAD:main >/dev/null 2>&1
+[ "$(cat "${TMP}/routed.log")" = "glab-athena git -C ${r} push origin HEAD:main" ] \
+  && ok "push: the route is forge-git's (--route), not a second table in forge-push" \
+  || bad "push: one table" "routed=[$(cat "${TMP}/routed.log")]"
+for u in "git@github.com:a/b.git" "https://gitlab.com/a/b.git" "/a/local/path"; do
+  got="$("${FG}" --route "${u}" 2>/dev/null)"; rc=$?
+  case "${u}" in git@github.com:*) w=gh-athena ;; https://gitlab.com/*) w=glab-athena ;; *) w=local ;; esac
+  [ "${rc}" = 0 ] && [ "${got}" = "${w}" ] && ok "forge-git --route ${u} -> ${w}" || bad "forge-git --route ${u}" "rc=${rc} got=${got}"
+done
+err="$("${FG}" --route "ssh://git@github.com/a/b.git" 2>&1 >/dev/null)"; rc=$?
+[ "${rc}" = 3 ] && grep -q 'Fix:' <<<"${err}" && ok "forge-git --route refuses ssh:// (exit 3, Fix:)" || bad "forge-git --route ssh://" "rc=${rc} err=${err}"
+
+# ---------------------------------------------------------------------------
 echo "D. unattended paths never reach a forge origin with plain git"
 FX="${TMP}/fx"; mkrepo "${FX}" "git@github.com:example/widgets.git"
 SHA="$(git -C "${FX}" rev-parse HEAD)"
@@ -242,6 +372,22 @@ expect_routed "wt merge's pull, under WT_AGENT_PUSH=1, goes through forge-git" \
   "gh-athena git -C ${FX} pull origin main --ff-only" \
   bash -c 'cd "$1" && . "$2/scripts/wt-lib/push.sh" && WT_AGENT_PUSH=1 wt_git_pull origin main --ff-only' _ "${FX}" "${ROOT}"
 
+# The push class (DND-1995): each unattended push, against a github.com and a
+# gitlab.com origin, reaches the matching wrapper through forge-push.
+FXL="${TMP}/fxl"; mkrepo "${FXL}" "git@gitlab.com:example/widgets.git"
+for pair in "${FX}|gh-athena" "${FXL}|glab-athena"; do
+  fx="${pair%%|*}"; w="${pair##*|}"
+  expect_routed "landing / lane sync-up (forge-push -C <lane> origin HEAD:main) pushes through ${w}" \
+    "${w} git -C ${fx} push origin HEAD:main" \
+    env GIT_TERMINAL_PROMPT=0 "${FP}" -C "${fx}" origin HEAD:main
+  expect_routed "leadtime-product's push (Forge.push) goes through ${w}" \
+    "${w} git -C ${fx} push -u origin HEAD" \
+    /usr/bin/ruby -I "${ROOT}/ai/lib" -e 'require "leadtime_product_io"; LeadTimeProductIO::Forge.push(ARGV[0], "-u", "origin", "HEAD")' "${fx}"
+  expect_routed "wt's push, under WT_AGENT_PUSH=1, goes through ${w}" \
+    "${w} git -C ${fx} push origin feat" \
+    bash -c 'cd "$1" && . "$2/scripts/wt-lib/push.sh" && WT_AGENT_PUSH=1 wt_git_push origin feat' _ "${fx}" "${ROOT}"
+done
+
 # The owner's own wt use keeps plain git (attended; the owner's key is theirs).
 reset_logs
 PATH="${TRIP}:${FSG_DIR}:${PATH}" bash -c 'cd "$1" && . "$2/scripts/wt-lib/push.sh" && wt_git_pull origin main --ff-only' _ "${FX}" "${ROOT}" >/dev/null 2>&1
@@ -277,6 +423,46 @@ else
   bad "class scan (exit ${rc})" "${scan}"
 fi
 
+# The push class: no unattended path runs `git push` with plain git or names a
+# forge wrapper for a push by hand; each push goes through ai/bin/forge-push.
+PALLOW="${TMP}/push-allow.tsv"
+cat > "${PALLOW}" <<'EOF'
+ai/bin/admiral-eval	"git", "--version"	the eval sandbox's own self-test: its 3-line argv window reaches the blocked-push probe below
+ai/bin/admiral-eval	"git", "push", "origin", "main"	the eval sandbox's self-test: asserts the sandbox BLOCKS this push
+ai/bin/blast-radius	cgit.call("push", "-q", bare	self-test fixture: pushes PR head refs into a local bare repo it built
+ai/bin/block-optimize	["git", "-C", s, "push"]	a deny-list test vector; never run
+ai/bin/harness-gate	git.call("-C", root, "push"	self-test fixture: pushes to a local bare origin it built
+ai/bin/harness-gate	git.call("-C", other, "push"	self-test fixture: pushes to a local bare origin it built
+ai/bin/harness-gate	git.call("-C", fixture, "push"	self-test fixture: pushes to a local bare origin it built
+ai/bin/harness-gate	git.call("-C", f_other, "push"	self-test fixture: pushes to a local bare origin it built
+ai/bin/tool-propose	["git", "-C", "/repo", "push"]	a deny-list test vector; never run
+ai/bin/tool-propose	["git", "-C", a, "push"]	a deny-list test vector; never run
+ai/bin/tool-propose	"--", "git", "push"]	a deny-list test vector; never run
+scripts/gc	git push origin	the owner's interactive commit tool (gc --push); no agent runs it
+scripts/iterate	git push	the owner's interactive iterate tool; no agent runs it
+scripts/wt-lib/push.sh	git push "$@"	wt_git_push's owner path (no WT_AGENT_PUSH); the agent path uses forge-push
+EOF
+scan="$(/usr/bin/ruby "${HERE}/plain_git_scan.rb" "${ROOT}" "${PALLOW}" --push 2>&1)"; rc=$?
+if [ "${rc}" -eq 0 ]; then
+  ok "push class scan: $(head -n 1 <<<"${scan}"); no plain or hand-routed push outside the allowlisted owner-run and fixture ones"
+else
+  bad "push class scan (exit ${rc})" "${scan}"
+fi
+
+# The prose an agent follows for an unattended push (the custom landing, the
+# lane sync-up) names forge-push, and no recipe pushes to main through a
+# wrapper named by hand. The scan above cannot read prose (its header says so).
+PROSE=(ai/skills/athena:merge-boarding/SKILL.md ai/skills/athena:shipwright-lane/SKILL.md ai/skills/athena:github/SKILL.md
+       ai/skills/athena:gitlab/SKILL.md ai/skills/athena:lead-time-improve/SKILL.md)
+hand="$(cd "${ROOT}" && grep -nE '(gh|glab)-athena git[^`]*push[^`]*:(refs/heads/)?main' "${PROSE[@]}" ai/agents/*.md.in ai/blocks -r 2>/dev/null)"
+miss=""
+for f in ai/skills/athena:merge-boarding/SKILL.md ai/skills/athena:shipwright-lane/SKILL.md; do
+  grep -q 'forge-push -C' "${ROOT}/${f}" || miss="${miss} ${f}"
+done
+[ -z "${hand}" ] && [ -z "${miss}" ] \
+  && ok "prose: the landing and sync-up recipes push through forge-push; none pushes to main through a wrapper named by hand" \
+  || bad "prose push recipes" "hand-routed=[${hand}] missing forge-push in:[${miss}]"
+
 # The scanner itself: it must SEE the shapes it claims to (a scan that finds
 # nothing because it reads nothing passes vacuously).
 SCAN_FX="${TMP}/scanfx"; mkdir -p "${SCAN_FX}/ai/bin" "${SCAN_FX}/ai/lib"
@@ -307,6 +493,30 @@ got="$(grep '^PLAIN' <<<"${scan}" | sed -E 's/^PLAIN ([^:]+:[0-9]+:).*/\1/' | tr
 [ "${rc}" -eq 1 ] && [ "${got}" = "${want}" ] \
   && ok "the scanner finds plain reads (one-liner with || die, env prefix and -c, a split Ruby argv, a helper call) and skips messages, forge-git and a local ls-remote --get-url" \
   || bad "scanner fixture" "rc=${rc} want=[${want}] got=[${got}] scan=${scan}"
+cat > "${SCAN_FX}/ai/bin/pushish" <<'EOF'
+#!/usr/bin/env bash
+GIT_TERMINAL_PROMPT=0 "${HERE}/gh-athena" git -c credential.helper= push origin HEAD:main
+git -C "${LANE}" push origin HEAD:main || die 3 "push failed" "Fix: retry"
+echo "Fix: push with ~/dev/custom/ai/bin/gh-athena git push origin HEAD"
+exec ~/dev/custom/ai/bin/glab-athena git -C "${D}" push -u origin HEAD
+"${FORGE_PUSH}" -C "${LANE}" origin HEAD:main
+EOF
+cat > "${SCAN_FX}/ai/lib/pushish.rb" <<'EOF'
+argv = [Cmd.forge_push, "-C", dir, "origin", "HEAD"]
+def push_argv(*a)
+  [Cmd.gh_athena, "git", "-c", "credential.helper=",
+   "push", *a]
+end
+out, st = Open3.capture2e("git", "-C", dir, "push", "origin", "HEAD")
+warn "Fix: `gh-athena git push origin HEAD` then retry"
+EOF
+git -C "${SCAN_FX}" add -A
+scan="$(/usr/bin/ruby "${HERE}/plain_git_scan.rb" "${SCAN_FX}" "${TMP}/empty-allow.tsv" --push 2>&1)"; rc=$?
+want="ai/bin/pushish:2: ai/bin/pushish:3: ai/bin/pushish:5: ai/lib/pushish.rb:3: ai/lib/pushish.rb:6:"
+got="$(grep '^PLAIN' <<<"${scan}" | sed -E 's/^PLAIN ([^:]+:[0-9]+:).*/\1/' | tr '\n' ' ' | sed 's/ $//')"
+[ "${rc}" -eq 1 ] && [ "${got}" = "${want}" ] \
+  && ok "the push scanner finds a quoted wrapper path, a plain push with || die, an exec'd wrapper, a split Ruby argv naming the wrapper, a plain Ruby argv; skips messages and forge-push" \
+  || bad "push scanner fixture" "rc=${rc} want=[${want}] got=[${got}] scan=${scan}"
 if fsg_verify; then ok "no git call fell through past the tripwire (DND-1667)"
 else bad "no git call fell through past the tripwire (DND-1667)" "see the forge-stub-guard FAIL above"; fi
 echo

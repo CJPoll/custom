@@ -7,12 +7,13 @@
 # interactive use, and a human's push should be the human's.
 #
 # An agent driving wt sets the EXPLICIT signal WT_AGENT_PUSH=1. Then every push
-# goes through the Athena forge wrapper for the remote's host, so the forge
-# records the bot, not the owner:
+# goes through ai/bin/forge-push, which runs the Athena forge wrapper for the
+# remote's host (forge-git's host table, DND-1995), so the forge records the
+# bot, not the owner:
 #   github.com -> gh-athena git push ...   (athena-harness[bot])
 #   gitlab.com -> glab-athena git push ... (the bot of the project namespace)
 # Under the signal nothing falls back to a plain push. A remote no wrapper
-# covers, a remote that does not resolve, a missing wrapper, or a wrapper
+# covers, a remote that does not resolve, a missing forge-push, or a wrapper
 # refusal each FAIL, exit 3, with a Fix:. A Graphite submit (which pushes with
 # the owner's credentials) is refused too: Graphite has no Athena route (see
 # wt_refuse_gt_submit_under_agent), so agents stack with plain branches and
@@ -24,8 +25,8 @@
 #   1               -> agent path (forge wrapper)
 #   anything else   -> refused: a malformed signal is an error, not a guess.
 #
-# WT_ATHENA_BIN_DIR overrides where the wrappers are found (default: this
-# checkout's ai/bin). It exists for the hermetic self-test
+# WT_ATHENA_BIN_DIR overrides where forge-push and forge-git are found
+# (default: this checkout's ai/bin). It exists for the hermetic self-test
 # (scripts/test/wt-agent-push/self-test.sh).
 
 # Prevent direct execution
@@ -58,45 +59,12 @@ if [[ -z "${WT_LIB_PUSH_SOURCED:-}" ]]; then
         esac
     }
 
-    # wt_push_url_host <url> : the lowercase host a git URL reaches, or empty
-    # for a local path / file URL.
-    wt_push_url_host() {
-        local url="$1" rest=""
-        case "$url" in
-            file://*) ;;
-            *://*)
-                rest="${url#*://}"; rest="${rest%%/*}"; rest="${rest##*@}"; rest="${rest%%:*}" ;;
-            /*|./*|../*) ;;
-            *:*)
-                # scp form [user@]host:path — a colon before any slash.
-                rest="${url%%:*}"
-                case "$rest" in */*) rest="" ;; *) rest="${rest##*@}" ;; esac ;;
-        esac
-        printf '%s' "$rest" | tr '[:upper:]' '[:lower:]'
-    }
-
-    # _wt_push_remote_arg <git push args...> : the repository argument (the
-    # first positional). Refuses an option whose value is a separate word, so
-    # the value is never mistaken for the remote.
-    _wt_push_remote_arg() {
-        local a
-        for a in "$@"; do
-            case "$a" in
-                --) break ;;
-                -o|--push-option|--repo|--receive-pack|--exec)
-                    _wt_push_refuse "\`git push $*\`: the option $a takes a separate value, which wt does not parse." \
-                        "pass it as $a=<value>, or push through the wrapper directly; $WT_AGENT_PUSH_ESCALATE"
-                    return ;;
-                -*) continue ;;
-                *) printf '%s' "$a"; return 0 ;;
-            esac
-        done
-        _wt_push_refuse "\`git push $*\` names no remote." \
-            "wt always names the remote (e.g. \`origin\`); this is a wt bug — $WT_AGENT_PUSH_ESCALATE"
-    }
-
     # wt_git_push <git push args...> : push as the owner (default) or, under
-    # WT_AGENT_PUSH=1, through the forge wrapper for the remote's host.
+    # WT_AGENT_PUSH=1, through ai/bin/forge-push, which picks the forge
+    # wrapper for the remote's host from forge-git's table (DND-1995; wt kept
+    # its own copy of that table before). forge-push refuses an unknown host,
+    # a local path, an unresolvable remote and push URLs on two forges; wt
+    # turns any non-zero exit into its own loud refusal, never a plain push.
     wt_git_push() {
         local mode
         mode="$(wt_agent_push_mode)" || return 3
@@ -105,45 +73,18 @@ if [[ -z "${WT_LIB_PUSH_SOURCED:-}" ]]; then
             return
         fi
 
-        local remote urls url host wrapper="" w
-        remote="$(_wt_push_remote_arg "$@")" || return 3
-        urls="$(git remote get-url --push --all "$remote" 2>/dev/null)" || urls=""
-        [ -n "$urls" ] || {
-            _wt_push_refuse "the push URL of remote '$remote' in $(pwd) does not resolve, so wt cannot tell which forge wrapper to use." \
-                "check \`git remote -v\` in that repo; if the remote is right, $WT_AGENT_PUSH_ESCALATE"
-            return 3
-        }
-        while IFS= read -r url; do
-            [ -n "$url" ] || continue
-            host="$(wt_push_url_host "$url")"
-            case "$host" in
-                github.com) w=gh-athena ;;
-                gitlab.com) w=glab-athena ;;
-                *)
-                    _wt_push_refuse "remote '$remote' pushes to '$url' (host '${host:-none}'); only github.com (gh-athena) and gitlab.com (glab-athena) have an Athena push path." \
-                        "an agent cannot push there as Athena; $WT_AGENT_PUSH_ESCALATE"
-                    return 3 ;;
-            esac
-            if [ -n "$wrapper" ] && [ "$wrapper" != "$w" ]; then
-                _wt_push_refuse "remote '$remote' has push URLs on more than one forge." \
-                    "give the remote a single forge; $WT_AGENT_PUSH_ESCALATE"
-                return 3
-            fi
-            wrapper="$w"
-        done <<< "$urls"
-
         local bin_dir="${WT_ATHENA_BIN_DIR:-${WT_LIB_PUSH_DIR}/../../ai/bin}"
-        [ -x "${bin_dir}/${wrapper}" ] || {
-            _wt_push_refuse "the wrapper ${bin_dir}/${wrapper} is missing or not executable." \
+        [ -x "${bin_dir}/forge-push" ] || {
+            _wt_push_refuse "${bin_dir}/forge-push is missing or not executable." \
                 "run wt from a full ~/dev/custom checkout (scripts/ and ai/bin/ side by side); $WT_AGENT_PUSH_ESCALATE"
             return 3
         }
 
         local rc=0
-        GIT_TERMINAL_PROMPT=0 "${bin_dir}/${wrapper}" git push "$@" || rc=$?
+        GIT_TERMINAL_PROMPT=0 "${bin_dir}/forge-push" -C "$(pwd)" "$@" || rc=$?
         if [ "$rc" -ne 0 ]; then
-            _wt_push_refuse "\`${wrapper} git push $*\` failed (exit $rc); see its output above." \
-                "if that output is a push rejection (non-fast-forward, stale lease), resolve it and re-run; otherwise $WT_AGENT_PUSH_ESCALATE"
+            _wt_push_refuse "\`forge-push -C $(pwd) $*\` failed (exit $rc); see its output above." \
+                "if that output is a push rejection (non-fast-forward, stale lease), resolve it and re-run; if it is a refused remote, follow its Fix:; otherwise $WT_AGENT_PUSH_ESCALATE"
             return 3
         fi
         return 0

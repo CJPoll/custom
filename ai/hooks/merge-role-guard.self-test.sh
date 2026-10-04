@@ -206,6 +206,7 @@ not_merge() { expect "$1" captain allow "$2" "$3"; }
 
 GHA="${HOME}/dev/custom/ai/bin/gh-athena"
 GLA="${HOME}/dev/custom/ai/bin/glab-athena"
+FP="${HOME}/dev/custom/ai/bin/forge-push"
 
 echo "== the DND-321 regression: a captain's wrapper merge =="
 expect "DND-321: gh-athena pr merge 275 --squash --auto" captain deny "${GHA} pr merge 275 --squash --auto" "${FEAT}" "" "athena-captain"
@@ -250,6 +251,12 @@ merge_class "the repo's default branch (trunk)" "cd ${TRUNK} && git push origin 
 merge_class "no refspec, on the default branch (trunk)" "git -C ${TRUNK} push"
 merge_class "no refspec, stdin cwd on main" "git push" "${HOMEREPO}"
 merge_class "glab-athena git push" "cd ${FEAT} && ${GLA} git push origin HEAD:main"
+# DND-1995: forge-push -C <dir> <push args> is `git -C <dir> push <args>`.
+merge_class "forge-push -C <worktree> origin HEAD:main" "${FP} -C ${FEAT} origin HEAD:main"
+merge_class "forge-push with a relative -C" "cd ${TMP}/wt && ${FP} -C feat origin HEAD:main"
+merge_class "forge-push, no refspec, on main" "GIT_TERMINAL_PROMPT=0 ${FP} -C ${HOMEREPO}"
+not_merge "forge-push of a feature branch" "${FP} -C ${FEAT} -u origin HEAD"
+not_merge "forge-push --help" "${FP} --help"
 expect "no refspec, unresolvable branch, names it" captain deny "cd \"\$WT\" && git push" "${HOMEREPO}" "" "could not tell"
 expect "no refspec, unresolvable branch" gp deny "cd \"\$WT\" && git push"
 expect "no refspec, unresolvable branch" admiral allow "cd \"\$WT\" && git push"
@@ -477,6 +484,11 @@ expect "lane, but a pr merge" shipwright deny "cd ${LANE} && ${GHA} pr merge 5 -
 expect "lane, but a local merge on main" shipwright deny "git -C ${HOMEREPO} merge --ff-only origin/main"
 expect "lane push by a captain" captain deny "cd ${LANE} && ${SWPUSH}"
 expect "lane push, top level" top allow "cd ${LANE} && ${SWPUSH}"
+FPPUSH="origin HEAD:main"
+expect "cron lane forge-push HEAD:main (DND-1995)" shipwright allow "${FP} -C ${LANE} ${FPPUSH}"
+expect "lead-time lane forge-push HEAD:main (DND-1995)" shipwright allow "${FP} -C ${LTLANE} ${FPPUSH}"
+expect "product repo's lead-time lane forge-push HEAD:main" shipwright deny "${FP} -C ${PRODLANE} ${FPPUSH}"
+expect "lane forge-push by a captain" captain deny "${FP} -C ${LANE} ${FPPUSH}"
 expect "architect merge" architect deny "${GHA} pr merge 5 --squash"
 
 echo "== role resolution =="
