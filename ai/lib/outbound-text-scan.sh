@@ -207,7 +207,8 @@ ots_refuse_flag_value() {
 # return is 2 (OTS_UNKNOWN, and OTS_AMBIG the word that makes it ambiguous)
 # only when that reading could be wrong in a way that matters: the next word
 # could be read as a flag or is `--`, or the flag is a letter with more of its
-# word after it. Otherwise returns 0 and sets, per value-taking flag
+# word after it. A lenient parse that read past such a flag sets
+# OTS_SAW_UNKNOWN. Otherwise returns 0 and sets, per value-taking flag
 # occurrence, in order:
 #   OTS_FN   its long name (no dashes)
 #   OTS_FV   its value
@@ -226,7 +227,7 @@ ots_pflag_parse() {
   local mode="$1" table="$2" off="$3"; shift 3
   local -a args=("$@")
   local n=$# i=0 a name long j sh c rest
-  OTS_FN=() OTS_FV=() OTS_FI=() OTS_FP=() OTS_FS=() OTS_PO=() OTS_POI=() OTS_UNKNOWN="" OTS_HELP="" OTS_AMBIG=""
+  OTS_FN=() OTS_FV=() OTS_FI=() OTS_FP=() OTS_FS=() OTS_PO=() OTS_POI=() OTS_UNKNOWN="" OTS_HELP="" OTS_AMBIG="" OTS_SAW_UNKNOWN=""
   case "$mode" in strict | lenient) ;; *) OTS_UNKNOWN="parse mode '$mode'"; return 1 ;; esac
   while [ "$i" -lt "$n" ]; do
     a="${args[$i]}"
@@ -242,6 +243,7 @@ ots_pflag_parse() {
         if ! ots_table_long "$table" "$long"; then
           OTS_UNKNOWN="--$long"
           [ "$mode" = lenient ] || return 1
+          OTS_SAW_UNKNOWN=1
           if [[ "$name" != *=* ]] && ots_pflag_ambiguous "${args[@]:$((i + 1)):1}"; then return 2; fi
           i=$((i + 1)); continue
         fi
@@ -260,6 +262,7 @@ ots_pflag_parse() {
             if [ "$c" = h ]; then OTS_HELP=1; return 0; fi
             OTS_UNKNOWN="-$c (in '$a')"
             [ "$mode" = lenient ] || return 1
+            OTS_SAW_UNKNOWN=1
             # Lenient: the letter may take the rest of the word, or the next
             # word, as its value; either way it is ambiguous when what follows
             # could be read as flags.

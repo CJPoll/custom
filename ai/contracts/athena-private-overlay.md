@@ -410,10 +410,9 @@ PUBLIC or read as private.
   `--web` body, `gh api` writes, the content of release asset files, or other
   commands (gists, repository or label descriptions, release upload). A CLI
   whose flags differ from its pinned table is read by the table until the
-  table is regenerated. `ai/bin/cli-flag-table --check` names the drift on a
-  machine running the pinned version, and its self-test fails where the CLI
-  is newer than the pin, or where a table differs from origin/main's and
-  cannot be compared. gh-athena's and glab-athena's residuals are listed in
+  table is regenerated. `ai/bin/cli-flag-table --check` names the drift only
+  on a machine running the pinned version; its self-test fails where a table
+  differs from origin/main's and cannot be compared there. gh-athena's and glab-athena's residuals are listed in
   the headers of `ai/lib/gh-outbound-scan.sh` and
   `ai/lib/glab-outbound-scan.sh`.
 - gh-athena and glab-athena run the scanner beside them, so a worktree's

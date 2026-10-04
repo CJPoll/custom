@@ -265,6 +265,8 @@ for argv in "mr note 5 --frobnicate -m x${TOKEN}" "mr update 5 --frobnicate -- -
 done
 gla mr note 5 --frobnicate value -m "x${TOKEN}"
 if refused_hit; then ok "a flag the table lacks, before a plain word, is read as a switch and the text is scanned"; else bad "unknown then plain" "rc=${RC} ${OUT}"; fi
+gla mr create --frobnicate "x${TOKEN}"
+if refused_hit && [[ "${OUT}" == *"argument:1 label=synth-token"* ]]; then ok "with no text flag, the word after a flag the table lacks is scanned (a newer text flag)"; else bad "unknown text flag" "rc=${RC} ${OUT}"; fi
 gla release create v1 --ref main -n "clean" -F "${TMP}/body-clean.md"
 if [ "${RC}" = 0 ] && sent; then ok "valued flags with plain values, then text and a file, are sent"; else bad "plain values" "rc=${RC} ${OUT}"; fi
 gla mr create --draft -t "clean title" -d "x${TOKEN}"

@@ -62,9 +62,9 @@
 # files, names that are not free text but reach the public repository (labels,
 # milestones, projects, issue types: gh refuses a name that does not exist), a
 # gh whose flags differ from the pinned table (`ai/bin/cli-flag-table --cli gh
-# --check` names the drift where gh is the pinned version; its self-test fails
-# where gh is newer, or where the table differs from origin/main's and cannot
-# be compared), a value no pattern describes, and the waiver. The scanner run is the one beside
+# --check` names the drift only where gh is the pinned version; its self-test
+# fails where the table differs from origin/main's and cannot be compared), a
+# value no pattern describes, and the waiver. The scanner run is the one beside
 # the gh-athena invoked, so a worktree's gh-athena runs that branch's scanner
 # (the pre-push hook avoids this by running the main checkout's).
 #

@@ -42,7 +42,8 @@
 # text, file or project is sent depends on the reading. This guard's own text,
 # file and target flags take a value whatever the table says. A value given as
 # its own word that names a file or repo flag (`--label -R <repo>`) is REFUSED,
-# and every positional is scanned when the command carries text (the two rules
+# and every positional is scanned when the command carries text or has a flag
+# the table lacks (which may be a newer text flag) (the two rules
 # in ai/lib/outbound-text-scan.sh, shared with gh-athena). A file or stdin is
 # copied once into a private file, scanned, and handed to glab in its place.
 #
@@ -359,7 +360,9 @@ glos_guard() {
     # and targets.
     ots_collect "$table" "$GLOS_TEXT" "$GLOS_FILE" "$GLOS_TARGET"
     for a in "${OTS_PO[@]}"; do pos+=("$a"); glos_positional "$a"; done
-    if [ -n "$OTS_POS_TEXT" ] || [ "$((${#texts[@]} + ${#fsrc[@]}))" -gt 0 ]; then
+    # A flag the table lacks may be a newer text flag whose value this parse
+    # reads as a positional: every positional is then text.
+    if [ -n "$OTS_POS_TEXT" ] || [ -n "$OTS_SAW_UNKNOWN" ] || [ "$((${#texts[@]} + ${#fsrc[@]}))" -gt 0 ]; then
       for a in "${pos[@]}"; do texts+=("$a"); tlab+=(argument); done
     fi
   fi
