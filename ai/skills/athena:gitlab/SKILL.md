@@ -176,14 +176,28 @@ declares one, it is refused (`NO RECEIPT`, exit 3) unless `integration-gate`
 covers the pushed commit (**athena:github** → *Pushing as Athena*, DND-1690).
 Run the gate; it is not an identity problem to escalate.
 
-The one exception is seeding an empty GitLab project from GitHub (DND-1983).
-From the checkout whose origin is still the GitHub project, run
+The one exception is a `main` push to a GitLab project before the cutover
+flips origin to it (DND-1983): the first seed, the final push before the flip,
+and the dual-run pushes. From the checkout whose origin is still the GitHub
+project, run
 `~/dev/custom/ai/bin/glab-athena git seed-mirror --to https://gitlab.com/<ns>/<project>.git`.
-It reads origin's main fresh and pushes exactly that SHA to the project's
-main, fast-forward only. It refuses a red main, any read it cannot make, and
-any checkout whose origin is already on gitlab.com. Branches and tags go
-through `glab-athena git push` as usual. The conditions are in
+It reads GitHub main fresh and pushes exactly that SHA to the project's main,
+fast-forward only. It refuses a main that main-health recorded red, any read
+it cannot make, a project other than origin's repository, and any checkout
+whose origin is already on gitlab.com. The conditions are in
 `ai/lib/glab-seed-mirror.sh`.
+
+Push branches and tags with `glab-athena git push` and explicit refspecs that
+leave `main` out. A `refs/heads/*` glob covers `main` and is refused NO
+RECEIPT, even with a `^refs/heads/main` exclusion:
+
+```sh
+git fetch --prune --tags origin
+{ git for-each-ref --format='%(refname):refs/heads/%(refname:lstrip=3)' refs/remotes/origin
+  git for-each-ref --format='%(refname):%(refname)' refs/tags; } \
+  | grep -v -e ':refs/heads/main$' -e ':refs/heads/HEAD$' \
+  | xargs ~/dev/custom/ai/bin/glab-athena git push --atomic https://gitlab.com/<ns>/<project>.git
+```
 
 An agent driving `wt` sets `WT_AGENT_PUSH=1` so `wt`'s own pushes take this
 path; see the header of `scripts/wt-lib/push.sh`.

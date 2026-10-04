@@ -72,7 +72,15 @@ chmod +x "${TMP}/stubbin/glab"
 # real CLI (ai/lib/forge-stub-guard.sh).
 . "${HERE}/../../lib/forge-stub-guard.sh"
 fsg_arm "${TMP}/forge-guard"
-fsg_require_stubs "${TMP}/stubbin" glab
+printf '#!/bin/sh\necho "STUB-GH-REACHED $*"\nexit 97\n' > "${TMP}/stubbin/gh"
+chmod +x "${TMP}/stubbin/gh"
+fsg_require_stubs "${TMP}/stubbin" glab gh
+# seed-mirror reads GitHub through gh-athena (DND-1983): a fixture App token,
+# never a mint.
+printf '12345\n' > "${TMP}/gh-app-id"; printf 'not-a-key\n' > "${TMP}/gh-key.pem"
+printf '%s\t%s\n' "ghs_SELFTESTFAKETOKEN0000" "$(( $(date +%s) + 86400 ))" > "${TMP}/gh-token-cache"; chmod 600 "${TMP}/gh-token-cache"
+export GH_ATHENA_APP_ID_FILE="${TMP}/gh-app-id" GH_ATHENA_KEY="${TMP}/gh-key.pem" GH_ATHENA_TOKEN_CACHE="${TMP}/gh-token-cache"
+export ATHENA_TELEMETRY_DIR="${TMP}/telemetry"
 export PATH="${TMP}/stubbin:${PATH}"
 
 # new_repo <name> <origin-url> -> a repo with one commit, origin set, echoes path.
@@ -840,7 +848,7 @@ sm_refused "COULD NOT LOOK" && [[ "${ERR}" == *"main-health marker"* ]] \
 # Reads that fail refuse.
 sm_setup s5
 SM_SRC="${TMP}/s5-no-such.git" sm "${SW}" --to "${SM_TO}"
-sm_refused "COULD NOT LOOK" && [[ "${ERR}" == *"fresh read of origin"* ]] \
+sm_refused "COULD NOT LOOK" && [[ "${ERR}" == *"fresh read of GitHub main"* ]] \
   && ok "S5. the source read fails: refused COULD NOT LOOK" \
   || bad "S5. unreadable source" "rc=${RC} out='${OUT}' err='${ERR}'"
 SM_SRC="${GL}" sm "${SW}" --to "${SM_TO}"
@@ -890,12 +898,54 @@ sm "${SW}"
 sm_refused USAGE && ok "S8d. no --to: refused (USAGE)" \
   || bad "S8d. missing --to" "rc=${RC} out='${OUT}' err='${ERR}'"
 
+sm "${SW}" --to "https://gitlab.com/cjpoll/../cjpoll/seed.git"
+sm_refused TARGET && [[ "${ERR}" == *"path segment"* ]] \
+  && ok "S8e. a target with a '..' path segment: refused (TARGET)" \
+  || bad "S8e. dot-segment target refused" "rc=${RC} out='${OUT}' err='${ERR}'"
+sm "${SW}" --to "https://gitlab.com/cjpoll/other.git"
+sm_refused TARGET && [[ "${ERR}" == *"not origin's repository 'seed'"* ]] \
+  && ok "S8f. a target project that is not origin's repository: refused (TARGET)" \
+  || bad "S8f. other project refused" "rc=${RC} out='${OUT}' err='${ERR}'"
+
 # A seam outside a dry run refuses before any read: it cannot redirect a read
-# behind a real push.
-OUT="$(cd "${SW}" && GLAB_ATHENA_SEED_SOURCE_READ="${GH}" "${WRAPPER}" git seed-mirror --to "${SM_TO}" 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"
-sm_refused USAGE && [[ "${ERR}" == *"GLAB_ATHENA_SEED_SOURCE_READ"* ]] \
-  && ok "S9. a read seam set outside a dry run: refused (USAGE), nothing read or pushed" \
-  || bad "S9. seam outside dry run" "rc=${RC} out='${OUT}' err='${ERR}'"
+# behind a real push. Each seam on its own.
+for seam in GLAB_ATHENA_SEED_SOURCE_READ GLAB_ATHENA_SEED_TARGET_READ; do
+  OUT="$(cd "${SW}" && env "${seam}=${GH}" "${WRAPPER}" git seed-mirror --to "${SM_TO}" 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"
+  sm_refused USAGE && [[ "${ERR}" == *"${seam}"* ]] && [[ "${ERR}" != *"main-health"* ]] \
+    && ok "S9. ${seam} set outside a dry run: refused (USAGE) before any read, nothing pushed" \
+    || bad "S9. ${seam} outside dry run" "rc=${RC} out='${OUT}' err='${ERR}'"
+done
+
+# The source read is GitHub's, through gh-athena's route, outside the
+# checkout: a checkout's ssh command (or proxy) cannot answer it with a local
+# repository. Before review, `git ls-remote origin` ran the repository's
+# core.sshCommand and took its answer as GitHub main.
+sm_setup s10
+FORGED="${TMP}/s10-forged.git"; git clone -q --bare "${GH}" "${FORGED}"
+git -C "${SW}" remote set-url origin "git@github.com:CJPoll/seed.git"
+printf '#!/bin/sh\ntouch "%s/s10-ssh-ran"\nexec git-upload-pack "%s"\n' "${TMP}" "${FORGED}" > "${TMP}/s10-ssh"; chmod +x "${TMP}/s10-ssh"
+git -C "${SW}" config core.sshCommand "${TMP}/s10-ssh"
+# ssh is allowed for this one call (its "ssh" is the local script), so the
+# repository's ssh command WOULD answer a read that went through it.
+OUT="$(cd "${SW}" && env -u GIT_SSH_COMMAND GIT_ALLOW_PROTOCOL=file:ssh GLAB_ATHENA_SEED_TARGET_READ="${GL}" GLAB_ATHENA_GIT_DRY_RUN=1 "${WRAPPER}" git seed-mirror --to "${SM_TO}" 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"
+sm_refused "COULD NOT LOOK" && [ ! -e "${TMP}/s10-ssh-ran" ] && [[ "${ERR}" == *"gh-athena git ls-remote https://github.com/CJPoll/seed.git"* ]] \
+  && ok "S10. an ssh origin with a caller core.sshCommand: the read goes to https://github.com through gh-athena, the ssh command never runs (no network here: COULD NOT LOOK)" \
+  || bad "S10. source read not shaped by the checkout" "rc=${RC} ssh-ran=$([ -e "${TMP}/s10-ssh-ran" ] && echo yes || echo no) out='${OUT}' err='${ERR}'"
+git -C "${SW}" remote set-url origin "${FORGED}"
+sm "${SW}" --to "${SM_TO}"
+sm_refused SOURCE && ok "S10b. a local-path origin: refused (SOURCE), with Fix:" \
+  || bad "S10b. local origin refused" "rc=${RC} out='${OUT}' err='${ERR}'"
+git -C "${SW}" remote set-url origin "https://github.com/CJPoll/seed.git"
+git -C "${SW}" config core.sshCommand false
+
+# The sanction is bound to the URL: a caller rewrite of the target's push URL
+# leaves the seed SHA uncovered, and nothing runs.
+sm_setup s11
+git -C "${SW}" config "url.https://gitlab.com/cjpoll/elsewhere.git.pushInsteadOf" "${SM_TO}"
+sm "${SW}" --to "${SM_TO}"
+[ "${RC}" = 3 ] && [[ "${OUT}" != *"dry-run: exec git"* ]] && [[ "${ERR}" != *"seeds ${SM_TO} main as a mirror"* ]] \
+  && ok "S11. a pushInsteadOf that moves the target: the sanction does not apply, refused, nothing runs" \
+  || bad "S11. sanction bound to the URL" "rc=${RC} out='${OUT}' err='${ERR}'"
 
 # DND-1647: no gh/glab call may have fallen through past its stub.
 if fsg_verify; then ok "no gh/glab call fell through past its stub (DND-1647)"

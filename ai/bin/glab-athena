@@ -45,7 +45,10 @@
 #
 # Test seams: GITLAB_ATHENA_TOKEN_FILE replaces the RESOLVED identity's token
 # file (the identity is still resolved and refused the same way);
-# ATHENA_FORGE_IDENTITIES_FILE / ATHENA_PRIVATE_ROOT name fixture map halves.
+# ATHENA_FORGE_IDENTITIES_FILE / ATHENA_PRIVATE_ROOT name fixture map halves;
+# GLAB_ATHENA_SEED_SOURCE_READ / GLAB_ATHENA_SEED_TARGET_READ redirect
+# seed-mirror's two reads, under GLAB_ATHENA_GIT_DRY_RUN=1 only
+# (ai/lib/glab-seed-mirror.sh).
 set -eu
 
 # `glab-athena --help` (alone) answers the wrapper's own help on stdout and does
@@ -358,7 +361,7 @@ if [ "${1:-}" = git ]; then
 		}
 		# shellcheck source=../lib/glab-seed-mirror.sh
 		. "$GSM_LIB"
-		gsm_main "$(readlink -f "${BASH_SOURCE[0]}")" "$@"
+		gsm_main "$(readlink -f "${BASH_SOURCE[0]}")" "$GA_DIR/gh-athena" "$@"
 		set -- "${GSM_PUSH_ARGV[@]}"
 	fi
 	fg_refuse_non_https "$@"
