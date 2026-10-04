@@ -24,8 +24,9 @@ shown() {
 }
 # expect <name> <want targets> <has_url> [-R values...] (GH_REPO from the caller)
 expect() {
-  local name="$1" want="$2"; shift 2
-  if gtr_resolve "$@" && [ "$(shown)" = "${want}" ]; then ok "${name}"; else bad "${name}" "got rc=$? targets=$(shown) why=${GTR_WHY}"; fi
+  local name="$1" want="$2" rc; shift 2
+  gtr_resolve "$@"; rc=$?
+  if [ "${rc}" = 0 ] && [ "$(shown)" = "${want}" ]; then ok "${name}"; else bad "${name}" "got rc=${rc} targets=$(shown) why=${GTR_WHY}"; fi
 }
 # refuses <name> <has_url> [-R values...]
 refuses() {
@@ -70,6 +71,12 @@ for v in not-a-repo a/b/c/d " " "a b/c"; do
   GH_REPO="${v}" refuses "GH_REPO='${v}' with no -R refused" 0
 done
 GH_REPO=not-a-repo expect "a malformed GH_REPO is not read when a -R names the repo" "[o/r]" 0 o/r
+# Stricter than gh on purpose (header): refused, never sent.
+GH_REPO=not-a-repo refuses "a malformed GH_REPO beside a URL refuses" 1
+unset GH_REPO
+refuses "an overridden malformed -R refuses" 0 junk o/r
+GH_REPO=$'o/r\nx' refuses "a GH_REPO with a newline refuses" 0 ""
+if [[ "${GTR_WHY}" != *$'\n'* ]]; then ok "the refusal shows the value quoted, with no raw newline"; else bad "quoted value" "${GTR_WHY}"; fi
 
 echo
 echo "gh-target-repo self-test: ${PASS} passed, ${FAIL} failed"

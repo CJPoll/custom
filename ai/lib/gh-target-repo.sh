@@ -17,7 +17,11 @@
 #
 # The function is a superset of gh's choice, never a subset: every non-empty
 # -R value is a target, not only the last, so a scan can only run more often
-# than gh's own choice requires.
+# than gh's own choice requires. It is stricter than gh on purpose in two
+# places, both refusals and never a send: an earlier -R that the last one
+# overrides must still be well formed, and a malformed GH_REPO is refused even
+# when a PR or issue URL names the repository (gh reads GH_REPO only when it
+# needs the base repository, which a URL lookup may not).
 
 # gtr_well_formed <value> : true when <value> is a repository in a form gh
 # reads (ghrepo.FromFullName): [HOST/]OWNER/REPO, a URL, or an scp-style git
@@ -49,7 +53,7 @@ gtr_resolve() {
     last="$v"
     [ -n "$v" ] || continue
     if ! gtr_well_formed "$v"; then
-      GTR_WHY="COULD NOT LOOK: the -R/--repo value '$v' is not a repository gh can read ([HOST/]OWNER/REPO or a URL), so which repository this write reaches is unknown; that is not the same as private. Fix: pass -R <owner>/<repo>, then retry."
+      GTR_WHY="COULD NOT LOOK: the -R/--repo value $(printf '%q' "$v") is not a repository gh can read ([HOST/]OWNER/REPO or a URL), so which repository this write reaches is unknown; that is not the same as private. Fix: pass -R <owner>/<repo>, then retry."
       return 1
     fi
     GTR_TARGETS+=("$v")
@@ -59,7 +63,7 @@ gtr_resolve() {
   if [ -n "${GH_REPO:-}" ]; then
     if [ "$#" -gt 0 ]; then from="GH_REPO (the -R/--repo value is empty, so gh uses GH_REPO)"; else from="GH_REPO"; fi
     if ! gtr_well_formed "$GH_REPO"; then
-      GTR_WHY="COULD NOT LOOK: $from is '$GH_REPO', not a repository gh can read ([HOST/]OWNER/REPO or a URL), so which repository this write reaches is unknown; that is not the same as private. Fix: unset GH_REPO or set it to <owner>/<repo>, or pass a non-empty -R <owner>/<repo>, then retry."
+      GTR_WHY="COULD NOT LOOK: $from is $(printf '%q' "$GH_REPO"), not a repository gh can read ([HOST/]OWNER/REPO or a URL), so which repository this write reaches is unknown; that is not the same as private. Fix: unset GH_REPO or set it to <owner>/<repo>, or pass a non-empty -R <owner>/<repo>, then retry."
       return 1
     fi
     GTR_TARGETS+=("$GH_REPO")

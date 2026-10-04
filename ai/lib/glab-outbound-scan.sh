@@ -51,7 +51,10 @@
 # (before or after the command path; OWNER/REPO, GROUP/NS/REPO, a full URL or a
 # git URL), `mr create --target-project`, the project of every MR or issue URL
 # given positionally, and the project glab resolves for the current directory
-# (`projects/:id`) when none of these names one. For `api`, the project or group the
+# (`projects/:id`) when none of these names one. An empty -R names no project:
+# glab then reads GITLAB_REPO, but glab-athena scrubs every GITLAB_* variable,
+# so the `projects/:id` read and glab's write both resolve the checkout
+# (DND-2006). For `api`, the project or group the
 # endpoint's second segment names (`projects/<ref>/…`, `groups/<ref>/…`, read
 # verbatim, so `:id` resolves as glab resolves it), and a `target_project_id`
 # field.

@@ -52,8 +52,9 @@
 # and the repository gh falls back to when the last -R is empty or absent:
 # GH_REPO, else the current directory's repo (not added beside a URL). An empty
 # -R is not a target: gh then uses GH_REPO (DND-2006; the resolution and its
-# measurement are in ai/lib/gh-target-repo.sh). A -R or GH_REPO value that is
-# not a repository gh can read is REFUSED (exit 3, COULD NOT LOOK). The text
+# measurement are in ai/lib/gh-target-repo.sh). A non-empty -R, or the GH_REPO
+# gh falls back to, that is not in a form gh reads is REFUSED (exit 3, COULD
+# NOT LOOK). The text
 # is scanned unless EVERY target reads PRIVATE or INTERNAL; a target whose
 # visibility cannot be read, or a URL it cannot parse, counts as PUBLIC.
 # Visibility: `gh repo view [<repo>] --json visibility`, as the App.
@@ -197,7 +198,7 @@ gos_guard() {
   # Rule 2 of ai/lib/outbound-text-scan.sh, and the sort into text, files and
   # targets.
   ots_collect "${GFT_FLAGS[$cmd]}" "$GOS_TEXT" "$GOS_FILE" " repo "
-  # `targets` now holds every -R/--repo value in argv order, empty ones
+  # At this point `targets` holds every -R/--repo value in argv order, empty ones
   # included; gtr_resolve (below) turns them into repositories.
   local -a rvals=("${targets[@]}")
   targets=()

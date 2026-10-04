@@ -367,9 +367,10 @@ was scanned. The scan runs unless every repository the write can reach
 reads PRIVATE or INTERNAL: each non-empty `-R`/`--repo`, the repository of
 each PR or issue URL given positionally, and, when the last `-R` is empty or
 absent, the repository gh falls back to: `GH_REPO`, otherwise the current
-directory's. The resolution is `ai/lib/gh-target-repo.sh`'s. A `-R` or
-`GH_REPO` value that is not a repository gh can read is refused (exit 3,
-COULD NOT LOOK). A visibility that cannot be read, or a URL that cannot be
+directory's. The resolution is `ai/lib/gh-target-repo.sh`'s. A non-empty
+`-R`, or the `GH_REPO` gh falls back to, that is not in a form gh reads
+(`[HOST/]OWNER/REPO`, a URL or a git address) is refused (exit 3, COULD NOT
+LOOK). A visibility that cannot be read, or a URL that cannot be
 parsed, counts as PUBLIC. HITS refuse (exit 1); a scanner exit 1 that does
 not report HITS is a failure (exit 3), never a result. COULD NOT MEASURE
 refuses (exit 3), except where the overlay is ABSENT and the machine is
