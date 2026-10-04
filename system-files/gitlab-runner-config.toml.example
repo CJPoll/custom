@@ -27,6 +27,10 @@
 # also mounts its own user's rootless docker socket and sets builds_dir, and a
 # `ci` entry sets services_tmpfs: system-files/gitlab-runner-runbook.md has the
 # per-role contract and its named residual.
+#
+# Later (2026-10-04, DND-1999): the security_opt below is the untagged role's.
+# A `ci` entry adds "systempaths=unconfined"; a `deploy` entry, or any other
+# tag, has no security_opt line (Docker's defaults). The runbook has the table.
 
 concurrent = 3          # global cap on parallel jobs on this box; tune to capacity
 check_interval = 0

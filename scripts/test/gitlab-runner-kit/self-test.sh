@@ -186,6 +186,59 @@ for tag in - other; do
     *) ok "lib: a '${tag}' entry gets no socket, builds_dir or tmpfs (only ci and deploy do)" ;; esac
   case "${r}" in *'volumes = ["/srv/ci/gitlab-runner/cache:/cache"]'*) ok "lib: a '${tag}' entry keeps the cache-only volumes" ;; *) bad "lib: a '${tag}' entry keeps the cache-only volumes" "${r}" ;; esac
 done
+# Per-role security_opt (DND-1999). The rendered line of each role is matched
+# exactly, and each entry has at most one security_opt line.
+SO_CI='    security_opt = ["seccomp:unconfined", "apparmor:unconfined", "systempaths=unconfined"]'
+SO_UNTAGGED='    security_opt = ["seccomp:unconfined", "apparmor:unconfined"]'
+so_lines() { grep -c 'security_opt' <<<"$1"; }
+eq "lib: a ci entry has exactly one security_opt line" "$(so_lines "${ci_render}")" "1"
+if grep -qxF -- "${SO_CI}" <<<"${ci_render}"; then ok "lib: a ci entry's security_opt is seccomp + apparmor + systempaths unconfined"
+else bad "lib: a ci entry's security_opt is seccomp + apparmor + systempaths unconfined" "${ci_render}"; fi
+eq "lib: a deploy entry has no security_opt (Docker's default seccomp and masked /proc)" "$(so_lines "${dp_render}")" "0"
+case "${dp_render}" in *unconfined*) bad "lib: a deploy entry names nothing unconfined" "${dp_render}" ;;
+  *) ok "lib: a deploy entry names nothing unconfined" ;; esac
+un_render="$(grk_render_runner walt-ui - 3 https://gitlab.com /srv/ci/gitlab-runner "${TOK_A}")"
+eq "lib: an untagged entry has exactly one security_opt line" "$(so_lines "${un_render}")" "1"
+if grep -qxF -- "${SO_UNTAGGED}" <<<"${un_render}"; then ok "lib: an untagged entry keeps the rootless-BuildKit pair (seccomp + apparmor unconfined)"
+else bad "lib: an untagged entry keeps the rootless-BuildKit pair (seccomp + apparmor unconfined)" "${un_render}"; fi
+case "${un_render}" in *systempaths*) bad "lib: an untagged entry does not unmask /proc" "${un_render}" ;;
+  *) ok "lib: an untagged entry does not unmask /proc" ;; esac
+for tag in other build ci2 deployx; do
+  r="$(grk_render_runner u "${tag}" 1 https://gitlab.com /srv/ci/gitlab-runner "${TOK_A}")"
+  case "${r}" in *security_opt*|*unconfined*) bad "lib: a '${tag}' entry (no known role) gets Docker's defaults, no security_opt" "${r}" ;;
+    *) ok "lib: a '${tag}' entry (no known role) gets Docker's defaults, no security_opt" ;; esac
+done
+# security_opt is a [runners.docker] key: it must sit after that table header.
+so_line="$(grep -n '^    security_opt' <<<"${ci_render}" | cut -d: -f1)"
+if [ -n "${so_line}" ] && [ -n "${dk_line}" ] && [ "${so_line}" -gt "${dk_line}" ]; then ok "lib: security_opt sits in [runners.docker]"
+else bad "lib: security_opt sits in [runners.docker]" "${ci_render}"; fi
+# Reading a kept entry's security_opt back (the re-run drift warning).
+eq "lib: role_security_opt ci" "$(grk_role_security_opt ci)" '["seccomp:unconfined", "apparmor:unconfined", "systempaths=unconfined"]'
+eq "lib: role_security_opt untagged" "$(grk_role_security_opt -)" '["seccomp:unconfined", "apparmor:unconfined"]'
+eq "lib: role_security_opt deploy is empty" "$(grk_role_security_opt deploy)" ""
+eq "lib: role_security_opt of an unknown role is empty" "$(grk_role_security_opt other)" ""
+two="$(printf '%s\n%s\n' "${ci_render}" "${dp_render}")"
+eq "lib: entry_security_opt reads the ci entry's value, spaces removed" \
+  "$(grk_config_entry_security_opt alpha-ci <<<"${two}")" '["seccomp:unconfined","apparmor:unconfined","systempaths=unconfined"]'
+eq "lib: entry_security_opt reads the deploy entry as none" "$(grk_config_entry_security_opt charlie-deploy <<<"${two}")" ""
+if grk_config_entry_security_opt no-such-runner <<<"${two}" >/dev/null; then bad "lib: entry_security_opt of a missing entry fails, never reads as none"
+else ok "lib: entry_security_opt of a missing entry fails, never reads as none"; fi
+if grk_security_opt_matches deploy no-such-runner <<<"${two}"; then bad "lib: security_opt_matches of a missing entry is no match"
+else ok "lib: security_opt_matches of a missing entry is no match"; fi
+check "lib: security_opt_matches: the rendered ci entry matches its role" \
+  grk_security_opt_matches ci alpha-ci <<<"${two}"
+check "lib: security_opt_matches: the rendered deploy entry matches its role" \
+  grk_security_opt_matches deploy charlie-deploy <<<"${two}"
+old_dp="$(sed 's/^  \[runners.docker\]$/&\n    security_opt = ["seccomp:unconfined", "apparmor:unconfined"]/' <<<"${dp_render}")"
+if grk_security_opt_matches deploy charlie-deploy <<<"${old_dp}"; then bad "lib: a deploy entry with the old unconfined pair does not match its role" "${old_dp}"
+else ok "lib: a deploy entry with the old unconfined pair does not match its role"; fi
+old_ci="$(sed 's/^    security_opt = .*$/    security_opt = [ "seccomp:unconfined" , "apparmor:unconfined" ]/' <<<"${ci_render}")"
+if grk_security_opt_matches ci alpha-ci <<<"${old_ci}"; then bad "lib: a ci entry without systempaths does not match its role" "${old_ci}"
+else ok "lib: a ci entry without systempaths does not match its role"; fi
+spaced_ci="$(sed 's/^    security_opt = .*$/  security_opt=[ "seccomp:unconfined","apparmor:unconfined",  "systempaths=unconfined" ]/' <<<"${ci_render}")"
+check "lib: security_opt_matches ignores whitespace inside the array" grk_security_opt_matches ci alpha-ci <<<"${spaced_ci}"
+commented_dp="$(sed 's/^  \[runners.docker\]$/&\n    # security_opt = ["seccomp:unconfined"]/' <<<"${dp_render}")"
+check "lib: a commented-out security_opt is not read as one" grk_security_opt_matches deploy charlie-deploy <<<"${commented_dp}"
 case "$(grk_render_runner_confd gitlab-runner /home/gitlab-runner)" in
   *RUNNER_USER=*|*RUNNER_HOME=*|*RUNNER_CONFIG=*) bad "lib: the default user's runner conf.d sets no user/home/config (instances inherit it)" ;;
   *) ok "lib: the default user's runner conf.d sets no user/home/config (instances inherit it)" ;; esac
@@ -285,7 +338,8 @@ for s in setup-gitlab-runner-user setup-gitlab-runner-docker setup-gitlab-runner
 done
 
 kit setup-gitlab-runner --help "${NOIN}"
-for want in "builds_dir" "/var/run/docker.sock" "services_tmpfs" "runner token" "DND-1942"; do
+for want in "builds_dir" "/var/run/docker.sock" "services_tmpfs" "runner token" "DND-1942" \
+            "security_opt" "systempaths=unconfined" "Docker's default seccomp" "user namespaces" "mount /proc"; do
   case "${OUT}" in *"${want}"*) ok "setup-gitlab-runner --help states the role contract and its residual (${want})" ;;
     *) bad "setup-gitlab-runner --help states the role contract and its residual (${want})" ;; esac
 done
@@ -446,6 +500,8 @@ eq "runner alpha: every ci entry sets builds_dir to alpha's builds dir" \
 eq "runner alpha: every ci entry keeps the database service's data dir in tmpfs" \
   "$(grep -cxF '    "/var/lib/postgresql/data" = "rw,size=2g"' "${CFG}")" "2"
 eq "runner alpha: no entry is privileged" "$(grep -c 'privileged = true' "${CFG}")" "0"
+eq "runner alpha: every ci entry has the ci security_opt (DND-1999)" "$(grep -cxF -- "${SO_CI}" "${CFG}")" "2"
+eq "runner alpha: no other security_opt line" "$(grep -c 'security_opt' "${CFG}")" "2"
 eq "runner alpha: the instance is a symlink to the base initd" "$(readlink "${ROOT}/etc/init.d/gitlab-runner.alpha")" "gitlab-runner"
 check "runner alpha: conf.d names the config" \
   grep -qx 'RUNNER_CONFIG="/home/gitlab-runner-alpha/.gitlab-runner/config.toml"' "${ROOT}/etc/conf.d/gitlab-runner.alpha"
@@ -458,6 +514,8 @@ expect_rc "runner alpha: a re-run with the entries present reads no token" 0
 eq "runner alpha: a re-run leaves the config unchanged" "$(cat "${CFG}")" "${cfg_before}"
 case "${ERR}" in *"predates the runner contract"*) bad "runner alpha: kept entries with the contract raise no warning" "${ERR}" ;;
   *) ok "runner alpha: kept entries with the contract raise no warning" ;; esac
+case "${ERR}" in *security_opt*) bad "runner alpha: kept entries with the role's security_opt raise no warning" "${ERR}" ;;
+  *) ok "runner alpha: kept entries with the role's security_opt raise no warning" ;; esac
 # A kept ci entry written before DND-1973 (no builds_dir) is named, never kept silently.
 F_CFG_DIR="${ROOT}/home/gitlab-runner-foxtrot/.gitlab-runner"; mkdir -p "${F_CFG_DIR}"
 printf 'concurrent = 1\n\n[[runners]]\n  name = "foxtrot-ci"\n  # tags = ["ci"], run_untagged = false: set on the runner\n  executor = "docker"\n  [runners.docker]\n    volumes = ["/srv/ci/gitlab-runner-foxtrot/cache:/cache"]\n' > "${F_CFG_DIR}/config.toml"
@@ -467,6 +525,8 @@ expect_rc "runner foxtrot: a re-run over a pre-contract entry still succeeds (it
 case "${ERR}" in *foxtrot-ci*"predates the runner contract"*Fix:*) ok "runner foxtrot: the pre-contract entry is named, with Fix:" ;;
   *) bad "runner foxtrot: the pre-contract entry is named, with Fix:" "${ERR}" ;; esac
 eq "runner foxtrot: the kept entry is left as is" "$(cat "${F_CFG_DIR}/config.toml")" "${legacy_before}"
+case "${ERR}" in *foxtrot-ci*security_opt*"systempaths=unconfined"*Fix:*) ok "runner foxtrot: a kept ci entry with no security_opt is named, with the role's value and Fix:" ;;
+  *) bad "runner foxtrot: a kept ci entry with no security_opt is named, with the role's value and Fix:" "${ERR}" ;; esac
 
 printf '%s\n' "${TOK_C}" > "${TMP}/tokens-c"
 kit setup-gitlab-runner --user gitlab-runner-alpha --runner alpha-ci:ci --runner alpha-ci3:ci "${TMP}/tokens-c"
@@ -501,6 +561,23 @@ if [ "${C_UID}" != "${A_UID}" ] && ! grep -qF -e "/run/user/${A_UID}/" -e "gitla
 else bad "runner charlie: the deploy config names nothing of the ci user's (socket, builds dir, cache)" "$(cat "${D_CFG}")"; fi
 if grep -qF 'services_tmpfs' "${D_CFG}"; then bad "runner charlie: the deploy entry has no services tmpfs"; else ok "runner charlie: the deploy entry has no services tmpfs"; fi
 eq "runner charlie: the deploy entry is not privileged" "$(grep -cx '    privileged = false' "${D_CFG}")" "1"
+if grep -qF -e 'security_opt' -e 'unconfined' "${D_CFG}"; then bad "runner charlie: the deploy entry has no security_opt and nothing unconfined (DND-1999)" "$(cat "${D_CFG}")"
+else ok "runner charlie: the deploy entry has no security_opt and nothing unconfined (DND-1999)"; fi
+kit setup-gitlab-runner --user gitlab-runner-charlie --runner charlie-deploy:deploy "${NOIN}"
+expect_rc "runner charlie: a re-run keeps the deploy entry" 0
+case "${ERR}" in *security_opt*) bad "runner charlie: a kept deploy entry with no security_opt raises no warning" "${ERR}" ;;
+  *) ok "runner charlie: a kept deploy entry with no security_opt raises no warning" ;; esac
+# A kept deploy entry written before DND-1999 still carries the old unconfined
+# pair. The re-run keeps it (it reads no token) but names it, with Fix:.
+kit setup-gitlab-runner-user --user gitlab-runner-golf "${NOIN}"; expect_rc "user golf: succeeds" 0
+G_CFG_DIR="${ROOT}/home/gitlab-runner-golf/.gitlab-runner"; mkdir -p "${G_CFG_DIR}"
+sed -e 's/charlie/golf/g' -e 's/^  \[runners.docker\]$/&\n    security_opt = ["seccomp:unconfined", "apparmor:unconfined"]/' "${D_CFG}" > "${G_CFG_DIR}/config.toml"
+old_deploy_before="$(cat "${G_CFG_DIR}/config.toml")"
+kit setup-gitlab-runner --user gitlab-runner-golf --runner golf-deploy:deploy "${NOIN}"
+expect_rc "runner golf: a re-run over a pre-DND-1999 deploy entry succeeds (it reads no token)" 0
+case "${ERR}" in *golf-deploy*security_opt*seccomp:unconfined*Fix:*"delete"*) ok "runner golf: the kept deploy entry's unconfined security_opt is named, with Fix:" ;;
+  *) bad "runner golf: the kept deploy entry's unconfined security_opt is named, with Fix:" "${ERR}" ;; esac
+eq "runner golf: the kept entry is left as is" "$(cat "${G_CFG_DIR}/config.toml")" "${old_deploy_before}"
 # A ci or deploy entry needs the user's builds dir (setup-gitlab-runner-user
 # makes it); without it the job's bind mount would fail at run time.
 kit setup-gitlab-runner-user --user gitlab-runner-india "${NOIN}"; expect_rc "user india: succeeds" 0

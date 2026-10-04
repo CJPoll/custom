@@ -49,6 +49,20 @@
 #            the ci user's), and no services_tmpfs.
 #   other    (untagged, or any other tag): the cache volume only; no socket, no
 #            builds_dir.
+#
+# security_opt in [runners.docker], per role (DND-1999):
+#   ci       ["seccomp:unconfined", "apparmor:unconfined", "systempaths=unconfined"]
+#            bwrap (tool-sandbox) needs a user namespace, which Docker's default
+#            seccomp refuses, and a fresh /proc mount, which masked /proc paths
+#            refuse.
+#   deploy   none: Docker's default seccomp and masked /proc. Its jobs only
+#            drive the mounted docker socket.
+#   untagged ["seccomp:unconfined", "apparmor:unconfined"], for rootless
+#            BuildKit as a job image (the runbook); /proc stays masked.
+#   other    none: Docker's defaults, since the kit knows no need for it.
+# A re-run keeps an existing entry; one whose security_opt differs from its
+# role's is named with a Fix: line.
+#
 # The socket is /run/user/<the user's uid>/docker.sock, from its rootless dockerd
 # (setup-gitlab-runner-docker). The builds dir comes from setup-gitlab-runner-user;
 # a ci or deploy entry is refused without it.
@@ -61,7 +75,10 @@
 # never run in the parent project (DND-1942). This script checks none of these
 # three: they are project settings and the DND-1942 harness refusal. The deploy
 # socket is the same power over the deploy user, reached only by
-# protected-branch jobs.
+# protected-branch jobs. The ci security_opt adds a second residual, on the same
+# grounds: ci job code can create user namespaces and mount /proc in its own
+# rootless daemon's containers. Host-only /proc (sysrq-trigger, kcore,
+# /proc/sys writes) stays refused, because the job's root is a subuid on the host.
 #
 # Example (ci and deploy as two users; each token from its `POST user/runners`):
 #   sudo scripts/setup-gitlab-runner --user gitlab-runner-personal --runner personal-ci:ci
@@ -181,6 +198,13 @@ for i in "${!R_NAMES[@]}"; do
     log "config already has runner ${R_NAMES[$i]} — keeping it (its token is not read)"
     if grk_role_gets_docker "${R_TAGS[$i]}" && ! grk_config_entry_has_builds_dir "${R_NAMES[$i]}" <<<"${EXISTING_CFG}"; then
       warn "kept runner ${R_NAMES[$i]} (${R_TAGS[$i]}) has no builds_dir: it predates the runner contract (DND-1973), so its jobs get no docker socket or same-path builds dir. Fix: delete its [[runners]] block from ${CONFIG} and re-run with its token on stdin"
+    fi
+    if ! grk_security_opt_matches "${R_TAGS[$i]}" "${R_NAMES[$i]}" <<<"${EXISTING_CFG}"; then
+      so_got="$(grk_config_entry_security_opt "${R_NAMES[$i]}" <<<"${EXISTING_CFG}" || true)"
+      so_want="$(grk_role_security_opt "${R_TAGS[$i]}")"
+      if [ -n "${so_want}" ]; then so_fix="set its [runners.docker] line to: security_opt = ${so_want}"
+      else so_fix="delete its [runners.docker] security_opt line (role ${R_TAGS[$i]} gets Docker's defaults)"; fi
+      warn "kept runner ${R_NAMES[$i]} (${R_TAGS[$i]}) has security_opt ${so_got:-<none>}, not its role's ${so_want:-<none>} (DND-1999). Fix: in ${CONFIG}, ${so_fix}; gitlab-runner reloads config.toml without a restart. Or delete its [[runners]] block and re-run with its token on stdin"
     fi
   else
     NEW_IDX+=("${i}")
