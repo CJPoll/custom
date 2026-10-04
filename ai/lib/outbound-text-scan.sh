@@ -383,9 +383,9 @@ ots_table_short() {
 }
 
 # ---- api writes (DND-1938; forge-neutral since DND-1976) --------------------
-# glab-athena's api scan uses these. gh-athena does not scan `gh api`: its
-# scan runs before the merge guard, and an api scan must run after it, as
-# glab-athena's does (the order is ai/bin/gh-athena's).
+# Both api scans use these: glab-athena's and, since DND-2007, gh-athena's.
+# Each runs after its wrapper's merge guard, so the guard's refusals read
+# nothing first.
 
 # ots_upload_name <path or -> : the file name a multipart upload of <path>
 # carries, for its scanned copy. Stdin and a name with no usable last segment

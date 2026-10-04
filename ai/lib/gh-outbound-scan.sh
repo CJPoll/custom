@@ -1,12 +1,13 @@
 # shellcheck shell=bash
 #
 # gh-outbound-scan.sh — the outbound scan behind `gh-athena` writes that carry
-# free text (DND-699, DND-1976). Sourced by ai/bin/gh-athena, never run. The
-# GitLab counterpart is ai/lib/glab-outbound-scan.sh (DND-1938); both apply ONE
-# set of rules, ai/lib/outbound-text-scan.sh.
+# free text (DND-699, DND-1976, DND-2007). Sourced by ai/bin/gh-athena, never
+# run. The GitLab counterpart is ai/lib/glab-outbound-scan.sh (DND-1938); both
+# apply ONE set of rules, ai/lib/outbound-text-scan.sh.
 #
 # The second publish path. A pre-push hook covers what reaches a public repo
-# through git; a PR, issue, comment or release reaches it through the API.
+# through git; a PR, issue, comment, release or any `gh api` write reaches it
+# through the API.
 # Before gh runs one of these against a PUBLIC repository, every text field is
 # scanned with `ai/bin/outbound-scan --text`:
 #
@@ -28,6 +29,26 @@
 #   release edit              --title/-t, --notes/-n, --tag,
 #                             --discussion-category, --notes-file/-F, and
 #                             every positional
+#   api, any write            every -f/-F field (inline text, an @file, or @-
+#                             for stdin), the --input body (a file or `-`),
+#                             and a ?query on the endpoint (DND-2007). A write
+#                             is any method but GET/HEAD (gh defaults to POST
+#                             when fields or --input are given), or one a
+#                             method-override header or a `_method` field
+#                             could turn into a write. `api` must be the first
+#                             word; anything else is REFUSED.
+#
+# An `api` argv is read with gh's api flag table (FAS_GH_API_* in
+# ai/lib/forge-api-scan.sh, the one the merge guard reads) and the shared
+# collector (ots_api_collect). A flag the table lacks, an endpoint that cannot
+# be normalized, or a GraphQL call whose query cannot be read is REFUSED (exit
+# 3, Fix:): an api write the scan cannot classify never passes. Its targets are
+# gos_api_target's: repos/<owner>/<repo>/… names <owner>/<repo>, and
+# repos/{owner}/{repo}/… (or :owner/:repo) names GH_REPO, else the current
+# directory's repo, as gh fills them. A GraphQL mutation (its target is inside
+# the query) and any other endpoint (repositories/<id>, gists, user, orgs, a
+# full URL on another host) name no target this guard resolves, and are
+# scanned as PUBLIC. A GraphQL query with no mutation is a read.
 #
 # The argv is read the way gh reads it (DND-1976): with a table of every flag
 # of each command above and whether it takes a value, built from gh's own
@@ -59,9 +80,12 @@
 # visibility cannot be read, or a URL it cannot parse, counts as PUBLIC.
 # Visibility: `gh repo view [<repo>] --json visibility`, as the App.
 #
-# Residuals, stated: `gh api` writes (scanning them needs the scan to run after
-# the merge guard, as glab-athena's does, which is a change to ai/bin/gh-athena),
-# `pr create --fill` (the body is commit messages, which the pre-push hook
+# This runs after the merge guard (ai/bin/gh-athena, DND-2007), so the guard's
+# refusals read nothing first, and the guard reads no stdin before the copy.
+#
+# Residuals, stated: a field or --input FILE that changes between the merge
+# guard's read of a GraphQL query and this scan's copy of it (gh sends the
+# copy, which the guard did not read), `pr create --fill` (the body is commit messages, which the pre-push hook
 # scans), `--generate-notes` and `--notes-from-tag` (text GitHub or the tag
 # supplies), an interactive editor or --web, the CONTENT of release asset
 # files, names that are not free text but reach the public repository (labels,
@@ -80,6 +104,10 @@ GOS_LIB_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 # shellcheck source=outbound-text-scan.sh
 . "$GOS_LIB_DIR/outbound-text-scan.sh"
 OTS_TOOL=gh-athena OTS_DEST=repository
+# The gh api flag table and argv parser (DND-2007). A failed load fails the
+# source, which ai/bin/gh-athena refuses.
+# shellcheck source=forge-api-scan.sh
+. "$GOS_LIB_DIR/forge-api-scan.sh" || return 1
 # The pinned flag table. A table that is missing or does not define its arrays
 # refuses every judged write (below, in gos_guard) rather than reading argv
 # without it.
@@ -93,8 +121,8 @@ fi
 
 # gos_positional <word> : a positional that is a URL adds its repository to the
 # caller's `targets` (dynamic scope). github.com URLs become OWNER/REPO; another
-# host becomes HOST/OWNER/REPO; a URL without an owner and repo becomes "?"
-# (unknown, scanned as PUBLIC).
+# host becomes HOST/OWNER/REPO; a URL without an owner and repo becomes
+# "?:<why>" (unknown, scanned as PUBLIC).
 gos_positional() {
   local w="$1" rest host owner repo
   case "$w" in
@@ -109,7 +137,7 @@ gos_positional() {
     host=""; owner=""; repo=""
   fi
   if [ -z "$host" ] || [ -z "$owner" ] || [ -z "$repo" ]; then
-    targets+=("?")
+    targets+=("?:a positional URL names a repository this guard cannot parse")
   elif [ "$host" = github.com ] || [ "$host" = www.github.com ]; then
     targets+=("$owner/${repo%.git}")
   else
@@ -139,6 +167,84 @@ gos_roles() {
 # gos_guarded_group <word> : true for a command group this scan judges.
 gos_guarded_group() { case "$1" in pr | issue | release) return 0 ;; esac; return 1; }
 
+# gos_shown <endpoint> : the endpoint without its ?query or #fragment, for a
+# message (a query can carry the very value the scan refuses to print).
+gos_shown() { printf '%s' "${1%%[?#]*}"; }
+
+# gos_api_target <endpoint> : adds the repository an api write to <endpoint>
+# reaches to the caller's `targets`, or nothing for a GraphQL read (a query
+# with no mutation). Exits 3 when the endpoint cannot be read.
+#   repos/<owner>/<repo>[/…]     <owner>/<repo> (HOST/<owner>/<repo> under a
+#                                --hostname other than github.com)
+#   repos/{owner}/{repo}[/…]     gh fills both from GH_REPO, else from the
+#   (or :owner, :repo)           current directory's repo: so GH_REPO, else ""
+#   graphql, with a mutation     unknown: the target is inside the query
+#   anything else                unknown (repositories/<id>, gists, user, orgs,
+#                                a placeholder mixed with text, a full URL on
+#                                another host)
+# An unknown target is scanned as PUBLIC, said on stderr.
+gos_api_target() {
+  local ep="$1" shown path lower host="" o rp sc hosted=""
+  local -a s=()
+  shown="$(gos_shown "$ep")"
+  if ! path="$(fas_path "$ep" api v3)"; then
+    ots_refuse 3 "the endpoint '$shown' cannot be normalized (a backslash, a control character, or a malformed or nested %-escape), so the outbound scan cannot tell which repository it writes to. Fix: spell the endpoint plainly (repos/<owner>/<repo>/…)."
+  fi
+  lower="${path,,}"
+  # gh sends ONLY the bare endpoint `graphql` to the GraphQL API.
+  if [ "$lower" = graphql ]; then
+    if fas_graphql_scan mutation; then sc=0; else sc=$?; fi
+    case "$sc" in
+      0) targets+=("?:a GraphQL mutation names its target inside the query") ;;
+      1) ;;
+      *) ots_refuse 3 "the outbound scan cannot tell whether this GraphQL call writes: $FAS_WHY. Fix: $FAS_HOW." ;;
+    esac
+    return 0
+  fi
+  case "$ep" in
+    http://* | https://*) host="${ep#*://}"; host="${host%%/*}"; host="${host,,}" ;;
+  esac
+  case "$host" in
+    "" | api.github.com | github.com | www.github.com) ;;
+    *) targets+=("?:the endpoint '$shown' is on the host '$host', which this guard does not resolve"); return 0 ;;
+  esac
+  if [ -n "$FAS_HOSTNAME" ] && [ "${FAS_HOSTNAME,,}" != github.com ]; then hosted="$FAS_HOSTNAME/"; fi
+  IFS=/ read -ra s <<<"$path"
+  if [ "${#s[@]}" -lt 3 ] || [ "${s[0],,}" != repos ]; then
+    targets+=("?:the endpoint '$shown' names no repository (repos/<owner>/<repo>/…)"); return 0
+  fi
+  o="${s[1]}" rp="${s[2]}"
+  case "$o:$rp" in
+    "{owner}:{repo}" | ":owner::repo") targets+=("${GH_REPO:-}"); return 0 ;;
+  esac
+  if [[ "$o$rp" == *[{}]* ]] || [[ "$o" == :* ]] || [[ "$rp" == :* ]]; then
+    targets+=("?:the endpoint '$shown' mixes a placeholder into the repository name"); return 0
+  fi
+  targets+=("$hosted$o/$rp")
+  return 0
+}
+
+# gos_api <args after the word api...> : fills the caller's text and file
+# arrays and `targets` for an api write; returns 0 with nothing collected for
+# a read. Exits 3 on an argv it cannot read.
+gos_api() {
+  local ep
+  FAS_API_VALUED="$FAS_GH_API_VALUED" FAS_API_BOOL="$FAS_GH_API_BOOL"
+  FAS_API_SVALUED="$FAS_GH_API_SVALUED" FAS_API_SBOOL="$FAS_GH_API_SBOOL"
+  if ! fas_parse_api "$@"; then
+    ots_refuse 3 "'$FAS_UNKNOWN' is not a \`gh api\` flag the outbound scan knows, so it cannot tell which text this call sends. Fix: drop the flag (gh rejects an unknown flag anyway)."
+  fi
+  # What a write is, which fields it sends, and the GraphQL copy step are
+  # shared with glab-athena (ai/lib/outbound-text-scan.sh, DND-1976).
+  ots_api_collect GOS_ARGV 1 api v3 || return 0
+  [ "$((${#texts[@]} + ${#fsrc[@]}))" -gt 0 ] || return 0
+  if [ "${#FAS_POS[@]}" = 0 ]; then
+    targets+=("?:the call names no endpoint")
+  fi
+  for ep in "${FAS_POS[@]}"; do gos_api_target "$ep"; done
+  return 0
+}
+
 # gos_guard <gh argv...> : sets GOS_ARGV to the argv gh must run (a file or
 # stdin value replaced by its scanned private copy). Returns 0, or exits 1
 # (HITS) or 3 (cannot judge).
@@ -148,6 +254,17 @@ gos_guard() {
   local -a argv=("$@") path=() texts=() tlab=() fsrc=() fidx=() fpre=() flab=() fnoun=() fflag=() targets=()
   local -A fbase=()
   local n=$# i=0 a v w cmd
+
+  # An api call (DND-2007). Only as the first word: cobra's walk past a flag
+  # before it can differ from this parse.
+  if [ "${argv[0]:-}" = api ]; then
+    OTS_WHAT="api write"
+    gos_api "${argv[@]:1}"
+    [ "$((${#texts[@]} + ${#fsrc[@]}))" -gt 0 ] || return 0
+    [ "${#targets[@]}" -gt 0 ] || return 0
+    gos_scan_targets
+    return 0
+  fi
 
   # The command path. cobra finds `pr create` past a -R/--repo and its value
   # (`gh -R X pr create`, `gh pr -R X create`), and pflag then reads that -R
@@ -166,12 +283,15 @@ gos_guard() {
       -h | --help) return 0 ;;
       -*)
         for w in "${argv[@]}"; do
-          if gos_guarded_group "$w"; then
+          if gos_guarded_group "$w" || [ "$w" = api ]; then
             ots_refuse 3 "'$a' comes before the command path, so the outbound scan cannot tell which command runs or which text it sends. Fix: put the command first and every flag after it (\`gh-athena pr create -t … -b …\`)."
           fi
         done
         return 0 ;;
       *)
+        if [ "$a" = api ] && [ "${#path[@]}" = 0 ]; then
+          ots_refuse 3 "\`api\` is not the first word, so the outbound scan cannot tell how gh parses the words before it. Fix: put \`api\` first: \`gh-athena api <endpoint> [flags]\`."
+        fi
         path+=("$a")
         if [ "${#path[@]}" = 2 ]; then i=$((i + 1)); break; fi
         gos_guarded_group "$a" || return 0 ;;
@@ -216,10 +336,19 @@ gos_guard() {
   declare -F gtr_resolve >/dev/null || ots_refuse 3 "$GOS_LIB_DIR/gh-target-repo.sh did not load, so the outbound scan cannot tell which repository this $OTS_WHAT reaches. Fix: run gh-athena from a full ~/dev/custom checkout (ai/bin and ai/lib side by side)."
   gtr_resolve "$has_url" "${rvals[@]}" || ots_refuse 3 "$GTR_WHY"
   targets+=("${GTR_TARGETS[@]}")
+  gos_scan_targets
+}
+
+# gos_scan_targets : reads the visibility of each of the caller's `targets` and
+# scans the caller's collected texts and files unless EVERY target reads
+# PRIVATE or INTERNAL. A target is "" (the current directory's repo), a
+# repository gh can name, or "?:<why>" (unknown, scanned as PUBLIC). Exits 1
+# (HITS) or 3; returns 0.
+gos_scan_targets() {
   local t vis public=""
   for t in "${targets[@]}"; do
-    if [ "$t" = "?" ]; then
-      printf 'gh-athena: a positional URL names a repository this guard cannot parse; scanning as PUBLIC.\n' >&2
+    if [[ "$t" == "?:"* ]]; then
+      printf 'gh-athena: %s; scanning as PUBLIC.\n' "${t#\?:}" >&2
       public=1; continue
     fi
     if [ -n "$t" ]; then

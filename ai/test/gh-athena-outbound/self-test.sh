@@ -65,6 +65,30 @@ case "$*" in
     if [ -s "${STUB_VIS}" ]; then cat "${STUB_VIS}"; exit 0; fi
     echo "stub: no visibility" >&2; exit 1 ;;
   "alias list"*) exit 0 ;;
+  # DND-2007: the merge guard now runs before the scan, so a `pr merge` reaches
+  # the scan only past the guard. These answer its reads for one PR whose head
+  # is green on a base tip that is the WORK checkout's own commit (no gate).
+  "pr view"*"--json number,url,baseRefName,headRefOid"*)
+    printf '{"number":5,"url":"https://github.com/synth-owner/pub/pull/5","baseRefName":"main","headRefOid":"%s"}\n' "${STUB_HEAD}"; exit 0 ;;
+  "api graphql"*"statusCheckRollup"*)
+    if [[ "$*" == *"oid=${STUB_TIP}"* ]]; then
+      echo '{"data":{"repository":{"object":{"__typename":"Commit","statusCheckRollup":null}}}}'
+    else
+      echo '{"data":{"repository":{"object":{"__typename":"Commit","statusCheckRollup":{"contexts":{"totalCount":1,"pageInfo":{"hasNextPage":false},"nodes":[{"__typename":"CheckRun","name":"Build","status":"COMPLETED","conclusion":"SUCCESS"}]}}}}}}'
+    fi
+    exit 0 ;;
+  "api repos/"*"/git/ref/heads/"*)
+    printf '{"ref":"refs/heads/main","object":{"sha":"%s","type":"commit"}}\n' "${STUB_TIP}"; exit 0 ;;
+  "pr merge"*) echo "stub: SENT pr merge"; exit 0 ;;
+  # DND-2007: an api call is a send. An --input file's content is echoed the
+  # way gh would read it, so a replaced stdin body is observable.
+  "api "*)
+    prev=""; for a in "$@"; do
+      case "$prev" in --input) printf 'stub-body:'; cat "$a" ;; esac
+      case "$a" in --input=*) printf 'stub-body:'; cat "${a#--input=}" ;; esac
+      prev="$a"
+    done
+    echo "stub: SENT api"; exit 0 ;;
   "pr create"*|"pr new"*|"pr comment"*|"pr edit"*|"pr review"*|"pr close"*|"pr reopen"*|"issue "*|"release "*)
     # Echo the body file's content the way gh would read it, so a replaced
     # stdin body file is observable.
@@ -99,6 +123,15 @@ git -C "${OVERLAY}" init -q && git -C "${OVERLAY}" add -A && git -C "${OVERLAY}"
 export ATHENA_PRIVATE_ROOT="${OVERLAY}"
 
 WORK="${TMP}/work"; mkdir -p "${WORK}"
+# DND-2007: WORK is a checkout of the PR's repo, so the merge guard can read
+# the base tip (its one commit, which declares no integration gate).
+git init -q -b main "${WORK}"
+git -C "${WORK}" remote add origin git@github.com:synth-owner/pub.git
+echo readme > "${WORK}/README"
+git -C "${WORK}" add README && git -C "${WORK}" commit -q -m base
+export STUB_TIP; STUB_TIP="$(git -C "${WORK}" rev-parse HEAD)"
+export STUB_HEAD="b712de1d0000000000000000000000000000beef"
+MH="--match-head-commit ${STUB_HEAD}"
 
 # gha <args...> : run the wrapper in WORK. Sets OUT (stdout+stderr), RC.
 gha() {
@@ -154,7 +187,7 @@ if [ "${RC}" = 1 ] && not_sent "pr create"; then ok "every --body occurrence is 
 echo "--- pr merge: a squash subject/body becomes a server-side commit (critic round 2) ---"
 for spelling in "--subject x${TOKEN}" "--subject=x${TOKEN}" "-t x${TOKEN}" "--body x${TOKEN}"; do
   # shellcheck disable=SC2086
-  gha pr merge 5 --squash ${spelling}
+  gha pr merge 5 --squash ${MH} ${spelling}
   if [ "${RC}" = 1 ] && [[ "${CALLS}" != *"pr merge"* ]] && [[ "${OUT}" == *"REFUSED"* ]] && [[ "${OUT}" == *"label=synth-token"* ]] && no_literal; then
     ok "refused: pr merge ${spelling%%x*}"
   else
@@ -395,12 +428,16 @@ else
 fi
 for argv in "pr create -a -t -b x${TOKEN}" "pr create -H -t --body x${TOKEN}" "pr create --label -t --body=x${TOKEN}" \
   "pr edit 5 --add-label -t -b x${TOKEN}" "pr comment 5 -R synth-owner/pub -b x${TOKEN}" \
-  "pr merge 5 --squash --match-head-commit -t -b x${TOKEN}" "issue create -l -t -b x${TOKEN}" \
+  "issue create -l -t -b x${TOKEN}" \
   "issue edit 7 --add-label -t -b x${TOKEN}" "issue close 7 -r -t -c x${TOKEN}"; do
   # shellcheck disable=SC2086
   gha ${argv}
   if [ "${RC}" = 1 ] && [[ "${OUT}" != *"stub: SENT"* ]] && [[ "${OUT}" == *"label=synth-token"* ]] && no_literal; then ok "refused: ${argv%%x${TOKEN}}"; else bad "refused: ${argv%%x${TOKEN}}" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 done
+# DND-2007: the merge guard runs first and reads `-t` as the pinned head, which
+# is not the PR's head, so it refuses before the scan; nothing is sent.
+gha pr merge 5 --squash --match-head-commit -t -b "x${TOKEN}"
+if [ "${RC}" = 3 ] && [[ "${OUT}" != *"stub: SENT"* ]] && [[ "${OUT}" == *"is not the PR's head"* ]]; then ok "refused by the merge guard: pr merge --match-head-commit -t -b"; else bad "pr merge --match-head-commit -t" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 
 echo "--- DND-1976: a value that is a file or target flag of the command is refused, not guessed ---"
 gha pr create -l -F "${TMP}/body-hit.md"
@@ -465,7 +502,7 @@ OUT="$(cd "${WORK}" && : > "${STUB_LOG}" && "${NT}/ai/bin/gh-athena" pr view 5 2
 if [ "${RC}" = 0 ] && [[ "${OUT}" == *"stub: passthrough pr view 5"* ]]; then ok "no table: pr view still passes"; else bad "no table: pr view" "rc=${RC} ${OUT}"; fi
 
 echo "--- DND-1976 sweep: the aliases and release text ---"
-for argv in "pr new -b x${TOKEN}" "issue new -t x${TOKEN}" "pr merge 5 -A x${TOKEN}" \
+for argv in "pr new -b x${TOKEN}" "issue new -t x${TOKEN}" "pr merge 5 ${MH} -A x${TOKEN}" \
   "release create v1 --notes x${TOKEN}" "release create v1 -n x${TOKEN}" "release create v1 -t x${TOKEN}" \
   "release new v1 -n x${TOKEN}" "release edit v1 --notes=x${TOKEN}" "release edit v1 --tag x${TOKEN}" \
   "release create v1 -n clean x${TOKEN}"; do
@@ -477,6 +514,74 @@ gha release create v1 -F "${TMP}/body-hit.md"
 if [ "${RC}" = 1 ] && [[ "${OUT}" != *"stub: SENT"* ]] && [[ "${OUT}" == *"notes-file:1 label=synth-token"* ]]; then ok "release -F <file> refused"; else bad "release -F" "rc=${RC} ${OUT}"; fi
 OUT="$(cd "${WORK}" && : > "${STUB_LOG}" && printf 'clean notes\n' | "${WRAPPER}" release create v1 --notes-file - 2>&1)"; RC=$?; CALLS="$(cat "${STUB_LOG}")"
 if [ "${RC}" = 0 ] && [[ "${OUT}" == *"stub-body:clean notes"* ]] && [[ "${CALLS}" != *"--notes-file -"* ]]; then ok "release notes from stdin reach gh as the scanned copy"; else bad "release stdin" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+rm -f "${STUB_VIS}".synth-owner_*
+
+echo "--- DND-2007: gh api writes to a PUBLIC repository are scanned ---"
+# The defect: `gh-athena api` was never scanned, so a comment, issue or PR body
+# sent by REST or GraphQL to a PUBLIC repository went out with no scan.
+printf 'PUBLIC\n' > "${STUB_VIS}.synth-owner_pub"
+printf 'PRIVATE\n' > "${STUB_VIS}.synth-owner_priv"
+echo PUBLIC > "${STUB_VIS}"
+api_refused() { [ "${RC}" = 1 ] && [[ "${OUT}" != *"stub: SENT"* ]] && [[ "${OUT}" == *"label=synth-token"* ]] && [[ "${OUT}" == *"Fix:"* ]] && no_literal; }
+gha api -X POST repos/synth-owner/pub/issues/1/comments -f "body=x${TOKEN}"
+if api_refused && [[ "${CALLS}" == *"repo view synth-owner/pub"* ]]; then
+  ok "DND-2007 regression: api POST comment body <planted> to a PUBLIC repo is scanned and refused"
+else
+  bad "DND-2007 regression: api POST comment body <planted>" "rc=${RC} calls=[${CALLS}] ${OUT}"
+fi
+for argv in "api repos/synth-owner/pub/issues -f title=x${TOKEN}" \
+  "api repos/synth-owner/pub/issues --raw-field=body=x${TOKEN}" \
+  "api repos/synth-owner/pub/issues -F body=x${TOKEN}" \
+  "api repos/synth-owner/pub/issues --field body=x${TOKEN}" \
+  "api repos/synth-owner/pub/issues -fbody=x${TOKEN}" \
+  "api -X PATCH repos/synth-owner/pub/pulls/5 -f body=x${TOKEN}" \
+  "api --method PUT repos/synth-owner/pub/issues/1/labels -f labels[]=x${TOKEN}" \
+  "api -X POST repos/synth-owner/pub/releases -f tag_name=v1 -f body=x${TOKEN}" \
+  "api -X POST repos/synth-owner/pub/pulls/5/reviews -f event=COMMENT -f body=x${TOKEN}" \
+  "api https://api.github.com/repos/synth-owner/pub/issues -f body=x${TOKEN}" \
+  "api repos/synth-owner/pub/issues?title=x${TOKEN} -X POST" \
+  "api -X POST repos/{owner}/{repo}/issues -f body=x${TOKEN}" \
+  "api -X POST gists -f description=x${TOKEN}" \
+  "api -X POST repos/synth-owner/pub/issues -H X-HTTP-Method-Override:GET -f body=x${TOKEN}"; do
+  # shellcheck disable=SC2086
+  gha ${argv}
+  if api_refused; then ok "refused: ${argv%%x${TOKEN}*}"; else bad "refused: ${argv%%x${TOKEN}*}" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+done
+gha api -X POST repos/synth-owner/pub/issues -F "body=@${TMP}/body-hit.md"
+if api_refused && [[ "${OUT}" == *"field-file:1 label=synth-token"* ]]; then ok "an @file field is scanned"; else bad "@file field" "rc=${RC} ${OUT}"; fi
+gha api -X POST repos/synth-owner/pub/issues --input "${TMP}/body-hit.md"
+if api_refused && [[ "${OUT}" == *"input:1 label=synth-token"* ]]; then ok "an --input body is scanned"; else bad "--input body" "rc=${RC} ${OUT}"; fi
+OUT="$(cd "${WORK}" && : > "${STUB_LOG}" && printf 'x%s\n' "${TOKEN}" | "${WRAPPER}" api -X POST repos/synth-owner/pub/issues --input - 2>&1)"; RC=$?; CALLS="$(cat "${STUB_LOG}")"
+if api_refused; then ok "an --input - (stdin) body is scanned"; else bad "--input - body" "rc=${RC} ${OUT}"; fi
+OUT="$(cd "${WORK}" && : > "${STUB_LOG}" && printf '{"body":"clean"}\n' | "${WRAPPER}" api -X POST repos/synth-owner/pub/issues --input - 2>&1)"; RC=$?; CALLS="$(cat "${STUB_LOG}")"
+if [ "${RC}" = 0 ] && [[ "${OUT}" == *'stub-body:{"body":"clean"}'* ]] && [[ "${CALLS}" != *"--input -"* ]] && [[ "${OUT}" == *"CLEAN mode=text"* ]]; then ok "a clean stdin body reaches gh as the scanned copy"; else bad "clean stdin body" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+gha api graphql -f "query=mutation { addComment(input: {subjectId: \"I_1\", body: \"x${TOKEN}\"}) { clientMutationId } }"
+if api_refused && [[ "${OUT}" == *"GraphQL mutation"* ]]; then ok "a GraphQL mutation (target in the query) is scanned as PUBLIC"; else bad "graphql mutation" "rc=${RC} ${OUT}"; fi
+GH_REPO=synth-owner/pub gha api -X POST "repos/{owner}/{repo}/issues" -f "body=x${TOKEN}"
+if api_refused && [[ "${CALLS}" == *"repo view synth-owner/pub"* ]]; then ok "a {owner}/{repo} endpoint reads GH_REPO's visibility"; else bad "placeholder GH_REPO" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+unset GH_REPO
+
+echo "--- DND-2007: what passes ---"
+gha api -X POST repos/synth-owner/priv/issues -f "body=x${TOKEN}"
+if [ "${RC}" = 0 ] && [[ "${OUT}" == *"stub: SENT api"* ]] && [[ "${OUT}" != *"outbound-scan:"* ]]; then ok "a write to a PRIVATE repo is sent unscanned"; else bad "private api write" "rc=${RC} ${OUT}"; fi
+gha api -X POST repos/synth-owner/pub/issues -f "body=a clean body"
+if [ "${RC}" = 0 ] && [[ "${OUT}" == *"stub: SENT api"* ]] && [[ "${OUT}" == *"CLEAN mode=text"* ]]; then ok "a clean write to a PUBLIC repo is scanned and sent"; else bad "clean public api write" "rc=${RC} ${OUT}"; fi
+gha api "repos/synth-owner/pub/issues?q=x${TOKEN}"
+if [ "${RC}" = 0 ] && [[ "${OUT}" == *"stub: SENT api"* ]] && [[ "${CALLS}" != *"repo view"* ]]; then ok "a GET reads nothing and is not scanned"; else bad "api GET" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+gha api -X GET search/issues -f "q=x${TOKEN}"
+if [ "${RC}" = 0 ] && [[ "${OUT}" == *"stub: SENT api"* ]] && [[ "${CALLS}" != *"repo view"* ]]; then ok "an explicit -X GET with fields is a read"; else bad "api -X GET fields" "rc=${RC} ${OUT}"; fi
+gha api graphql -f "query=query { viewer { login } }"
+if [ "${RC}" = 0 ] && [[ "${OUT}" == *"stub: SENT api"* ]] && [[ "${CALLS}" != *"repo view"* ]]; then ok "a GraphQL query (no mutation) is a read"; else bad "graphql read" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+gha api -X DELETE repos/synth-owner/pub/issues/comments/9
+if [ "${RC}" = 0 ] && [[ "${OUT}" == *"stub: SENT api"* ]] && [[ "${CALLS}" != *"repo view"* ]]; then ok "a write with no text reads nothing"; else bad "api DELETE" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+
+echo "--- DND-2007: the merge guard refuses first, with no read; the scan cannot classify -> refused ---"
+gha api -X PUT repos/synth-owner/pub/pulls/5/merge -f "commit_message=x${TOKEN}"
+if [ "${RC}" = 3 ] && [[ "${OUT}" != *"stub: SENT"* ]] && [[ "${CALLS}" != *"repo view"* ]] && [[ "${OUT}" == *"REST merge"* ]]; then ok "an api merge is refused by the merge guard before any visibility read"; else bad "api merge order" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+gha --verbose api -X POST repos/synth-owner/pub/issues -f "body=clean"
+if [ "${RC}" = 3 ] && [[ "${OUT}" != *"stub: SENT"* ]] && [[ "${OUT}" == *"Fix:"* ]]; then ok "a flag before api is refused"; else bad "flag before api" "rc=${RC} ${OUT}"; fi
+gha api -X POST 'repos/synth-owner/pub/issues%zz' -f "body=clean"
+if [ "${RC}" = 3 ] && [[ "${OUT}" != *"stub: SENT"* ]] && [[ "${OUT}" == *"Fix:"* ]]; then ok "an endpoint that cannot be normalized is refused"; else bad "bad endpoint" "rc=${RC} ${OUT}"; fi
 rm -f "${STUB_VIS}".synth-owner_*
 
 # DND-1647: no gh/glab call may have fallen through past its stub.

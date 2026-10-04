@@ -93,6 +93,11 @@ case "$*" in
   "api repos/"*"/rules/branches/"*) answer rules ;;
   "api repos/"*"/git/ref/heads/"*) answer baseref ;;
   "alias list"*) answer aliases ;;
+  # DND-2007: the outbound scan runs after the merge guard and reads the
+  # target's visibility for an api write that carries text. PRIVATE, so this
+  # suite judges the merge guard alone (the scan is
+  # ai/test/gh-athena-outbound's).
+  "repo view"*"--json visibility"*) echo PRIVATE ;;
   "pr merge"*|"-R "*"pr merge"*|"--repo"*"pr merge"*) echo "stub: MERGED" ; exit 0 ;;
   *) echo "stub: passthrough $*"; exit 0 ;;
 esac
@@ -621,7 +626,11 @@ api_refused() {
 api_passes() {
   local label="$1"; shift
   reset_fx; run "$@"
-  if [ "${RC}" = 0 ] && [[ "${OUT}" == *"stub: passthrough api"* ]] && [ "$(cat "${STUB_LOG}")" = "$*" ]; then
+  # The merge guard reads nothing for an api call: the one read allowed before
+  # the call is the outbound scan's visibility read, which runs after the
+  # guard (DND-2007).
+  if [ "${RC}" = 0 ] && [[ "${OUT}" == *"stub: passthrough api"* ]] \
+     && [ "$(grep -v '^repo view .*--json visibility' "${STUB_LOG}")" = "$*" ]; then
     ok "${label}"
   else bad "${label}" "$(detail)"; fi
 }

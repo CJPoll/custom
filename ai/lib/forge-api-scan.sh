@@ -71,6 +71,15 @@ FAS_GLAB_API_BOOL=" --include --paginate --silent --help "
 FAS_GLAB_API_SVALUED="XFfH"
 FAS_GLAB_API_SBOOL="ih"
 
+# ---- the gh api flag table (gh 2.83; unchanged in gh 2.96) -------------------
+# One table for every gh-athena guard that parses `gh api`: the merge guard
+# (ai/lib/gh-merge-guard.sh) and the outbound scan (ai/lib/gh-outbound-scan.sh,
+# DND-2007).
+FAS_GH_API_VALUED=" --method --raw-field --field --header --input --jq --template --preview --hostname --cache "
+FAS_GH_API_BOOL=" --include --paginate --slurp --silent --verbose --help "
+FAS_GH_API_SVALUED="XFfHqtp"
+FAS_GH_API_SBOOL="ih"
+
 # ---- fas_parse_api ----------------------------------------------------------
 # The caller sets the flag table first (space-delimited, each with a leading and
 # trailing space):

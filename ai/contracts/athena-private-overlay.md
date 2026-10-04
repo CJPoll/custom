@@ -350,9 +350,14 @@ installer is DND-703." Superseded by DND-703's installer.
 
 **The forge path.** `ai/bin/gh-athena` scans every text field and text file
 of `pr create|new|edit|comment|review|merge|close|reopen`,
-`issue create|new|edit|comment|close|reopen` and `release create|new|edit`
-before gh runs; a squash merge's subject and body become a commit made on the
-server, where no pre-push hook runs. Which flags carry text is listed in the
+`issue create|new|edit|comment|close|reopen` and `release create|new|edit`,
+and every field, `--input` body and endpoint query of a `gh api` write (REST
+or a GraphQL mutation), before gh runs; a squash merge's subject and body
+become a commit made on the server, where no pre-push hook runs. It runs after
+gh-athena's merge guard, as glab-athena's does, so the guard's refusals read
+nothing first. An api write the scan cannot classify (a flag outside gh's api
+table, an endpoint it cannot normalize, a GraphQL query it cannot read) is
+refused (exit 3). Which flags carry text is listed in the
 header of `ai/lib/gh-outbound-scan.sh`. The argv is read the way gh reads it,
 with a table of every flag of each of these commands and whether it takes a
 value, built from gh's own help and pinned to one gh version
@@ -418,14 +423,20 @@ PUBLIC or read as private.
 - The waiver is self-granted and is written to a local log that nothing reads
   today. It leaves a record, not an alert.
 - gh-athena's forge path does not scan `gh pr create --fill`, an editor or
-  `--web` body, `gh api` writes, the content of release asset files, or other
-  commands (gists, repository or label descriptions, release upload). A CLI
+  `--web` body, the content of release asset files, or other commands
+  (`gh gist`, repository or label descriptions, release upload). A CLI
   whose flags differ from its pinned table is read by the table until the
   table is regenerated. `ai/bin/cli-flag-table --check` names the drift only
   on a machine running the pinned version; its self-test fails where a table
   differs from origin/main's and cannot be compared there. gh-athena's and glab-athena's residuals are listed in
   the headers of `ai/lib/gh-outbound-scan.sh` and
   `ai/lib/glab-outbound-scan.sh`.
+
+  **Later (2026-10-04, DND-2007):** this bullet named `gh api` writes as a
+  gh-athena residual. Superseded: gh-athena's scan runs after its merge guard
+  and scans every `gh api` write, as glab-athena's does. The scan ran before
+  the guard, and a visibility read there would have read before the guard's
+  read-free refusals, so the api scan had been left out.
 - gh-athena and glab-athena run the scanner beside them, so a worktree's
   wrapper runs that branch's scanner. Only the pre-push hook pins the landed
   scanner.

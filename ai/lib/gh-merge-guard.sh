@@ -429,12 +429,13 @@ gmg_api_ref_route() {
   return 1
 }
 
-# `gh api` flags (gh 2.83), the table for fas_parse_api (ai/lib/forge-api-scan.sh,
-# the argv parser shared with glab-athena's guard since DND-742).
-GMG_API_VALUED=" --method --raw-field --field --header --input --jq --template --preview --hostname --cache "
-GMG_API_BOOL=" --include --paginate --slurp --silent --verbose --help "
-GMG_API_SVALUED="XFfHqtp"
-GMG_API_SBOOL="ih"
+# `gh api` flags, the table for fas_parse_api (ai/lib/forge-api-scan.sh, the
+# argv parser shared with glab-athena's guard since DND-742). The table itself
+# is FAS_GH_API_* there, shared with the outbound scan (DND-2007).
+GMG_API_VALUED="$FAS_GH_API_VALUED"
+GMG_API_BOOL="$FAS_GH_API_BOOL"
+GMG_API_SVALUED="$FAS_GH_API_SVALUED"
+GMG_API_SBOOL="$FAS_GH_API_SBOOL"
 
 # gmg_api_guard <shown> <gh api args (after the word api)...> : returns 0 when
 # the call neither merges nor writes a ref; exits 3 otherwise. The argv parser

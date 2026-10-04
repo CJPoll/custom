@@ -180,16 +180,6 @@ fi
 # Isolation comes first so the guard's own gh reads run as the App, with the
 # same (empty) alias set the final gh sees.
 use_app_token
-# ---- The outbound scan (DND-699) -------------------------------------------
-# A PR/issue title or body bound for a PUBLIC repository is scanned for
-# work-domain values before gh runs; a hit is refused. A `-` body file is read
-# here and handed to gh as the scanned private copy. Mechanism, states and
-# residuals: ai/lib/gh-outbound-scan.sh.
-# shellcheck source=../lib/gh-outbound-scan.sh
-. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/gh-outbound-scan.sh" \
-  || die "cannot load ai/lib/gh-outbound-scan.sh. Fix: run gh-athena from a full ~/dev/custom checkout (ai/bin and ai/lib side by side)."
-gos_guard "$@"
-set -- "${GOS_ARGV[@]}"
 # shellcheck source=../lib/gh-merge-guard.sh
 . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/gh-merge-guard.sh" \
   || die "cannot load ai/lib/gh-merge-guard.sh. Fix: run gh-athena from a full ~/dev/custom checkout (ai/bin and ai/lib side by side)."
@@ -199,6 +189,21 @@ if [ -n "${GH_ATHENA_MERGE_DRY_RUN:-}" ]; then
   printf 'gh-athena: dry-run: would exec gh %s\n' "$*"
   exit 0
 fi
+# ---- The outbound scan (DND-699, DND-1976, DND-2007) ------------------------
+# Every write that carries free text to a PUBLIC repository is scanned for
+# work-domain values before gh runs; a hit is refused. That is PR, issue,
+# comment, review, merge-commit and release text, and every `gh api` write's
+# fields, --input body and endpoint query (REST and GraphQL). A file or stdin
+# value is read here and handed to gh as the scanned private copy. Mechanism,
+# states and residuals: ai/lib/gh-outbound-scan.sh. After the merge guard, as
+# in glab-athena: the guard's refusals read nothing and send nothing, so they
+# stay read-free, and the guard reads no stdin, so the scan's copy of it is
+# whole. After the dry-run seam, which sends nothing either.
+# shellcheck source=../lib/gh-outbound-scan.sh
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/gh-outbound-scan.sh" \
+  || die "cannot load ai/lib/gh-outbound-scan.sh. Fix: run gh-athena from a full ~/dev/custom checkout (ai/bin and ai/lib side by side)."
+gos_guard "$@"
+set -- "${GOS_ARGV[@]}"
 # A child, not exec: fci_isolate's trap removes the config dir when gh exits.
 rc=0
 gh "$@" || rc=$?
