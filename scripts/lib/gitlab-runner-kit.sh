@@ -127,6 +127,57 @@ grk_docker_socket() {
 grk_role_gets_docker() { [ "${1-}" = "ci" ] || [ "${1-}" = "deploy" ]; }
 grk_role_gets_db_tmpfs() { [ "${1-}" = "ci" ]; }
 
+# grk_role_security_opt ROLE -> the [runners.docker] security_opt value of
+# ROLE, or nothing for "write no security_opt" (DND-1999). Deny by default:
+# only a role named here is loosened from Docker's defaults.
+#   ci          seccomp and AppArmor unconfined, and systempaths=unconfined.
+#               tool-sandbox runs bwrap --unshare-all ... --proc /proc in ci
+#               jobs: Docker's default seccomp refuses the user namespace, and
+#               the masked /proc paths make the kernel refuse a fresh proc
+#               mount. Residual: ci job code can create user namespaces and
+#               mount /proc in its own rootless daemon. Accepted because the ci
+#               user holds no deploy secret, and host-only /proc stays refused
+#               (the job's root is the runner user's subuid on the host).
+#               Where AppArmor is not loaded the entry is a no-op; it keeps bwrap's
+#               mounts working on a host where it is.
+#   deploy      none: Docker's default seccomp and masked /proc. Deploy jobs
+#               only drive the mounted daemon socket (docker build; buildx's
+#               buildkitd is a sibling container the daemon starts).
+#   - (untagged) seccomp and AppArmor unconfined: rootless BuildKit as a job
+#               image (moby/buildkit:rootless) nests a user namespace
+#               (system-files/gitlab-runner-runbook.md). /proc stays masked.
+#   any other   none: the kit knows no need for it.
+GRK_SECURITY_OPT_CI='["seccomp:unconfined", "apparmor:unconfined", "systempaths=unconfined"]'
+GRK_SECURITY_OPT_UNTAGGED='["seccomp:unconfined", "apparmor:unconfined"]'
+grk_role_security_opt() {
+  case "${1-}" in
+    ci) printf '%s\n' "${GRK_SECURITY_OPT_CI}" ;;
+    -)  printf '%s\n' "${GRK_SECURITY_OPT_UNTAGGED}" ;;
+    *)  printf '\n' ;;
+  esac
+}
+
+# grk_config_entry_security_opt NAME < CONFIG -> the security_opt value of the
+# [[runners]] entry named NAME, all whitespace removed; nothing when it sets
+# none. A # comment line is not a setting. Exit 1 when no entry is named NAME,
+# so a missing entry never reads as "sets none".
+grk_config_entry_security_opt() {
+  awk -v want="$1" '
+    /^[[:space:]]*\[\[runners\]\]/ { cur = ""; next }
+    /^[[:space:]]*name[[:space:]]*=/ { s = $0; sub(/^[^"]*"/, "", s); sub(/".*$/, "", s); cur = s; if (cur == want) seen = 1; next }
+    cur == want && /^[[:space:]]*security_opt[[:space:]]*=/ { s = $0; sub(/^[^=]*=/, "", s); gsub(/[[:space:]]/, "", s); print s; exit }
+    END { exit seen ? 0 : 1 }'
+}
+
+# grk_security_opt_matches ROLE NAME < CONFIG -> 0 when entry NAME's
+# security_opt is ROLE's (whitespace aside), both "none" included.
+grk_security_opt_matches() {
+  local got want
+  got="$(grk_config_entry_security_opt "$2")" || return 1
+  want="$(grk_role_security_opt "$1")"
+  [ "${got}" = "${want//[[:space:]]/}" ]
+}
+
 # grk_config_entry_has_builds_dir NAME < CONFIG -> 0 when the [[runners]] entry
 # named NAME in the config text on stdin sets builds_dir. A ci or deploy entry
 # without it predates the runner contract (DND-1973).
@@ -290,7 +341,8 @@ grk_render_header() {
 # entry: one without it is refused, never written with no daemon. The token
 # reaches only stdout, through the printf builtin: no argv.
 grk_render_runner() {
-  local docker=false builds="$5/builds"
+  local docker=false builds="$5/builds" secopt
+  secopt="$(grk_role_security_opt "$2")"
   if grk_role_gets_docker "$2"; then
     docker=true
     if [[ "${7-}" != /*/docker.sock ]]; then
@@ -321,7 +373,8 @@ grk_render_runner() {
   printf '  [runners.docker]\n'
   printf '    image = "alpine:3.20"\n'
   printf '    privileged = false\n'
-  printf '    security_opt = ["seccomp:unconfined", "apparmor:unconfined"]\n'
+  # Per role (DND-1999, grk_role_security_opt): none means Docker's defaults.
+  if [ -n "${secopt}" ]; then printf '    security_opt = %s\n' "${secopt}"; fi
   if $docker; then
     printf '    volumes = ["%s:/var/run/docker.sock", "%s:%s", "%s/cache:/cache"]\n' "$7" "${builds}" "${builds}" "$5"
   else
