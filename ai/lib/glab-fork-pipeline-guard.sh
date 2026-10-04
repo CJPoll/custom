@@ -412,6 +412,18 @@ glfp_branch() {
   return 0
 }
 
+# glfp_mr_value <value> : sets GLFP_MR from a --mr=<value>, as glab (a Go bool
+# flag, the last occurrence wins) reads it: 1 t T TRUE true True are true; 0 f F
+# FALSE false False are false. Any other spelling is refused, so a value this
+# does not read as glab does cannot hide an --mr run or fake one.
+glfp_mr_value() {
+  case "$1" in
+    1|t|T|TRUE|true|True) GLFP_MR=1 ;;
+    0|f|F|FALSE|false|False) GLFP_MR=0 ;;
+    *) glfp_refuse "$GLFP_SHOWN" "COULD NOT LOOK: '--mr=$1' is not a boolean glab reads (1 t T TRUE true True 0 f F FALSE false False), so whether this is an --mr run is unknown" "spell it --mr, --mr=true or --mr=false" ;;
+  esac
+}
+
 # glfp_cli_parse <valued long flags> <bool long flags> <valued shorts> <bool
 # shorts> <args...> : sets GLFP_OPT_<name> for -b/--branch, -p/--pipeline-id,
 # -R/--repo, --ref, -t; GLFP_MR (1 on --mr); GLFP_POS; refuses an unknown flag.
@@ -425,7 +437,7 @@ glfp_cli_parse() {
       --) GLFP_POS+=("$@"); break ;;
       --*=*)
         if [[ "$lv" == *" ${a%%=*} "* ]]; then glfp_cli_opt "${a%%=*}" "${a#*=}"
-        elif [[ "$lb" == *" ${a%%=*} "* ]]; then [ "${a%%=*}" = --mr ] && [ "${a#*=}" != false ] && GLFP_MR=1
+        elif [[ "$lb" == *" ${a%%=*} "* ]]; then [ "${a%%=*}" = --mr ] && glfp_mr_value "${a#*=}"
         else glfp_refuse "$GLFP_SHOWN" "'${a%%=*}' is not a flag of this command that this knows (glab 1.92), so it cannot tell how the rest parses" "drop the flag, or put it after a flag it knows"; fi ;;
       --*)
         if [[ "$lv" == *" $a "* ]]; then v="${1:-}"; [ $# -gt 0 ] && shift; glfp_cli_opt "$a" "$v"
