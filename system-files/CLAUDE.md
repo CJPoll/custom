@@ -115,6 +115,11 @@ instance pair (one trust role per runner user; `scripts/setup-gitlab-runner
 config.toml is written by `scripts/setup-gitlab-runner --runner …` (tokens on
 stdin), not by `gitlab-runner register --token` in argv; the registry declares
 each runner user's config.toml (`ai/secrets/registry.json`, field `user`).
+A `ci` or `deploy` entry carries the runner contract (DND-1973): its own
+user's rootless docker socket at `/var/run/docker.sock`, `builds_dir`
+`/srv/ci/<user>/builds` mounted at the same path, and for `ci` a
+`services_tmpfs` for the database data dir. The table and the named residual
+are in `gitlab-runner-runbook.md`.
 
 ### Stopping a service ends its whole process tree (lib/initd-proc-tree.sh)
 

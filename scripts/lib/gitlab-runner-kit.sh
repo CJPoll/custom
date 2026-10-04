@@ -34,6 +34,12 @@ GRK_SUBID_BASE=1000000000
 GRK_SUBID_SLOTS=4096
 GRK_SUBID_MIN=100000
 GRK_SUBID_MAX=4294901759 # 2^32 - 1 - 65536: the last start a full block fits under
+# The rootless dockerd's socket dir, as the initd files default it
+# (ATHENA_INITD_RUN_USER_DIR): the socket is <dir>/<uid>/docker.sock.
+GRK_RUN_USER_DIR="/run/user"
+# The database service's data dir a ci entry keeps in memory (DND-1973).
+GRK_DB_TMPFS_PATH="/var/lib/postgresql/data"
+GRK_DB_TMPFS_OPTS="rw,size=2g"
 
 grk_refuse() { # <problem> <fix>
   printf '%s\n' "$(grk_redact "$1")" >&2
@@ -85,6 +91,34 @@ grk_docker_service() {
 
 # grk_ci_dir NAME -> the user's CI data root (docker data root + job cache).
 grk_ci_dir() { printf '/srv/ci/%s\n' "$1"; }
+
+# grk_builds_dir NAME -> the user's job builds dir: builds_dir for a ci or
+# deploy entry, bind-mounted into the job at the same path (DND-1973).
+grk_builds_dir() { printf '%s/builds\n' "$(grk_ci_dir "$1")"; }
+
+# grk_docker_socket UID -> the rootless dockerd socket of the user with UID, or
+# a refusal. A uid that is empty, 0 or not a number is an error, never an empty
+# or root path in a volume mount.
+grk_docker_socket() {
+  if [[ ! "${1-}" =~ ^[1-9][0-9]{0,9}$ ]]; then
+    grk_refuse "runner uid '${1-}' is not a non-root numeric uid, so its docker socket path cannot be named" \
+      "check the runner user's /etc/passwd line (getent passwd <user>): its third field must be its numeric uid, not 0"
+    return 1
+  fi
+  printf '%s/%s/docker.sock\n' "${GRK_RUN_USER_DIR}" "$1"
+}
+
+# The runner contract per role (DND-1973). The role is the entry's one tag.
+#   ci, deploy  the job gets its OWN user's rootless docker socket at
+#               /var/run/docker.sock and that user's builds dir as builds_dir,
+#               bind-mounted at the same path, so a container the job starts on
+#               that daemon can mount the job's checkout.
+#   ci          also keeps the database service's data dir in tmpfs
+#               (services_tmpfs cannot be set from .gitlab-ci.yml).
+#   any other   (untagged, or another tag): no socket, no builds_dir, as before.
+# privileged stays false for every role.
+grk_role_gets_docker() { [ "${1-}" = "ci" ] || [ "${1-}" = "deploy" ]; }
+grk_role_gets_db_tmpfs() { [ "${1-}" = "ci" ]; }
 
 # grk_subid_start NAME -> the deterministic first subordinate id of NAME's block.
 grk_subid_start() {
@@ -229,9 +263,20 @@ grk_render_header() {
   printf 'check_interval = 0\n'
 }
 
-# grk_render_runner NAME TAG LIMIT URL CI_DIR TOKEN -> one [[runners]] entry.
-# The token reaches only stdout, through the printf builtin: no argv.
+# grk_render_runner NAME TAG LIMIT URL CI_DIR TOKEN [SOCKET] -> one [[runners]]
+# entry. SOCKET (the user's grk_docker_socket) is required for a ci or deploy
+# entry: one without it is refused, never written with no daemon. The token
+# reaches only stdout, through the printf builtin: no argv.
 grk_render_runner() {
+  local docker=false builds="$5/builds"
+  if grk_role_gets_docker "$2"; then
+    docker=true
+    if [[ "${7-}" != /*/docker.sock ]]; then
+      grk_refuse "runner $1 (tag $2) needs its user's docker socket path, got '${7-}'" \
+        "pass the socket from grk_docker_socket <uid> as the 7th argument (setup-gitlab-runner does)"
+      return 1
+    fi
+  fi
   printf '\n[[runners]]\n'
   printf '  name = "%s"\n' "$1"
   if [ "$2" = "-" ]; then
@@ -246,11 +291,24 @@ grk_render_runner() {
   printf '  token = "%s"\n' "$6"
   printf '  executor = "docker"\n'
   printf '  limit = %s\n' "$3"
+  if $docker; then
+    printf '  # Role %s (DND-1973): jobs get this user'"'"'s own rootless docker socket\n' "$2"
+    printf '  # and its builds dir, at the same path on the host and in the job.\n'
+    printf '  builds_dir = "%s"\n' "${builds}"
+  fi
   printf '  [runners.docker]\n'
   printf '    image = "alpine:3.20"\n'
   printf '    privileged = false\n'
   printf '    security_opt = ["seccomp:unconfined", "apparmor:unconfined"]\n'
-  printf '    volumes = ["%s/cache:/cache"]\n' "$5"
+  if $docker; then
+    printf '    volumes = ["%s:/var/run/docker.sock", "%s:%s", "%s/cache:/cache"]\n' "$7" "${builds}" "${builds}" "$5"
+  else
+    printf '    volumes = ["%s/cache:/cache"]\n' "$5"
+  fi
+  if grk_role_gets_db_tmpfs "$2"; then
+    printf '  [runners.docker.services_tmpfs]\n'
+    printf '    "%s" = "%s"\n' "${GRK_DB_TMPFS_PATH}" "${GRK_DB_TMPFS_OPTS}"
+  fi
 }
 
 # OpenRC sources /etc/conf.d/<base> BEFORE /etc/conf.d/<base>.<suffix> for an

@@ -39,6 +39,28 @@
 # block, rootless dockerd, services, builds dir and cache, and is created in
 # GitLab with access_level=ref_protected so only protected-branch jobs reach it.
 #
+# What each role's jobs get (the runner contract, DND-1973). The role is the
+# entry's tag; privileged = false for every role.
+#   ci       volumes = [<user's rootless docker socket>:/var/run/docker.sock,
+#                       <builds dir>:<builds dir>, /srv/ci/<user>/cache:/cache]
+#            builds_dir = <builds dir>   (/srv/ci/<user>/builds, same path in jobs)
+#            [runners.docker.services_tmpfs] "/var/lib/postgresql/data" = "rw,size=2g"
+#   deploy   the same socket, builds_dir and volumes, each its OWN user's (never
+#            the ci user's), and no services_tmpfs.
+#   other    (untagged, or any other tag): the cache volume only; no socket, no
+#            builds_dir.
+# The socket is /run/user/<the user's uid>/docker.sock, from its rootless dockerd
+# (setup-gitlab-runner-docker). The builds dir comes from setup-gitlab-runner-user;
+# a ci or deploy entry is refused without it.
+#
+# Residual, named. Mounting the ci user's docker socket into ci jobs gives job
+# code control of that daemon, so a job can read anything the ci runner user
+# can, including its config.toml and runner token. That is accepted only
+# because the ci user holds no deploy secret (the deploy runner is its own user
+# and daemon), only the owner and the bot can push branches, and fork pipelines
+# never run in the parent project (DND-1942). The deploy socket is the same
+# power over the deploy user, reached only by protected-branch jobs.
+#
 # Example (ci and deploy as two users; each token from its `POST user/runners`):
 #   sudo scripts/setup-gitlab-runner --user gitlab-runner-personal --runner personal-ci:ci
 #   sudo scripts/setup-gitlab-runner --user gitlab-runner-personal-deploy --runner personal-deploy:deploy
@@ -166,6 +188,22 @@ if [ "${#NEW_IDX[@]}" -gt 0 ] && $HAVE_CFG; then
   mapfile -t EXISTING_ROLES < <(grk_config_roles <<<"${EXISTING_CFG}")
   grk_one_role "${USER_NAME}" "${EXISTING_ROLES[@]+"${EXISTING_ROLES[@]}"}" "${R_TAGS[@]}" || exit 1
 fi
+# The runner contract (DND-1973): a new ci or deploy entry mounts this user's
+# own docker socket and builds dir, so both must be nameable before any change.
+DOCKER_SOCK=""
+BUILDS_DIR="$(grk_builds_dir "${USER_NAME}")"
+for i in "${NEW_IDX[@]+"${NEW_IDX[@]}"}"; do
+  grk_role_gets_docker "${R_TAGS[$i]}" || continue
+  if [ -z "${DOCKER_SOCK}" ]; then
+    USER_UID="$(getent passwd "${USER_NAME}" | cut -d: -f3)"
+    DOCKER_SOCK="$(grk_docker_socket "${USER_UID}")" || exit 1
+    if [ -L "${R}${BUILDS_DIR}" ] || [ ! -d "${R}${BUILDS_DIR}" ]; then
+      die "${BUILDS_DIR} is missing or a symlink, so a ${R_TAGS[$i]} job's builds_dir mount would fail" \
+          "run: sudo scripts/setup-gitlab-runner-user --user ${USER_NAME} (it creates ${BUILDS_DIR}), then re-run"
+    fi
+  fi
+  log "runner ${R_NAMES[$i]} (${R_TAGS[$i]}): jobs get ${DOCKER_SOCK} at /var/run/docker.sock and builds_dir ${BUILDS_DIR}"
+done
 TOKENS=()
 if [ "${#NEW_IDX[@]}" -gt 0 ] && ! $DRY_RUN; then
   for i in "${NEW_IDX[@]}"; do
@@ -248,7 +286,7 @@ if [ "${#R_NAMES[@]}" -gt 0 ]; then
   for i in "${NEW_IDX[@]+"${NEW_IDX[@]}"}"; do
     log "adding runner ${R_NAMES[$i]} (tag ${R_TAGS[$i]}, limit ${R_LIMITS[$i]}) to ${CONFIG}"
     $DRY_RUN && continue
-    content+="$(grk_render_runner "${R_NAMES[$i]}" "${R_TAGS[$i]}" "${R_LIMITS[$i]}" "${GITLAB_URL}" "${CI_DIR}" "${TOKENS[$i]}")"$'\n'
+    content+="$(grk_render_runner "${R_NAMES[$i]}" "${R_TAGS[$i]}" "${R_LIMITS[$i]}" "${GITLAB_URL}" "${CI_DIR}" "${TOKENS[$i]}" "${DOCKER_SOCK}")"$'\n'
   done
   if $DRY_RUN; then
     printf '    + write %s (mode 0600, owner %s; %s new entr(ies); would read %s token(s) on stdin)\n' \
@@ -294,7 +332,8 @@ GitLab Runner binary at ${BIN_PATH}; ${SERVICE_NAME} installed, not registered. 
   1. Create each runner in GitLab with its tag and "Run untagged jobs" OFF,
      e.g. glab api -X POST user/runners -f runner_type=project_type \\
        -F project_id=<id> -f description=<name> -f tag_list=<tag> -F run_untagged=false
-     A deploy runner also gets -f access_level=ref_protected, and its own
+     A deploy runner also gets -f access_level=ref_protected, a
+     -F maximum_timeout=<seconds> at least its longest job's, and its own
      --user (one trust role per runner user; see --help).
      Keep the 'glrt-...' token from the response. Never paste it into a chat.
 

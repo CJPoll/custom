@@ -109,19 +109,56 @@ if grk_valid_url http://gitlab.com || grk_valid_url https://u:p@gitlab.com || gr
   bad "lib: http, credentialed and pathed urls are refused"
 else ok "lib: http, credentialed and pathed urls are refused"; fi
 
-render="$(grk_render_runner alpha-ci ci 1 https://gitlab.com /srv/ci/gitlab-runner-alpha "${TOK_A}")"
+render="$(grk_render_runner alpha-ci ci 1 https://gitlab.com /srv/ci/gitlab-runner-alpha "${TOK_A}" /run/user/2001/docker.sock)"
 for want in '[[runners]]' 'name = "alpha-ci"' 'tags = ["ci"], run_untagged = false' 'limit = 1' \
-            'privileged = false' 'volumes = ["/srv/ci/gitlab-runner-alpha/cache:/cache"]' "token = \"${TOK_A}\""; do
+            'privileged = false' 'volumes = [' "token = \"${TOK_A}\""; do
   case "${render}" in *"${want}"*) ok "lib: a rendered entry has ${want%% =*}" ;; *) bad "lib: a rendered entry has ${want%% =*}" "${render}" ;; esac
 done
 printf '%s\n' "${render}" > "${TMP}/cfg"
 if grk_config_has_runner alpha-ci < "${TMP}/cfg"; then ok "lib: config_has_runner finds a rendered entry"; else bad "lib: config_has_runner finds a rendered entry"; fi
 if grk_config_has_runner alpha < "${TMP}/cfg"; then bad "lib: config_has_runner matches whole names only"; else ok "lib: config_has_runner matches whole names only"; fi
-eq "lib: config_roles reads each entry's role" "$(printf '%s\n%s\n%s\n' "$(grk_render_runner a ci 1 https://gitlab.com /x "${TOK_A}")" "$(grk_render_runner b - 1 https://gitlab.com /x "${TOK_A}")" '[[runners]]' | grk_config_roles | tr '\n' ' ')" "ci - ? "
+eq "lib: config_roles reads each entry's role" "$(printf '%s\n%s\n%s\n' "$(grk_render_runner a ci 1 https://gitlab.com /x "${TOK_A}" /run/user/2001/docker.sock)" "$(grk_render_runner b - 1 https://gitlab.com /x "${TOK_A}")" '[[runners]]' | grk_config_roles | tr '\n' ' ')" "ci - ? "
 eq "lib: --runner NAME:- is an untagged runner" "$(grk_parse_runner walt-ui:-:3)" "walt-ui - 3"
 case "$(grk_render_runner walt-ui - 3 https://gitlab.com /srv/ci/gitlab-runner "${TOK_A}")" in
   *"untagged: no tags, run_untagged = true"*) ok "lib: an untagged entry says so, not run_untagged = false" ;;
   *) bad "lib: an untagged entry says so, not run_untagged = false" ;; esac
+# The runner contract per role (DND-1973): what a job of each role is given.
+eq "lib: the builds dir is /srv/ci/<user>/builds" "$(grk_builds_dir gitlab-runner-alpha)" "/srv/ci/gitlab-runner-alpha/builds"
+eq "lib: a user's rootless docker socket is /run/user/<uid>/docker.sock" "$(grk_docker_socket 2001)" "/run/user/2001/docker.sock"
+for baduid in "" 0 x12 "12 3" -5; do
+  err="$(grk_docker_socket "${baduid}" 2>&1)" && bad "lib: uid '${baduid}' gives no socket path" "accepted: ${err}"
+  case "${err}" in *Fix:*) ok "lib: uid '${baduid}' is refused with Fix:, never an empty socket path" ;; *) bad "lib: uid '${baduid}' is refused with Fix:, never an empty socket path" "${err}" ;; esac
+done
+SOCK_A="/run/user/2001/docker.sock"
+ci_render="$(grk_render_runner alpha-ci ci 1 https://gitlab.com /srv/ci/gitlab-runner-alpha "${TOK_A}" "${SOCK_A}")"
+for want in '  builds_dir = "/srv/ci/gitlab-runner-alpha/builds"' \
+            '    volumes = ["/run/user/2001/docker.sock:/var/run/docker.sock", "/srv/ci/gitlab-runner-alpha/builds:/srv/ci/gitlab-runner-alpha/builds", "/srv/ci/gitlab-runner-alpha/cache:/cache"]' \
+            '  [runners.docker.services_tmpfs]' \
+            '    "/var/lib/postgresql/data" = "rw,size=2g"' \
+            '    privileged = false'; do
+  if grep -qxF -- "${want}" <<<"${ci_render}"; then ok "lib: a ci entry has: ${want## }"; else bad "lib: a ci entry has: ${want## }" "${ci_render}"; fi
+done
+dp_render="$(grk_render_runner charlie-deploy deploy 1 https://gitlab.com /srv/ci/gitlab-runner-charlie "${TOK_A}" /run/user/2003/docker.sock)"
+for want in '  builds_dir = "/srv/ci/gitlab-runner-charlie/builds"' \
+            '    volumes = ["/run/user/2003/docker.sock:/var/run/docker.sock", "/srv/ci/gitlab-runner-charlie/builds:/srv/ci/gitlab-runner-charlie/builds", "/srv/ci/gitlab-runner-charlie/cache:/cache"]' \
+            '    privileged = false'; do
+  if grep -qxF -- "${want}" <<<"${dp_render}"; then ok "lib: a deploy entry has: ${want## }"; else bad "lib: a deploy entry has: ${want## }" "${dp_render}"; fi
+done
+case "${dp_render}" in *services_tmpfs*|*postgresql*) bad "lib: a deploy entry has no services tmpfs (no database service)" "${dp_render}" ;;
+  *) ok "lib: a deploy entry has no services tmpfs (no database service)" ;; esac
+# builds_dir is a [[runners]] key: it must come before the [runners.docker] table.
+bd_line="$(grep -n '^  builds_dir' <<<"${ci_render}" | cut -d: -f1)"; dk_line="$(grep -n '^  \[runners.docker\]$' <<<"${ci_render}" | cut -d: -f1)"
+if [ -n "${bd_line}" ] && [ -n "${dk_line}" ] && [ "${bd_line}" -lt "${dk_line}" ]; then ok "lib: builds_dir sits in [[runners]], before [runners.docker]"
+else bad "lib: builds_dir sits in [[runners]], before [runners.docker]" "${ci_render}"; fi
+err="$(grk_render_runner alpha-ci ci 1 https://gitlab.com /srv/ci/gitlab-runner-alpha "${TOK_A}" 2>&1)" && bad "lib: a ci entry with no socket is refused" "accepted"
+case "${err}" in *Fix:*) ok "lib: a ci entry with no socket is refused with Fix:, never written without the daemon" ;; *) bad "lib: a ci entry with no socket is refused with Fix:, never written without the daemon" "${err}" ;; esac
+case "${err}" in *"${TOK_A}"*) bad "lib: that refusal never prints the token" ;; *) ok "lib: that refusal never prints the token" ;; esac
+for tag in - other; do
+  r="$(grk_render_runner u "${tag}" 1 https://gitlab.com /srv/ci/gitlab-runner "${TOK_A}" "${SOCK_A}")"
+  case "${r}" in *docker.sock*|*builds_dir*|*services_tmpfs*) bad "lib: a '${tag}' entry gets no socket, builds_dir or tmpfs (only ci and deploy do)" "${r}" ;;
+    *) ok "lib: a '${tag}' entry gets no socket, builds_dir or tmpfs (only ci and deploy do)" ;; esac
+  case "${r}" in *'volumes = ["/srv/ci/gitlab-runner/cache:/cache"]'*) ok "lib: a '${tag}' entry keeps the cache-only volumes" ;; *) bad "lib: a '${tag}' entry keeps the cache-only volumes" "${r}" ;; esac
+done
 case "$(grk_render_runner_confd gitlab-runner /home/gitlab-runner)" in
   *RUNNER_USER=*|*RUNNER_HOME=*|*RUNNER_CONFIG=*) bad "lib: the default user's runner conf.d sets no user/home/config (instances inherit it)" ;;
   *) ok "lib: the default user's runner conf.d sets no user/home/config (instances inherit it)" ;; esac
@@ -220,6 +257,12 @@ for s in setup-gitlab-runner-user setup-gitlab-runner-docker setup-gitlab-runner
   else ok "${s} --help runs no host command"; fi
 done
 
+kit setup-gitlab-runner --help "${NOIN}"
+for want in "builds_dir" "/var/run/docker.sock" "services_tmpfs" "runner token" "DND-1942"; do
+  case "${OUT}" in *"${want}"*) ok "setup-gitlab-runner --help states the role contract and its residual (${want})" ;;
+    *) bad "setup-gitlab-runner --help states the role contract and its residual (${want})" ;; esac
+done
+
 # --- a bad --user is refused before anything changes -------------------------
 before="$(snapshot)"
 kit setup-gitlab-runner-user --user evil "${NOIN}"
@@ -238,6 +281,11 @@ check "user alpha: /srv/ci/gitlab-runner-alpha is created root-owned" \
 for d in /docker /cache; do
   eq "user alpha: /srv/ci/gitlab-runner-alpha${d} is 0700" "$(mode_of "${ROOT}/srv/ci/gitlab-runner-alpha${d}")" "700"
 done
+# The builds dir: traverse-only for others, so a job's non-root user reaches its
+# checkout inside the container; /srv/ci/<user> (0710) still keeps host users out.
+eq "user alpha: /srv/ci/gitlab-runner-alpha/builds is 0711" "$(mode_of "${ROOT}/srv/ci/gitlab-runner-alpha/builds")" "711"
+check "user alpha: the builds dir is created owned by the user" \
+  grep -q "^install -d -m 0711 -o gitlab-runner-alpha -g gitlab-runner-alpha ${ROOT}/srv/ci/gitlab-runner-alpha/builds\$" "${ARGV_LOG}"
 check "user alpha: useradd allocates no subid block itself" grep -q '^useradd .*-K SUB_UID_COUNT=0 -K SUB_GID_COUNT=0 gitlab-runner-alpha$' "${ARGV_LOG}"
 check "user alpha: the CI dirs are created owned by the user" \
   grep -q "^install -d -m 0700 -o gitlab-runner-alpha -g gitlab-runner-alpha ${ROOT}/srv/ci/gitlab-runner-alpha/cache\$" "${ARGV_LOG}"
@@ -362,6 +410,15 @@ check "runner alpha: first token is in its entry" grep -qxF "  token = \"${TOK_A
 check "runner alpha: second token is in its entry" grep -qxF "  token = \"${TOK_B}\"" "${CFG}"
 check "runner alpha: an entry records its tag" grep -qF 'tags = ["ci"], run_untagged = false' "${CFG}"
 check "runner alpha: an entry has its own limit" grep -qx '  limit = 2' "${CFG}"
+uid_of() { awk -F: -v u="$1" '$1 == u { print $3 }' "${ROOT}/etc/passwd"; }
+A_UID="$(uid_of gitlab-runner-alpha)"
+A_VOL="    volumes = [\"/run/user/${A_UID}/docker.sock:/var/run/docker.sock\", \"/srv/ci/gitlab-runner-alpha/builds:/srv/ci/gitlab-runner-alpha/builds\", \"/srv/ci/gitlab-runner-alpha/cache:/cache\"]"
+eq "runner alpha: every ci entry mounts alpha's own docker socket, same-path builds dir and cache" "$(grep -cxF -- "${A_VOL}" "${CFG}")" "2"
+eq "runner alpha: every ci entry sets builds_dir to alpha's builds dir" \
+  "$(grep -cxF '  builds_dir = "/srv/ci/gitlab-runner-alpha/builds"' "${CFG}")" "2"
+eq "runner alpha: every ci entry keeps the database service's data dir in tmpfs" \
+  "$(grep -cxF '    "/var/lib/postgresql/data" = "rw,size=2g"' "${CFG}")" "2"
+eq "runner alpha: no entry is privileged" "$(grep -c 'privileged = true' "${CFG}")" "0"
 eq "runner alpha: the instance is a symlink to the base initd" "$(readlink "${ROOT}/etc/init.d/gitlab-runner.alpha")" "gitlab-runner"
 check "runner alpha: conf.d names the config" \
   grep -qx 'RUNNER_CONFIG="/home/gitlab-runner-alpha/.gitlab-runner/config.toml"' "${ROOT}/etc/conf.d/gitlab-runner.alpha"
@@ -396,6 +453,34 @@ expect_rc "runner charlie: a deploy runner under its own user succeeds" 0
 check "runner charlie: its config holds the deploy entry" \
   grep -qF 'tags = ["deploy"], run_untagged = false' "${ROOT}/home/gitlab-runner-charlie/.gitlab-runner/config.toml"
 if grep -qF 'deploy' "${CFG}"; then bad "runner alpha: the ci user's config holds no deploy entry"; else ok "runner alpha: the ci user's config holds no deploy entry"; fi
+D_CFG="${ROOT}/home/gitlab-runner-charlie/.gitlab-runner/config.toml"
+C_UID="$(uid_of gitlab-runner-charlie)"
+check "runner charlie: the deploy entry mounts charlie's OWN socket, builds dir and cache" \
+  grep -qxF "    volumes = [\"/run/user/${C_UID}/docker.sock:/var/run/docker.sock\", \"/srv/ci/gitlab-runner-charlie/builds:/srv/ci/gitlab-runner-charlie/builds\", \"/srv/ci/gitlab-runner-charlie/cache:/cache\"]" "${D_CFG}"
+check "runner charlie: the deploy entry's builds_dir is charlie's" grep -qxF '  builds_dir = "/srv/ci/gitlab-runner-charlie/builds"' "${D_CFG}"
+if [ "${C_UID}" != "${A_UID}" ] && ! grep -qF -e "/run/user/${A_UID}/" -e "gitlab-runner-alpha" "${D_CFG}"; then
+  ok "runner charlie: the deploy config names nothing of the ci user's (socket, builds dir, cache)"
+else bad "runner charlie: the deploy config names nothing of the ci user's (socket, builds dir, cache)" "$(cat "${D_CFG}")"; fi
+if grep -qF 'services_tmpfs' "${D_CFG}"; then bad "runner charlie: the deploy entry has no services tmpfs"; else ok "runner charlie: the deploy entry has no services tmpfs"; fi
+eq "runner charlie: the deploy entry is not privileged" "$(grep -cx '    privileged = false' "${D_CFG}")" "1"
+# A ci or deploy entry needs the user's builds dir (setup-gitlab-runner-user
+# makes it); without it the job's bind mount would fail at run time.
+kit setup-gitlab-runner-user --user gitlab-runner-india "${NOIN}"; expect_rc "user india: succeeds" 0
+rmdir "${ROOT}/srv/ci/gitlab-runner-india/builds"
+before="$(snapshot)"
+kit setup-gitlab-runner --user gitlab-runner-india --runner india-ci:ci "${TMP}/tokens-c"
+expect_rc "runner india: a ci entry with no builds dir is refused" 1
+case "${ERR}" in *builds*Fix:*setup-gitlab-runner-user*) ok "the missing-builds-dir refusal's Fix: names setup-gitlab-runner-user" ;;
+  *) bad "the missing-builds-dir refusal's Fix: names setup-gitlab-runner-user" "${ERR}" ;; esac
+eq "runner india: that refusal changes no file" "$(snapshot)" "${before}"
+# A malformed uid in passwd is refused, never written as an empty socket path.
+sed -i 's/^\(gitlab-runner-india:x:\)[0-9]*:/\1notanumber:/' "${ROOT}/etc/passwd"
+install -d -m 0711 "${ROOT}/srv/ci/gitlab-runner-india/builds"
+before="$(snapshot)"
+kit setup-gitlab-runner --user gitlab-runner-india --runner india-ci:ci "${TMP}/tokens-c"
+expect_rc "runner india: a non-numeric uid is refused" 1
+case "${ERR}" in *uid*Fix:*) ok "the bad-uid refusal carries Fix:" ;; *) bad "the bad-uid refusal carries Fix:" "${ERR}" ;; esac
+eq "runner india: the bad-uid refusal changes no file" "$(snapshot)" "${before}"
 # An entry whose role this kit cannot tell (register wrote it) blocks additions.
 printf '[[runners]]\n  name = "legacy"\n' > "${TMP}/legacy-cfg"
 mkdir -p "${ROOT}/home/gitlab-runner-delta/.gitlab-runner"

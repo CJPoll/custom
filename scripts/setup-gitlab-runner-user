@@ -10,6 +10,9 @@
 #   * /srv/ci/<name>/docker (its rootless docker data root) and
 #     /srv/ci/<name>/cache (the job cache), each 0700 and owned by <name>,
 #     inside /srv/ci/<name> at 0710 root:<name> (the user cannot replace them)
+#   * /srv/ci/<name>/builds (a ci or deploy runner's builds_dir, mounted into
+#     its jobs at the same path), 0711 and owned by <name>: a job's non-root
+#     user can traverse to its checkout; /srv/ci/<name> still keeps host users out
 #   * CI job code executes as this user (inside rootless-docker containers), so
 #     it deliberately has no root, and no runner user can read another's files.
 #
@@ -91,7 +94,8 @@ fi
 # Root never follows a symlink here: chmod/install -d act on a link's target,
 # and a runner user could plant one to make root chown /etc to it.
 CI_DIR="$(grk_ci_dir "${USER_NAME}")"
-for p in "${USER_HOME}" /srv/ci "${CI_DIR}" "${CI_DIR}/docker" "${CI_DIR}/cache"; do
+BUILDS_DIR="$(grk_builds_dir "${USER_NAME}")"
+for p in "${USER_HOME}" /srv/ci "${CI_DIR}" "${CI_DIR}/docker" "${CI_DIR}/cache" "${BUILDS_DIR}"; do
   [ ! -L "${R}${p}" ] || die "${p} is a symlink, so root would act on its target" \
     "remove the symlink (rm ${p}) after checking what it points at, then re-run"
 done
@@ -108,6 +112,11 @@ run install -d -m 0710 -o root -g "${USER_NAME}" "${R}${CI_DIR}"
 for d in "${CI_DIR}/docker" "${CI_DIR}/cache"; do
   run install -d -m 0700 -o "${USER_NAME}" -g "${USER_NAME}" "${R}${d}"
 done
+# The builds dir (DND-1973): a ci or deploy job's checkout lives here, bind-
+# mounted at the same path. Inside the job, the dir's own mode is all that
+# stands between the image's non-root user and its checkout, so it is 0711.
+log "builds dir ${BUILDS_DIR} (0711 ${USER_NAME})"
+run install -d -m 0711 -o "${USER_NAME}" -g "${USER_NAME}" "${R}${BUILDS_DIR}"
 
 $DRY_RUN || log "confirmed no root groups: $(id -nG "${USER_NAME}" 2>/dev/null || echo '(pending)')"
 

@@ -23,6 +23,40 @@ harness executes on your behalf.
   on **both** gitlab.com SaaS (no extra config) and a self-managed **unprivileged**
   runner (needs only the `security_opt` in `config.toml`).
 
+**Later (2026-10-04, DND-1973):** the invariants above hold for the untagged
+runner and any tag other than `ci` and `deploy`. A `ci` or `deploy` entry
+written by `scripts/setup-gitlab-runner` carries a runner contract, because
+those jobs drive a docker daemon (a project's Build and Tooling jobs, and its
+deploy image builds):
+
+| Role | `volumes` | `builds_dir` | `services_tmpfs` |
+|---|---|---|---|
+| `ci` | `/run/user/<uid>/docker.sock:/var/run/docker.sock`, `<builds>:<builds>`, `/srv/ci/<user>/cache:/cache` | `<builds>` = `/srv/ci/<user>/builds` | `"/var/lib/postgresql/data" = "rw,size=2g"` |
+| `deploy` | the same three, each the deploy user's own | the deploy user's `<builds>` | none |
+| other | `/srv/ci/<user>/cache:/cache` | unset | none |
+
+`privileged = false` for every role. `<uid>` is the runner user's own uid, so
+the socket is that user's rootless dockerd (`setup-gitlab-runner-docker`).
+`setup-gitlab-runner-user` creates `<builds>` at `0711`, owned by the user;
+`/srv/ci/<user>` (`0710 root:<user>`) keeps other host users out, and `0711`
+lets a job's non-root user reach its checkout. `setup-gitlab-runner` refuses a
+`ci` or `deploy` entry when the builds dir is missing or the uid is not a
+number. A deploy runner is created in GitLab with `access_level=ref_protected`
+and a `maximum_timeout` at least its longest job's.
+
+Residual, named. Mounting the `ci` user's docker socket into `ci` jobs gives job
+code control of that daemon, so a job can read anything the `ci` runner user
+can, including its `config.toml` and runner token. That is accepted only
+because the `ci` user holds no deploy secret (the deploy runner is its own user
+and daemon), only the owner and the bot can push branches, and fork pipelines
+never run in the parent project (DND-1942). The deploy socket gives the same
+power over the deploy user, and only protected-branch jobs reach it.
+
+An entry written before DND-1973 has no contract, and a re-run keeps it as is.
+To add the contract, delete that `[[runners]]` block from the config and re-run
+`setup-gitlab-runner` with its token on stdin. The builds dir is not cleaned
+by the kit: a cancelled job's leftovers stay until removed by hand.
+
 ## 1. Install (root)
 
 ```

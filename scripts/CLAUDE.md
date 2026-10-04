@@ -516,3 +516,7 @@ because a ci job's merge-request code reaches its user's docker socket. The
 deploy runner is its own user (e.g. `gitlab-runner-<suffix>-deploy`), created in
 GitLab with `access_level=ref_protected`. The rules live in
 `scripts/lib/gitlab-runner-kit.sh`; the tests in `scripts/test/gitlab-runner-kit/`.
+A `ci` or `deploy` entry carries the runner contract (DND-1973): its own user's
+docker socket and same-path `builds_dir` (`/srv/ci/<user>/builds`, `0711`), and
+for `ci` a database `services_tmpfs`. `setup-gitlab-runner --help` and
+`system-files/gitlab-runner-runbook.md` have the table and the named residual.
