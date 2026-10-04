@@ -30,7 +30,8 @@
 set -euo pipefail
 
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
-  sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'
+  # The header comment, from line 2 to the first line that is not a comment.
+  awk 'NR == 1 { next } !/^#/ { exit } { sub(/^# ?/, ""); print }' "$0"
   exit 0
 fi
 if [ "$#" -ne 0 ]; then
@@ -133,7 +134,7 @@ rm -rf "${src}"
 hook_usage="$(git hook -h 2>&1 || true)"
 [[ "${hook_usage}" == *"git hook list"* ]] || {
   echo "setup.sh: the installed git has no \`git hook list\`" >&2
-  echo "  Fix: set GIT_VERSION to a release with config-based hooks (2.54.0 or later)." >&2
+  echo "  Fix: set GIT_VERSION to a release whose \`git hook -h\` lists \`git hook list\` (2.54.0 does)." >&2
   exit 1
 }
 [ -x "$(git --exec-path)/git-subtree" ] || {
