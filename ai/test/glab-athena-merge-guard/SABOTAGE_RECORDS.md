@@ -10,7 +10,7 @@ project's namespace before the guard runs, and refuses what it cannot key: any
 path, an absolute URL. So G1–G12, F1 and F2 (and the original shapes of A3,
 A7, A9 and A12, as A3g, A7g, A9g, A12g) run the guard itself (`glmg_guard`,
 sourced) instead of the wrapper, and still kill the mutants credited to them
-below (S7, X2, X3, X6). W1–W3 pin that the wrapper refuses those shapes. The
+below (S7, X2, X3, X6). GQ1–GQ3 pin that the wrapper refuses those shapes. The
 other route cases name the project by path (`example-group%2Fexample-app`)
 instead of `1`.
 

@@ -228,6 +228,12 @@ R="$(fid_in "${PERS}" fid_resolve_glab_args mr note 1 -m "-R${W_NS}/y")"
 expect A2 "-m -R<work>/y (a message that looks like -R) -> BAD KEY, never the work bot" 2 "BAD KEY" "" "right after the flag '-m'"
 R="$(fid_in "${PERS}" fid_resolve_glab_args mr note 1 --message -R "${W_NS}/y")"
 expect A3 "--message -R <work>/y -> BAD KEY" 2 "BAD KEY" "" "right after the flag '--message'"
+# glab's flag parser (pflag) reads combined shorthand: in `-yR x/y` the -y is a
+# boolean and -R takes the next word; in `-fRx/y` it takes the rest of the word.
+R="$(fid_in "${PERS}" fid_resolve_glab_args mr merge 1 -yR "${W_NS}/y")"
+expect A3b "-yR <work>/y (-R combined with a short flag) -> BAD KEY, never origin's bot" 2 "BAD KEY" "" "combined with other short flags"
+R="$(fid_in "${PERS}" fid_resolve_glab_args mr create -fR"${W_NS}/y")"
+expect A3c "-fR<work>/y (-R and its value combined with a short flag) -> BAD KEY" 2 "BAD KEY" "" "combined with other short flags"
 R="$(fid_in "${PERS}" fid_resolve_glab_args api -X POST --hostname gitlab.example.com user)"
 expect A4 "--hostname right after a valued flag's value is fine (it is after a value word)" 1 "NO ENTRY" "" "gitlab.example.com/cjpoll"
 R="$(fid_in "${PERS}" fid_resolve_glab_args mr list --draft --hostname gitlab.com)"

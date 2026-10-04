@@ -389,7 +389,8 @@ fid_endpoint_key() {
 # origin. The host is --hostname when given, else the source's own (gitlab.com
 # for a bare OWNER/REPO). BAD KEY when glab could act on a project other than
 # the one read here: two -R values; -R or --hostname right after another flag
-# (it may be that flag's value); -R and the endpoint disagreeing; an endpoint
+# (it may be that flag's value); -R combined with other short flags in one word
+# (-yR, -fRx/y); -R and the endpoint disagreeing; an endpoint
 # naming its target by id, double encoding or an absolute URL; `api graphql`
 # with no -R; an origin checkout with another remote on that host that is not
 # this identity (fid_check_other_remotes).
@@ -399,8 +400,16 @@ fid_resolve_glab_args() {
   fid_clear
   while [ "$i" -lt "$n" ]; do
     a="${args[$i]}"
+    [ "$a" = -- ] && break
+    # glab's flag parser (pflag) reads combined short flags: `-yR x/y` is -y
+    # and -R x/y, `-fRx/y` is -f and -Rx/y. This loop keys only on -R as its
+    # own word, so a combined -R is refused rather than read as some flag.
+    if [[ "$a" != -R* && "$a" =~ ^-[A-Za-z]+R ]]; then
+      fid_fail 2 "BAD KEY" "'$(fid_shown "$a")' may be -R combined with other short flags, which names a project this does not read" \
+        "write -R <namespace>/<project> as its own word (\`mr merge <iid> -y -R <namespace>/<project>\`), and a short flag's value as its own word. $FID_ESCALATE"
+      return
+    fi
     case "$a" in
-      --) break ;;
       -R|--repo|-R?*|--repo=*|--hostname|--hostname=*)
         if fid_flag_may_take_value "$prev"; then
           fid_fail 2 "BAD KEY" "'$(fid_shown "$a")' comes right after the flag '$prev', so glab may read it as that flag's value and act on another project than the one it names" \

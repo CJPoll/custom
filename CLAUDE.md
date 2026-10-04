@@ -158,9 +158,8 @@ bodies. Tests use synthetic values (`UFAKE00001`).
   rather than fix it. The sweep that followed found 17 such bins, including
   `build-agents --help` rewriting every rendered agent and `forge-preflight
   --help` minting a GitHub App installation token. A passthrough wrapper whose
-  contract IS forwarding argv (`gh-athena`, `glab-athena`,
-  `notion-athena-mcp`) is exempt, named with a reason in the check's `EXEMPT`
-  table.
+  contract IS forwarding argv (`gh-athena`, `notion-athena-mcp`) is exempt,
+  named with a reason in the check's `EXEMPT` table.
 
   **Later (2026-10-03, DND-1936):** the exempt wrappers were `gh-athena`,
   `glab-athena` and `notion-athena-mcp`. `glab-athena` left the table: once it
