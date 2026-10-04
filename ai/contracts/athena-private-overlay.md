@@ -352,15 +352,16 @@ installer is DND-703." Superseded by DND-703's installer.
 of `pr create|new|edit|comment|review|merge|close|reopen`,
 `issue create|new|edit|comment|close|reopen` and `release create|new|edit`
 before gh runs; a squash merge's subject and body become a commit made on the
-server, where no pre-push hook runs. Which flags carry text
-is listed in the header of `ai/lib/gh-outbound-scan.sh`. The argv is read the
-way gh reads it, with a table of every flag of each of these commands and
-whether it takes a value, built from gh's own help and pinned to one gh
-version (`ai/lib/gh-flag-table.sh`, generated and checked by
-`ai/bin/gh-flag-table`). A flag the table does not have is refused, and so is a
-flag value that, read as a flag, names a file or repository flag
-(`--label -F <file>`): both rules are `ai/lib/outbound-text-scan.sh`'s, shared
-with glab-athena (DND-1976). Every file is copied once, the copy is scanned,
+server, where no pre-push hook runs. Which flags carry text is listed in the
+header of `ai/lib/gh-outbound-scan.sh`. The argv is read the way gh reads it,
+with a table of every flag of each of these commands and whether it takes a
+value, built from gh's own help and pinned to one gh version
+(`ai/lib/gh-flag-table.sh`, generated and checked by
+`ai/bin/cli-flag-table --cli gh`). A flag the table does not have is refused,
+and so is a value of a non-text flag that, read as a flag, names a file or
+repository flag (`--label -F <file>`). Both rules are
+`ai/lib/outbound-text-scan.sh`'s, shared with glab-athena (DND-1976). Every
+file is copied once, the copy is scanned,
 and gh is handed the copy, so a pipe or a changing file cannot differ from what
 was scanned. The scan runs unless every repository the write can reach
 reads PRIVATE or INTERNAL: each `-R`/`--repo`, the repository of each PR or
@@ -382,18 +383,22 @@ is refused", with no table: a flag the guard did not know was skipped as if it
 took no value. Superseded by the pinned flag table and the two shared rules.
 pflag gives a value-taking flag the next word even when it starts with `-`, so
 `gh pr create -l -t -b X` is label `-t`, body X; the guard read `-t` as the
-title and sent X to a public repository unscanned. A cluster is now read
-letter by letter, as pflag reads it.
+title and sent X to a public repository unscanned. A cluster is read letter by
+letter, as pflag reads it.
 
 **The GitLab forge path.** `ai/bin/glab-athena` applies the same outcome rules
 (DND-1938) to MR, issue and incident notes, MR descriptions, merge and squash
 messages, release text and every `glab api` write, before glab runs. Which
 commands, flags and targets it reads, how it reads a project's visibility, and
-its residuals are in the header of `ai/lib/glab-outbound-scan.sh`. It differs
-from gh-athena in two ways, both stricter: an `internal` project is scanned,
-because any signed-in gitlab.com user can read it; and a visibility that cannot
-be read is refused (exit 3, COULD NOT LOOK), never scanned as PUBLIC or read as
-private.
+its residuals are in the header of `ai/lib/glab-outbound-scan.sh`. It reads the
+argv with a pinned glab table (`ai/lib/glab-flag-table.sh`, from
+`ai/bin/cli-flag-table --cli glab`) under the same two rules, except that a
+flag its table lacks is refused only when the word after it reads as a flag
+or is `--`, because the glab versions in use differ in their flags. It differs
+from gh-athena in two more ways, both stricter: an `internal` project is
+scanned, because any signed-in gitlab.com user can read it; and a visibility
+that cannot be read is refused (exit 3, COULD NOT LOOK), never scanned as
+PUBLIC or read as private.
 
 **Residuals, stated.**
 
@@ -403,12 +408,14 @@ private.
   today. It leaves a record, not an alert.
 - gh-athena's forge path does not scan `gh pr create --fill`, an editor or
   `--web` body, `gh api` writes, the content of release asset files, or other
-  commands (gists, repository or label descriptions, release upload). A gh
-  whose flags differ
-  from the pinned table is read by the table until it is regenerated;
-  `ai/bin/gh-flag-table --check` names the drift on a machine running the
-  pinned gh version. gh-athena's and glab-athena's residuals are listed in the
-  headers of `ai/lib/gh-outbound-scan.sh` and `ai/lib/glab-outbound-scan.sh`.
+  commands (gists, repository or label descriptions, release upload). A CLI
+  whose flags differ from its pinned table is read by the table until the
+  table is regenerated. `ai/bin/cli-flag-table --check` names the drift on a
+  machine running the pinned version, and its self-test fails where the CLI
+  is newer than the pin, or where a table differs from origin/main's and
+  cannot be compared. gh-athena's and glab-athena's residuals are listed in
+  the headers of `ai/lib/gh-outbound-scan.sh` and
+  `ai/lib/glab-outbound-scan.sh`.
 - gh-athena and glab-athena run the scanner beside them, so a worktree's
   wrapper runs that branch's scanner. Only the pre-push hook pins the landed
   scanner.

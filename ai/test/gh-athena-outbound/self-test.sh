@@ -323,6 +323,13 @@ gha pr create -l -F "${TMP}/body-hit.md"
 if [ "${RC}" = 3 ] && not_sent "pr create" && [[ "${OUT}" == *"looks like a flag"* ]] && [[ "${OUT}" == *"Fix:"* ]]; then ok "a label value that is -F refused"; else bad "label -F" "rc=${RC} ${OUT}"; fi
 gha pr create --label -R synth-owner/pub -b "clean"
 if [ "${RC}" = 3 ] && not_sent "pr create" && [[ "${OUT}" == *"looks like a flag"* ]]; then ok "a label value that is -R refused"; else bad "label -R" "rc=${RC} ${OUT}"; fi
+gha pr create --label -b "x${TOKEN}"
+if [ "${RC}" = 1 ] && not_sent "pr create" && [[ "${OUT}" == *"argument:1 label=synth-token"* ]] && no_literal; then ok "a label value that names a text flag makes the next word text (a drifted table)"; else bad "label -b X" "rc=${RC} ${OUT}"; fi
+for argv in "pr --help" "issue -h" "release --help" "pr --help create"; do
+  # shellcheck disable=SC2086
+  gha ${argv} -b "x${TOKEN}"
+  if [ "${RC}" = 0 ] && [[ "${OUT}" != *"outbound-scan:"* ]] && [[ "${CALLS}" != *"repo view"* ]]; then ok "a help flag before the verb passes: ${argv}"; else bad "help before verb: ${argv}" "rc=${RC} ${OUT}"; fi
+done
 gha pr create "--label=-F" -b "clean"
 if [ "${RC}" = 0 ] && sent "pr create"; then ok "an attached value is never another flag"; else bad "attached -F value" "rc=${RC} ${OUT}"; fi
 
@@ -361,6 +368,15 @@ gha pr create -dF "${TMP}/body-hit.md"
 if [ "${RC}" = 1 ] && not_sent "pr create" && [[ "${OUT}" == *"body-file:1 label=synth-token"* ]]; then ok "-dF <file>: the body file is scanned"; else bad "-dF file" "rc=${RC} ${OUT}"; fi
 gha pr create -l bug -t "a title" -b "a clean body" -d
 if [ "${RC}" = 0 ] && sent "pr create" && [[ "${OUT}" == *"CLEAN mode=text"* ]]; then ok "a clean create with valued and boolean flags is sent"; else bad "clean create" "rc=${RC} ${OUT}"; fi
+
+echo "--- DND-1976: a missing flag table refuses a judged write, named, with Fix: ---"
+NT="${TMP}/no-table"; git init -q "${NT}"; mkdir -p "${NT}/ai"
+cp -r "${AI_DIR}/bin" "${AI_DIR}/lib" "${NT}/ai/"
+rm -f "${NT}/ai/lib/gh-flag-table.sh"
+OUT="$(cd "${WORK}" && : > "${STUB_LOG}" && "${NT}/ai/bin/gh-athena" pr create -b "clean" 2>&1)"; RC=$?; CALLS="$(cat "${STUB_LOG}")"
+if [ "${RC}" = 3 ] && not_sent "pr create" && [[ "${OUT}" == *"gh-flag-table.sh"* ]] && [[ "${OUT}" == *"Fix:"* ]]; then ok "no table: pr create refused"; else bad "no table: pr create" "rc=${RC} ${OUT}"; fi
+OUT="$(cd "${WORK}" && : > "${STUB_LOG}" && "${NT}/ai/bin/gh-athena" pr view 5 2>&1)"; RC=$?
+if [ "${RC}" = 0 ] && [[ "${OUT}" == *"stub: passthrough pr view 5"* ]]; then ok "no table: pr view still passes"; else bad "no table: pr view" "rc=${RC} ${OUT}"; fi
 
 echo "--- DND-1976 sweep: the aliases and release text ---"
 for argv in "pr new -b x${TOKEN}" "issue new -t x${TOKEN}" "pr merge 5 -A x${TOKEN}" \

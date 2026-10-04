@@ -1,0 +1,254 @@
+#!/usr/bin/env bash
+#
+# cli-flag-table — generate, or check, the pinned flag tables that the
+# gh-athena and glab-athena outbound scans parse argv with (DND-1976).
+#
+# A scan must read an argv the way the CLI's flag parser (pflag) reads it.
+# pflag gives a flag that takes a value the NEXT word, even one that starts
+# with `-`: `gh pr create -l -t -b X` is label `-t`, body X. A parse that does
+# not know -l takes a value reads `-t` as the title and never scans X. So each
+# scan carries a table of every flag of every command it judges, and whether
+# each one takes a value. This tool builds that table from the installed CLI:
+#
+#   * the flags: the FLAGS and INHERITED FLAGS sections of `<cli> <cmd> --help`;
+#   * the aliases: gh's ALIASES section (`gh pr new` is `gh pr create`); for
+#     glab, whose help lists none, each known alias whose help shows the same
+#     flags as its command;
+#   * whether a flag takes a value: `<cli> <cmd> --help --<flag>`. pflag parses
+#     every flag before cobra shows help, so a flag that needs a value fails
+#     with "flag needs an argument", and one that does not shows the help.
+#     No command runs. The probes run with no token, an empty config dir and
+#     stdin from /dev/null, so even a command that did run could not
+#     authenticate.
+#
+# A table is pinned: ai/lib/<cli>-flag-table.sh records the CLI version it was
+# built from, and is committed. It is never read from the CLI at run time.
+#
+# Usage:
+#   cli-flag-table --help              this text
+#   cli-flag-table --cli <gh|glab> --print   print the table for the installed CLI
+#   cli-flag-table --cli <gh|glab> --write   write it to ai/lib/<cli>-flag-table.sh
+#   cli-flag-table --cli <gh|glab> --check   compare the committed table with the installed CLI
+#
+# Exit codes:
+#   0  printed, written, or (--check) the committed table matches
+#   1  --check: the committed table differs from the installed CLI (same version)
+#   2  --check: not compared (no CLI, or a version other than the pinned one)
+#   3  the table could not be built (CLI missing, a help or probe it cannot read)
+#   64 usage
+#
+# Environment (test seams):
+#   CLI_FLAG_TABLE_BIN    the CLI binary to read (default: the first <cli> on
+#                         PATH that is not the agent PATH wrapper in ai/agent-bin)
+#   CLI_FLAG_TABLE_FILE   the committed table to write or check
+#                         (default: ai/lib/<cli>-flag-table.sh)
+
+set -uo pipefail
+
+HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd -P)"
+
+die() { local rc="$1"; shift; printf 'cli-flag-table: %s\n' "$*" >&2; exit "$rc"; }
+
+usage() { sed -n '2,/^set -uo/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'; }
+
+# configure <cli> : sets the commands a scan judges, the alias candidates, and
+# the table's variable prefix.
+configure() {
+  case "$1" in
+    gh)
+      PREFIX=GFT
+      COMMANDS=(
+        "issue close" "issue comment" "issue create" "issue edit" "issue reopen"
+        "pr close" "pr comment" "pr create" "pr edit" "pr merge" "pr reopen" "pr review"
+        "release create" "release edit"
+      )
+      ALIAS_CANDIDATES=() ;;
+    glab)
+      PREFIX=LFT
+      COMMANDS=(
+        "incident note" "issue create" "issue note" "issue update"
+        "mr create" "mr merge" "mr note" "mr update" "release create"
+      )
+      ALIAS_CANDIDATES=(
+        "incident comment|incident note" "issue comment|issue note" "issue new|issue create"
+        "mr accept|mr merge" "mr comment|mr note" "mr new|mr create"
+      ) ;;
+    *) die 64 "--cli must be gh or glab, not '$1'. Fix: pass --cli gh or --cli glab." ;;
+  esac
+}
+
+# resolve_bin : echoes the CLI to read.
+resolve_bin() {
+  if [ -n "${CLI_FLAG_TABLE_BIN:-}" ]; then
+    [ -x "${CLI_FLAG_TABLE_BIN}" ] || die 3 "CLI_FLAG_TABLE_BIN=${CLI_FLAG_TABLE_BIN} is not an executable. Fix: point it at a $CLI binary, or unset it."
+    printf '%s\n' "${CLI_FLAG_TABLE_BIN}"; return 0
+  fi
+  # The agent PATH wrapper (any checkout's ai/agent-bin, or ATHENA_AGENT_BIN)
+  # refuses a probe it reads as a write, so it is skipped for the real CLI.
+  local agent_bin c dir
+  agent_bin="$(readlink -f "${ATHENA_AGENT_BIN:-/nonexistent}" 2>/dev/null || true)"
+  while IFS= read -r c; do
+    [ -n "$c" ] || continue
+    dir="$(dirname "$(readlink -f "$c")")"
+    case "$dir" in */ai/agent-bin) continue ;; esac
+    if [ -n "$agent_bin" ] && [ "$dir" = "$agent_bin" ]; then continue; fi
+    printf '%s\n' "$c"; return 0
+  done < <(type -ap "$CLI" 2>/dev/null)
+  return 1
+}
+
+# cli_version : echoes the bare version (2.96.0) of the CLI.
+cli_version() {
+  local v
+  v="$(run_cli --version | sed -n "s/^$CLI \(version \)\{0,1\}\([0-9][0-9.]*\).*/\2/p" | head -n1)"
+  [ -n "$v" ] || return 1
+  printf '%s\n' "$v"
+}
+
+# run_cli <args...> : the CLI with no credentials, no prompts and no update
+# check. Prints its output; returns its exit.
+run_cli() {
+  env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN -u GH_HOST -u GH_REPO \
+    -u GITLAB_TOKEN -u GITLAB_ACCESS_TOKEN -u OAUTH_TOKEN -u GITLAB_HOST -u GL_HOST \
+    GH_CONFIG_DIR="${SCRATCH}/config" GLAB_CONFIG_DIR="${SCRATCH}/config" XDG_CONFIG_HOME="${SCRATCH}/config" \
+    GH_NO_UPDATE_NOTIFIER=1 GLAB_CHECK_UPDATE=false GH_PROMPT_DISABLED=1 GLAB_NO_PROMPT=1 NO_COLOR=1 \
+    "$BIN" "$@" </dev/null 2>&1
+}
+
+# flags_of <cmd words> : echoes one "<short>:<long>" per flag line of the help.
+# Exits 3 when the help cannot be read.
+flags_of() {
+  local cmd="$1" help line trimmed sect=""
+  # shellcheck disable=SC2086
+  help="$(run_cli $cmd --help)" || die 3 "\`$CLI $cmd --help\` failed: $(head -c 300 <<<"$help"). Fix: check that $BIN runs, then retry."
+  while IFS= read -r line; do
+    trimmed="$(sed 's/^ *//; s/ *$//' <<<"$line")"
+    # A section header is a line of capitals alone (gh: `FLAGS`; glab: `  FLAGS  `).
+    if [[ "$trimmed" =~ ^[A-Z][A-Z\ ]*$ ]]; then
+      case "$trimmed" in "FLAGS" | "INHERITED FLAGS") sect=flags ;; *) sect="" ;; esac
+      continue
+    fi
+    [ "$sect" = flags ] || continue
+    # A flag line is indented 2..8 spaces; a wrapped description line is
+    # indented to the description column, far deeper.
+    if [[ "$line" =~ ^\ {2,8}(-([A-Za-z0-9]),?\ )?--([A-Za-z0-9][A-Za-z0-9-]*)(\ |$) ]]; then
+      printf '%s:%s\n' "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}"
+    elif [[ "$line" =~ ^\ {2,8}-([A-Za-z0-9])(\ |,|$) ]]; then
+      die 3 "\`$CLI $cmd --help\` lists a short-only flag (-${BASH_REMATCH[1]}), which this tool cannot probe. Fix: extend cli-flag-table to probe a short-only flag."
+    fi
+  done <<<"$help"
+}
+
+# table_for <cmd words> : echoes " <kind>:<short>:<long> ... " for one command.
+# Exits 3 on anything it cannot read.
+table_for() {
+  local cmd="$1" fl short long out rc kind entries=() lines
+  lines="$(flags_of "$cmd")" || exit 3
+  while IFS= read -r fl; do
+    [ -n "$fl" ] || continue
+    short="${fl%%:*}"; long="${fl#*:}"
+    # shellcheck disable=SC2086
+    out="$(run_cli $cmd --help "--$long")"; rc=$?
+    if [[ "${out,,}" == *"flag needs an argument"* ]]; then kind=v
+    elif [ "$rc" = 0 ]; then kind=b
+    else die 3 "the probe \`$CLI $cmd --help --$long\` neither showed help nor said the flag needs an argument (exit $rc): $(head -c 300 <<<"$out"). Fix: read how this $CLI reports a flag's value, then extend the probe."
+    fi
+    entries+=("$kind:$short:$long")
+  done <<<"$lines"
+  [ "${#entries[@]}" -gt 0 ] || die 3 "\`$CLI $cmd --help\` lists no flags this tool can read. Fix: check the help's FLAGS section format against the parser in cli-flag-table."
+  printf ' %s ' "${entries[*]}"
+}
+
+# render : prints the whole table file for the installed CLI.
+render() {
+  local ver cmd t a alias canon
+  local -A tables=()
+  ver="$(cli_version)" || die 3 "could not read the version of $BIN (\`$CLI --version\`). Fix: check that it is the $CLI CLI."
+  for cmd in "${COMMANDS[@]}"; do
+    t="$(table_for "$cmd")" || exit 3
+    tables["$cmd"]="$t"
+  done
+  ALIASES=()
+  if [ "$CLI" = gh ]; then
+    for cmd in "${COMMANDS[@]}"; do
+      # shellcheck disable=SC2086
+      while IFS= read -r a; do
+        [ -n "$a" ] && [ "$a" != "$cmd" ] && ALIASES+=("$a|$cmd")
+      done < <(run_cli $cmd --help | sed -n '/^ALIASES$/,/^$/s/^ *gh \(.*[^ ]\) *$/\1/p')
+    done
+  else
+    for a in "${ALIAS_CANDIDATES[@]}"; do
+      alias="${a%%|*}"; canon="${a#*|}"
+      # An alias is its command under another name: the same flags.
+      if [ "$(flags_of "$alias" 2>/dev/null)" = "$(flags_of "$canon")" ]; then ALIASES+=("$a"); fi
+    done
+  fi
+  printf '# shellcheck shell=bash\n'
+  printf '# %s-flag-table.sh — GENERATED by ai/bin/cli-flag-table from %s %s. Do not\n' "$CLI" "$CLI" "$ver"
+  printf '# edit by hand: after a %s upgrade, run `ai/bin/cli-flag-table --cli %s --write`.\n' "$CLI" "$CLI"
+  printf '# Sourced by ai/lib/%s-outbound-scan.sh (DND-1976), never run.\n' "$CLI"
+  printf '#\n'
+  printf '# %s_FLAGS[<command>] holds one entry per flag, <kind>:<short>:<long>:\n' "$PREFIX"
+  printf '#   v  takes a value: pflag gives it the next word, even one starting with -\n'
+  printf '#   b  takes none: a switch, set by its name alone (or --name=value)\n'
+  printf '# %s_ALIAS[<alias>] is the command it names.\n' "$PREFIX"
+  printf "%s_VERSION='%s'\n" "$PREFIX" "$ver"
+  printf 'declare -gA %s_FLAGS=(\n' "$PREFIX"
+  for cmd in "${COMMANDS[@]}"; do printf "  ['%s']='%s'\n" "$cmd" "${tables[$cmd]}"; done
+  printf ')\n'
+  printf 'declare -gA %s_ALIAS=(\n' "$PREFIX"
+  for a in "${ALIASES[@]}"; do printf "  ['%s']='%s'\n" "${a%%|*}" "${a#*|}"; done
+  printf ')\n'
+}
+
+MODE="" CLI=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --help | -h) usage; exit 0 ;;
+    --print | --write | --check)
+      [ -z "$MODE" ] || die 64 "give one mode, not $MODE and $1. Fix: run \`cli-flag-table --help\`."
+      MODE="$1" ;;
+    --cli)
+      [ $# -ge 2 ] || die 64 "--cli needs a value. Fix: pass --cli gh or --cli glab."
+      CLI="$2"; shift ;;
+    --cli=*) CLI="${1#--cli=}" ;;
+    *) die 64 "unknown argument '$1'. Fix: run \`cli-flag-table --help\`." ;;
+  esac
+  shift
+done
+[ -n "$CLI" ] || die 64 "no CLI given. Fix: pass --cli gh or --cli glab (\`cli-flag-table --help\`)."
+[ -n "$MODE" ] || die 64 "no mode given. Fix: pass --print, --write or --check (\`cli-flag-table --help\`)."
+configure "$CLI"
+TABLE="${CLI_FLAG_TABLE_FILE:-$(cd "${HERE}/../lib" && pwd -P)/${CLI}-flag-table.sh}"
+
+if ! BIN="$(resolve_bin)"; then
+  [ "$MODE" = --check ] && die 2 "not compared: no $CLI on PATH. Fix: none needed where $CLI is absent; install $CLI to check the table."
+  die 3 "no $CLI on PATH (the agent wrapper in ai/agent-bin is skipped). Fix: install $CLI, or set CLI_FLAG_TABLE_BIN."
+fi
+SCRATCH="$(mktemp -d)" || die 3 "mktemp failed. Fix: make \$TMPDIR (or /tmp) writable."
+trap 'rm -rf "$SCRATCH"' EXIT
+mkdir -p "$SCRATCH/config"
+
+case "$MODE" in
+  --print) render ;;
+  --write)
+    new="$(render)" || exit 3
+    printf '%s\n' "$new" > "$TABLE" || die 3 "could not write $TABLE. Fix: make it writable."
+    printf 'cli-flag-table: wrote %s\n' "$TABLE" ;;
+  --check)
+    have="$(cli_version)" || die 3 "could not read the version of $BIN. Fix: check that it is the $CLI CLI."
+    [ -r "$TABLE" ] || die 3 "the committed table $TABLE is missing or unreadable. Fix: run \`ai/bin/cli-flag-table --cli $CLI --write\`."
+    pinned="$(sed -n "s/^${PREFIX}_VERSION='\(.*\)'$/\1/p" "$TABLE")"
+    [ -n "$pinned" ] || die 3 "$TABLE has no ${PREFIX}_VERSION line. Fix: regenerate it with \`ai/bin/cli-flag-table --cli $CLI --write\`."
+    if [ "$have" != "$pinned" ]; then
+      die 2 "not compared: the table is pinned to $CLI $pinned and $BIN is $CLI $have. Fix: on a machine whose $CLI is the version to pin, run \`ai/bin/cli-flag-table --cli $CLI --write\` and commit the table."
+    fi
+    new="$(render)" || exit 3
+    if [ "$new" = "$(cat "$TABLE")" ]; then
+      printf 'cli-flag-table: OK: %s matches %s %s\n' "$TABLE" "$CLI" "$have"
+      exit 0
+    fi
+    diff <(cat "$TABLE") <(printf '%s\n' "$new") >&2
+    die 1 "DRIFT: $TABLE differs from what $CLI $have reports (diff above). Fix: run \`ai/bin/cli-flag-table --cli $CLI --write\`, review the diff, and commit it."
+    ;;
+esac

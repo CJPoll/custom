@@ -99,6 +99,10 @@ tools:
   # --- idempotent: deterministic local mutation (writes an in-repo artifact;
   #     re-running yields the same result; no external/irreversible effect) ---
   build-agents:            { class: idempotent, reason: render }
+  # cli-flag-table (DND-1976): --write renders ai/lib/<cli>-flag-table.sh from
+  # the installed gh's or glab's help; its probes carry no token and run no
+  # command.
+  cli-flag-table:          { class: idempotent, reason: render }
   # outbound-scan (DND-699) reads the overlay and git. Its one write is a
   # waiver line appended to a LOCAL log (never the repo, a forge or a remote);
   # nothing stricter than local mutation, so idempotent by the class order.

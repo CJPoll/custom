@@ -5,10 +5,11 @@
 # (ai/lib/glab-outbound-scan.sh, DND-1938) run on text bound for a PUBLIC
 # repository or project. Sourced, never run.
 #
-# One set of rules for both forges. Each forge guard parses its own CLI's argv
-# and decides whether the target is public; everything after that lives here:
-# how a field reaches the scanner (a private copy, never argv), and what each
-# scanner outcome means.
+# One set of rules for both forges. Each forge guard names its CLI's text,
+# file and target flags and decides whether the target is public; the rest
+# lives here: how an argv is read (ots_pflag_parse, with the CLI's pinned flag
+# table), an api call's fields (ots_api_collect), how a field reaches the
+# scanner (a private copy, never argv), and what each scanner outcome means.
 #
 #   CLEAN / WAIVED - NOT SCANNED   the write goes ahead (the scanner's line is
 #                                  shown on stderr)
@@ -32,18 +33,22 @@
 # shared by both guards, close that class:
 #
 #   1. A word the parse cannot place is scanned or refused, never dropped.
-#      gh-athena parses with a pinned table of every flag of every command it
-#      judges (ai/lib/gh-flag-table.sh, ots_pflag_parse), so an unknown flag
-#      is REFUSED. glab's help does not say which flags take a value, so
-#      glab-athena's parse lets an unknown flag take nothing; every positional
-#      is then scanned whenever the command carries text, so text a swallowed
-#      flag hands on is scanned either way.
+#      Each guard parses with a pinned table of every flag of every command it
+#      judges and whether it takes a value (ai/lib/gh-flag-table.sh,
+#      ai/lib/glab-flag-table.sh, built by ai/bin/cli-flag-table from the
+#      CLI's own help). gh-athena REFUSES a flag its table lacks. glab-athena
+#      runs on glab versions whose flags differ, so a flag its table lacks is
+#      read as taking nothing unless the next word could be read as a flag or
+#      is `--`; then it is REFUSED (lenient mode). A guard's own text, file
+#      and target flags always take a value, in the table or not. Every
+#      positional is scanned when the command carries text.
 #   2. A flag value given as its own word that, read as a flag, names one of
 #      the command's FILE or TARGET flags (`--label -F <file>`, `-l -R <repo>`)
-#      is REFUSED: under the other reading that file is sent unscanned, or that
-#      repository decides the visibility. gh-athena applies it to every value
-#      but text (a drifted table); glab-athena to a value that follows an
-#      unknown flag. The attached form (`--label=-F`) is never ambiguous.
+#      is REFUSED: should the table have drifted, that file is sent unscanned,
+#      or that repository decides the visibility. A value naming a TEXT flag
+#      (`--label -b X`) makes every positional text. Text values are exempt
+#      (they are scanned either way). The attached form (`--label=-F`) is never
+#      ambiguous.
 #
 # The caller sets:
 #   OTS_TOOL   the wrapper's name, the prefix of every line (gh-athena)
@@ -193,9 +198,14 @@ ots_refuse_flag_value() {
 
 # ots_pflag_parse <table> <offset> <args...> : reads <args> the way pflag
 # reads them, with <table> the command's flags (" <v|b>:<short>:<long> … ",
-# the GFT_FLAGS format of ai/lib/gh-flag-table.sh). Returns 1 on a word it
+# the <P>_FLAGS format of ai/lib/<cli>-flag-table.sh). Returns 1 on a word it
 # cannot place (an unknown flag, `--=x`, `---x`), naming it in OTS_UNKNOWN.
-# Otherwise returns 0 and sets, per value-taking flag occurrence, in order:
+# With OTS_LENIENT set, an unknown flag is read as taking nothing, and the
+# return is 2 (OTS_UNKNOWN, and OTS_AMBIG the word that makes it ambiguous)
+# only when that reading could be wrong in a way that matters: the next word
+# could be read as a flag or is `--`, or the flag is a letter with more of its
+# word after it. Otherwise returns 0 and sets, per value-taking flag
+# occurrence, in order:
 #   OTS_FN   its long name (no dashes)
 #   OTS_FV   its value
 #   OTS_FI   <offset> + the index of the word that holds the value
@@ -213,7 +223,7 @@ ots_pflag_parse() {
   local table="$1" off="$2"; shift 2
   local -a args=("$@")
   local n=$# i=0 a name long j sh c rest
-  OTS_FN=() OTS_FV=() OTS_FI=() OTS_FP=() OTS_FS=() OTS_PO=() OTS_POI=() OTS_UNKNOWN="" OTS_HELP=""
+  OTS_FN=() OTS_FV=() OTS_FI=() OTS_FP=() OTS_FS=() OTS_PO=() OTS_POI=() OTS_UNKNOWN="" OTS_HELP="" OTS_AMBIG=""
   while [ "$i" -lt "$n" ]; do
     a="${args[$i]}"
     if [ "$a" = "--" ]; then
@@ -225,7 +235,12 @@ ots_pflag_parse() {
         name="${a#--}"
         if [ -z "$name" ] || [[ "$name" == [-=]* ]]; then OTS_UNKNOWN="$a"; return 1; fi
         long="${name%%=*}"
-        ots_table_long "$table" "$long" || { OTS_UNKNOWN="--$long"; return 1; }
+        if ! ots_table_long "$table" "$long"; then
+          OTS_UNKNOWN="--$long"
+          [ -n "${OTS_LENIENT:-}" ] || return 1
+          if [[ "$name" != *=* ]] && ots_pflag_ambiguous "${args[@]:$((i + 1)):1}"; then return 2; fi
+          i=$((i + 1)); continue
+        fi
         if [[ "$name" == *=* ]]; then
           if [ "$OTS_K" = v ]; then ots_pflag_rec "$long" "${name#*=}" $((off + i)) "--$long=" 0; fi
         elif [ "$OTS_K" = v ]; then
@@ -239,7 +254,14 @@ ots_pflag_parse() {
             # pflag answers an undefined -h with the help and stops: the
             # command never runs, so nothing is sent.
             if [ "$c" = h ]; then OTS_HELP=1; return 0; fi
-            OTS_UNKNOWN="-$c (in '$a')"; return 1
+            OTS_UNKNOWN="-$c (in '$a')"
+            [ -n "${OTS_LENIENT:-}" ] || return 1
+            # Lenient: the letter may take the rest of the word, or the next
+            # word, as its value; either way it is ambiguous when what follows
+            # could be read as flags.
+            if [ -n "$rest" ]; then OTS_AMBIG="$rest"; return 2; fi
+            if ots_pflag_ambiguous "${args[@]:$((i + 1)):1}"; then return 2; fi
+            break
           fi
           if [ "${#rest}" -ge 2 ] && [ "${rest:0:1}" = "=" ]; then
             if [ "$OTS_K" = v ]; then ots_pflag_rec "$OTS_L" "${rest:1}" $((off + i)) "-${sh:0:$((j + 1))}=" 0; fi
@@ -260,6 +282,72 @@ ots_pflag_parse() {
 }
 
 ots_pflag_rec() { OTS_FN+=("$1"); OTS_FV+=("$2"); OTS_FI+=("$3"); OTS_FP+=("$4"); OTS_FS+=("$5"); }
+
+# ots_flag_letters <table> <" long long "> : sets OTS_LETTERS to the short
+# letters of the named flags and OTS_LONGS to their " --long " spellings.
+ots_flag_letters() {
+  local e rest s l
+  OTS_LETTERS="" OTS_LONGS=" "
+  for e in $1; do
+    rest="${e#*:}"; s="${rest%%:*}"; l="${rest#*:}"
+    if [[ "$2" == *" $l "* ]]; then
+      OTS_LONGS+="--$l "
+      OTS_LETTERS+="$s"
+    fi
+  done
+}
+
+# ots_with_roles <table> <" role longs "> : echoes <table> with every named
+# flag it lacks added as taking a value. A guard's text, file and target flags
+# always take one, whatever the CLI version the table was built from.
+ots_with_roles() {
+  local t="$1" l
+  for l in $2; do ots_table_long "$t" "$l" || t+=" v::$l "; done
+  printf '%s' "$t"
+}
+
+# ots_collect <table> <" text longs "> <" file longs "> <" target longs "> :
+# after ots_pflag_parse, sorts every value it read into the caller's texts/
+# tlab, fsrc/fidx/fpre/flab/fnoun/fflag and targets (dynamic scope), and
+# applies rule 2 of the header: a value given as its own word that names a
+# file or target flag is REFUSED, and one that names a text flag sets
+# OTS_POS_TEXT (every positional is then text). Sets OTS_HAVE_TARGET when a
+# target flag was given.
+ots_collect() {
+  local table="$1" tx="$2" fl="$3" tg="$4" k role name val
+  local ft_letters ft_longs tx_letters tx_longs
+  OTS_POS_TEXT="" OTS_HAVE_TARGET=""
+  ots_flag_letters "$table" "$fl $tg "; ft_letters="$OTS_LETTERS" ft_longs="$OTS_LONGS"
+  ots_flag_letters "$table" "$tx"; tx_letters="$OTS_LETTERS" tx_longs="$OTS_LONGS"
+  for k in "${!OTS_FN[@]}"; do
+    name="${OTS_FN[$k]}" val="${OTS_FV[$k]}" role=""
+    if [[ "$tx" == *" $name "* ]]; then role=text
+    elif [[ "$fl" == *" $name "* ]]; then role=file
+    elif [[ "$tg" == *" $name "* ]]; then role=target; fi
+    if [ "$role" != text ] && [ "${OTS_FS[$k]}" = 1 ]; then
+      if ots_names_flag "$val" "$ft_letters" "$ft_longs"; then ots_refuse_flag_value "--$name" "$val"; fi
+      if ots_names_flag "$val" "$tx_letters" "$tx_longs"; then OTS_POS_TEXT=1; fi
+    fi
+    case "$role" in
+      text) texts+=("$val"); tlab+=("$name") ;;
+      file)
+        fsrc+=("$val"); fidx+=("${OTS_FI[$k]}"); fpre+=("${OTS_FP[$k]}")
+        flab+=("$name"); fnoun+=("${name%-file}"); fflag+=("--$name") ;;
+      target) targets+=("$val"); OTS_HAVE_TARGET=1 ;;
+    esac
+  done
+}
+
+# ots_pflag_ambiguous [<next word>] : lenient mode, after a flag the table does
+# not have. True (with OTS_AMBIG set) when the next word exists and pflag would
+# read it as a flag or as `--` were the unknown flag a switch: then whether
+# that word is the unknown flag's value or a flag of its own decides what is
+# sent, and the parse cannot tell.
+ots_pflag_ambiguous() {
+  [ $# -gt 0 ] || return 1
+  if [ "$1" = "--" ] || ots_flag_shaped "$1"; then OTS_AMBIG="$1"; return 0; fi
+  return 1
+}
 
 # ots_table_long <table> <long> / ots_table_short <table> <letter> : 0 when
 # the table has the flag, with OTS_K its kind (v|b) and OTS_L its long name.

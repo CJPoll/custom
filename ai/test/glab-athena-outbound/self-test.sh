@@ -204,7 +204,7 @@ if [ "${RC}" = 0 ] && sent && [[ "${OUT}" == *"CLEAN mode=text"* ]]; then ok "a 
 gla mr note 5 -m "clean" -m "x${TOKEN}"
 if refused_hit; then ok "every occurrence is scanned (last dirty)"; else bad "repeat" "rc=${RC} ${OUT}"; fi
 gla mr create -yd "x${TOKEN}"
-if [ "${RC}" = 3 ] && ! sent && [[ "${OUT}" == *"short-flag cluster"* ]] && [[ "${OUT}" == *"Fix:"* ]]; then ok "a cluster hiding -d is refused"; else bad "cluster" "rc=${RC} ${OUT}"; fi
+if refused_hit; then ok "a cluster is read letter by letter: -y a switch, -d the description (DND-1976)"; else bad "cluster" "rc=${RC} ${OUT}"; fi
 gla mr create -m milestone-1 --description "clean"
 if [ "${RC}" = 0 ] && sent && [[ "${OUT}" == *"outbound-scan: CLEAN mode=text"* ]]; then ok "a clean description is sent, CLEAN shown"; else bad "clean send" "rc=${RC} ${OUT}"; fi
 
@@ -230,24 +230,52 @@ fi
 gla release create v1 --notes-file "${TMP}/no-such-file"
 if [ "${RC}" = 3 ] && ! sent && [[ "${OUT}" == *"is not readable"* ]] && [[ "${OUT}" == *"Fix:"* ]]; then ok "an unreadable notes file refused"; else bad "unreadable file" "rc=${RC} ${OUT}"; fi
 
-echo "--- DND-1976: after an unknown flag, a value that names a file or repo flag is refused ---"
-# glab (pflag) gives --ref the next word, so `--ref -n -F <file>` is notes read
-# from <file>; this parse reads `-F` as the notes text and <file> as a
-# positional, so the file went out unscanned.
+echo "--- DND-1976: the argv is read as glab's pflag reads it (the pinned glab table) ---"
+# glab (pflag) gives --ref the next word, so `--ref -n -F <file>` is ref `-n`
+# and notes read from <file>. The old parse did not know --ref takes a value,
+# read `-F` as the notes text and <file> as a positional: the file went out
+# unscanned.
 gla release create v1 --ref -n -F "${TMP}/body-hit.md"
-if [ "${RC}" = 3 ] && ! sent && [[ "${OUT}" == *"looks like a flag"* ]] && [[ "${OUT}" == *"Fix:"* ]] && no_literal; then
-  ok "DND-1976 regression (glab): release create --ref -n -F <file> is refused"
+if refused_hit && [[ "${OUT}" == *"notes-file:1 label=synth-token"* ]]; then
+  ok "DND-1976 regression (glab): release create --ref -n -F <file> scans the file"
 else
   bad "DND-1976 regression (glab): release create --ref -n -F <file>" "rc=${RC} calls=[${CALLS}] ${OUT}"
 fi
 gla release create v1 -r -N --notes-file "${TMP}/body-hit.md"
-if [ "${RC}" = 3 ] && ! sent && [[ "${OUT}" == *"looks like a flag"* ]]; then ok "-r -N --notes-file <file> refused"; else bad "-r -N --notes-file" "rc=${RC} ${OUT}"; fi
-gla mr note 5 --unique -m -R synth-group/pub
-if [ "${RC}" = 3 ] && ! sent && [[ "${OUT}" == *"looks like a flag"* ]]; then ok "an unknown flag, then -m -R <repo>, refused"; else bad "-m -R" "rc=${RC} ${OUT}"; fi
+if refused_hit; then ok "-r -N --notes-file <file>: the file is scanned"; else bad "-r -N --notes-file" "rc=${RC} ${OUT}"; fi
+gla release create v1 --ref -- -F "${TMP}/body-hit.md"
+if refused_hit; then ok "--ref -- -F <file>: -- is the ref, the file is scanned"; else bad "--ref --" "rc=${RC} ${OUT}"; fi
+for argv in "mr update 5 -l -- -t x${TOKEN}" "mr update 5 -l -- --title=x${TOKEN}" "mr update 5 -l -t -d x${TOKEN}" "mr create -l --label -d x${TOKEN}"; do
+  # shellcheck disable=SC2086
+  gla ${argv}
+  if refused_hit; then ok "scanned: ${argv%%x${TOKEN}}"; else bad "scanned: ${argv%%x${TOKEN}}" "rc=${RC} ${OUT}"; fi
+done
+for argv in "mr update 5 -l -R -t x${TOKEN}" "mr update 5 -l --repo -t x${TOKEN}" "mr create -l --target-project -t x${TOKEN}" \
+  "release create v1 --ref -R -n x${TOKEN}" "release create v1 --ref -F x${TOKEN}"; do
+  # shellcheck disable=SC2086
+  gla ${argv}
+  if [ "${RC}" = 3 ] && ! sent && [[ "${OUT}" == *"looks like a flag"* ]] && [[ "${OUT}" == *"Fix:"* ]] && no_literal; then ok "a value naming a repo or file flag refused: ${argv%%x${TOKEN}}"; else bad "value names repo/file: ${argv%%x${TOKEN}}" "rc=${RC} ${OUT}"; fi
+done
+echo "--- DND-1976: a flag the pinned table lacks, before a word that reads as a flag, is refused ---"
+for argv in "mr note 5 --frobnicate -m x${TOKEN}" "mr update 5 --frobnicate -- -t x${TOKEN}" \
+  "mr create --frobnicate --target-project -t x${TOKEN}" "mr create -Zd x${TOKEN}" "mr create -Z -d x${TOKEN}"; do
+  # shellcheck disable=SC2086
+  gla ${argv}
+  if [ "${RC}" = 3 ] && ! sent && [[ "${OUT}" == *"not a flag of"* ]] && [[ "${OUT}" == *"Fix:"* ]] && no_literal; then ok "ambiguous refused: ${argv%%x${TOKEN}}"; else bad "ambiguous: ${argv%%x${TOKEN}}" "rc=${RC} ${OUT}"; fi
+done
+gla mr note 5 --frobnicate value -m "x${TOKEN}"
+if refused_hit; then ok "a flag the table lacks, before a plain word, is read as a switch and the text is scanned"; else bad "unknown then plain" "rc=${RC} ${OUT}"; fi
 gla release create v1 --ref main -n "clean" -F "${TMP}/body-clean.md"
-if [ "${RC}" = 0 ] && sent; then ok "an unknown flag with a plain value, then text and a file, is sent"; else bad "plain unknown value" "rc=${RC} ${OUT}"; fi
+if [ "${RC}" = 0 ] && sent; then ok "valued flags with plain values, then text and a file, are sent"; else bad "plain values" "rc=${RC} ${OUT}"; fi
 gla mr create --draft -t "clean title" -d "x${TOKEN}"
 if refused_hit; then ok "a switch before a text flag is not refused, and the text is scanned"; else bad "switch then text" "rc=${RC} ${OUT}"; fi
+gla mr --help -d "x${TOKEN}"
+if [ "${RC}" = 0 ] && [[ "${OUT}" != *"outbound-scan:"* ]]; then ok "a help flag before the verb passes (cobra shows the help)"; else bad "mr --help" "rc=${RC} ${OUT}"; fi
+NT="${TMP}/no-table"; git init -q "${NT}"; mkdir -p "${NT}/ai"
+cp -r "${AI_DIR}/bin" "${AI_DIR}/lib" "${NT}/ai/"
+rm -f "${NT}/ai/lib/glab-flag-table.sh"
+OUT="$(cd "${WORK}" && : > "${STUB_LOG}" && "${NT}/ai/bin/glab-athena" mr note 5 -m "clean" 2>&1)"; RC=$?
+if [ "${RC}" = 3 ] && ! sent && [[ "${OUT}" == *"glab-flag-table.sh"* ]] && [[ "${OUT}" == *"Fix:"* ]]; then ok "no table: a judged write refused, named"; else bad "no table" "rc=${RC} ${OUT}"; fi
 
 echo "--- the target is every project the write can reach ---"
 vis default private
@@ -267,7 +295,7 @@ gla mr create --target-project synth-group/pub -d "x${TOKEN}"
 if refused_hit && read_was "api projects/synth-group%2Fpub"; then ok "mr create --target-project is a target"; else bad "--target-project" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 vis default public
 gla mr create --label -R synth-group/priv -d "x${TOKEN}"
-if refused_hit && read_was "api projects/:id"; then ok "an -R after an unknown flag (maybe its value) also reads the directory's project"; else bad "-R after unknown flag" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+if [ "${RC}" = 3 ] && ! sent && [[ "${OUT}" == *"looks like a flag"* ]]; then ok "an -R that is --label's value is refused, not read as a target (DND-1976)"; else bad "-R as a label value" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 vis default private
 gla mr note https://gitlab.com/synth-group/pub/-/merge_requests/3 -m "x${TOKEN}"
 if refused_hit && read_was "api projects/synth-group%2Fpub"; then ok "an MR URL to a PUBLIC project is scanned from a PRIVATE cwd"; else bad "MR URL" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi

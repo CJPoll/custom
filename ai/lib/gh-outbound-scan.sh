@@ -32,16 +32,18 @@
 # The argv is read the way gh reads it (DND-1976): with a table of every flag
 # of each command above and whether it takes a value, built from gh's own
 # --help and pinned to one gh version (ai/lib/gh-flag-table.sh, generated and
-# checked by ai/bin/gh-flag-table). Every spelling pflag accepts is read, and
+# checked by ai/bin/cli-flag-table). Every spelling pflag accepts is read, and
 # every occurrence is scanned: `--title X`, `--title=X`, `-t X`, `-tX`, `-t=X`,
 # and clusters (`-dbX`, `-dF <file>`). A flag the table does not have is
 # REFUSED (gh would reject it too, or the table is stale). A value given as its
 # own word that names one of the command's file or repo flags
 # (`--label -F <file>`) is REFUSED, and every positional is scanned when the
-# command carries text (the two rules in ai/lib/outbound-text-scan.sh). Before
-# the command path only -R/--repo is read, as cobra reads it (`gh -R X pr
-# create`, `gh pr -R X create`); any other flag there is REFUSED, because cobra
-# still finds the command past it. Every file, stdin included, is copied once
+# command carries text or such a value names a text flag (`--label -b X`: X is
+# the body if the table has drifted) (the two rules in
+# ai/lib/outbound-text-scan.sh). Before the command path only -R/--repo is
+# read, as cobra reads it (`gh -R X pr create`, `gh pr -R X create`), and a
+# help flag passes (cobra shows the help and runs nothing); any other flag
+# there is REFUSED, because cobra still finds the command past it. Every file, stdin included, is copied once
 # into a private file, scanned, and handed to gh in its place.
 #
 # The TARGET repository is every repository the write could reach: each
@@ -57,10 +59,12 @@
 # `pr create --fill` (the body is commit messages, which the pre-push hook
 # scans), `--generate-notes` and `--notes-from-tag` (text GitHub or the tag
 # supplies), an interactive editor or --web, the CONTENT of release asset
-# files, other commands (gists, repo and label descriptions, release upload), a
-# gh whose flags differ from the pinned table (ai/bin/gh-flag-table --check
-# names the drift; its self-test runs it where gh is the pinned version), a
-# value no pattern describes, and the waiver. The scanner run is the one beside
+# files, names that are not free text but reach the public repository (labels,
+# milestones, projects, issue types: gh refuses a name that does not exist), a
+# gh whose flags differ from the pinned table (`ai/bin/cli-flag-table --cli gh
+# --check` names the drift where gh is the pinned version; its self-test fails
+# where gh is newer, or where the table differs from origin/main's and cannot
+# be compared), a value no pattern describes, and the waiver. The scanner run is the one beside
 # the gh-athena invoked, so a worktree's gh-athena runs that branch's scanner
 # (the pre-push hook avoids this by running the main checkout's).
 #
@@ -70,9 +74,15 @@
 GOS_LIB_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 # shellcheck source=outbound-text-scan.sh
 . "$GOS_LIB_DIR/outbound-text-scan.sh"
-# shellcheck source=gh-flag-table.sh
-. "$GOS_LIB_DIR/gh-flag-table.sh"
 OTS_TOOL=gh-athena OTS_DEST=repository
+# The pinned flag table. A table that is missing or does not define its arrays
+# refuses every judged write (below, in gos_guard) rather than reading argv
+# without it.
+GOS_TABLE_OK=""
+# shellcheck source=gh-flag-table.sh
+if . "$GOS_LIB_DIR/gh-flag-table.sh" 2>/dev/null && declare -p GFT_FLAGS GFT_ALIAS >/dev/null 2>&1; then
+  GOS_TABLE_OK=1
+fi
 
 # gos_positional <word> : a positional that is a URL adds its repository to the
 # caller's `targets` (dynamic scope). github.com URLs become OWNER/REPO; another
@@ -119,20 +129,6 @@ gos_roles() {
   return 0
 }
 
-# gos_flag_letters <table> <" long long "> : sets GOS_LETTERS to the short
-# letters of the named flags and GOS_LONGS to their " --long " spellings.
-gos_flag_letters() {
-  local e rest s l
-  GOS_LETTERS="" GOS_LONGS=" "
-  for e in $1; do
-    rest="${e#*:}"; s="${rest%%:*}"; l="${rest#*:}"
-    if [[ "$2" == *" $l "* ]]; then
-      GOS_LONGS+="--$l "
-      GOS_LETTERS+="$s"
-    fi
-  done
-}
-
 # gos_guarded_group <word> : true for a command group this scan judges.
 gos_guarded_group() { case "$1" in pr | issue | release) return 0 ;; esac; return 1; }
 
@@ -144,7 +140,7 @@ gos_guard() {
   OTS_WHAT="gh command"
   local -a argv=("$@") path=() texts=() tlab=() fsrc=() fidx=() fpre=() flab=() fnoun=() fflag=() targets=()
   local -A fbase=()
-  local n=$# i=0 a v w k role cmd have_r=""
+  local n=$# i=0 a v w cmd have_r=""
 
   # The command path. cobra finds `pr create` past a -R/--repo and its value
   # (`gh -R X pr create`, `gh pr -R X create`), and pflag then reads that -R
@@ -159,6 +155,8 @@ gos_guard() {
         targets+=("$v"); have_r=1 ;;
       --repo=*) targets+=("${a#--repo=}"); have_r=1 ;;
       -R?*) v="${a#-R}"; targets+=("${v#=}"); have_r=1 ;;
+      # cobra answers a help flag with the help and runs nothing.
+      -h | --help) return 0 ;;
       -*)
         for w in "${argv[@]}"; do
           if gos_guarded_group "$w"; then
@@ -175,38 +173,29 @@ gos_guard() {
   done
   [ "${#path[@]}" = 2 ] || return 0
   cmd="${path[0]} ${path[1]}"
+  if [ -z "$GOS_TABLE_OK" ]; then
+    # Without the table an alias cannot be resolved: refuse every verb a
+    # judged command or its alias could be.
+    case "${path[1]}" in create | new | edit | comment | review | merge | close | reopen) ;; *) return 0 ;; esac
+    ots_refuse 3 "the pinned gh flag table ($GOS_LIB_DIR/gh-flag-table.sh) is missing or does not define GFT_FLAGS and GFT_ALIAS, so the outbound scan cannot read the argv of \`gh $cmd\`. Fix: run gh-athena from a full ~/dev/custom checkout; if the file is damaged, regenerate it with \`ai/bin/cli-flag-table --cli gh --write\`."
+  fi
   if [ -n "${GFT_ALIAS[$cmd]+x}" ]; then cmd="${GFT_ALIAS[$cmd]}"; fi
   gos_roles "$cmd" || return 0
-  [ -n "${GFT_FLAGS[$cmd]+x}" ] || ots_refuse 3 "the pinned gh flag table has no \`$cmd\`, so the outbound scan cannot read its argv. Fix: run \`ai/bin/gh-flag-table --write\` and commit the table."
+  [ -n "${GFT_FLAGS[$cmd]+x}" ] || ots_refuse 3 "the pinned gh flag table has no \`$cmd\`, so the outbound scan cannot read its argv. Fix: run \`ai/bin/cli-flag-table --cli gh --write\` and commit the table."
   OTS_WHAT="$cmd"
 
   if ! ots_pflag_parse "${GFT_FLAGS[$cmd]}" "$i" "${argv[@]:$i}"; then
-    ots_refuse 3 "'$OTS_UNKNOWN' is not a flag of \`gh $cmd\` in the pinned table (gh $GFT_GH_VERSION), so the outbound scan cannot tell which words gh reads as text. Fix: drop or correct the flag; if this gh has it, run \`ai/bin/gh-flag-table --write\` and commit the table."
+    ots_refuse 3 "'$OTS_UNKNOWN' is not a flag of \`gh $cmd\` in the pinned table (gh $GFT_VERSION), so the outbound scan cannot tell which words gh reads as text. Fix: drop or correct the flag; if this gh has it, run \`ai/bin/cli-flag-table --cli gh --write\` and commit the table."
   fi
   [ -z "$OTS_HELP" ] || return 0
-  # Rule 2: a value (its own word) naming a file or repo flag is refused.
-  gos_flag_letters "${GFT_FLAGS[$cmd]}" "$GOS_FILE repo "
-  local ft_letters="$GOS_LETTERS" ft_longs="$GOS_LONGS"
-  for k in "${!OTS_FN[@]}"; do
-    role=""
-    if [[ "$GOS_TEXT" == *" ${OTS_FN[$k]} "* ]]; then role=text
-    elif [[ "$GOS_FILE" == *" ${OTS_FN[$k]} "* ]]; then role=file
-    elif [ "${OTS_FN[$k]}" = repo ]; then role=target; fi
-    if [ "$role" != text ] && [ "${OTS_FS[$k]}" = 1 ] && ots_names_flag "${OTS_FV[$k]}" "$ft_letters" "$ft_longs"; then
-      ots_refuse_flag_value "--${OTS_FN[$k]}" "${OTS_FV[$k]}"
-    fi
-    case "$role" in
-      text) texts+=("${OTS_FV[$k]}"); tlab+=("${OTS_FN[$k]}") ;;
-      file)
-        fsrc+=("${OTS_FV[$k]}"); fidx+=("${OTS_FI[$k]}"); fpre+=("${OTS_FP[$k]}")
-        flab+=("${OTS_FN[$k]}"); fnoun+=("${OTS_FN[$k]%-file}"); fflag+=("--${OTS_FN[$k]}") ;;
-      target) targets+=("${OTS_FV[$k]}"); have_r=1 ;;
-    esac
-  done
+  # Rule 2 of ai/lib/outbound-text-scan.sh, and the sort into text, files and
+  # targets.
+  ots_collect "${GFT_FLAGS[$cmd]}" "$GOS_TEXT" "$GOS_FILE" " repo "
+  if [ -n "$OTS_HAVE_TARGET" ]; then have_r=1; fi
   if [ -z "$GOS_POS" ]; then
     for w in "${OTS_PO[@]}"; do gos_positional "$w"; done
   fi
-  if [ -n "$GOS_POS" ] || [ "$((${#texts[@]} + ${#fsrc[@]}))" -gt 0 ]; then
+  if [ -n "$GOS_POS" ] || [ -n "$OTS_POS_TEXT" ] || [ "$((${#texts[@]} + ${#fsrc[@]}))" -gt 0 ]; then
     for w in "${OTS_PO[@]}"; do texts+=("$w"); tlab+=(argument); done
   fi
   [ "$((${#texts[@]} + ${#fsrc[@]}))" -gt 0 ] || return 0

@@ -28,34 +28,29 @@
 #                                 given), or one a method-override header or a
 #                                 `_method` field could turn into a write.
 #
-# Every spelling pflag accepts is read, and every occurrence is scanned:
-# `--title X`, `--title=X`, `-t X`, `-tX`, `-t=X`. A single-dash cluster that
-# carries a text letter (or R) after its first letter (`-yd X`) is REFUSED with
-# a Fix rather than guessed at. This parse does not know every valued flag of
-# every command (`-l` label, `-a` assignee), and pflag gives such a flag the
-# next word even when it starts with `-`: `-l -t -d X` is label `-t`,
-# description X to glab, while this parse reads `-d` as the title. So when a
-# command carries any text flag, every word this parse reads as positional is
-# scanned too: X is scanned either way. Text is not the only thing such a flag
-# can hand on: `release create v1 --ref -n -F <file>` is notes `-F` to this
-# parse, and notes read from <file> to glab (--ref takes -n). So after a flag
-# this parse does not know, a value given as its own word that names a file or
-# repo flag (-F, --notes-file, -R, --repo, --target-project) is REFUSED with a
-# Fix (DND-1976; both rules are ai/lib/outbound-text-scan.sh's, shared with
-# gh-athena, which reads gh's argv with a pinned flag table instead). This
-# parse keeps no pinned glab table: glab's help names no value types, and its
-# flags differ across the glab versions in use (`--target-project` is not in
-# glab 1.92), so a pinned table would refuse a flag one machine has. A
-# file or stdin is copied once into a private file, scanned, and handed to glab
-# in its place.
+# The argv is read the way glab reads it (DND-1976). pflag gives a flag that
+# takes a value the next word even when it starts with `-`: `-l -t -d X` is
+# label `-t`, description X, and `release create v1 --ref -n -F <file>` is ref
+# `-n`, notes read from <file>. So the parse carries a table of every flag of
+# each command above and whether it takes a value, built from glab's own help
+# and pinned to one glab version (ai/lib/glab-flag-table.sh, generated and
+# checked by `ai/bin/cli-flag-table --cli glab`), and reads every spelling
+# pflag accepts, clusters included (`-yd X`). glab versions in use differ
+# (`--target-project` is not in glab 1.92), so a flag the table lacks is read
+# as taking nothing, unless the next word reads as a flag or is `--`, or it is
+# a letter with more of its word after it: then it is REFUSED, because which
+# text, file or project is sent depends on the reading. This guard's own text,
+# file and target flags take a value whatever the table says. A value given as
+# its own word that names a file or repo flag (`--label -R <repo>`) is REFUSED,
+# and every positional is scanned when the command carries text (the two rules
+# in ai/lib/outbound-text-scan.sh, shared with gh-athena). A file or stdin is
+# copied once into a private file, scanned, and handed to glab in its place.
 #
 # The TARGET is every project the write can reach: each -R/--repo value
 # (before or after the command path; OWNER/REPO, GROUP/NS/REPO, a full URL or a
 # git URL), `mr create --target-project`, the project of every MR or issue URL
 # given positionally, and the project glab resolves for the current directory
-# (`projects/:id`) when none of these names one. An -R that follows a flag this
-# parse does not know may be that flag's value rather than a repository, so the
-# directory's project is read too. For `api`, the project or group the
+# (`projects/:id`) when none of these names one. For `api`, the project or group the
 # endpoint's second segment names (`projects/<ref>/…`, `groups/<ref>/…`, read
 # verbatim, so `:id` resolves as glab resolves it), and a `target_project_id`
 # field.
@@ -81,8 +76,10 @@
 # (`-d -`, a note with no -m) or --web, `--recover` (a title and description
 # loaded from a recovery file), the CONTENT of release asset files (their paths
 # are scanned as positionals), other commands (snippets, wiki, label and repo
-# descriptions, release update), a value no pattern describes, and the waiver.
-# The scanner run is the one beside the glab-athena invoked.
+# descriptions, release update), names that are not free text (labels,
+# milestones), a glab flag that changed whether it takes a value since the
+# pinned version, a value no pattern describes, and the waiver. The scanner
+# run is the one beside the glab-athena invoked.
 #
 # Test seam: none of its own. ai/test/glab-athena-outbound/self-test.sh drives
 # the real wrapper with a stub glab on PATH that records every call.
@@ -93,17 +90,37 @@ GLOS_LIB_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 # shellcheck source=forge-api-scan.sh
 . "$GLOS_LIB_DIR/forge-api-scan.sh"
 
+# The pinned flag table (DND-1976). A table that is missing or does not define
+# its arrays refuses every judged write (in glos_guard) rather than reading
+# argv without it.
+GLOS_TABLE_OK=""
+# shellcheck source=glab-flag-table.sh
+if . "$GLOS_LIB_DIR/glab-flag-table.sh" 2>/dev/null && declare -p LFT_FLAGS LFT_ALIAS >/dev/null 2>&1; then
+  GLOS_TABLE_OK=1
+fi
+
 GLOS_ARGV=()
 GLOS_VIS=""
 
-# Letter -> long flag name, for the text and file flags this guard reads.
-glos_long_of() {
+# glos_roles <group verb> : for a command this scan judges (or one of its
+# known aliases), sets GLOS_CMD to the command's own name and GLOS_TEXT,
+# GLOS_FILE, GLOS_TARGET to its text, file and target flags (" long long ").
+# Returns 1 for any other command.
+glos_roles() {
+  GLOS_TEXT="" GLOS_FILE="" GLOS_TARGET=" repo "
   case "$1" in
-    t) echo title ;; d) echo description ;; m) echo message ;;
-    n) echo name ;; N) echo notes ;; T) echo tag-message ;; F) echo notes-file ;;
-    a) echo assets-links ;;
-    *) echo "$1" ;;
+    "mr create" | "mr new") GLOS_CMD="mr create" GLOS_TEXT=" title description " GLOS_TARGET=" repo target-project " ;;
+    "mr update") GLOS_CMD="mr update" GLOS_TEXT=" title description " ;;
+    "issue create" | "issue new") GLOS_CMD="issue create" GLOS_TEXT=" title description " ;;
+    "issue update") GLOS_CMD="issue update" GLOS_TEXT=" title description " ;;
+    "mr note" | "mr comment") GLOS_CMD="mr note" GLOS_TEXT=" message " ;;
+    "issue note" | "issue comment") GLOS_CMD="issue note" GLOS_TEXT=" message " ;;
+    "incident note" | "incident comment") GLOS_CMD="incident note" GLOS_TEXT=" message " ;;
+    "mr merge" | "mr accept") GLOS_CMD="mr merge" GLOS_TEXT=" message squash-message " ;;
+    "release create") GLOS_CMD="release create" GLOS_TEXT=" name notes tag-message assets-links " GLOS_FILE=" notes-file " ;;
+    *) return 1 ;;
   esac
+  return 0
 }
 
 # glos_shown <endpoint or URL> : the text without its ?query or #fragment, for
@@ -274,18 +291,22 @@ glos_guard() {
   OTS_TOOL=glab-athena OTS_DEST=project OTS_WHAT="glab command"
   local -a argv=("$@") path=() targets=() texts=() tlab=() fsrc=() fidx=() fpre=() flab=() fnoun=() fflag=() pos=()
   local -A fbase=()
-  local n=$# i=0 a v c rest pre="" group="" verb="" tl="" ts="" fl="" fs="" tg="" lf
-  local after_unknown="" r_ambiguous=""
+  local n=$# i=0 a v pre="" group="" verb="" cmd table prc
 
   # The words before the command path. Only -R/--repo may sit there: any other
   # flag can make cobra's command walk differ from this parse (the merge
-  # guard's rule, ai/lib/glab-merge-guard.sh -> glmg_prepath_flag).
+  # guard's rule, ai/lib/glab-merge-guard.sh -> glmg_prepath_flag). A help
+  # flag passes: cobra shows the help and runs nothing.
   while [ "$i" -lt "$n" ]; do
     a="${argv[$i]}"
     case "$a" in
-      -R | --repo) i=$((i + 1)); targets+=("${argv[$i]:-}") ;;
+      -R | --repo)
+        i=$((i + 1)); v="${argv[$i]:-}"
+        if ots_flag_shaped "$v"; then ots_refuse_flag_value "$a" "$v"; fi
+        targets+=("$v") ;;
       --repo=*) targets+=("${a#--repo=}") ;;
       -R?*) v="${a#-R}"; targets+=("${v#=}") ;;
+      -h | --help) return 0 ;;
       -*) pre="$a"; break ;;
       *)
         path+=("$a")
@@ -308,94 +329,42 @@ glos_guard() {
   fi
 
   group="${path[0]:-}"; verb="${path[1]:-}"
-  case "$group $verb" in
-    "mr create" | "mr new")
-      tl=" --title --description " ts="td" tg=" --target-project " ;;
-    "mr update" | "issue create" | "issue new" | "issue update")
-      tl=" --title --description " ts="td" ;;
-    "mr note" | "mr comment" | "issue note" | "issue comment" | "incident note" | "incident comment")
-      tl=" --message " ts="m" ;;
-    "mr merge" | "mr accept")
-      tl=" --message --squash-message " ts="m" ;;
-    "release create")
-      tl=" --name --notes --tag-message --assets-links " ts="nNTa" fl=" --notes-file " fs="F" ;;
-    "api "*)
-      if [ "$i" != 1 ]; then
-        ots_refuse 3 "\`api\` is not the first word, so the outbound scan cannot tell how glab parses the flags before it. Fix: put \`api\` first: \`glab-athena api <endpoint> [flags]\`."
-      fi
-      OTS_WHAT="api write"
-      glos_api 1 "${argv[@]:1}" ;;
-    *) return 0 ;;
-  esac
-
-  if [ "$group" != api ]; then
-    OTS_WHAT="$group $verb"
-    # Rule 2 (ai/lib/outbound-text-scan.sh): after an unknown flag, which may
-    # take the next word, a value given as its own word that names a file or
-    # repo flag is refused: `release create v1 --ref -n -F <file>` is notes
-    # `-F` to this parse, and to glab (--ref takes -n) notes read from <file>.
-    local ft_letters="${fs}R" ft_longs="$fl$tg --repo "
-    while [ "$i" -lt "$n" ]; do
-      a="${argv[$i]}"
-      if [ -n "$after_unknown" ] && [ "$((i + 1))" -lt "$n" ] && ots_names_flag "${argv[$((i + 1))]}" "$ft_letters" "$ft_longs"; then
-        case "$a" in
-          -R | --repo) ots_refuse_flag_value "$a" "${argv[$((i + 1))]}" ;;
-          --*=*) ;;
-          --*) if [[ "$tl$fl$tg" == *" $a "* ]]; then ots_refuse_flag_value "$a" "${argv[$((i + 1))]}"; fi ;;
-          -?) if [[ "$ts$fs" == *"${a:1:1}"* ]]; then ots_refuse_flag_value "$a" "${argv[$((i + 1))]}"; fi ;;
-        esac
-      fi
-      case "$a" in
-        --)
-          for a in "${argv[@]:$((i + 1))}"; do pos+=("$a"); glos_positional "$a"; done
-          break ;;
-        -R | --repo | -R?* | --repo=*)
-          case "$a" in
-            -R | --repo) i=$((i + 1)); v="${argv[$i]:-}" ;;
-            --repo=*) v="${a#--repo=}" ;;
-            *) v="${a#-R}"; v="${v#=}" ;;
-          esac
-          targets+=("$v")
-          if [ -n "$after_unknown" ]; then r_ambiguous=1; fi ;;
-        --*=*)
-          lf="${a%%=*}"
-          if [[ "$tl" == *" $lf "* ]]; then texts+=("${a#*=}"); tlab+=("${lf#--}")
-          elif [[ "$fl" == *" $lf "* ]]; then fsrc+=("${a#*=}"); fidx+=("$i"); fpre+=("$lf="); flab+=("${lf#--}"); fnoun+=(notes); fflag+=("$lf")
-          elif [[ "$tg" == *" $lf "* ]]; then targets+=("${a#*=}"); fi ;;
-        --*)
-          if [[ "$tl" == *" $a "* ]]; then i=$((i + 1)); texts+=("${argv[$i]:-}"); tlab+=("${a#--}")
-          elif [[ "$fl" == *" $a "* ]]; then i=$((i + 1)); fsrc+=("${argv[$i]:-}"); fidx+=("$i"); fpre+=(""); flab+=("${a#--}"); fnoun+=(notes); fflag+=("$a")
-          elif [[ "$tg" == *" $a "* ]]; then i=$((i + 1)); targets+=("${argv[$i]:-}")
-          else after_unknown=1; i=$((i + 1)); continue; fi ;;
-        -?)
-          c="${a:1:1}"
-          if [[ "$ts" == *"$c"* ]]; then i=$((i + 1)); texts+=("${argv[$i]:-}"); tlab+=("$(glos_long_of "$c")")
-          elif [[ -n "$fs" && "$fs" == *"$c"* ]]; then i=$((i + 1)); fsrc+=("${argv[$i]:-}"); fidx+=("$i"); fpre+=(""); flab+=("$(glos_long_of "$c")"); fnoun+=(notes); fflag+=("-$c")
-          else after_unknown=1; i=$((i + 1)); continue; fi ;;
-        -?*)
-          c="${a:1:1}"; rest="${a:2}"
-          if [[ "$ts" == *"$c"* ]]; then texts+=("${rest#=}"); tlab+=("$(glos_long_of "$c")")
-          elif [[ -n "$fs" && "$fs" == *"$c"* ]]; then
-            v="-$c"; if [[ "$rest" == =* ]]; then v="$v="; fi
-            fsrc+=("${rest#=}"); fidx+=("$i"); fpre+=("$v"); flab+=("$(glos_long_of "$c")"); fnoun+=(notes); fflag+=("-$c")
-          elif [[ "$rest" == *["${ts}${fs}R"]* ]]; then
-            ots_refuse 3 "the short-flag cluster \`${a:0:2}…\` in this $OTS_WHAT may carry a text field or a repo the outbound scan cannot separate. Fix: write each short flag as its own word (\`-y -d <text>\`), or use the long flags (--title, --description, --message, --repo)."
-          fi ;;
-        *) pos+=("$a"); glos_positional "$a" ;;
-      esac
-      after_unknown=""
-      i=$((i + 1))
-    done
-    # A positional may be text a valued flag this parse does not know handed
-    # on (see the header); scan them whenever the command carries text.
-    if [ "$((${#texts[@]} + ${#fsrc[@]}))" -gt 0 ]; then
+  if [ "$group" = api ]; then
+    if [ "$i" != 1 ]; then
+      ots_refuse 3 "\`api\` is not the first word, so the outbound scan cannot tell how glab parses the flags before it. Fix: put \`api\` first: \`glab-athena api <endpoint> [flags]\`."
+    fi
+    OTS_WHAT="api write"
+    glos_api 1 "${argv[@]:1}"
+  else
+    cmd="$group $verb"
+    if [ -n "$GLOS_TABLE_OK" ] && [ -n "${LFT_ALIAS[$cmd]+x}" ]; then cmd="${LFT_ALIAS[$cmd]}"; fi
+    glos_roles "$cmd" || return 0
+    cmd="$GLOS_CMD"
+    OTS_WHAT="$cmd"
+    if [ -z "$GLOS_TABLE_OK" ] || [ -z "${LFT_FLAGS[$cmd]+x}" ]; then
+      ots_refuse 3 "the pinned glab flag table ($GLOS_LIB_DIR/glab-flag-table.sh) is missing, does not define LFT_FLAGS and LFT_ALIAS, or has no \`$cmd\`, so the outbound scan cannot read this argv. Fix: run glab-athena from a full ~/dev/custom checkout; if the file is damaged, regenerate it with \`ai/bin/cli-flag-table --cli glab --write\`."
+    fi
+    # The guard's own text, file and target flags always take a value, in the
+    # table or not (`--target-project` is not in glab 1.92).
+    table="$(ots_with_roles "${LFT_FLAGS[$cmd]}" "$GLOS_TEXT $GLOS_FILE $GLOS_TARGET")"
+    # Lenient: this glab may have flags the table's glab lacked (header).
+    prc=0; OTS_LENIENT=1 ots_pflag_parse "$table" "$i" "${argv[@]:$i}" || prc=$?
+    case "$prc" in
+      0) ;;
+      2) ots_refuse 3 "'$OTS_UNKNOWN' is not a flag of \`glab $cmd\` in the pinned table (glab $LFT_VERSION), and \`$OTS_AMBIG\` after it reads as a flag: if '$OTS_UNKNOWN' takes a value, glab reads \`$OTS_AMBIG\` as that value, and the outbound scan cannot tell which text, file or project this sends. Fix: attach the value (\`--flag=value\`), drop the flag, or put it after the text flags' values; if this glab has the flag, run \`ai/bin/cli-flag-table --cli glab --write\` and commit the table." ;;
+      *) ots_refuse 3 "'$OTS_UNKNOWN' in this $OTS_WHAT is not a flag pflag can read. Fix: correct the flag (\`--name\` or \`--name=value\`)." ;;
+    esac
+    [ -z "$OTS_HELP" ] || return 0
+    # Rule 2 of ai/lib/outbound-text-scan.sh, and the sort into text, files
+    # and targets.
+    ots_collect "$table" "$GLOS_TEXT" "$GLOS_FILE" "$GLOS_TARGET"
+    for a in "${OTS_PO[@]}"; do pos+=("$a"); glos_positional "$a"; done
+    if [ -n "$OTS_POS_TEXT" ] || [ "$((${#texts[@]} + ${#fsrc[@]}))" -gt 0 ]; then
       for a in "${pos[@]}"; do texts+=("$a"); tlab+=(argument); done
     fi
   fi
   [ "$((${#texts[@]} + ${#fsrc[@]}))" -gt 0 ] || return 0
-  if [ "$group" != api ]; then
-    if [ "${#targets[@]}" = 0 ] || [ -n "$r_ambiguous" ]; then targets+=(""); fi
-  fi
+  if [ "$group" != api ] && [ "${#targets[@]}" = 0 ]; then targets+=(""); fi
   [ "${#targets[@]}" -gt 0 ] || return 0
 
   local t public=""
