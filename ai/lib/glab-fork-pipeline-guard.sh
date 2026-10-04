@@ -2,7 +2,7 @@
 #
 # glab-fork-pipeline-guard.sh — never run a fork MR's pipeline in the parent
 # project (DND-1942). Sourced, never run. Called from ONE place in each glab
-# front: ai/bin/glab-athena (before the merge guard) and the agent PATH glab
+# front: ai/bin/glab-athena (after the merge guard) and the agent PATH glab
 # wrapper (ai/lib/agent-forge-cli.sh, before it execs the real glab).
 #
 # THE DEFECT. By GitLab default a fork MR's pipeline runs in the fork, on the
