@@ -958,9 +958,19 @@ athena_fetch_origin_main() {
   local dir="$1" url
   url="$(git -C "${dir}" remote get-url origin 2>/dev/null || true)"
   case "${url}" in
-    *github.com[:/]*) timeout 120 "${dir}/ai/bin/gh-athena" git -C "${dir}" fetch --quiet origin main ;;
-    *gitlab.com[:/]*) timeout 120 "${dir}/ai/bin/glab-athena" git -C "${dir}" fetch --quiet origin main ;;
-    *) timeout 120 git -C "${dir}" fetch --quiet origin main ;;
+    git@github.com:*|https://github.com/*)
+      timeout 120 "${dir}/ai/bin/gh-athena" git -C "${dir}" fetch --quiet origin main ;;
+    git@gitlab.com:*|https://gitlab.com/*)
+      timeout 120 "${dir}/ai/bin/glab-athena" git -C "${dir}" fetch --quiet origin main ;;
+    *github.com*|*gitlab.com*)
+      # Any other forge URL form (ssh://, a host alias, a port) is one the
+      # bot route cannot rewrite to HTTPS, and plain git would need the
+      # owner's SSH key. Refuse it rather than reach the forge as the owner.
+      echo "athena_fetch_origin_main: origin '${url}' is a forge URL the Athena route does not take." >&2
+      echo "  Fix: set origin to the git@<host>:<owner>/<repo>.git or https://<host>/<owner>/<repo>.git form (git -C '${dir}' remote set-url origin ...)." >&2
+      return 3 ;;
+    *)
+      timeout 120 git -C "${dir}" fetch --quiet origin main ;;
   esac
 }
 

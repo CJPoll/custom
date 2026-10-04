@@ -73,7 +73,6 @@ for runner in "${RUNNERS[@]}"; do
   i=0
   for case in \
     "git@github.com:CJPoll/custom.git|gh-athena" \
-    "ssh://git@github.com/CJPoll/custom.git|gh-athena" \
     "https://github.com/CJPoll/custom.git|gh-athena" \
     "git@gitlab.com:cjpoll/custom.git|glab-athena" \
     "https://gitlab.com/cjpoll/custom.git|glab-athena"; do
@@ -88,6 +87,22 @@ for runner in "${RUNNERS[@]}"; do
       ok "${name}: ${url} routes through ${want}"
     else
       bad "${name}: ${url} expected ${want}; rc=${rc} calls=[${calls}]"
+    fi
+  done
+
+  # A forge URL form the route can't rewrite (ssh://, a host alias) is refused
+  # with exit 3 and a Fix, and neither a stub nor plain git (the owner's key)
+  # is tried.
+  j=0
+  for url in "ssh://git@github.com/CJPoll/custom.git" "ssh://git@gitlab.com/cjpoll/custom.git" "git@github.com-work:CJPoll/custom.git"; do
+    j=$((j + 1))
+    dir="${TMP}/${name}-refuse-${j}"
+    make_checkout "${dir}" "${url}" 0
+    rc="$(run_helper "${runner}" "${dir}")"
+    if [ "${rc}" = "3" ] && [ ! -e "${dir}/calls" ] && ! git -C "${dir}" rev-parse -q --verify FETCH_HEAD >/dev/null 2>&1; then
+      ok "${name}: ${url} is refused (exit 3), no route or plain-git attempt"
+    else
+      bad "${name}: ${url} expected refusal exit 3; rc=${rc} calls=[$(cat "${dir}/calls" 2>/dev/null)]"
     fi
   done
 
