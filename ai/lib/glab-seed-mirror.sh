@@ -15,28 +15,42 @@
 #
 # Usage: glab-athena git seed-mirror --to https://gitlab.com/<ns>/<project>.git
 #                                    [--from origin]
-# The source is the checkout's own origin, the GitHub project whose bar the
-# commit already passed. Only `origin` is accepted for --from.
+# The source is the checkout's own origin: GitHub main as landed. Only `origin`
+# is accepted for --from. It is the one way to push main to the GitLab project
+# before the cutover flips origin: the first seed, the final push before the
+# flip, and the dual-run pushes (design: a fast-forward each time).
 #
 # It pushes <source main>:refs/heads/main to the target, as the target
 # namespace's bot, only when ALL of these hold. Each refusal names its
 # condition and carries Fix:, exit 3. A read that fails is COULD NOT LOOK and
 # refuses; it is never read as "absent" or "fine".
 #   1 TARGET        --to is https://gitlab.com/<ns>/<project>[.git], with no
-#                   credentials, query or fragment, and the identity map
-#                   (DND-1936) resolves its namespace to a bot.
+#                   credentials, query, fragment, or empty, `.` or `..`
+#                   segment; its project name is origin's repository name;
+#                   and the identity map (DND-1936) resolves its namespace to
+#                   a bot.
 #   2 POST-FLIP     origin does not reach gitlab.com (its URL, its resolved
-#                   fetch URL, any push URL). Once the cutover flips origin to
-#                   the GitLab project the mode refuses, so it cannot become a
-#                   standing bypass.
-#   3 SOURCE        origin's URL and resolved fetch URL are on github.com, and
-#                   it names no remote.origin.vcs helper.
+#                   fetch URL, any push URL). Once the cutover flips a
+#                   checkout's origin to the GitLab project the mode refuses
+#                   there. Across clones it rests on GitHub main being frozen
+#                   after the flip (the push mirror, and the `retired` mark,
+#                   design §3.2 step 6): a clone not yet flipped can only
+#                   mirror what GitHub main is.
+#   3 SOURCE        origin's URL and resolved fetch URL are github.com
+#                   project URLs (https://github.com/<o>/<r>, git@github.com:
+#                   <o>/<r>, ssh://git@github.com/<o>/<r>), and it names no
+#                   remote.origin.vcs helper.
 #   4 RED SOURCE    ai/bin/main-health has no RED marker for this checkout's
 #                   origin/main (an unreadable marker refuses). No marker
 #                   means no red is known, as for the red-main refusal.
-#   5 FRESH SHA     the pushed SHA is origin's refs/heads/main as read by
-#                   `git ls-remote` in this command; it must be in the local
-#                   object store (the push sends it from there).
+#   5 FRESH SHA     the pushed SHA is refs/heads/main of
+#                   https://github.com/<o>/<r>.git, read in this command
+#                   through `gh-athena git ls-remote`, run outside the
+#                   checkout: the route's own transport, with TLS verification
+#                   on and no proxy (ai/lib/forge-http-pin.sh), whatever the
+#                   checkout's ssh command, proxy or TLS config says. It must
+#                   be in the local object store (the push sends it from
+#                   there).
 #   6 FAST-FORWARD  the target's main, read through the route in this command,
 #                   is absent, or is a strict ancestor of the pushed SHA. The
 #                   push carries no `+`, so the forge refuses a non-fast-forward
@@ -50,19 +64,25 @@
 # forge-git-passthrough.sh resets to "" every time it is sourced, so a value in
 # the caller's environment never reaches fg_refuse_ungated_main. That function
 # accepts exactly FG_SEED_SHA pushed to exactly FG_SEED_URL, and nothing else.
-# Residual, said out loud: a shell that sources the library itself and sets the
-# variables is past this guard, as it is past every other one here, since it
-# could run git directly; the agent PATH git wrapper (ai/lib/agent-forge-push.sh)
-# is the layer that refuses a forge push outside the route.
+# Residuals, said out loud:
+#   * this mirrors GitHub main as landed. It does not check that main passed a
+#     gate on GitHub: a web-UI merge or an owner push is mirrored too. That is
+#     no new exposure, since the commit is already the canonical main;
+#   * a shell that sources the library itself and sets the variables is past
+#     this guard, as it is past every other one here, since it could run git
+#     directly; the agent PATH git wrapper (ai/lib/agent-forge-push.sh) is the
+#     layer that refuses a forge push outside the route.
 #
 # Test seams, honored ONLY under GLAB_ATHENA_GIT_DRY_RUN=1 (which never pushes)
-# and refused otherwise: GLAB_ATHENA_SEED_SOURCE_READ and
+# and refused otherwise, before any read: GLAB_ATHENA_SEED_SOURCE_READ and
 # GLAB_ATHENA_SEED_TARGET_READ name a local repository that the source and the
-# target ls-remote read instead of origin and the target URL. Every other check,
-# the host checks on origin's configured URLs included, runs unchanged.
+# target ls-remote read instead of GitHub and the target URL. Every other
+# check, the host checks on origin's configured URLs included, runs unchanged.
 
 GSM_TO=""
 GSM_FROM="origin"
+GSM_SRC_URL=""
+GSM_SRC_REPO=""
 GSM_SRC_SHA=""
 GSM_TGT_SHA=""
 GSM_OUTCOME=""
@@ -118,6 +138,32 @@ gsm_judge_target_url() {
     */*) ;;
     *) GSM_WHY="'$u' names no <namespace>/<project> path"; return 1 ;;
   esac
+  case "/$path/" in
+    */./*|*/../*) GSM_WHY="'$u' has a '.' or '..' path segment, so the project it reaches is not the one it names"; return 1 ;;
+  esac
+  return 0
+}
+
+# gsm_github_repo <url> : pure. 0 when <url> is a github.com project URL
+# (https://github.com/<o>/<r>[.git][/], git@github.com:<o>/<r>[.git],
+# ssh://git@github.com/<o>/<r>[.git]); sets GSM_SRC_URL to its canonical
+# https://github.com/<o>/<r>.git and GSM_SRC_REPO to <r>. Else 1, GSM_WHY.
+gsm_github_repo() {
+  local u="$1" path o r
+  GSM_WHY="" GSM_SRC_URL="" GSM_SRC_REPO=""
+  case "$u" in
+    https://github.com/*) path="${u#https://github.com/}" ;;
+    git@github.com:*) path="${u#git@github.com:}" ;;
+    ssh://git@github.com/*) path="${u#ssh://git@github.com/}" ;;
+    *) GSM_WHY="'$(fid_shown "$u")' is no https://github.com/<owner>/<repo>, git@github.com:<owner>/<repo> or ssh://git@github.com/<owner>/<repo> URL"; return 1 ;;
+  esac
+  path="${path%/}"; path="${path%.git}"
+  o="${path%%/*}"; r="${path#*/}"
+  if [ "$o" = "$path" ] || ! [[ "$o" =~ ^[A-Za-z0-9_.-]+$ ]] || ! [[ "$r" =~ ^[A-Za-z0-9_.-]+$ ]] \
+     || [ "$o" = . ] || [ "$o" = .. ] || [ "$r" = . ] || [ "$r" = .. ]; then
+    GSM_WHY="'$(fid_shown "$u")' names no plain <owner>/<repo> on github.com"; return 1
+  fi
+  GSM_SRC_URL="https://github.com/$o/$r.git" GSM_SRC_REPO="$r"
   return 0
 }
 
@@ -129,7 +175,8 @@ gsm_check_target() {
 }
 
 # gsm_host <url> : the lowercased host of <url>, empty for a local path.
-gsm_host() { local sh; sh="$(fg_url_host_scheme "$1")"; [ -n "$sh" ] && printf '%s' "${sh#* }"; }
+# Always returns 0: an empty host is the caller's to judge (set -e).
+gsm_host() { local sh; sh="$(fg_url_host_scheme "$1")" || sh=""; [ -z "$sh" ] || printf '%s' "${sh#* }"; return 0; }
 
 # gsm_check_origin : conditions 2 and 3.
 gsm_check_origin() {
@@ -156,11 +203,20 @@ gsm_check_origin() {
           "nothing to seed from here. A main push to the GitLab project now needs integration-gate's receipt (\`integration-gate --with-critic --rebase\`, then \`glab-athena git push\`)." ;;
     esac
   done
+  local first=""
   for u in "$raw" "$resolved"; do
-    h="$(gsm_host "$u")"
-    [ "$h" = github.com ] || gsm_refuse SOURCE "origin's URL $(fid_shown "$u") is not on github.com, so its main has not passed the GitHub bar this mirror relies on" \
-      "run it from the checkout whose origin is the GitHub project (\`git remote get-url origin\` names github.com)."
+    gsm_github_repo "$u" || gsm_refuse SOURCE "origin's URL is not a GitHub project: $GSM_WHY, so its main is not GitHub main as landed" \
+      "run it from the checkout whose origin is the GitHub project (\`git remote get-url origin\` names https://github.com/<owner>/<repo>.git)."
+    if [ -z "$first" ]; then first="$GSM_SRC_URL"
+    elif [ "$first" != "$GSM_SRC_URL" ]; then
+      gsm_refuse SOURCE "origin's configured URL ($first) and the URL git resolves it to ($GSM_SRC_URL) name different GitHub projects (an insteadOf rule)" \
+        "drop the url.<base>.insteadOf rule that rewrites origin, then retry."
+    fi
   done
+  # Condition 1's second half: the target is this repository's GitLab project.
+  local tproj="${GSM_TO#https://$FG_HOST/}"; tproj="${tproj%.git}"; tproj="${tproj##*/}"
+  [ "$tproj" = "$GSM_SRC_REPO" ] || gsm_refuse TARGET "the target project '$tproj' is not origin's repository '$GSM_SRC_REPO', so this would seed another project's main" \
+    "run it from the checkout of the repository that project mirrors, or name that repository's GitLab project in --to."
   rc=0; vcs="$(git config --get remote.origin.vcs 2>/dev/null)" || rc=$?
   case "$rc" in
     0) gsm_refuse SOURCE "remote.origin.vcs is '$vcs', so git reads origin through git-remote-$vcs, not from github.com" \
@@ -219,17 +275,23 @@ gsm_main_of() {
   return 0
 }
 
-# gsm_read_source : condition 5's read. Sets GSM_SRC_SHA.
+# gsm_read_source <gh-athena> : condition 5's read. Sets GSM_SRC_SHA.
 gsm_read_source() {
-  local where out rc=0
-  gsm_seam GLAB_ATHENA_SEED_SOURCE_READ
-  where="${GSM_SEAM:-origin}"
-  out="$(timeout 60 env -u GIT_ASKPASS -u SSH_ASKPASS GIT_TERMINAL_PROMPT=0 git ls-remote "$where" refs/heads/main 2>/dev/null </dev/null)" || rc=$?
-  [ "$rc" = 0 ] || gsm_cnl "the fresh read of origin's main (\`git ls-remote origin refs/heads/main\`) exited $rc" \
-    "check this checkout can read its GitHub origin (\`git ls-remote origin refs/heads/main\`), then retry."
+  local gh="$1" out rc=0 err why
+  err="$(mktemp)" || gsm_cnl "mktemp failed" "check the temporary directory is writable, then retry."
+  if [ -n "$GSM_SRC_SEAM" ]; then
+    out="$(timeout 60 env GIT_TERMINAL_PROMPT=0 git ls-remote "$GSM_SRC_SEAM" refs/heads/main 2>"$err" </dev/null)" || rc=$?
+  else
+    # Outside the checkout, so its config (ssh command, proxy, TLS, insteadOf)
+    # never shapes the read; the route's transport pins TLS and no proxy.
+    out="$(cd / && timeout 120 env -u GH_ATHENA_GIT_DRY_RUN "$gh" git ls-remote "$GSM_SRC_URL" refs/heads/main 2>"$err" </dev/null)" || rc=$?
+  fi
+  why="$(head -c 300 "$err" | tr '\n' ' ')"; rm -f "$err"
+  [ "$rc" = 0 ] || gsm_cnl "the fresh read of GitHub main (\`gh-athena git ls-remote $GSM_SRC_URL refs/heads/main\`) exited $rc${why:+: $why}" \
+    "check the read runs (\`~/dev/custom/ai/bin/gh-athena git ls-remote $GSM_SRC_URL refs/heads/main\`), then retry."
   gsm_main_of "$out" || gsm_cnl "the fresh read of origin's main: $GSM_WHY" "retry; if it repeats, check origin."
   GSM_SRC_SHA="$GSM_MAIN"
-  [ -n "$GSM_SRC_SHA" ] || gsm_cnl "origin lists no refs/heads/main (an empty list is not an empty repository)" \
+  [ -n "$GSM_SRC_SHA" ] || gsm_cnl "GitHub ($GSM_SRC_URL) lists no refs/heads/main (an empty list is not an empty repository)" \
     "check origin's default branch is main and this checkout can read it, then retry."
   git cat-file -e "${GSM_SRC_SHA}^{commit}" 2>/dev/null || gsm_refuse "FRESH SHA" "origin's main is $GSM_SRC_SHA, which this checkout does not have, so the push cannot send it" \
     "run \`git fetch origin\` in this checkout, then retry."
@@ -238,8 +300,7 @@ gsm_read_source() {
 # gsm_read_target <self> : condition 6's read, through the route as the
 # target's bot (<self> is this glab-athena). Sets GSM_TGT_SHA ("" = absent).
 gsm_read_target() {
-  local self="$1" out rc=0 seam err
-  gsm_seam GLAB_ATHENA_SEED_TARGET_READ; seam="$GSM_SEAM"
+  local self="$1" out rc=0 seam="$GSM_TGT_SEAM" err
   err="$(mktemp)" || gsm_cnl "mktemp failed" "check the temporary directory is writable, then retry."
   if [ -n "$seam" ]; then
     out="$(timeout 120 env GIT_TERMINAL_PROMPT=0 git ls-remote "$seam" refs/heads/main 2>"$err" </dev/null)" || rc=$?
@@ -271,17 +332,21 @@ gsm_judge() {
   esac
 }
 
-# gsm_main <self> <seed-mirror args...> : check every condition, then set the
-# sanction and GSM_PUSH_ARGV for the caller to run through the route. Exits 0
-# when there is nothing to push; exits 3 on any refusal.
+# gsm_main <self> <gh-athena> <seed-mirror args...> : check every condition,
+# then set the sanction and GSM_PUSH_ARGV for the caller to run through the
+# route. Exits 0 when there is nothing to push; exits 3 on any refusal.
+GSM_SRC_SEAM=""
+GSM_TGT_SEAM=""
 gsm_main() {
-  local self="$1" tgt_local=0 anc=""
-  shift
+  local self="$1" gh="$2" tgt_local=0 anc=""
+  shift 2
+  gsm_seam GLAB_ATHENA_SEED_SOURCE_READ; GSM_SRC_SEAM="$GSM_SEAM"
+  gsm_seam GLAB_ATHENA_SEED_TARGET_READ; GSM_TGT_SEAM="$GSM_SEAM"
   gsm_parse_args "$@"
   gsm_check_target
   gsm_check_origin
   gsm_check_health
-  gsm_read_source
+  gsm_read_source "$gh"
   gsm_read_target "$self"
   if [ -n "$GSM_TGT_SHA" ] && [ "$GSM_TGT_SHA" != "$GSM_SRC_SHA" ]; then
     git cat-file -e "${GSM_TGT_SHA}^{commit}" 2>/dev/null && tgt_local=1
