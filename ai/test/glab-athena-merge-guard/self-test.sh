@@ -53,7 +53,7 @@ unset GLAB_ATHENA_MERGE_DRY_RUN GLAB_ATHENA_GIT_DRY_RUN
 export ATHENA_FORGE_IDENTITIES_FILE="${TMP}/forge-identities.json"
 jq -n --arg t "${TMP}/token" '{kind:"athena-forge-identities", schema:1, identities:
   [["gitlab.com","example-group"], ["gitlab.com","x"], ["gitlab.com","someone"], ["evil-gitlab.com","example-group"],
-   ["gitlabxcom","example-group"], ["other.example.com","example-group"]]
+   ["gitlabxcom","example-group"], ["other.example.com","example-group"], ["gitlab.com","cjpoll"]]
   | map({host:.[0], namespace:.[1], bot:"synthetic-merge-bot", token_file:$t, refresh:"group_service_account"})}' \
   > "${ATHENA_FORGE_IDENTITIES_FILE}"
 export ATHENA_PRIVATE_ROOT="${TMP}/empty-overlay"; mkdir -p "${ATHENA_PRIVATE_ROOT}/overlay"; chmod 700 "${ATHENA_PRIVATE_ROOT}"
@@ -459,18 +459,18 @@ expect_refused T20 "boarding with a failed head pipeline" "'failed', not success
 echo
 echo "--- api graphql: mergeRequestAccept is refused wherever the query comes from ---"
 # DND-1936: a GraphQL call names its target inside the query, so glab-athena
-# keys no bot on it and refuses every `api graphql` before the guard runs (W1);
-# -R cannot name it either, because the guard refuses -R before `api` (W3)
-# and its api flag table has no -R after it (W2). So the scan is unreachable
+# keys no bot on it and refuses every `api graphql` before the guard runs (GQ1);
+# -R cannot name it either, because the guard refuses -R before `api` (GQ3)
+# and its api flag table has no -R after it (GQ2). So the scan is unreachable
 # through the wrapper today, and G1-G12, F1 and F2 run the guard itself
 # (glmg_guard, sourced), keeping its scan covered for when a keyed GraphQL
 # path exists.
 reset_fx
-expect_refused W1 "the wrapper refuses \`api graphql\` (identity: no bot can be keyed on a query)" "api graphql" api graphql -f 'query=query { currentUser { username } }'
+expect_refused GQ1 "the wrapper refuses \`api graphql\` (identity: no bot can be keyed on a query)" "api graphql" api graphql -f 'query=query { currentUser { username } }'
 reset_fx
-expect_refused W2 "\`api graphql -R <repo>\`: the guard's api flag table has no -R" "-R" api graphql -R example-group/example-app -f 'query=query { currentUser { username } }'
+expect_refused GQ2 "\`api graphql -R <repo>\`: the guard's api flag table has no -R" "-R" api graphql -R example-group/example-app -f 'query=query { currentUser { username } }'
 reset_fx
-expect_refused W3 "\`-R <repo> api graphql\`: api is not the first word" "is not the first word" -R example-group/example-app api graphql -f 'query=query { currentUser { username } }'
+expect_refused GQ3 "\`-R <repo> api graphql\`: api is not the first word" "is not the first word" -R example-group/example-app api graphql -f 'query=query { currentUser { username } }'
 Q='mutation { mergeRequestAccept(input: {projectPath: "example-group/example-app", iid: "4242", sha: "x"}) { errors } }'
 reset_fx
 guard_refused G1 "inline -f query" "mergeRequestAccept" api graphql -f "query=${Q}"
@@ -671,7 +671,7 @@ else bad "R14. unsearchable store" "$(detail)"; fi
 
 # Where the receipt is read from: the checkout of the MR's own project.
 reset_fx; green_fx; cd "${TMP}/not-a-repo" || exit 2
-receipt_refused R15 "run outside any checkout -> refused (COULD NOT LOOK)" "COULD NOT LOOK" mr -R example-group/example-app merge 4242 --sha "${HEAD_SHA}"
+receipt_refused R15 "run outside any checkout -> refused (COULD NOT LOOK)" "COULD NOT LOOK" mr -R example-group/example-app merge 4242 --auto-merge=false --sha "${HEAD_SHA}" --yes
 cd "${REPO_FX}" || exit 2
 for other in "git@gitlab.com:example-group/other-app.git" "git@evil-gitlab.com:example-group/example-app.git" "https://gitlab.com/x/example-group/example-app.git"; do
   OFX="${TMP}/other-$RANDOM"; git init -q -b main "${OFX}"; git -C "${OFX}" remote add origin "${other}"
@@ -688,7 +688,7 @@ HTTPS_FX="${TMP}/https-app"; git init -q -b main "${HTTPS_FX}"; git -C "${HTTPS_
 # The bot is resolved from -R here: with no -R, the Example-Group origin is
 # itself refused by the identity map, whose namespaces match exactly (R18b).
 reset_fx; green_fx; cd "${HTTPS_FX}" || exit 2
-run mr -R example-group/example-app merge 4242 --sha "${HEAD_SHA}"
+run mr -R example-group/example-app merge 4242 --auto-merge=false --sha "${HEAD_SHA}" --yes
 if refused && [[ "${ERR}" == *"NO RECEIPT"* ]] && [[ "${ERR}" == *"${HTTPS_FX}"* ]]; then ok "R18. an https remote (any case) matches the project; its own store is the one read"
 else bad "R18. https remote matches" "$(detail)"; fi
 reset_fx; green_fx
@@ -824,10 +824,14 @@ reset_fx; ref_refused W9 "PUT merge_requests/<iid>/rebase (moves the source bran
 reset_fx; ref_refused W10 "PUT repository/submodules/<path>" "repository/submodules" api -X PUT "projects/:id/repository/submodules/lib%2Fdep" -f branch=main -f "commit_sha=${HEAD_SHA}"
 reset_fx; ref_refused W11 "POST repository/changelog (commits the changelog)" "repository/changelog" api -X POST "projects/:id/repository/changelog" -f version=1.0.0
 reset_fx; ref_refused W12 "an encoded project path, upper case, a .json suffix" "repository/commits" api -X post "PROJECTS/example-group%2Fexample-app/REPOSITORY/COMMITS.json" -f branch=main
-reset_fx; ref_refused W13 "the full URL with api/v4" "repository/branches" api -X POST "https://gitlab.com/api/v4/projects/1/repository/branches" -f branch=x
+# The wrapper refuses an absolute-URL endpoint before the guard (DND-1936: its
+# host and project are not the ones the bot is keyed on); W13g keeps the
+# guard's own reading of it covered.
+reset_fx; expect_refused W13 "the full URL with api/v4 (identity)" "absolute URL" api -X POST "https://gitlab.com/api/v4/projects/1/repository/branches" -f branch=x
+reset_fx; guard_refused W13g "the full URL with api/v4" "repository/branches" api -X POST "https://gitlab.com/api/v4/projects/1/repository/branches" -f branch=x
 reset_fx; ref_refused W14 "a branch DELETE with a method-override header is not a plain DELETE" "repository/branches" api -X DELETE -H "X-HTTP-Method-Override: POST" "projects/:id/repository/branches/feature"
 reset_fx; ref_refused W15 "a branch DELETE with a _method field is not a plain DELETE" "repository/branches" api -X DELETE -f "_method=POST" "projects/:id/repository/branches/feature"
-reset_fx; ref_refused W16 "a DELETE that also names protected_branches deeper in the path" "protected_branches" api -X DELETE "projects/1/repository/branches/x/protected_branches/main"
+reset_fx; ref_refused W16 "a DELETE that also names protected_branches deeper in the path" "protected_branches" api -X DELETE "projects/:id/repository/branches/x/protected_branches/main"
 reset_fx; ref_refused W24 "POST groups/<g>/protected_branches (group-level protection)" "protected_branches" api -X POST "groups/example-group/protected_branches" -f name=main
 reset_fx; ref_refused W24b "DELETE groups/<g>/protected_branches/main (unprotects main in every project)" "protected_branches" api -X DELETE "groups/example-group%2Fsub/protected_branches/main"
 reset_fx; expect_ran W24c "GET groups/<g>/protected_branches passes" none api "groups/example-group/protected_branches"
@@ -842,14 +846,16 @@ reset_fx; expect_ran W23 "GET a file passes" none api "projects/:id/repository/f
 
 echo
 echo "--- DND-1941: GraphQL ref writes are refused ---"
-reset_fx; ref_refused GR1 "commitCreate" "commitCreate" api graphql -f 'query=mutation { commitCreate(input: {projectPath: "g/p", branch: "main", message: "x", actions: []}) { errors } }'
-reset_fx; ref_refused GR2 "createBranch" "createBranch" api graphql -f 'query=mutation { createBranch(input: {projectPath: "g/p", name: "x", ref: "main"}) { errors } }'
-reset_fx; ref_refused GR3 "tagCreate" "tagCreate" api graphql -f 'query=mutation { tagCreate(input: {}) { errors } }'
-reset_fx; ref_refused GR4 "branchRuleUpdate (protection)" "branchRuleUpdate" api graphql -f 'query=mutation { branchRuleUpdate(input: {}) { errors } }'
-reset_fx; ref_refused GR5 "branchRuleDelete (protection)" "branchRuleDelete" api graphql -f 'query=mutation { branchRuleDelete(input: {}) { errors } }'
+# The wrapper refuses every `api graphql` before the guard (DND-1936, GQ1-GQ3),
+# so these run the guard itself, like G1-G12.
+reset_fx; guard_refused GR1 "commitCreate" "commitCreate" api graphql -f 'query=mutation { commitCreate(input: {projectPath: "g/p", branch: "main", message: "x", actions: []}) { errors } }'
+reset_fx; guard_refused GR2 "createBranch" "createBranch" api graphql -f 'query=mutation { createBranch(input: {projectPath: "g/p", name: "x", ref: "main"}) { errors } }'
+reset_fx; guard_refused GR3 "tagCreate" "tagCreate" api graphql -f 'query=mutation { tagCreate(input: {}) { errors } }'
+reset_fx; guard_refused GR4 "branchRuleUpdate (protection)" "branchRuleUpdate" api graphql -f 'query=mutation { branchRuleUpdate(input: {}) { errors } }'
+reset_fx; guard_refused GR5 "branchRuleDelete (protection)" "branchRuleDelete" api graphql -f 'query=mutation { branchRuleDelete(input: {}) { errors } }'
 reset_fx; printf '{"query":"mutation { commit\\u0043reate(input: {}) { errors } }"}' > "${TMP}/qc.json"
-reset_fx; ref_refused GR6 "commitCreate in an --input body with a \\u escape" "commitCreate" api graphql --input "${TMP}/qc.json"
-reset_fx; expect_ran GR7 "branchDelete passes (a ref delete)" none api graphql -f 'query=mutation { branchDelete(input: {}) { errors } }'
+reset_fx; guard_refused GR6 "commitCreate in an --input body with a \\u escape" "commitCreate" api graphql --input "${TMP}/qc.json"
+reset_fx; guard_passed GR7 "branchDelete passes (a ref delete)" api graphql -f 'query=mutation { branchDelete(input: {}) { errors } }'
 
 echo
 echo "--- DND-1941: a RED target tip stops the line (DND-1902 on GitHub) ---"

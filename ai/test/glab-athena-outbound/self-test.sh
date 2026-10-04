@@ -99,7 +99,17 @@ printf 'synth-token\tSYNTH-TOKEN-[0-9]+\n' > "${OVERLAY}/outbound/patterns.tsv"
 git -C "${OVERLAY}" init -q && git -C "${OVERLAY}" add -A && git -C "${OVERLAY}" commit -q -m overlay
 export ATHENA_PRIVATE_ROOT="${OVERLAY}"
 
-WORK="${TMP}/work"; mkdir -p "${WORK}"
+# DND-1936: glab-athena picks its bot by (host, top-level namespace) before the
+# scan runs, so WORK is a checkout of a synth-group project and a fixture
+# identity map names that namespace. GITLAB_ATHENA_TOKEN_FILE still supplies the
+# token. The identity refusals have their own suites (ai/test/forge-identity,
+# ai/test/glab-athena).
+WORK="${TMP}/work"; git init -q "${WORK}"
+git -C "${WORK}" remote add origin https://gitlab.com/synth-group/app.git
+export ATHENA_FORGE_IDENTITIES_FILE="${TMP}/forge-identities.json"
+jq -n --arg t "${TMP}/token" '{kind:"athena-forge-identities", schema:1, identities:
+  [{host:"gitlab.com", namespace:"synth-group", bot:"synthetic-outbound-bot", token_file:$t, refresh:"group_service_account"}]}' \
+  > "${ATHENA_FORGE_IDENTITIES_FILE}"
 
 vis() { # vis <ref|default> <public|internal|private|raw:<json>|none>
   local f="${STUB_VIS}.$(printf '%s' "$1" | tr '/%' '__')"
@@ -132,13 +142,15 @@ refused_hit() { [ "${RC}" = 1 ] && ! sent && [[ "${OUT}" == *"REFUSED"* ]] && [[
   && [[ "${OUT}" == *"PUBLIC project"* ]] && [[ "${OUT}" == *"Fix:"* ]] && no_literal; }
 read_was() { [[ "${CALLS}" == *"$1"* ]]; }
 # lib_guard <args...> : runs glos_guard straight from the library, as the
-# wrapper calls it after isolation, and prints "stub: SENT" when it passes.
-# For the merge commands, whose wrapper path the merge guard (DND-742) refuses
-# first without an MR fixture; the scan runs after it on a pinned, gated merge.
+# wrapper calls it after isolation, and prints "stub: SENT" and the argv it
+# would hand glab when it passes. For the merge commands, whose wrapper path
+# the merge guard (DND-742) refuses first without an MR fixture (the scan runs
+# after it on a pinned, gated merge), and for what the identity map refuses
+# first (DND-1936).
 lib_guard() {
   : > "${STUB_LOG}"; mkdir -p "${TMP}/cfg"
   OUT="$(cd "${WORK}" && FCI_CFG_DIR="${TMP}/cfg" GITLAB_TOKEN="${FAKE_TOKEN}" \
-    bash -c 'set -eu; . "$1"; shift; glos_guard "$@"; echo "stub: SENT (the guard passed)"' _ "${AI_DIR}/lib/glab-outbound-scan.sh" "$@" 2>&1)"; RC=$?
+    bash -c 'set -eu; . "$1"; shift; glos_guard "$@"; echo "stub: SENT (the guard passed) glos-argv: ${GLOS_ARGV[*]}"' _ "${AI_DIR}/lib/glab-outbound-scan.sh" "$@" 2>&1)"; RC=$?
   CALLS="$(cat "${STUB_LOG}")"
 }
 
@@ -315,8 +327,11 @@ fi
 gla mr create --target-project synth-group/pub -d "x${TOKEN}"
 if refused_hit && read_was "api projects/synth-group%2Fpub"; then ok "mr create --target-project is a target"; else bad "--target-project" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 vis default public
+# The wrapper refuses an -R that may be a flag's value before the scan
+# (DND-1936: it may name another project than the bot's); the library call
+# keeps the scan's own reading covered.
 gla mr create --label -R synth-group/priv -d "x${TOKEN}"
-if [ "${RC}" = 3 ] && ! sent && [[ "${OUT}" == *"looks like a flag"* ]]; then ok "an -R that is --label's value is refused, not read as a target (DND-1976)"; else bad "-R as a label value" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+if [ "${RC}" = 3 ] && ! sent && { [[ "${OUT}" == *"looks like a flag"* ]] || [[ "${OUT}" == *"BAD KEY"* ]]; } && [[ "${OUT}" == *"Fix:"* ]]; then ok "an -R that is --label's value is refused, not read as a target (DND-1976, DND-1936)"; else bad "-R as a label value" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 vis default private
 gla mr note https://gitlab.com/synth-group/pub/-/merge_requests/3 -m "x${TOKEN}"
 if refused_hit && read_was "api projects/synth-group%2Fpub"; then ok "an MR URL to a PUBLIC project is scanned from a PRIVATE cwd"; else bad "MR URL" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
@@ -358,19 +373,25 @@ gla api -X POST groups/synth-group/epics/1/notes -f "body=x${TOKEN}"
 if refused_hit && read_was "api groups/synth-group"; then ok "a group write reads the group's visibility"; else bad "group" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 gla api -X POST snippets -f "content=x${TOKEN}"
 if refused_hit && [[ "${OUT}" == *"scanning as PUBLIC"* ]]; then ok "a write with no nameable project is scanned as PUBLIC"; else bad "snippets" "rc=${RC} ${OUT}"; fi
-gla api graphql -f "query=mutation { createNote(input: {noteableId: \"gid://gitlab/MergeRequest/1\", body: \"x${TOKEN}\"}) { errors } }"
-if refused_hit; then ok "a GraphQL mutation is scanned as PUBLIC"; else bad "graphql mutation" "rc=${RC} ${OUT}"; fi
-gla api graphql -f "query=query { project(fullPath: \"x${TOKEN}\") { id } }"
-if [ "${RC}" = 0 ] && sent; then ok "a GraphQL query (a read) is not scanned"; else bad "graphql query" "rc=${RC} ${OUT}"; fi
+# The wrapper refuses every `api graphql` before the scan (DND-1936: no bot can
+# be keyed on a query), so the GraphQL cases run the library, as the merge
+# guard's suite does.
+gla api graphql -f "query=mutation { createNote(input: {body: \"clean\"}) { errors } }"
+if [ "${RC}" = 3 ] && ! sent && [[ "${OUT}" == *"api graphql"* ]] && [[ "${OUT}" == *"Fix:"* ]]; then ok "the wrapper refuses \`api graphql\` before anything is sent"; else bad "graphql (identity)" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+lib_guard api graphql -f "query=mutation { createNote(input: {noteableId: \"gid://gitlab/MergeRequest/1\", body: \"x${TOKEN}\"}) { errors } }"
+if refused_hit; then ok "a GraphQL mutation is scanned as PUBLIC (library)"; else bad "graphql mutation" "rc=${RC} ${OUT}"; fi
+lib_guard api graphql -f "query=query { project(fullPath: \"x${TOKEN}\") { id } }"
+if [ "${RC}" = 0 ] && sent; then ok "a GraphQL query (a read) is not scanned (library)"; else bad "graphql query" "rc=${RC} ${OUT}"; fi
 # (A GraphQL query from stdin is refused first by the merge guard, which
 # cannot read it without consuming it; a file is the supported form.)
 printf 'mutation { createNote(input: {body: "x%s"}) { errors } }\n' "${TOKEN}" > "${TMP}/gql-hit.graphql"
 printf 'mutation { createNote(input: {body: "clean"}) { errors } }\n' > "${TMP}/gql-clean.graphql"
-gla api graphql -F "query=@${TMP}/gql-hit.graphql"
-if refused_hit; then ok "a GraphQL mutation read from a file is scanned"; else bad "graphql file" "rc=${RC} ${OUT}"; fi
-gla api graphql -F "query=@${TMP}/gql-clean.graphql"
-if [ "${RC}" = 0 ] && sent && [[ "${OUT}" == *"stub-body:mutation"* ]] && [[ "${CALLS}" != *"${TMP}/gql-clean.graphql"* ]]; then ok "a clean GraphQL mutation reaches glab as the scanned copy"; else bad "graphql file clean" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
-for ep in projects/7/wikis/graphql projects/7/repository/files/graphql projects/7/wikis/graphql.md; do
+lib_guard api graphql -F "query=@${TMP}/gql-hit.graphql"
+if refused_hit; then ok "a GraphQL mutation read from a file is scanned (library)"; else bad "graphql file" "rc=${RC} ${OUT}"; fi
+lib_guard api graphql -F "query=@${TMP}/gql-clean.graphql"
+if [ "${RC}" = 0 ] && sent && [[ "${OUT}" == *"glos-argv: api graphql -F query=@"*"/outbound-scan/"* ]] && [[ "${OUT}" != *"${TMP}/gql-clean.graphql"* ]]; then ok "a clean GraphQL mutation is handed to glab as the scanned copy (library)"; else bad "graphql file clean" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+# :id, not a numeric id: the identity map refuses a project named by id (DND-1936).
+for ep in projects/:id/wikis/graphql projects/:id/repository/files/graphql projects/:id/wikis/graphql.md; do
   gla api -X PUT "${ep}" -f "content=x${TOKEN}"
   if refused_hit; then ok "a REST path ending in graphql is a REST write: ${ep}"; else bad "REST graphql-suffix ${ep}" "rc=${RC} ${OUT}"; fi
 done
@@ -613,8 +634,13 @@ if [ "${RC}" = 0 ] && sent && [ "$(grep -c . <<<"${CALLS}")" = 1 ]; then ok "mr 
 echo "--- the shared rules: the same outcomes as gh-athena ---"
 OUT="$(cd "${WORK}" && : > "${STUB_LOG}" && XDG_STATE_HOME="${TMP}/state" ATHENA_OUTBOUND_WAIVE="synthetic waiver" "${WRAPPER}" mr note 5 -m "x${TOKEN}" 2>&1)"; RC=$?
 if [ "${RC}" = 0 ] && sent && [[ "${OUT}" == *"WAIVED - NOT SCANNED"* ]] && [[ "${OUT}" != *"CLEAN"* ]]; then ok "waiver"; else bad "waiver" "rc=${RC} ${OUT}"; fi
+# A malformed overlay is refused by the identity map first (its gitlab
+# .identities cannot be read, DND-1936); the library call keeps the scan's own
+# refusal covered.
 OUT="$(cd "${WORK}" && : > "${STUB_LOG}" && ATHENA_PRIVATE_ROOT=/nonexistent "${WRAPPER}" mr note 5 -m "x" 2>&1)"; RC=$?
-if [ "${RC}" = 3 ] && ! sent && [[ "${OUT}" == *"overlay is MALFORMED"* ]] && [[ "${OUT}" == *"REFUSED"* ]]; then ok "malformed overlay refused"; else bad "malformed" "rc=${RC} ${OUT}"; fi
+if [ "${RC}" = 3 ] && ! sent && [[ "${OUT}" == *"MALFORMED"* ]] && [[ "${OUT}" == *"Fix:"* ]]; then ok "malformed overlay refused (identity map)"; else bad "malformed (identity)" "rc=${RC} ${OUT}"; fi
+ATHENA_PRIVATE_ROOT=/nonexistent lib_guard mr note 5 -m "x"
+if [ "${RC}" = 3 ] && ! sent && [[ "${OUT}" == *"overlay is MALFORMED"* ]] && [[ "${OUT}" == *"REFUSED"* ]]; then ok "malformed overlay refused (library)"; else bad "malformed" "rc=${RC} ${OUT}"; fi
 CR="${TMP}/crash"; git init -q "${CR}"; mkdir -p "${CR}/ai"
 cp -r "${AI_DIR}/bin" "${AI_DIR}/lib" "${CR}/ai/"
 printf '#!/bin/sh\necho "Traceback: boom" >&2\nexit 1\n' > "${CR}/ai/bin/outbound-scan"

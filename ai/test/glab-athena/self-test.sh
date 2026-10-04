@@ -465,6 +465,15 @@ cat > "${IDBIN}/glab" <<'EOF'
 case "${GITLAB_TOKEN:-}" in
   glpat-SELFTESTWORKTOKEN0001) who=work ;; glpat-SELFTESTPERSONAL0001) who=personal ;; '') who=none ;; *) who=other ;;
 esac
+# The outbound scan (DND-1938) reads a project's visibility before an api POST
+# to a text route: answer that read as a private project, and log which token
+# it ran with.
+if [ "$#" = 2 ] && [ "$1" = api ]; then
+  case "$2" in projects/*)
+    echo "token=${who} args=$*" >> "${0%/*}/vis.log"
+    echo '{"visibility":"private"}'; exit 0 ;;
+  esac
+fi
 echo "STUB-ID token=${who} host=${GITLAB_HOST:-unset} args=$*"
 EOF
 chmod +x "${IDBIN}/glab"
@@ -509,9 +518,12 @@ glai "${WR}" mr list
 glai "${WR}" mr list -R cjpoll/custom
 [ "${RC}" = 0 ] && [[ "${OUT}" == "STUB-ID token=personal host=gitlab.com args=mr list -R cjpoll/custom" ]] \
   && ok "N8. -R cjpoll/custom from a work checkout -> the personal token (-R names the project)" || bad "N8. -R selects the identity" "rc=${RC} out='${OUT}' err='${ERR}'"
+rm -f "${IDBIN}/vis.log"
 glai "${TMP}/norepo-1936" api -X POST "projects/example-group%2Fexample-app/issues" -f title=t
 [ "${RC}" = 0 ] && [[ "${OUT}" == "STUB-ID token=work host=gitlab.com "* ]] \
-  && ok "N9. api projects/<ns>%2F<p>/... outside a checkout -> that namespace's token" || bad "N9. endpoint selects the identity" "rc=${RC} out='${OUT}' err='${ERR}'"
+  && [ "$(cat "${IDBIN}/vis.log" 2>/dev/null)" = "token=work args=api projects/example-group%2Fexample-app" ] \
+  && ok "N9. api projects/<ns>%2F<p>/... outside a checkout -> that namespace's token, the outbound scan's visibility read included" \
+  || bad "N9. endpoint selects the identity" "rc=${RC} out='${OUT}' err='${ERR}' vis='$(cat "${IDBIN}/vis.log" 2>/dev/null)'"
 glai "${UR}" mr list
 [ "${RC}" = 3 ] && [[ "${ERR}" == *"NO ENTRY"* ]] && [[ "${OUT}" != *STUB-ID* ]] \
   && ok "N10. glab in a checkout of an unmapped namespace -> refused, glab never runs" || bad "N10. unmapped normal path" "rc=${RC} out='${OUT}' err='${ERR}'"
