@@ -64,7 +64,7 @@ no longer holds for `security_opt`: an unknown tag gets Docker's defaults.
 
 | Role | `[runners.docker] security_opt` | Why |
 |---|---|---|
-| `ci` | `["seccomp:unconfined", "apparmor:unconfined"]` | tool-sandbox runs `bwrap --unshare-all ... --proc /proc`. Docker's default seccomp refuses the user namespace, and `/proc` stays masked, so the proc mount is still refused (DND-1998 tracks unmasking it). |
+| `ci` | `["seccomp:unconfined", "apparmor:unconfined"]` | tool-sandbox runs `bwrap --unshare-all ... --proc /proc`. Docker's default seccomp refuses the user namespace. The job container's `/proc` stays masked, so custom's job starts the gate in a sibling container through the job's socket, with the docker CLI's `systempaths=unconfined` (DND-2085, `ai/docs/ci-harness-masked-proc.md`). |
 | `deploy` | none: Docker's default seccomp, masked `/proc` | Its jobs only drive the mounted socket (`docker build`; buildx's buildkitd is a sibling container the daemon starts). |
 | untagged (`-`) | `["seccomp:unconfined", "apparmor:unconfined"]` | Rootless BuildKit as a job image nests a user namespace (the invariants above). `/proc` stays masked. |
 | other | none: Docker's defaults | The kit knows no need for it. Deny by default. |
@@ -78,6 +78,19 @@ until the live runner was set back to the pair. The kit matches the live
 runner again, and its self-test rejects any value outside that grammar. The
 masked `/proc` stays: unmasking it for `ci` is DND-1998, reopened for a new
 approach, and is not decided here.
+
+**Later (2026-10-05, DND-2085):** the `ci` row said "`/proc` stays masked, so
+the proc mount is still refused (DND-1998 tracks unmasking it)". DND-1998
+closed without a runner change. The job container's `/proc` stays masked.
+custom's `harness-gate` job uses the socket it already holds to start the gate
+in a sibling container with `--security-opt systempaths=unconfined`, which the
+docker CLI turns into empty `MaskedPaths`/`ReadonlyPaths` the Engine API
+accepts. A boundary probe in the job asserts on every run that the sibling's
+root still cannot write `/proc/sys` or `/proc/sysrq-trigger` or read
+`/proc/kcore` (`.gitlab-ci.yml`, `dockerfiles/ci-harness/boundary-probe.sh`).
+Measured on the live `ci` runner 2026-10-05 (spike pipeline 2913148572): the
+same sibling without `systempaths=unconfined` fails "Can't mount proc on
+/proc", and with it bwrap mounts its own `/proc`.
 
 Where AppArmor is not loaded, `apparmor:unconfined` changes nothing; it keeps
 bwrap's and BuildKit's mounts working on a host where AppArmor is loaded. The

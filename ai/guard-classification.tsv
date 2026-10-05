@@ -406,3 +406,7 @@ ai/lib/notion-version-shim.cjs	library	preloaded by ai/bin/notion-athena-mcp; ad
 ai/lib/gh_ci_wait.rb	library	pure rules of ai/bin/gh-ci-wait (DND-1708): parse a gh api -i response, judge CI state, the wait decision and argument validation; no I/O; raises GhCiWait::Usage carrying its Fix:, which the caller prints
 ai/lib/gh_ci_wait_io.rb	library	the wait loop and the bounded gh api reader of ai/bin/gh-ci-wait (DND-1708); every non-DONE outcome carries a Fix: the caller prints
 scripts/lib/block-signature.sh	library	sourced by the lead-time, clustering and shipwright runners; athena_block_signature prints a matched wording or nothing and always exits 0, because the runner holds the session exit status and prints the Fix: for each outcome
+
+# --- DND-1998/DND-2085 CI image: setup.sh refuses a bad pin, a wrong checksum or a git without `git hook list`; boundary-probe.sh fails an allowed /proc write or kcore read; each with Fix:.
+dockerfiles/ci-harness/setup.sh	guard
+dockerfiles/ci-harness/boundary-probe.sh	guard

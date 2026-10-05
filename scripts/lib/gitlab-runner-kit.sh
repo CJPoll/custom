@@ -132,9 +132,9 @@ grk_role_gets_db_tmpfs() { [ "${1-}" = "ci" ]; }
 # only a role named here is loosened from Docker's defaults.
 #   ci          seccomp and AppArmor unconfined (the live runner's pair).
 #               tool-sandbox runs bwrap --unshare-all ... in ci jobs: Docker's
-#               default seccomp refuses the user namespace. /proc stays masked,
-#               so a fresh proc mount is still refused (DND-1998 is reopened
-#               for it). Every value must be API-valid: systempaths=unconfined
+#               default seccomp refuses the user namespace. /proc stays masked
+#               in the job container; the gate runs in a sibling container with
+#               an unmasked /proc instead (DND-2085, .gitlab-ci.yml). Every value must be API-valid: systempaths=unconfined
 #               is a docker CLI flag the Engine API rejects ("invalid
 #               --security-opt 2"), and it stopped every ci job (DND-2039).
 #               Residual: seccomp:unconfined lifts Docker's whole

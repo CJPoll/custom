@@ -9,15 +9,25 @@
 #   - No credentials: no CI/CD variables, no secrets, no id_tokens.
 #   - Every job carries the role tag `ci` (never a per-host tag); the runner
 #     does not take untagged jobs.
-
-# Known state (measured 2026-10-04, DND-1946): in a default unprivileged docker
-# container, 13 of 194 gate checks do not pass. bubblewrap needs unprivileged
-# user namespaces (the tool-sandbox suites), `git hook list` needs a newer git
-# than trixie's, and the proc-scan and process-group suites (suite-reaper,
-# test-slot, telemetry-shell) read host process state. The job stays a full,
-# unweakened gate: no allow_failure, no skipped check. Until the follow-up
-# (make the gate pass in the CI image: a runner that allows user namespaces and
-# a git with `git hook list`) lands, do not make this job a required check.
+#   - The gate runs in a sibling container on the `ci` user's rootless
+#     daemon, from the pinned image dockerfiles/ci-harness builds (DND-2085).
+#     No sibling gets --privileged, a host namespace, --cap-add, a device or
+#     the docker socket.
+#
+# The job is a full, unweakened gate: no allow_failure, no skipped check.
+# The gate needs an unmasked /proc: tool-sandbox runs `bwrap --unshare-all ...
+# --proc /proc`, and the kernel refuses a fresh procfs mount while Docker's
+# masks cover the job container's /proc. The runner cannot unmask it (the
+# Engine API has no systempaths key; DND-2039), so the job starts the gate in
+# a sibling with the docker CLI's `--security-opt systempaths=unconfined`.
+# The boundary that grants nothing new, and the probe that asserts it on every
+# run: ai/docs/ci-harness-masked-proc.md -> The boundary.
+#
+# **Later (2026-10-05, DND-2085):** this header read "Known state (measured
+# 2026-10-04, DND-1946): in a default unprivileged docker container, 13 of 194
+# gate checks do not pass", and said not to make the job a required check.
+# Superseded: the pinned image supplies `git hook list`, and the sibling's
+# unmasked /proc lets bwrap mount its own; DND-1998 closed through this ticket.
 
 workflow:
   rules:
@@ -43,25 +53,40 @@ harness-gate:
   stage: test
   tags: [ci]
   interruptible: true
-  # Pinned by exact tag and digest: a public Docker Hub image the runner can
-  # pull, Ruby 3.4 (the harness floor, DND-931) on Debian trixie (its apt has
-  # gh, bubblewrap and nodejs, which the suites need), with no build step.
-  image: ruby:3.4.10-slim-trixie@sha256:b573616eed67613e1d380ebb777d87aa094fad7505bdbc2d1b45dca9dd9116b9
+  # The launcher: the docker CLI, pinned by exact tag and digest. The `ci`
+  # runner mounts its user's rootless dockerd socket at /var/run/docker.sock
+  # (DND-1973); the gate itself runs in the image built below.
+  image: docker:29.5.2-cli@sha256:9ba8e32bfc35a2c7ae2feb1e3241b2778ae21dee80f4dcd31d04e1cfdea86ea2
   variables:
     # Full history, so a check that reads the landed bar from origin/main can.
     GIT_DEPTH: "0"
   script:
-    - apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends git jq python3 procps ca-certificates curl gawk bubblewrap util-linux gh nodejs inotify-tools openssh-client
-    # Harness Ruby executables carry the absolute #!/usr/bin/ruby shebang.
-    - ln -sf "$(command -v ruby)" /usr/bin/ruby
-    # Run as a non-root user that owns the tree: suites assert unreadable-path
-    # and ownership behavior, and git refuses a tree owned by another user.
-    - useradd --create-home --shell /bin/bash ci
-    - chown -R ci:ci "$CI_PROJECT_DIR" && mkdir -p /home/ci/dev && ln -sfn "$CI_PROJECT_DIR" /home/ci/dev/custom && chown -h ci:ci /home/ci/dev /home/ci/dev/custom
-    - runuser -u ci -- env HOME=/home/ci git config --global user.name ci
-    - runuser -u ci -- env HOME=/home/ci git config --global user.email ci@localhost
-    - runuser -u ci -- env HOME=/home/ci git config --global init.defaultBranch main
+    # The socket must reach a rootless daemon: only there is a sibling's
+    # root a subuid on the host. The boundary probe below checks it again.
+    - |
+      if ! docker info --format '{{.SecurityOptions}}' | grep -q 'name=rootless'; then
+        echo "harness-gate: the job's docker socket does not reach a rootless daemon; refusing to start an unmasked sibling"
+        echo "  Fix: point the runner's ci entry at the ci user's rootless dockerd socket (system-files/gitlab-runner-runbook.md, DND-1973)."
+        exit 1
+      fi
+    # The pinned tool set, built on the ci user's daemon. The tag is the
+    # content hash of the build context, so one tag is one content and the
+    # layer cache makes an unchanged rebuild free. No registry, no credential.
+    - CI_HARNESS_IMAGE="custom-ci-harness:$(find dockerfiles/ci-harness -type f | sort | xargs sha256sum | sha256sum | cut -c1-16)"
+    - docker build -q -t "$CI_HARNESS_IMAGE" dockerfiles/ci-harness
     # The runner's clone may not create origin/main; the landed bars need it.
-    - runuser -u ci -- env HOME=/home/ci git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
-    - runuser -u ci -- env HOME=/home/ci git rev-parse --verify --quiet refs/remotes/origin/main
-    - runuser -u ci -- env HOME=/home/ci ai/bin/harness-gate
+    - git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+    - git rev-parse --verify --quiet refs/remotes/origin/main
+    # Every run proves the boundary: as the image's root, with the gate's
+    # options, /proc/sys and sysrq writes and a kcore read must be denied.
+    - docker run --rm --name "custom-probe-$CI_JOB_ID" --user 0 --security-opt seccomp=unconfined --security-opt apparmor=unconfined --security-opt systempaths=unconfined -v "$CI_PROJECT_DIR:$CI_PROJECT_DIR" -w "$CI_PROJECT_DIR" "$CI_HARNESS_IMAGE" dockerfiles/ci-harness/boundary-probe.sh
+    # The gate runs as `ci`, owning the tree: suites assert unreadable-path
+    # and ownership behavior, and git refuses a tree another user owns. No
+    # ~/dev/custom link: a checkout there marks this machine as an inbox
+    # tenant, and the CI container is not one (check-inbox-registry; DND-1998).
+    - docker run --rm --name "custom-prep-$CI_JOB_ID" --user 0 -v "$CI_PROJECT_DIR:$CI_PROJECT_DIR" -w "$CI_PROJECT_DIR" "$CI_HARNESS_IMAGE" chown -R ci:ci "$CI_PROJECT_DIR"
+    # The gate. It never gets the socket. --init reaps the orphans suites leave.
+    - docker run --rm --init --name "custom-gate-$CI_JOB_ID" --user ci --security-opt seccomp=unconfined --security-opt apparmor=unconfined --security-opt systempaths=unconfined -v "$CI_PROJECT_DIR:$CI_PROJECT_DIR" -w "$CI_PROJECT_DIR" "$CI_HARNESS_IMAGE" ai/bin/harness-gate
+  after_script:
+    # A cancelled job leaves no sibling behind.
+    - docker rm -f "custom-probe-$CI_JOB_ID" "custom-prep-$CI_JOB_ID" "custom-gate-$CI_JOB_ID" >/dev/null 2>&1 || true

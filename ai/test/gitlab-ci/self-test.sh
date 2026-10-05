@@ -3,8 +3,16 @@
 # harness-gate. Parses the file and asserts the rules the pipeline holds:
 # the fork guard leads workflow:rules, MR and branch pipelines do not
 # duplicate, every runnable job is tagged, nothing carries credentials, and
-# the gate job runs ai/bin/harness-gate with full history. Functional only
-# (DND-1222): reads one file, no network, no docker, no timing.
+# the gate runs ai/bin/harness-gate with full history. DND-2085 adds the
+# sibling container: the job checks its daemon is rootless, builds
+# dockerfiles/ci-harness under a content-hash tag, runs the boundary probe as
+# root and then the gate as `ci`, each with exactly the three --security-opt
+# values; no `docker run` gets --privileged, a host namespace, --cap-add, a
+# device, --volumes-from or the docker socket; after_script removes the
+# siblings by name. DND-1998's image rules stay: the Dockerfile has one pinned
+# FROM and runs setup.sh, and setup.sh pins one apt snapshot, exact package
+# versions and a sha256-checked git tarball. Functional only (DND-1222): reads
+# those three files, no network, no docker, no timing.
 # Each rule has a miss case: a mutated copy of the file must fail the checker.
 
 set -u
@@ -12,6 +20,8 @@ set -u
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT="$(cd -- "${HERE}/../../.." && pwd -P)"
 CI_FILE="${ROOT}/.gitlab-ci.yml"
+DOCKERFILE="${ROOT}/dockerfiles/ci-harness/Dockerfile"
+SETUP="${ROOT}/dockerfiles/ci-harness/setup.sh"
 CHECK="${HERE}/check.rb"
 
 [ -x /usr/bin/ruby ] || { echo "gitlab-ci self-test: FAIL -- /usr/bin/ruby is missing"; echo "  Fix: install the harness Ruby at /usr/bin/ruby (DND-931); this suite does not skip."; exit 1; }
@@ -25,18 +35,30 @@ bad() { FAIL=$((FAIL + 1)); printf 'FAIL %s\n' "$1"; [ -n "${2:-}" ] && printf '
 TMP="$(mktemp -d)"
 trap 'rm -rf "${TMP}"' EXIT
 
-# The real file passes.
-out="$(/usr/bin/ruby "${CHECK}" "${CI_FILE}" 2>&1)"
-if [ $? -eq 0 ]; then ok "the committed .gitlab-ci.yml satisfies every rule"; else bad "the committed .gitlab-ci.yml satisfies every rule" "${out}"; fi
+# The real files pass.
+out="$(/usr/bin/ruby "${CHECK}" "${CI_FILE}" "${DOCKERFILE}" "${SETUP}" 2>&1)"
+if [ $? -eq 0 ]; then ok "the committed .gitlab-ci.yml, Dockerfile and setup.sh satisfy every rule"; else bad "the committed .gitlab-ci.yml, Dockerfile and setup.sh satisfy every rule" "${out}"; fi
 
-# mutate NAME EXPECT SED-EXPR: the mutated copy must fail, naming EXPECT.
-mutate() {
-  local name="$1" expect="$2" expr="$3" f="${TMP}/m.yml" out
-  sed -e "${expr}" "${CI_FILE}" > "${f}"
-  if cmp -s "${f}" "${CI_FILE}"; then bad "${name}" "mutation did not change the file"; return; fi
-  out="$(/usr/bin/ruby "${CHECK}" "${f}" 2>&1)"
+# The default image paths resolve beside the file: no extra args finds them.
+out="$(/usr/bin/ruby "${CHECK}" "${CI_FILE}" 2>&1)"
+if [ $? -eq 0 ]; then ok "check.rb finds dockerfiles/ci-harness beside the file"; else bad "check.rb finds dockerfiles/ci-harness beside the file" "${out}"; fi
+
+# mutate_in WHICH NAME EXPECT SED-EXPR: mutate a copy of one of the three
+# files (ci, dockerfile, setup); the checker must fail on it, naming EXPECT.
+mutate_in() {
+  local which="$1" name="$2" expect="$3" expr="$4" out src f
+  local y="${CI_FILE}" d="${DOCKERFILE}" s="${SETUP}"
+  case "${which}" in
+    ci)         src="${CI_FILE}";    y="${TMP}/m.yml";        f="${y}" ;;
+    dockerfile) src="${DOCKERFILE}"; d="${TMP}/m.Dockerfile"; f="${d}" ;;
+    setup)      src="${SETUP}";      s="${TMP}/m.setup.sh";   f="${s}" ;;
+  esac
+  sed -e "${expr}" "${src}" > "${f}"
+  if cmp -s "${f}" "${src}"; then bad "${name}" "mutation did not change the file"; return; fi
+  out="$(/usr/bin/ruby "${CHECK}" "${y}" "${d}" "${s}" 2>&1)"
   if [ $? -ne 0 ] && [[ "${out}" == *"${expect}"* ]]; then ok "${name}"; else bad "${name}" "expected failure naming [${expect}], got: ${out}"; fi
 }
+mutate() { mutate_in ci "$@"; }
 
 mutate "fork guard removed fails"        "fork guard"      's/CI_MERGE_REQUEST_SOURCE_PROJECT_PATH/CI_SOMETHING_ELSE/g'
 mutate "untagged job fails"              "tags"            's/tags: \[ci\]/tags: []/'
@@ -47,7 +69,7 @@ mutate "gate not run fails"              "harness-gate"    's#ai/bin/harness-gat
 mutate "shallow clone fails"             "GIT_DEPTH"       's/GIT_DEPTH: "0"/GIT_DEPTH: "1"/'
 mutate "duplicate-pipeline guard removed fails" "CI_OPEN_MERGE_REQUESTS" 's/CI_OPEN_MERGE_REQUESTS/CI_X/'
 mutate "job not interruptible fails"     "interruptible"   's/^  interruptible: true$/  interruptible: false/'
-mutate "unpinned image fails"            "image"           's/@sha256:[0-9a-f]*//'
+mutate "unpinned image fails"            "image"           's/^\(  image: [^@]*\)@sha256:[0-9a-f]*/\1/'
 mutate "default id_tokens fails"         "id_tokens"       's/^default:$/default:\n  id_tokens: {}/'
 mutate "include fails"                   "include"         's/^default:$/include: https:\/\/example.invalid\/x.yml\ndefault:/'
 mutate "fork guard operator flipped fails" "fork guard"    's/!= \$CI_PROJECT_PATH/== $CI_PROJECT_PATH/'
@@ -55,7 +77,7 @@ mutate "MR rule removed fails"           "merge_request_event" 's/merge_request_
 mutate "branch rule removed fails"       "branch pipeline" "s/^    - if: '\$CI_COMMIT_BRANCH'\$/    - if: '\$CI_COMMIT_TAG'/"
 mutate "branch rule never fails"         "must not be"     "s/^    - if: '\$CI_COMMIT_BRANCH'\$/    - if: '\$CI_COMMIT_BRANCH'\n      when: never/"
 mutate "origin/main fetch removed fails" "fetch origin/main" 's/git fetch --no-tags origin/git status --no-tags origin/'
-mutate "gate echoed not run fails"       "harness-gate"    's#env HOME=/home/ci ai/bin/harness-gate$#echo ai/bin/harness-gate#'
+mutate "gate echoed not run fails"       "exactly ai/bin/harness-gate"    's#"$CI_HARNESS_IMAGE" ai/bin/harness-gate$#"$CI_HARNESS_IMAGE" echo ai/bin/harness-gate#'
 mutate "credential-named variable fails" "credential"      's/GIT_DEPTH: "0"/GIT_DEPTH: "0"\n    DEPLOY_TOKEN: "x"/'
 
 # Goal 4 (DND-2067): no pipeline on the default branch.
@@ -65,6 +87,71 @@ mutate "default-branch rule not never fails" "must be" '/CI_DEFAULT_BRANCH/{n;s/
 /usr/bin/ruby -ryaml -e 'd = YAML.safe_load_file(ARGV[0], aliases: true); r = d["workflow"]["rules"]; i = r.index { |x| x["if"].to_s.include?("CI_DEFAULT_BRANCH") }; r.push(r.delete_at(i)); File.write(ARGV[1], YAML.dump(d))' "${CI_FILE}" "${TMP}/order.yml"
 out="$(/usr/bin/ruby "${CHECK}" "${TMP}/order.yml" 2>&1)"
 if [ $? -ne 0 ] && [[ "${out}" == *"must come before"* ]]; then ok "default-branch rule after the branch rule fails"; else bad "default-branch rule after the branch rule fails" "${out}"; fi
+
+# The sibling gate container (DND-2085). GATE and PROBE address the two lines.
+GATE='/custom-gate-\$CI_JOB_ID" --user ci/'
+PROBE='/custom-probe-\$CI_JOB_ID" --user 0/'
+mutate "gate run in the job container fails"   "exactly one \`docker run\`" "${GATE}"'s#^    - docker run .* ai/bin/harness-gate$#    - ai/bin/harness-gate#'
+mutate "gate --privileged fails"               "--privileged"      "${GATE}"'s/--rm --init/--rm --privileged --init/'
+mutate "gate --pid=host fails"                 "--pid=host"        "${GATE}"'s/--rm --init/--rm --pid=host --init/'
+mutate "gate --pid host (two words) fails"     "--pid=host"        "${GATE}"'s/--rm --init/--rm --pid host --init/'
+mutate "gate --network=host fails"             "--network=host"    "${GATE}"'s/--rm --init/--rm --network=host --init/'
+mutate "gate --net host fails"                 "--network=host"    "${GATE}"'s/--rm --init/--rm --net host --init/'
+mutate "gate --cap-add fails"                  "--cap-add"         "${GATE}"'s/--rm --init/--rm --cap-add SYS_ADMIN --init/'
+mutate "gate --userns=host fails"              "--userns=host"     "${GATE}"'s/--rm --init/--rm --userns=host --init/'
+mutate "gate --device fails"                   "--device"          "${GATE}"'s/--rm --init/--rm --device \/dev\/kmsg --init/'
+mutate "gate --volumes-from fails"             "--volumes-from"    "${GATE}"'s/--rm --init/--rm --volumes-from x --init/'
+mutate "gate docker.sock bind fails"           "docker.sock"       "${GATE}"'s#--rm --init#--rm -v /var/run/docker.sock:/var/run/docker.sock --init#'
+mutate "gate docker.sock --mount fails"        "docker.sock"       "${GATE}"'s#--rm --init#--rm --mount type=bind,src=/var/run/docker.sock,dst=/s --init#'
+mutate "gate extra --security-opt fails"       "is not one of"     "${GATE}"'s/--rm --init/--rm --security-opt label=disable --init/'
+mutate "gate missing systempaths fails"        "exactly the three" "${GATE}"'s/ --security-opt systempaths=unconfined//'
+mutate "gate missing seccomp fails"            "exactly the three" "${GATE}"'s/ --security-opt seccomp=unconfined//'
+mutate "gate duplicated opt fails"             "exactly the three" "${GATE}"'s/--security-opt apparmor=unconfined/--security-opt apparmor=unconfined --security-opt apparmor=unconfined/'
+mutate "gate as root fails"                    "--user ci"         "${GATE}"'s/--user ci/--user 0/'
+mutate "gate renamed fails"                    "custom-gate"       "${GATE}"'s/custom-gate-\$CI_JOB_ID/gate/'
+mutate "gate not --rm fails"                   "--rm"              "${GATE}"'s/--rm --init/--init/'
+mutate "gate other image fails"                "built image"       "${GATE}"'s/"\$CI_HARNESS_IMAGE" ai/ruby:3 ai/'
+mutate "gate checkout not bound fails"         "-v"                "${GATE}"'s#-v "$CI_PROJECT_DIR:$CI_PROJECT_DIR"#-v "$CI_PROJECT_DIR:/src"#'
+mutate "prep --privileged fails"               "--privileged"      '/custom-prep/s/--user 0/--user 0 --privileged/'
+mutate "probe --pid=host fails"                "--pid=host"        "${PROBE}"'s/--user 0/--user 0 --pid=host/'
+mutate "probe removed fails"                   "boundary probe"    "${PROBE}d"
+mutate "probe as ci fails"                     "--user 0"          "${PROBE}"'s/--user 0/--user ci/'
+mutate "probe without systempaths fails"       "exactly the three" "${PROBE}"'s/ --security-opt systempaths=unconfined//'
+mutate "probe with an argument fails"          "no arguments"      "${PROBE}"'s#boundary-probe.sh$#boundary-probe.sh --root /tmp#'
+mutate "probe after the gate fails"            "the boundary probe must come before" "${PROBE}"'{h;d;}; /custom-gate-.*harness-gate$/G'
+mutate "rootless check removed fails"          "rootless"          's/name=rootless/name=seccomp/'
+mutate "image built from elsewhere fails"      "build the image"   's#-t "$CI_HARNESS_IMAGE" dockerfiles/ci-harness$#-t "$CI_HARNESS_IMAGE" .#'
+mutate "image tag not a content hash fails"    "content hash"      's#^    - CI_HARNESS_IMAGE=.*#    - CI_HARNESS_IMAGE=custom-ci-harness:latest#'
+mutate "tree not handed to ci fails"           "chown -R ci:ci"    's/chown -R ci:ci/chown -R root:root/'
+mutate "after_script cleanup removed fails"    "after_script"      's/docker rm -f /docker ps /'
+mutate "after_script skips the gate fails"     "after_script"      's/ "custom-gate-\$CI_JOB_ID" >/ >/'
+mutate "~/dev/custom link fails"               "dev/custom"        's#chown -R ci:ci "$CI_PROJECT_DIR"$#chown -R ci:ci "$CI_PROJECT_DIR" \&\& ln -sfn "$CI_PROJECT_DIR" /home/ci/dev/custom#'
+mutate "before_script ~/dev/custom link fails" "dev/custom"        's#^  script:$#  before_script:\n    - ln -sfn "$CI_PROJECT_DIR" /home/ci/dev/custom\n  script:#'
+mutate "a hidden job's docker run with --privileged fails" "--privileged" 's/^default:$/.x:\n  script:\n    - docker run --privileged alpine true\ndefault:/'
+
+# The pinned CI image (DND-1998).
+mutate_in dockerfile "Dockerfile FROM unpinned fails"    "pinned by @sha256" 's/@sha256:[0-9a-f]*//'
+mutate_in dockerfile "Dockerfile not running setup.sh fails" "COPY setup.sh" 's/^RUN .*/RUN true/'
+mutate_in dockerfile "second FROM fails"                 "exactly one FROM"  '$a FROM debian:latest'
+mutate_in setup "moving apt archive fails"       "snapshot.debian.org" 's#^URIs: https://snapshot.debian.org/archive/debian/${SNAPSHOT}$#URIs: https://deb.debian.org/debian#'
+mutate_in setup "unpinned package fails"         "name=exact-version"  's/^  jq=.*/  jq/'
+mutate_in setup "malformed snapshot fails"       "SNAPSHOT"            's/^SNAPSHOT=.*/SNAPSHOT=latest/'
+mutate_in setup "empty source checksum fails"    "GIT_SHA256"          's/^GIT_SHA256=.*/GIT_SHA256=/'
+mutate_in setup "dropped checksum step fails"    "sha256sum -c"        's/| sha256sum -c --quiet -/| true/'
+mutate_in setup "floating source version fails"  "GIT_VERSION"         's/^GIT_VERSION=.*/GIT_VERSION=latest/'
+mutate_in setup "base sources kept fails"        "remove the base image" 's#^rm -f /etc/apt/sources.list /etc/apt/sources.list.d/\*$#true#'
+mutate_in setup "one-line moving source fails"   "one-line"            's#^\(rm -f /etc/apt/sources.list .*\)$#\1\necho "deb https://deb.debian.org/debian trixie main" > /etc/apt/sources.list#'
+mutate_in setup "extra sources file fails"       "other sources"       's#^\(rm -f /etc/apt/sources.list .*\)$#\1\ncp /x /etc/apt/sources.list.d/extra.list#'
+mutate_in setup "extra unpinned package fails"   "exactly"             's/"\${PACKAGES\[@\]}"; then$/"${PACKAGES[@]}" vim; then/'
+mutate_in setup "glob version fails"             "name=exact-version"  's/^  jq=.*/  jq=1.7*/'
+mutate_in setup "snapshot reassigned fails"      "exactly once"        's/^\(SNAPSHOT=.*\)$/\1\nSNAPSHOT=latest/'
+mutate_in setup "checksum reassigned fails"      "exactly once"        's/^\(GIT_SHA256=.*\)$/\1\nGIT_SHA256=$(curl -s x)/'
+
+# A missing image file is an error, not a pass.
+out="$(/usr/bin/ruby "${CHECK}" "${CI_FILE}" "${TMP}/absent.Dockerfile" "${SETUP}" 2>&1)"
+if [ $? -ne 0 ] && [[ "${out}" == *"Dockerfile"*"missing"* ]]; then ok "missing Dockerfile fails"; else bad "missing Dockerfile fails" "${out}"; fi
+out="$(/usr/bin/ruby "${CHECK}" "${CI_FILE}" "${DOCKERFILE}" "${TMP}/absent.setup.sh" 2>&1)"
+if [ $? -ne 0 ] && [[ "${out}" == *"setup.sh"*"missing"* ]]; then ok "missing setup.sh fails"; else bad "missing setup.sh fails" "${out}"; fi
 
 # A missing file is an error, not a pass.
 out="$(/usr/bin/ruby "${CHECK}" "${TMP}/absent.yml" 2>&1)"

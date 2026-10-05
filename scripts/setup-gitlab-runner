@@ -56,7 +56,8 @@
 #            seccomp refuses. Every value must be one the Docker Engine API
 #            accepts (seccomp, apparmor, label, no-new-privileges): the CLI-only
 #            systempaths=unconfined is refused and no job starts (DND-2039).
-#            /proc stays masked; unmasking it for ci is DND-1998.
+#            /proc stays masked in the job container; custom's gate runs in a
+#            sibling container with an unmasked /proc (DND-2085).
 #   deploy   none: Docker's default seccomp and masked /proc. Its jobs only
 #            drive the mounted docker socket.
 #   untagged (-) ["seccomp:unconfined", "apparmor:unconfined"], for rootless
