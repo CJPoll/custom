@@ -3,16 +3,25 @@
 # ai/lib/forge_wire/fields.rb -- the text of a write (DND-2025).
 # Design: ai/docs/outbound-scan-at-the-wire.md -> What is judged.
 #
-# Domain only. Two jobs:
-#   parse_body  the body by Content-Type: JSON (application/json, */*+json),
-#               form-urlencoded, multipart/form-data, or raw bytes. A body
-#               declared JSON or multipart that does not parse is Unparseable
-#               (refused): a body the judge cannot read is never read as clean.
-#   of          every piece of text the write carries, as named fields: each
-#               path segment (raw and decoded), each query key and value, and
-#               the body's keys, strings and numbers. A raw body that happens
-#               to parse as JSON is read both ways, so a \u escape cannot hide
-#               text from the scan.
+# Domain only. Three jobs:
+#   parse_body    the body by Content-Type: JSON (application/json,
+#                 */*+json), form-urlencoded, multipart/form-data, or raw
+#                 bytes. A body declared JSON or multipart that does not
+#                 parse is Unparseable (refused): a body the judge cannot read
+#                 is never read as clean. A multipart part with a transfer
+#                 encoding other than 7bit, 8bit or binary is refused too: its
+#                 text would be scanned still encoded.
+#   of            every piece of text the write carries, as named fields: each
+#                 path segment (raw and decoded), each query key and value, the
+#                 typed body's keys, strings and numbers, and, for every body
+#                 whatever its type, the raw bytes plus every JSON string
+#                 literal in them, decoded. So a duplicate JSON key (the parser
+#                 keeps the last), JSON sent under another Content-Type, or a
+#                 \u escape cannot hide text from the scan.
+#   param_values  a named parameter wherever a forge reads parameters from:
+#                 the query, a form body, a JSON body's top level, a
+#                 multipart part, or a raw body that parses as a JSON object
+#                 (GitLab's API merges them all into one params hash).
 #
 # A field NAME never carries request text: names are positions (path[2],
 # query[0].value) or JSON key paths whose keys are plain identifiers; any
@@ -29,6 +38,9 @@ module ForgeWire
 
     JSON_MAX_NESTING = 64
     PLAIN_KEY = /\A[A-Za-z0-9_]{1,40}\z/.freeze
+    # A JSON string literal: no raw control character, only JSON's escapes.
+    JSON_STRING = /"(?:[^"\\\x00-\x1f]|\\(?:["\\\/bfnrt]|u[0-9a-fA-F]{4}))*"/.freeze
+    PLAIN_CTE = %w[7bit 8bit binary].freeze
 
     module_function
 
@@ -57,13 +69,43 @@ module ForgeWire
       raise Unparseable, "the JSON body does not parse"
     end
 
+    # The value or nil, never an error: a raw body is only maybe JSON.
+    def maybe_json(bytes)
+      JSON.parse(utf8(bytes), max_nesting: JSON_MAX_NESTING)
+    rescue JSON::ParserError, JSON::NestingError, EncodingError
+      nil
+    end
+
     # -> [Field]
     def of(req, body)
       out = []
       path_fields(req.path, out)
       query_fields(req.query, out)
       body_fields(body, out)
+      raw_fields(req.body, "body.raw", out) unless req.body.empty?
       out
+    end
+
+    # -> [String] every value of parameter `name`, from every place a forge
+    # reads parameters. A non-scalar JSON value is returned as its JSON text,
+    # so a caller expecting an id sees something that is not one.
+    def param_values(req, body, name)
+      vals = form_pairs(req.query.to_s).select { |k, _| k == name }.map { |_, v| v.to_s }
+      case body.kind
+      when :form then vals += body.value.select { |k, _| k == name }.map { |_, v| v.to_s }
+      when :json then vals += json_param(body.value, name)
+      when :raw then vals += json_param(maybe_json(body.value), name)
+      when :multipart
+        vals += body.value.select { |p| p[:name] == name }.map { |p| utf8(p[:content]) }
+      end
+      vals
+    end
+
+    def json_param(value, name)
+      return [] unless value.is_a?(Hash) && value.key?(name)
+
+      v = value[name]
+      [v.is_a?(String) || v.is_a?(Numeric) ? v.to_s : JSON.generate(v)]
     end
 
     def path_fields(path, out)
@@ -95,18 +137,21 @@ module ForgeWire
           out << Field.new(name: "body[#{i}].value", text: v) unless v.nil?
         end
       when :multipart then multipart_fields(body.value, out)
-      when :raw then raw_fields(body.value, "body", out)
       end
     end
 
+    # The bytes as text, and every JSON string literal in them, decoded.
     def raw_fields(bytes, name, out)
-      out << Field.new(name: name, text: utf8(bytes))
-      begin
-        value = JSON.parse(utf8(bytes), max_nesting: JSON_MAX_NESTING)
-      rescue JSON::ParserError, JSON::NestingError, EncodingError
-        return
+      text = utf8(bytes)
+      out << Field.new(name: name, text: text)
+      text.scan(JSON_STRING).each_with_index do |lit, i|
+        decoded = begin
+          JSON.parse("[#{lit}]").first
+        rescue JSON::ParserError, EncodingError
+          next
+        end
+        out << Field.new(name: "#{name}.string[#{i}]", text: decoded) if decoded != lit[1..-2]
       end
-      json_fields(value, "#{name}~json", out)
     end
 
     def json_fields(value, name, out)
@@ -158,10 +203,11 @@ module ForgeWire
     end
 
     def boundary(content_type)
-      m = content_type.to_s.match(/;\s*boundary=(?:"([^"]{1,70})"|([^\s;"]{1,70}))/i)
-      raise Unparseable, "multipart/form-data has no boundary" unless m
+      found = content_type.to_s.scan(/;\s*boundary=(?:"([^"]{1,70})"|([^\s;"]{1,70}))/i)
+      raise Unparseable, "multipart/form-data has no boundary" if found.empty?
+      raise Unparseable, "multipart/form-data names its boundary more than once" if found.length > 1
 
-      m[1] || m[2]
+      found.first.compact.first
     end
 
     # -> [{name:, filename:, headers:, content:}]
@@ -186,6 +232,11 @@ module ForgeWire
       raise Unparseable, "a multipart part has no blank line after its headers" if sep.empty?
 
       headers = head.split("\r\n").map { |h| utf8(h) }
+      cte = headers.find { |h| h.downcase.start_with?("content-transfer-encoding:") }
+      if cte && !PLAIN_CTE.include?(cte.split(":", 2).last.strip.downcase)
+        raise Unparseable, "a multipart part has a transfer encoding other than 7bit, 8bit or binary"
+      end
+
       disp = headers.find { |h| h.downcase.start_with?("content-disposition:") }.to_s
       { name: disp[/;\s*name="([^"]*)"/, 1], filename: disp[/;\s*filename="([^"]*)"/, 1], headers: headers, content: content }
     end

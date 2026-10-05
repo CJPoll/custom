@@ -387,7 +387,7 @@ ai/lib/forge_wire/request.rb	library	pure HTTP/1.1 framing for the forge-wire ju
 ai/lib/forge_wire/graphql.rb	library	pure GraphQL operation reader for the forge-wire judge (DND-2025); returns :unreadable and never raises out, and the verdict refuses that with Fix:
 ai/lib/forge_wire/target.rb	library	pure write-target reader for the forge-wire judge (DND-2025); returns :unknown targets, never fails, and the verdict scans them as public
 ai/lib/forge_wire/fields.rb	library	pure write-text reader for the forge-wire judge (DND-2025); raises ForgeWire::Unparseable, which ForgeWire::Judge turns into the refusal that carries Fix:
-ai/lib/forge_wire/operations.rb	library	the forge-wire operation-table parser (DND-2025); raises Operations::TableError naming the line, and its caller (the proxy, build step 2) prints it with Fix:
+ai/lib/forge_wire/operations.rb	guard
 ai/lib/forge_wire/operations.tsv	library	the forge-wire operation table (DND-2025), data read by ai/lib/forge_wire/operations.rb; it runs nothing, and a malformed table is a TableError naming the line
 ai/lib/forge_wire/verdict.rb	guard
 ai/lib/gh-outbound-scan.sh	guard

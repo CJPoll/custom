@@ -67,7 +67,21 @@ end
 check("a string literal in the document makes the target unknown") do
   unknown?(:github, gql('mutation{addComment(input: {subjectId: "PR_x", body: "b"}){clientMutationId}}', {}))
 end
-check("a mutation with no id at all is unknown") { unknown?(:github, gql("mutation($t: String!){createRepository(input: {name: $t}){repository{id}}}", { t: "x" })) }
+check("a node id under a key not named *Id adds an unknown target") do
+  r = gql("mutation($i: X!){addComment(input: $i){clientMutationId}}",
+          { i: { subjectId: "PR_kwDOSynthPriv1", subject: "PR_kwDOSynthPub1", body: "b" } })
+  keys(:github, r).include?("github:node:PR_kwDOSynthPriv1") && unknown?(:github, r)
+end
+check("a legacy base64 node id under another key adds an unknown target") do
+  unknown?(:github, gql("mutation($i: X!){addComment(input: $i){clientMutationId}}",
+                        { i: { subjectId: "PR_x123456", other: "MDExOlB1bGxSZXF1ZXN0MQ==" } }))
+end
+check("ordinary text under other keys adds nothing") do
+  r = gql("mutation($i: X!){addComment(input: $i){clientMutationId}}",
+          { i: { subjectId: "PR_kwDOSynthPriv1", body: "SYNTH-WORK-4242 and main", mergeMethod: "SQUASH" } })
+  !unknown?(:github, r)
+end
+check("a mutation with no id at all is unknown"){ unknown?(:github, gql("mutation($t: String!){createRepository(input: {name: $t}){repository{id}}}", { t: "x" })) }
 check("an id value that is not a string is unknown") do
   unknown?(:github, gql("mutation($i: X!){addComment(input: $i){clientMutationId}}", { i: { subjectId: 7, body: "b" } }))
 end
@@ -103,6 +117,21 @@ check("target_project_id in a form body is a second target") do
   r = wire("POST", "/api/v4/projects/synth-group%2Fpub/merge_requests", host: GL_HOST,
            body: "title=t&target_project_id=102", type: "application/x-www-form-urlencoded")
   keys(:gitlab, r) == ["gitlab:project:synth-group/pub", "gitlab:project_id:102"]
+end
+check("target_project_id in the query is a second target") do
+  r = wire("POST", "/api/v4/projects/synth-group%2Fpriv/merge_requests?target_project_id=101", host: GL_HOST,
+           body: JSON.generate({ title: "t" }))
+  keys(:gitlab, r) == ["gitlab:project:synth-group/priv", "gitlab:project_id:101"]
+end
+check("target_project_id in a raw JSON body is a second target") do
+  r = wire("POST", "/api/v4/projects/synth-group%2Fpriv/merge_requests", host: GL_HOST,
+           body: JSON.generate({ target_project_id: 101 }), type: "text/plain")
+  keys(:gitlab, r) == ["gitlab:project:synth-group/priv", "gitlab:project_id:101"]
+end
+check("two target_project_id values are both targets") do
+  r = wire("POST", "/api/v4/projects/synth-group%2Fpriv/merge_requests?target_project_id=101", host: GL_HOST,
+           body: JSON.generate({ target_project_id: 102 }))
+  keys(:gitlab, r) == ["gitlab:project:synth-group/priv", "gitlab:project_id:101", "gitlab:project_id:102"]
 end
 check("a target_project_id that is not an id is unknown") do
   r = wire("POST", "/api/v4/projects/synth-group%2Fpub/merge_requests", host: GL_HOST,

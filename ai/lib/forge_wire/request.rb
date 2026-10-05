@@ -4,8 +4,8 @@
 # Design: ai/docs/outbound-scan-at-the-wire.md -> Components, by bucket.
 #
 # Domain only: bytes in, a Request out. No socket, no clock, no environment.
-# The proxy (ticket 2) reads bytes from the CLI and hands them here; this file
-# decides whether they are one whole, well-framed request.
+# The proxy (build step 2) is to read bytes from the CLI and hand them here;
+# this file decides whether they are one whole, well-framed request.
 #
 # Two failures, never confused:
 #   Incomplete   the bytes so far are a valid prefix; read more.
@@ -15,9 +15,12 @@
 # What is refused, and why (each one is a place where two parsers -- this one
 # and the forge's -- could read different requests from the same bytes, and a
 # write could pass judged as one thing and land as another):
-#   - any version but HTTP/1.1; any request target but origin-form; a fragment
+#   - any version but HTTP/1.1; any request target but origin-form; a fragment;
+#     a request line not split by exactly one SP
 #   - bare LF or CR line endings, obs-fold, whitespace before a colon, a header
-#     line without a colon, a NUL or control character in a header
+#     line without a colon, a NUL or control character anywhere in a header
+#     value (only SP and HTAB are trimmed), a control character in a chunk
+#     extension
 #   - a missing or duplicate Host, or a Host that is not the CONNECT host
 #     (port 443 or none)
 #   - duplicate Content-Length, Transfer-Encoding, Content-Encoding,
@@ -111,7 +114,7 @@ module ForgeWire
     end
 
     def request_line(line)
-      parts = line.split(" ", -1)
+      parts = line.split(/ /, -1)
       unparseable("the request line is not METHOD SP TARGET SP VERSION") unless parts.length == 3
       method, target, version = parts
       unparseable("the version is #{version.inspect}, not HTTP/1.1") unless version == "HTTP/1.1"
@@ -134,7 +137,9 @@ module ForgeWire
       name, colon, value = line.partition(":")
       unparseable("a header line has no colon") if colon.empty?
       unparseable("a header name is not a token") unless TOKEN.match?(name)
-      value = value.strip
+      # Trim only SP and HTAB: String#strip also drops NUL, VT, FF, CR and LF,
+      # which would accept `Content-Length: 5\0` as 5.
+      value = value.gsub(/\A[ \t]+|[ \t]+\z/, "")
       unparseable("a header value holds a control character") if value.match?(/[\x00-\x08\x0a-\x1f\x7f]/n)
       [name.downcase, value]
     end
@@ -196,8 +201,9 @@ module ForgeWire
 
     def chunk_size(line)
       unparseable("a chunk size line is over the cap") if line.bytesize > CHUNK_LINE_CAP
-      hex = line.split(";", 2).first
+      hex, _, ext = line.partition(";")
       unparseable("a chunk size is not hex") unless hex.match?(/\A[0-9a-fA-F]{1,8}\z/)
+      unparseable("a chunk extension holds a control character") if ext.match?(/[^\x20-\x7e\t]/n)
       hex.to_i(16)
     end
 

@@ -166,7 +166,7 @@ unaffected.
 
 ### Components, by bucket
 
-| Bucket | Module (proposed path) | Job |
+| Bucket | Module | Job |
 |---|---|---|
 | Domain | `ai/lib/forge_wire/request.rb` | An HTTP/1.1 request as data: method, host, path, query, headers, body. Framing rules (Content-Length, chunked, refusal of anything else). |
 | Domain | `ai/lib/forge_wire/target.rb` | The target of a request: GitHub `/repos/{o}/{r}/…`, `uploads.github.com/repos/{o}/{r}/…`, `/repositories/{id}/…`, GraphQL node ids; GitLab `/api/v4/projects/{id or path}/…`, `/groups/…`, GraphQL. |
@@ -237,17 +237,24 @@ For a write, **the text** is:
 - GitHub GraphQL: every value under a `variables` key named `id`, `*Id` or
   `*Ids` is resolved with one `node` query to its repository. A mutation whose
   document holds a string literal, an id that is not a non-empty string, a
-  mutation with no id, or an id that does not resolve, has an unknown target.
+  mutation with no id, an id that does not resolve, or a string shaped like a
+  node id under any other key, has an unknown target.
 
   **Later (2026-10-04, DND-2025):** this read "each `ID` value in
   `variables`". The judge has no schema, and gh sends its ids inside input
   objects (`input.repositoryId`, `input.subjectId`), whose GraphQL type is
   the input type, so a type-driven reading finds none. The key name is what
-  the wire carries; a missed id can only add an unknown (public) target.
+  the wire carries. The bound on a miss: only mutations the operation table
+  names are forwarded, the fixtures show where each one's target sits, and a
+  node-id-shaped string under another key adds an unknown (public) target.
+  The residual is a target named under another key in a shape that is not a
+  node id; a new table row is added only with a fixture that shows its keys.
 - GitLab REST: `api/v4/projects/{id or encoded path}` and `api/v4/groups/…`;
-  any other path is unknown. A body `target_project_id` is a second target:
-  `mr create -H <head>` posts the MR to the head project's route with the
-  target project in the body (the DND-2018 fixture).
+  any other path is unknown. Every `target_project_id` parameter, in the
+  query or the body, is a further target: `mr create -H <head>` posts the MR
+  to the head project's route with the target project in the body (the
+  DND-2018 fixture), and GitLab reads parameters from the query and the body
+  alike.
 - A path segment not spelled plainly (a percent-escape in a GitHub owner or
   repo, a dot or empty segment, a GitLab project whose decoded path is not
   plain) makes the target unknown: two readers of one unplain path can name
@@ -336,6 +343,11 @@ or mutation nobody listed.
 | visibility unreadable | GitHub: scanned as public; GitLab: refused (COULD NOT LOOK) |
 | scanner COULD NOT MEASURE | refused, exit 3, except the unmarked-machine rule |
 | verdict log missing or unreadable after the CLI exits | wrapper exit 3: a missing log never reads as clean |
+| a method override (header or `_method` parameter), a GraphQL document the judge cannot read, a body declared JSON or multipart that does not parse | refused, exit 3 |
+
+The framing rules behind the "not HTTP/1.1" row are listed in full in the
+header of `ai/lib/forge_wire/request.rb`, and the judge's order in the header
+of `ai/lib/forge_wire/verdict.rb`.
 
 ### Residuals
 
@@ -361,6 +373,11 @@ or mutation nobody listed.
 - **GitLab GraphQL mutations** have an unknown target, so work text sent to a
   private project that way is refused when it matches. glab's harness writes
   are REST.
+- **Branch creation through the API has no granter.** The merge guards grant
+  merges only, so a branch created by an API call (`glab mr create
+  --create-source-branch` or `--related-issue` without `-s`, `gh issue
+  develop`) stays refused after the grants land. Branches reach a forge by
+  `git push`, which the pre-push hook scans.
 - **Same uid.** As stated in *What the scan protects, and from whom*.
 - **The scanner's patterns** are the overlay's; a value no pattern describes
   passes, as today.
@@ -382,10 +399,10 @@ instead.
 Functional only (DND-1222): no load, no timing verdicts. A timeout only caps a
 hang.
 
-- **Fixtures are real bytes.** `ai/lib/test/forge-wire/capture/capture` runs
-  the pinned gh 2.96.0 and glab 1.92.1 against a local fake upstream with
-  synthetic tokens and synthetic repositories, for each harness command shape
-  and each earlier leak, and records each request under
+- **Fixtures are real bytes.** `ai/bin/forge-wire-capture` runs the pinned
+  gh 2.96.0 and glab 1.92.1 against a local fake upstream with synthetic
+  tokens and synthetic repositories, for each harness command shape and each
+  earlier leak, and records each request under
   `ai/lib/test/forge-wire/fixtures/`. Nothing reaches a forge: the fake is a
   CONNECT proxy with no upstream socket, and the CLI's trust store holds only
   its CA.

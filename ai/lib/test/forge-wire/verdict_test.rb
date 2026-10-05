@@ -11,7 +11,7 @@ require_relative "../../forge_wire/verdict"
 J = ForgeWire::Judge
 PATTERNS = OutboundScan.parse_patterns("synthetic-work\tSYNTH-WORK-[0-9]{4}\n", "test patterns")
 MEASURED = ForgeWire::Scan.measured(PATTERNS)
-TABLE = ForgeWire::Operations.load_default
+TABLE = shipped_table
 VIS = {
   "github:repo:synth-owner/pub" => "public", "github:repo:synth-owner/priv" => "private",
   "github:node:PR_pub" => "public", "github:node:PR_priv" => "private",
@@ -100,7 +100,12 @@ check("one public target among private ones is scanned") do
            body: JSON.generate({ title: PLANT, target_project_id: 102 }))
   judge(r, forge: :gitlab).state == :hits
 end
-check("GitLab internal is public") { judge(note("synth-group%2Fint", PLANT), forge: :gitlab).state == :hits }
+check("an MR on a private project whose query names a public target_project_id is scanned") do
+  r = wire("POST", "/api/v4/projects/synth-group%2Fpriv/merge_requests?target_project_id=101", host: GL_HOST,
+           body: JSON.generate({ title: PLANT }))
+  judge(r, forge: :gitlab, visibility: VIS.merge("gitlab:project_id:101" => "public")).state == :hits
+end
+check("GitLab internal is public"){ judge(note("synth-group%2Fint", PLANT), forge: :gitlab).state == :hits }
 check("GitLab private is forwarded") { judge(note("synth-group%2Fpriv", PLANT), forge: :gitlab).state == :private }
 check("GitLab unreadable visibility is COULD NOT LOOK, exit 3") do
   v = judge(note("synth-group%2Fpub", "clean"), forge: :gitlab, visibility: { "gitlab:project:synth-group/pub" => :unreadable })
@@ -145,9 +150,9 @@ check("one unknown field among known ones refuses the whole request") do
   judge(r).state == :unknown_operation
 end
 check("an unreadable GraphQL document is judged a write and refused") do
-  judge(wire("POST", "/graphql", body: JSON.generate({ query: "mutation { ...F }" }))).state == :unknown_operation
+  judge(wire("POST", "/graphql", body: JSON.generate({ query: "mutation { ...F }" }))).state == :unreadable_graphql
 end
-check("a GraphQL body that is not an object is refused") { judge(wire("POST", "/graphql", body: "[1,2]")).state == :unknown_operation }
+check("a GraphQL body that is not an object is refused") { judge(wire("POST", "/graphql", body: "[1,2]")).state == :unreadable_graphql }
 check("a ref operation is refused without a grant") do
   v = judge(wire("PUT", "/repos/synth-owner/priv/pulls/1/merge", body: JSON.generate({ sha: "abc" })))
   v.state == :ref_without_grant && v.exit_code == 3 && all_lines(v).include?("locked-merge")
@@ -173,6 +178,39 @@ check("unparseable bytes have a verdict too") { J.unparseable("a line ending is 
 check("a GitLab GraphQL GET with a mutation in the query string is a write") do
   r = wire("GET", "/api/graphql?query=mutation%7BcreateNote(input%3A%7B%7D)%7Bnote%7Bid%7D%7D%7D", host: GL_HOST)
   judge(r, forge: :gitlab).state == :unknown_operation
+end
+check("a COULD NOT LOOK refusal does not print the project path") do
+  v = judge(note("synth-group%2Fpub", "clean"), forge: :gitlab, visibility: {})
+  v.state == :could_not_look && !all_lines(v).include?("synth-group") && all_lines(v).include?("project")
+end
+check("a COULD NOT LOOK refusal names a numeric project id") do
+  r = wire("POST", "/api/v4/projects/101/merge_requests/1/notes", host: GL_HOST, body: JSON.generate({ body: "x" }))
+  all_lines(judge(r, forge: :gitlab, visibility: {})).include?("project_id 101")
+end
+check("a pattern that times out mid-scan is COULD NOT MEASURE, not an exception") do
+  slow = OutboundScan::Pattern.new(label: "slow", source: "x", regex: Object.new.tap do |o|
+    def o.match?(_text) = raise(Regexp::TimeoutError)
+  end)
+  v = judge(issue("synth-owner/pub", "clean"), scan: ForgeWire::Scan.measured([slow]))
+  v.state == :unmeasured && v.exit_code == 3 && all_lines(v).include?("Fix:")
+end
+check("a _method parameter in the query is a method override") do
+  judge(wire("POST", "/repos/synth-owner/pub/issues?_method=DELETE", body: "{}")).state == :method_override
+end
+check("a _method parameter in a form body is a method override") do
+  judge(wire("POST", "/repos/synth-owner/pub/issues", body: "_method=DELETE&title=x", type: "application/x-www-form-urlencoded")).state == :method_override
+end
+check("a GET to a GraphQL-looking path that is not the endpoint is not a read") do
+  !judge(wire("GET", "/graphql/?query=mutation%7Bx%7D")).forward? &&
+    !judge(wire("GET", "/api/graphql.json?query=mutation%7Bx%7D", host: GL_HOST), forge: :gitlab).forward?
+end
+check("an unknown GraphQL mutation's refusal names the field") do
+  r = wire("POST", "/graphql", body: JSON.generate({ query: "mutation($i: X!){deleteRepository(input: $i){clientMutationId}}", variables: { i: { repositoryId: "R_x" } } }))
+  all_lines(judge(r)).include?("deleteRepository")
+end
+check("an unreadable GraphQL document has its own state and a defect Fix:") do
+  v = judge(wire("POST", "/graphql", body: JSON.generate({ query: "mutation { ...F }" })))
+  v.state == :unreadable_graphql && v.exit_code == 3 && !all_lines(v).include?("operations.tsv") && all_lines(v).include?("Fix:")
 end
 check("every refusal carries Fix:") do
   [judge(wire("DELETE", "/repos/synth-owner/pub")), judge(wire("PUT", "/repos/synth-owner/pub/pulls/1/merge", body: "{}")),

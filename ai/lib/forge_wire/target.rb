@@ -8,11 +8,14 @@
 #                   /repositories/{id}/...         -> repository id
 #                   (api.github.com and uploads.github.com alike)
 #   GitHub GraphQL  every string under a key named `id`, `*Id` or `*Ids` in
-#                   the variables                  -> node, resolved upstream
+#                   the variables                  -> node, resolved upstream;
+#                   a node-id-shaped string under any other key -> :unknown
+#                   (it may name a target the id keys do not)
 #   GitLab REST     /api/v4/projects/{id|path}/... -> project
 #                   /api/v4/groups/{id|path}/...   -> group
-#                   plus a body `target_project_id` -> a second project (an MR
-#                   created on a head project lands in the target project;
+#                   plus each `target_project_id` param, from the query or
+#                   the body (Fields.param_values) -> a further project (an
+#                   MR created on a head project lands in the target project;
 #                   measured in the DND-2018 fixture)
 #   anything else   -> :unknown
 #
@@ -41,6 +44,9 @@ module ForgeWire
     PLAIN = /\A[A-Za-z0-9_.-]+\z/.freeze
     DOTS = /\A\.+\z/.freeze
     ID_KEY = /\A(?:id|.*Ids?)\z/.freeze
+    # A GitHub global node id: `PR_kwDO...` (prefix, underscore, base64url)
+    # or the legacy base64 form (`MDEwOlJlcG9zaXRvcnkx...`).
+    NODE_SHAPE = %r{\A(?:[A-Z][A-Za-z]{0,15}_[A-Za-z0-9_-]{6,}|MD[A-Za-z0-9+/]{10,}={0,2})\z}.freeze
 
     module_function
 
@@ -65,7 +71,7 @@ module ForgeWire
         elsif forge == :github
           [github_rest(req.path)]
         else
-          [gitlab_rest(req.path)] + gitlab_body(body)
+          [gitlab_rest(req.path)] + gitlab_params(req, body)
         end
       list.uniq
     end
@@ -106,18 +112,22 @@ module ForgeWire
 
       ids = []
       bad = false
-      walk_ids(body.value["variables"], false) do |v|
-        if v.is_a?(String) && !v.empty? then ids << v
+      stray = false
+      walk_ids(body.value["variables"], false) do |v, under_id|
+        if !under_id then stray ||= v.is_a?(String) && NODE_SHAPE.match?(v)
+        elsif v.is_a?(String) && !v.empty? then ids << v
         else bad = true
         end
       end
       return [unknown("graphql-id-not-a-string")] if bad
       return [unknown("graphql-no-node-id")] if ids.empty?
 
-      ids.uniq.map { |id| Target.new(kind: :node, key: "github:node:#{id}") }
+      found = ids.uniq.map { |id| Target.new(kind: :node, key: "github:node:#{id}") }
+      stray ? found + [unknown("graphql-node-id-under-another-key")] : found
     end
 
-    # Yields every scalar under an id-named key (arrays under it included).
+    # Yields every non-nil scalar with whether it sits under an id-named key
+    # (arrays under such a key included).
     def walk_ids(value, under_id, &blk)
       case value
       when Hash
@@ -125,7 +135,7 @@ module ForgeWire
       when Array
         value.each { |v| walk_ids(v, under_id, &blk) }
       else
-        blk.call(value) if under_id && !value.nil?
+        blk.call(value, under_id) unless value.nil?
       end
     end
 
@@ -151,16 +161,15 @@ module ForgeWire
       Target.new(kind: kind.to_sym, key: "gitlab:#{kind}:#{parts.join('/').downcase}")
     end
 
-    def gitlab_body(body)
-      value =
-        case body.kind
-        when :json then body.value.is_a?(Hash) ? body.value["target_project_id"] : nil
-        when :form then body.value.reverse.find { |k, _| k == "target_project_id" }&.last
-        end
-      return [] if value.nil?
-      return [unknown("target-project-id-not-an-id")] unless value.to_s.match?(/\A[0-9]{1,20}\z/)
+    # Every `target_project_id`, wherever GitLab reads params from (query,
+    # form, JSON, multipart, a raw body that is JSON). One that is not a plain
+    # id makes the target unknown.
+    def gitlab_params(req, body)
+      Fields.param_values(req, body, "target_project_id").map do |v|
+        next unknown("target-project-id-not-an-id") unless v.match?(/\A[0-9]{1,20}\z/)
 
-      [Target.new(kind: :project_id, key: "gitlab:project_id:#{value}")]
+        Target.new(kind: :project_id, key: "gitlab:project_id:#{v}")
+      end
     end
   end
 end

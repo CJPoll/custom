@@ -70,3 +70,10 @@ end
 def fixture_names
   Dir.children(FIXTURE_DIR).select { |d| File.directory?(File.join(FIXTURE_DIR, d)) }.sort
 end
+
+# The operation table as shipped (the branch copy: a self-test judges the
+# branch's own table; the proxy loads the main checkout's).
+def shipped_table
+  require_relative "../../forge_wire/operations"
+  ForgeWire::Operations.parse(File.read(ForgeWire::Operations::DEFAULT), ForgeWire::Operations::DEFAULT)
+end

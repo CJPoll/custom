@@ -1,35 +1,38 @@
 #!/usr/bin/ruby
 # frozen_string_literal: true
 
-# capture -- record the forge-wire fixtures from the real CLIs (DND-2025).
+# forge-wire-capture -- record the forge-wire fixtures from the real CLIs (DND-2025).
 #
-# For each scenario in scenarios.rb it starts fake-upstream.rb (a local
+# For each scenario in ai/lib/test/forge-wire/capture/scenarios.rb it starts
+# fake-upstream.rb (beside it) (a local
 # CONNECT proxy that answers from canned responses and never dials out), runs
 # the real gh or glab through it with a synthetic token, empty config dirs and
 # a trust store holding only the fake's CA, and writes the requests the CLI
-# sent to ../fixtures/<scenario>/. Nothing reaches a forge: a CLI that skips
+# sent to ai/lib/test/forge-wire/fixtures/<scenario>/. Nothing reaches a forge: a CLI that skips
 # the proxy fails TLS on the CA-only trust store.
 #
 # Not run by the gate: it needs the pinned CLIs installed (gh 2.96.0 at
 # /usr/bin/gh, glab 1.92.1 at ~/.local/bin/glab or FW_GLAB). The committed
-# fixtures are its output; the Domain suites read those.
+# fixtures are its output; the Domain suites read those. It lives in ai/bin,
+# not in the test tree, because it runs the REAL CLIs on purpose (as
+# ai/bin/cli-flag-table does): it is a tool, not a suite, and stubs nothing.
 
 require "json"
 require "fileutils"
 require "tmpdir"
-require_relative "scenarios"
+require_relative "../lib/test/forge-wire/capture/scenarios"
 
-HERE = __dir__
+HERE = File.expand_path("../lib/test/forge-wire/capture", __dir__)
 FIXTURES = File.expand_path("../fixtures", HERE)
 HELP = <<~HELP
-  capture -- record forge-wire fixtures from the real gh and glab (DND-2025)
+  forge-wire-capture -- record forge-wire fixtures from the real gh and glab (DND-2025)
 
   Usage:
-    capture [--only NAME]... [--explore]
-    capture --list
-    capture --help
+    forge-wire-capture [--only NAME]... [--explore]
+    forge-wire-capture --list
+    forge-wire-capture --help
 
-  Runs each scenario in scenarios.rb against fake-upstream.rb (a local proxy
+  Runs each scenario in ai/lib/test/forge-wire/capture/scenarios.rb against fake-upstream.rb (a local proxy
   that never connects anywhere) and writes the CLI's requests to
   ai/lib/test/forge-wire/fixtures/<scenario>/NN-<host>.http, plus meta.json.
   --explore prints each request line and the CLI's output, and writes nothing
@@ -45,7 +48,7 @@ GLAB = ENV.fetch("FW_GLAB", File.join(Dir.home, ".local/bin/glab"))
 VERSIONS = { "gh" => [GH, "gh version 2.96.0"], "glab" => [GLAB, "glab 1.92.1"] }.freeze
 
 def fail!(msg)
-  warn "capture: #{msg}"
+  warn "forge-wire-capture: #{msg}"
   exit 1
 end
 
@@ -187,16 +190,16 @@ args = ARGV.dup
 until args.empty?
   a = args.shift
   case a
-  when "--only" then only << (args.shift or (warn "capture: --only needs a NAME. Fix: see --help."; exit 2))
+  when "--only" then only << (args.shift or (warn "forge-wire-capture: --only needs a NAME. Fix: see --help."; exit 2))
   when "--explore" then explore = true
   else
-    warn "capture: unknown argument #{a.inspect}. Fix: see --help."
+    warn "forge-wire-capture: unknown argument #{a.inspect}. Fix: see --help."
     exit 2
   end
 end
 unknown = only - SCENARIOS.map { |s| s[:name] }
 unless unknown.empty?
-  warn "capture: no scenario #{unknown.join(', ')}. Fix: run --list."
+  warn "forge-wire-capture: no scenario #{unknown.join(', ')}. Fix: run --list."
   exit 2
 end
 

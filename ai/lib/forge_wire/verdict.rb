@@ -9,31 +9,39 @@
 # or why it has none), and a visibility map the proxy filled upstream. Nothing
 # here reads a socket, a file or the environment.
 #
-# The order of judgement, for a request that is not a read:
-#   1. a write to a host outside the forge's list         REFUSED, exit 3
-#   2. a body that does not parse, a method override     REFUSED, exit 3
-#   3. an operation the table does not name               REFUSED, exit 3
-#   4. a `ref` operation (no grant: merge grants are      REFUSED, exit 3
+# The order of judgement:
+#   1. a method override (an X-HTTP-Method-Override-style header, or a
+#      `_method` parameter in the query or a form body)  REFUSED, exit 3
+#   2. a body that does not parse                         REFUSED, exit 3
+#   3. a read                                             forwarded, unjudged
+#   4. a write to a host outside the forge's list         REFUSED, exit 3
+#   5. a GraphQL document this judge cannot read          REFUSED, exit 3
+#   6. an operation the table does not name               REFUSED, exit 3
+#   7. a `ref` operation (no grant: merge grants are      REFUSED, exit 3
 #      build step 5, issued by the merge guards)
-#   5. every target reads `private`                       forwarded, unscanned
-#   6. a GitLab target whose visibility is unreadable     REFUSED, exit 3
-#   7. the scanner WAIVED                                 forwarded, WAIVED
-#      the scanner COULD NOT MEASURE                      REFUSED, exit 3, except
+#   8. every target reads `private`                       forwarded, unscanned
+#   9. a GitLab target whose visibility is unreadable     REFUSED, exit 3
+#  10. the scanner WAIVED                                 forwarded, WAIVED
+#      the scanner COULD NOT MEASURE (a pattern that      REFUSED, exit 3, except
+#      times out mid-scan included)
 #        the overlay is ABSENT and the machine unmarked   forwarded, WARNING
-#   8. any field line matches a pattern                   REFUSED, exit 1 (HITS)
-#   9. otherwise                                          forwarded, CLEAN
+#  11. any field line matches a pattern                   REFUSED, exit 1 (HITS)
+#  12. otherwise                                          forwarded, CLEAN
 #
-# A read is GET or HEAD with an empty body and no method override, or a
-# GraphQL query. A GraphQL document this judge cannot read is a mutation with
-# no known operation (step 3). The visibility rules are the argv scan's
-# (ai/lib/outbound-text-scan.sh): an unknown target is public; GitHub reads an
-# unreadable or unresolved visibility as public; GitLab refuses an unreadable
-# one; GitLab `internal` is public. A target missing from the map is
-# unreadable: a lookup that did not happen never reads as private.
+# A read is GET or HEAD with an empty body to a path that is not
+# GraphQL-shaped (its last segment does not start with `graphql`, unless it is
+# the forge's GraphQL endpoint), or a GraphQL query. The visibility rules are
+# the argv scan's (ai/lib/outbound-text-scan.sh): an unknown target is public;
+# GitHub reads an unreadable or unresolved visibility as public; GitLab
+# refuses an unreadable one; GitLab `internal` is public. A target missing
+# from the map is unreadable: a lookup that did not happen never reads as
+# private.
 #
-# What a refusal prints: the operation's table name, field names and pattern
-# labels. Never a matched value, never the raw path (a path is scanned text),
-# and a field name that itself matches a pattern is redacted.
+# What a refusal prints: the operation's table name or GraphQL field names,
+# field names, pattern labels, and a target's kind (with its id when numeric).
+# Never a matched value, never a raw path or project path (both are scanned
+# text), and a field name, path segment or GraphQL field that itself matches
+# a pattern is redacted.
 
 require_relative "request"
 require_relative "fields"
@@ -74,7 +82,7 @@ module ForgeWire
     GRANT_FIX = "Fix: merge and move refs only through `integration-gate` then `locked-merge`; the merge guard " \
                 "issues the grant this request needs (ai/docs/outbound-scan-at-the-wire.md -> Merges and ref moves at the wire)."
     TABLE_FIX = "Fix: if the harness needs this operation, capture the CLI making it " \
-                "(ai/lib/test/forge-wire/capture/capture --help) and add its row to ai/lib/forge_wire/operations.tsv on main."
+                "(ai/bin/forge-wire-capture --help) and add its row to ai/lib/forge_wire/operations.tsv on main."
     DEFECT_FIX = "Fix: this is a defect in the CLI or in forge-wire, not in your text; report it with the CLI version " \
                  "and the command shape (never the text), and do not retry through another route."
 
@@ -82,16 +90,18 @@ module ForgeWire
 
     # -> Verdict for one request.
     def judge(req, forge:, table:, scan:, visibility:)
-      write = req.header("x-http-method-override") || req.header("x-http-method") || req.header("x-method-override")
-      return refuse(:method_override, "#{describe(req, scan)} carries a method-override header", DEFECT_FIX) if write
-
       body = Fields.parse_body(req)
+      if override?(req, body)
+        return refuse(:method_override, "#{describe(req, scan)} carries a method override", DEFECT_FIX)
+      end
+
       op = graphql_op(forge, req, body)
-      return read if read?(req, op)
+      return read if read?(forge, req, op)
       return refuse(:off_forge, "a write to #{req.host}, which is not a #{forge} API host", DEFECT_FIX) unless Target.hosts(forge).include?(req.host)
+      return refuse(:unreadable_graphql, "a GraphQL request whose operation this judge cannot read", DEFECT_FIX) if op&.type == :unreadable
 
       ops = operations(forge, req, op, table)
-      return refuse(:unknown_operation, "#{describe(req, scan)} is not an operation in the table", TABLE_FIX) if ops.nil?
+      return refuse(:unknown_operation, "#{describe_op(req, op, scan)} is not an operation in the table", TABLE_FIX) if ops.nil?
 
       if (ref = ops.find { |o| o.klass == :ref })
         return refuse(:ref_without_grant, "#{ref.name} moves a branch or merges, and no grant covers it", GRANT_FIX, ops: ops)
@@ -101,6 +111,18 @@ module ForgeWire
       judge_text(req, forge, body, ops, targets, scan, visibility)
     rescue Unparseable => e
       unparseable(e.message)
+    rescue OutboundScan::Unmeasurable => e
+      refuse(:unmeasured, "COULD NOT MEASURE: #{e.message}", OutboundScan.unmeasured_fix(e.message))
+    end
+
+    OVERRIDE_HEADERS = %w[x-http-method-override x-http-method x-method-override].freeze
+
+    def override?(req, body)
+      return true if OVERRIDE_HEADERS.any? { |h| req.header(h) }
+
+      pairs = Fields.form_pairs(req.query.to_s)
+      pairs += body.value if body.kind == :form
+      pairs.any? { |k, _| k == "_method" }
     end
 
     # The verdict for bytes Request.parse refused.
@@ -125,16 +147,21 @@ module ForgeWire
       end
     end
 
-    def read?(req, op)
+    def read?(forge, req, op)
       return op.type == :query if op
+      return false if graphql_shaped?(req.path) # not the endpoint, so not judged as GraphQL either
 
       READ_METHODS.include?(req.method) && req.body.empty?
+    end
+
+    def graphql_shaped?(path)
+      path.split("/").last.to_s.downcase.start_with?("graphql")
     end
 
     # -> [Op] or nil when any operation is not in the table.
     def operations(forge, req, op, table)
       if op
-        return nil if op.type == :unreadable || op.fields.empty?
+        return nil if op.fields.empty?
 
         ops = op.fields.map { |f| table.graphql(forge, f) }
         ops.include?(nil) ? nil : ops.uniq
@@ -151,7 +178,8 @@ module ForgeWire
       end
       blind = seen.find { |_, v| v == :could_not_look }
       if blind
-        return refuse(:could_not_look, "COULD NOT LOOK: the visibility of #{blind[0].key} is unreadable, so the text cannot be judged",
+        return refuse(:could_not_look, "COULD NOT LOOK: the visibility of the #{target_label(blind[0])} is unreadable, " \
+                                       "so the text cannot be judged",
                       "Fix: check that the token can read that project (glab-athena api projects/<id>), then retry.",
                       ops: ops, targets: targets)
       end
@@ -203,6 +231,26 @@ module ForgeWire
       loc = hit.location
       name = OutboundScan.labels_matching(patterns, loc.field.to_s).empty? ? loc.field : "<field name redacted: it matches a pattern>"
       OutboundScan.render_location(OutboundScan::Location.new(kind: :field, field: name, line: loc.line), patterns)
+    end
+
+    # A target as a refusal may print it: its kind, and its id only when the
+    # id is numeric. A path (owner/repo, group/project) is scanned text.
+    def target_label(target)
+      _forge, kind, id = target.key.split(":", 3)
+      id.to_s.match?(/\A[0-9]+\z/) ? "#{kind} #{id}" : kind.tr("_", " ")
+    end
+
+    # An unknown operation: the GraphQL field names (each redacted when it
+    # matches a pattern), or the REST method and path.
+    def describe_op(req, op, scan)
+      return describe(req, scan) unless op
+
+      names = op.fields.map { |f| safe_text?(f, scan) ? f : "<field>" }
+      "GraphQL #{op.type} #{names.join(', ')}"
+    end
+
+    def safe_text?(text, scan)
+      scan.state == :measured && OutboundScan.labels_matching(scan.patterns, text).empty?
     end
 
     # The method and the path with every segment that could carry text shown

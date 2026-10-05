@@ -3,11 +3,11 @@
 # ai/lib/forge_wire/operations.rb -- the wire operation table (DND-2025).
 # Design: ai/docs/outbound-scan-at-the-wire.md -> The operation table.
 #
-# Domain only: parse the table's text and look operations up. The table is
-# data, ai/lib/forge_wire/operations.tsv; `load_default` reads that file
-# beside this one. (The proxy, ticket 2, loads the main checkout's copy, so a
-# branch cannot widen the table it is judged by; the self-tests load the
-# branch copy.)
+# Domain only: parse the table's text and look operations up; reading the
+# file is the caller's. The table is data, ai/lib/forge_wire/operations.tsv
+# (DEFAULT names it). The proxy (build step 2) is to load the main checkout's
+# copy, so a branch cannot widen the table it is judged by; the self-tests
+# load the branch copy.
 #
 # One row per operation, TAB-separated:
 #   forge   github | gitlab
@@ -19,7 +19,7 @@
 #           ref    moves a branch or merges; forwarded only under a grant
 #           plain  carries no free text; scanned all the same
 # `#` starts a comment line. A table with no rows, or a malformed row, is a
-# TableError naming the line number and never quoting it.
+# TableError naming the line number, never quoting it, and carrying Fix:.
 
 module ForgeWire
   module Operations
@@ -75,13 +75,16 @@ module ForgeWire
 
     module_function
 
-    def load_default
-      parse(File.read(DEFAULT), DEFAULT)
-    rescue SystemCallError => e
-      raise TableError, "the operation table #{DEFAULT} is unreadable (#{e.class.name.split('::').last})"
-    end
+    TABLE_ERROR_FIX = "Fix: correct that line of the table (forge<TAB>method<TAB>route<TAB>class, " \
+                      "format in ai/lib/forge_wire/operations.rb), or restore the landed table from origin/main."
 
     def parse(text, origin)
+      parse_rows(text, origin)
+    rescue TableError => e
+      raise TableError, "#{e.message}. #{TABLE_ERROR_FIX}"
+    end
+
+    def parse_rows(text, origin)
       seen = {}
       ops = text.each_line.with_index(1).filter_map do |raw, n|
         line = raw.chomp

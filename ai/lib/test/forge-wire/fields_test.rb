@@ -10,6 +10,9 @@ require_relative "helper"
 require_relative "../../forge_wire/fields"
 
 F = ForgeWire::Fields
+# A JSON \u escape for S, built at run time: an editor that decodes \u escapes
+# in source would turn a literal one into a plain S and make these cases vacuous.
+ESC_S = "#{92.chr}u0053"
 
 def fields(req)
   F.of(req, F.parse_body(req))
@@ -43,7 +46,7 @@ check("array members are fields") { texts(j).include?("a") && texts(j).include?(
 check("JSON keys are fields") { %w[query variables input body n].all? { |k| texts(j).include?(k) } }
 check("a JSON field is named by its key path") { named(j, "body.variables.input.body") == ["line one\nline two"] }
 check("an array member is named by index") { named(j, "body.variables.input.list[1]") == ["b"] }
-escaped = wire("POST", "/x", body: '{"t":"SYNTH"}')
+escaped = wire("POST", "/x", body: %({"t":"#{ESC_S}YNTH"}))
 check("a JSON \\u escape is decoded") { texts(escaped).include?("SYNTH") }
 odd = wire("POST", "/x", body: JSON.generate({ "has space and SYNTH-WORK-4242" => "v" }))
 check("an odd key is named by position, not by its text") { fields(odd).none? { |f| f.name.include?("SYNTH") } && texts(odd).include?("has space and SYNTH-WORK-4242") }
@@ -86,8 +89,45 @@ check("a body with no Content-Type is scanned raw") do
   r2 = ForgeWire::Request.parse(http("POST /x HTTP/1.1", "Host: #{GH_API}", "Content-Length: 3", body: "abc"), host: GH_API, max_body: 99)
   texts(r2).include?("abc")
 end
-sneaky = wire("POST", "/x", body: '{"t":"SYNTH"}', type: "text/plain")
+sneaky = wire("POST", "/x", body: %({"t":"#{ESC_S}YNTH"}), type: "text/plain")
 check("a raw body that parses as JSON is also read as JSON") { texts(sneaky).include?("SYNTH") }
 check("an empty body has no body fields") { fields(wire("POST", "/x")).none? { |f| f.name.start_with?("body") } }
+
+# --- every body is also read raw ----------------------------------------------
+dup = wire("POST", "/x", body: '{"body":"first SYNTH","body":"second"}')
+check("the first of two duplicate JSON keys is still scanned") { texts(dup).any? { |t| t.include?("first SYNTH") } }
+dup_esc = wire("POST", "/x", body: %({"body":"#{ESC_S}YNTH-first","body":"second"}))
+check("an escaped value under a duplicate key is decoded and scanned") { texts(dup_esc).include?("SYNTH-first") }
+form_json = wire("POST", "/x", body: %({"t":"#{ESC_S}YNTH"}), type: "application/x-www-form-urlencoded")
+check("JSON sent with a form Content-Type is read as JSON too") { texts(form_json).include?("SYNTH") }
+check("the raw body is a field whatever the type") { named(j, "body.raw").length == 1 }
+check("a JSON string literal anywhere in a raw body is decoded") do
+  texts(wire("POST", "/x", body: %(prefix "#{ESC_S}YNTH" suffix), type: "text/plain")).include?("SYNTH")
+end
+
+# --- multipart edge cases --------------------------------------------------------
+b64 = "--BND\r\nContent-Disposition: form-data; name=\"n\"\r\nContent-Transfer-Encoding: base64\r\n\r\nU1lOVEg=\r\n--BND--\r\n"
+check("a multipart part with a base64 transfer encoding is refused") do
+  raises?(ForgeWire::Unparseable) { F.parse_body(wire("POST", "/x", body: b64, type: "multipart/form-data; boundary=BND")) }
+end
+check("a multipart part with an 8bit transfer encoding is read") do
+  ok = b64.sub("base64", "8bit").sub("U1lOVEg=", "plain")
+  texts(wire("POST", "/x", body: ok, type: "multipart/form-data; boundary=BND")).include?("plain")
+end
+check("two boundary parameters are refused") do
+  raises?(ForgeWire::Unparseable) { F.parse_body(wire("POST", "/x", body: mp_body, type: "multipart/form-data; boundary=BND; boundary=X")) }
+end
+
+# --- GitLab's target_project_id, wherever it is sent ---------------------------
+check("target_project_id is read from the query") { F.param_values(wire("POST", "/x?target_project_id=7&a=1"), F.parse_body(wire("POST", "/x?target_project_id=7&a=1")), "target_project_id") == ["7"] }
+check("target_project_id is read from a multipart part") do
+  mp_tp = "--BND\r\nContent-Disposition: form-data; name=\"target_project_id\"\r\n\r\n9\r\n--BND--\r\n"
+  r = wire("POST", "/x", body: mp_tp, type: "multipart/form-data; boundary=BND")
+  F.param_values(r, F.parse_body(r), "target_project_id") == ["9"]
+end
+check("target_project_id is read from a raw body that is JSON") do
+  r = wire("POST", "/x", body: '{"target_project_id":5}', type: "text/plain")
+  F.param_values(r, F.parse_body(r), "target_project_id") == ["5"]
+end
 
 finish("forge-wire fields")

@@ -6,7 +6,7 @@
 # is an HTTPS proxy (CONNECT) that terminates TLS itself with a throwaway CA,
 # answers every request from a scenario's canned responses, and records each
 # request's exact bytes. It NEVER connects anywhere: there is no upstream
-# socket in this file. Run only by ./capture (see its --help).
+# socket in this file. Run only by ai/bin/forge-wire-capture (see its --help).
 #
 # Usage: ruby fake-upstream.rb <work dir> <responses.json> <out dir>
 #   writes <work dir>/ca.pem, then <work dir>/port (the ready signal);
@@ -23,7 +23,7 @@ require "json"
 require_relative "../../../forge_wire/request"
 
 work, responses_file, out = ARGV
-abort "usage: fake-upstream.rb <work dir> <responses.json> <out dir>. Fix: run it through ./capture." unless out
+abort "usage: fake-upstream.rb <work dir> <responses.json> <out dir>. Fix: run it through ai/bin/forge-wire-capture." unless out
 
 ROUTES = JSON.parse(File.read(responses_file))
 FORGE_HOSTS = %w[api.github.com uploads.github.com gitlab.com].freeze

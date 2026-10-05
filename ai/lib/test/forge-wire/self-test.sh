@@ -3,7 +3,7 @@
 # outbound scan at the wire (DND-2025; design ai/docs/outbound-scan-at-the-wire.md):
 # ai/lib/forge_wire/{request,graphql,target,fields,operations,verdict}.rb on
 # hand-built requests, and on the requests real gh 2.96.0 and glab 1.92.1 sent
-# to a local fake upstream (fixtures/, recorded by capture/capture). No
+# to a local fake upstream (fixtures/, recorded by ai/bin/forge-wire-capture). No
 # network, no CLI, no clock, no load (DND-1222). Discovered by
 # ai/bin/harness-gate (a committed self-test.sh under a test/ directory).
 #
@@ -24,11 +24,11 @@ for t in request_test graphql_test fields_test target_test operations_test verdi
   fi
 done
 
-# The capture tool answers --help without running anything.
-if /usr/bin/ruby "${here}/capture/capture" --help >"${T}/help" 2>&1 && grep -q '^capture -- ' "${T}/help"; then
-  printf '  ok    capture --help\n'; PASS=$((PASS+1))
+# The capture tool answers --help on stdout, exit 0, without running anything.
+if /usr/bin/ruby "${here}/../../../bin/forge-wire-capture" --help >"${T}/help" 2>&1 && grep -q '^forge-wire-capture -- ' "${T}/help"; then
+  printf '  ok    forge-wire-capture --help\n'; PASS=$((PASS+1))
 else
-  printf '  FAIL  capture --help\n'; sed 's/^/        /' "${T}/help"; FAIL=$((FAIL+1))
+  printf '  FAIL  forge-wire-capture --help\n'; sed 's/^/        /' "${T}/help"; FAIL=$((FAIL+1))
 fi
 
 printf '\n%s passed, %s failed\n' "${PASS}" "${FAIL}"

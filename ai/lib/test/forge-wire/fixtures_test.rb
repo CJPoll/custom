@@ -2,7 +2,7 @@
 
 # The judge on captured CLI traffic (DND-2025). Each scenario under fixtures/
 # is what real gh 2.96.0 or glab 1.92.1 sent to a local fake upstream
-# (capture/capture --help). Every earlier argv-scan leak is a scenario, and
+# (ai/bin/forge-wire-capture --help). Every earlier argv-scan leak is a scenario, and
 # each must be REFUSED when a pattern matches its planted synthetic value and
 # the target is public, and FORWARDED when no pattern matches (clean text).
 # The bytes are the CLI's own, so these cases judge what is actually sent:
@@ -14,7 +14,7 @@ require_relative "../../forge_wire/verdict"
 
 PLANTED_PATTERNS = OutboundScan.parse_patterns("synthetic-work\tSYNTH-WORK-[0-9]{4}\n", "planted")
 CLEAN_PATTERNS = OutboundScan.parse_patterns("other-work\tNEVER-SENT-[0-9]{4}\n", "clean")
-TABLE = ForgeWire::Operations.load_default
+TABLE = shipped_table
 
 # What the proxy's upstream reads would say for the synthetic repositories.
 VISIBILITY = {
@@ -103,8 +103,10 @@ check("every captured write is in the operation table (no unknown_operation)") d
 end
 
 # --- each leak, where it is caught ---------------------------------------------
+# The typed fields that hit; the raw-body copies (body.raw...) hit too, by
+# construction, and are left out so each case names where the text sits.
 def fields_for(name)
-  hit_fields(run(name, PLANTED_PATTERNS))
+  hit_fields(run(name, PLANTED_PATTERNS)).reject { |f| f.start_with?("body.raw") }.uniq
 end
 
 check("DND-1976: the body that followed `-l -t` is the PR body on the wire") do

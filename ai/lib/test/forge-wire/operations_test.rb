@@ -60,6 +60,7 @@ check("a route not starting with / is an error") { table_error?("github\tPOST\tx
 check("a GraphQL name that is not a name is an error") { table_error?("github\tgraphql\tadd comment\ttext\n") }
 check("a duplicate row is an error") { table_error?("github\tPOST\t/x\ttext\ngithub\tPOST\t/x\tref\n", "line 2") }
 check("a placeholder that is not {name} is an error") { table_error?("github\tPOST\t/x/{a\ttext\n") }
+check("a table error carries Fix:") { table_error?("github\tPOST\t/x\n", "Fix:") }
 check("a table error never quotes the row") do
   O.parse("github\tPOST\t/secret-row\tbogus\n", "t")
   false
@@ -68,7 +69,7 @@ rescue O::TableError => e
 end
 
 # The shipped table parses, and every row in it is reachable.
-shipped = O.load_default
+shipped = shipped_table
 check("the shipped table parses") { shipped.size.positive? }
 check("the shipped table holds a GitHub merge as ref") { shipped.graphql(:github, "mergePullRequest")&.klass == :ref }
 check("the shipped table holds a GitLab merge as ref") { shipped.rest(:gitlab, "PUT", "/api/v4/projects/1/merge_requests/2/merge")&.klass == :ref }

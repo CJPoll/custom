@@ -122,6 +122,17 @@ check("a header block over the cap is refused, not Incomplete forever") do
   raises?(ForgeWire::Unparseable) { R.parse(("GET / HTTP/1.1\r\nX: " + "a" * 70_000).b, host: H, max_body: 10) }
 end
 check("a NUL in a header value is refused") { unparseable?(http("GET / HTTP/1.1", "Host: #{H}", "X: a\0b")) }
+check("a NUL at the end of a header value is refused, not stripped") do
+  unparseable?(http("POST /x HTTP/1.1", "Host: #{H}", "Content-Length: 1\0", body: "a"))
+end
+check("a vertical tab after the Host is refused, not stripped") { unparseable?(http("GET / HTTP/1.1", "Host: #{H}\v")) }
+check("a header value's spaces and tabs are trimmed") { parse(http("GET / HTTP/1.1", "Host: \t#{H} \t")).host == H }
+check("a tab between request-line parts is refused") { unparseable?(http("GET\t/ HTTP/1.1", "Host: #{H}")) }
+check("two spaces between request-line parts are refused") { unparseable?(http("GET  / HTTP/1.1", "Host: #{H}")) }
+check("a leading space on the request line is refused") { unparseable?(http(" GET / HTTP/1.1", "Host: #{H}")) }
+check("a control byte in a chunk extension is refused") do
+  unparseable?(http("POST /x HTTP/1.1", "Host: #{H}", "Transfer-Encoding: chunked", body: "1;a\x01b\r\na\r\n0\r\n\r\n"))
+end
 
 # --- Content-Encoding ---------------------------------------------------------
 gz = StringIO.new("".b)

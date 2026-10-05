@@ -20,6 +20,8 @@
 # named inline (`subjectId: "X"`) cannot be read from variables, so the
 # target reader treats such a mutation's target as unknown.
 
+require "strscan"
+
 module ForgeWire
   module GraphQL
     Operation = Struct.new(:type, :name, :fields, :literal, keyword_init: true)
@@ -47,60 +49,48 @@ module ForgeWire
       UNREADABLE
     end
 
-    PUNCT = /\A(?:\.\.\.|[!$&()\[\]{}:=@|])/.freeze
-    NAME = /\A[_A-Za-z][_0-9A-Za-z]*/.freeze
-    NUMBER = /\A-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/.freeze
-    IGNORED = /\A(?:[ \t\r\n,]|﻿|#[^\r\n]*)+/.freeze
+    PUNCT = /\.\.\.|[!$&()\[\]{}:=@|]/.freeze
+    NAME = /[_A-Za-z][_0-9A-Za-z]*/.freeze
+    NUMBER = /-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/.freeze
+    IGNORED = /(?:[ \t\r\n,]|﻿|#[^\r\n]*)+/.freeze
+    # A string: no raw line break inside; an escape takes the next character.
+    STRING = /"(?:[^"\\\r\n]|\\[^\r\n])*"/.freeze
+    # A block string: anything up to the first `"""` not escaped as `\"""`.
+    BLOCK_STRING = /"""(?:\\"""|(?!""")[\s\S])*"""/.freeze
 
-    # -> [[kind, text], ...], literal?
+    # -> [[kind, text], ...], literal?  One pass with StringScanner, so the
+    # cost is linear in the document's length.
     def lex(src)
       s = src.dup.force_encoding(Encoding::UTF_8)
       raise Unreadable unless s.valid_encoding?
 
+      sc = StringScanner.new(s)
       tokens = []
       literal = false
-      until s.empty?
-        if (m = IGNORED.match(s))
-          s = m.post_match
-        elsif s.start_with?('"""')
-          s = skip_block_string(s)
+      until sc.eos?
+        next if sc.skip(IGNORED)
+
+        if sc.check(/"""/)
+          raise Unreadable unless sc.skip(BLOCK_STRING)
+
           tokens << [:string, ""]
           literal = true
-        elsif s.start_with?('"')
-          s = skip_string(s)
+        elsif sc.check(/"/)
+          raise Unreadable unless sc.skip(STRING)
+
           tokens << [:string, ""]
           literal = true
-        elsif (m = PUNCT.match(s) || NAME.match(s) || NUMBER.match(s))
-          kind = PUNCT.match?(m[0]) ? :punct : (NAME.match?(m[0]) ? :name : :number)
-          tokens << [kind, m[0]]
-          s = m.post_match
+        elsif (t = sc.scan(PUNCT))
+          tokens << [:punct, t]
+        elsif (t = sc.scan(NAME))
+          tokens << [:name, t]
+        elsif (t = sc.scan(NUMBER))
+          tokens << [:number, t]
         else
           raise Unreadable
         end
       end
       [tokens, literal]
-    end
-
-    def skip_string(s)
-      i = 1
-      while i < s.length
-        c = s[i]
-        return s[(i + 1)..] if c == '"'
-        raise Unreadable if ["\n", "\r"].include?(c)
-
-        i += c == "\\" ? 2 : 1
-      end
-      raise Unreadable
-    end
-
-    def skip_block_string(s)
-      i = 3
-      while i < s.length
-        return s[(i + 3)..] if s[i, 3] == '"""'
-
-        i += s[i, 4] == '\\"""' ? 4 : 1
-      end
-      raise Unreadable
     end
 
     # Reads the top level of a token list.
