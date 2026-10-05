@@ -432,8 +432,8 @@ split_first_push() {
 # FG_PA_OPTS (spelled --repo=<r>, --no-repo, --<name>=<value>), FG_PA_POS and
 # FG_PA_BAD. The self-test's DND-1862 cases exercise each, and a missing
 # function or table makes every candidate deny. Naming this hook in that
-# file's own list of readers is a separate change, because that file is an
-# owner-held surface. That file is bash and this hook is POSIX sh, so the
+# file's own list of readers is a separate change. That file is bash and this
+# hook is POSIX sh, so the
 # reading runs in one `bash` child per candidate push. The child sources the
 # file (it only defines functions and tables), turns FI_EMPTY_WORD back into
 # "", drops shell redirections (a word that starts with optional digits then

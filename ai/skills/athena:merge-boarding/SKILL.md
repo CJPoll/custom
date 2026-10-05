@@ -402,8 +402,11 @@ diff` and is not owner-gated. What holds:
   change from a harmless update. Request the go with the plan's summary.
 - **In any repo:** forge settings (`.github/settings.yml`, `CODEOWNERS`), a
   check's suppression list, the approval table itself (`ai/CLAUDE.md` → *Owner
-  approval policy*), and the classifier and verifier that enforce it.
-- **Never:** a deploy-automation edit. It prints `hold: no` and exits 0.
+  approval policy*), the owner approval grant allowlist, the classifier and its
+  manifest, and the owner verifiers with what they load to tell the owner's
+  identity (*Only the approval policy is a held surface*).
+- **Never:** a deploy-automation edit. It prints `hold: no` and exits 0. Nor
+  merge or push tooling: it is not a surface. Neither is ever an ask.
 
 **There is no admiral override on exit 4, and that is the difference from exit
 3.** A missing judge verdict is a *verification* gap you may take responsibility
@@ -607,90 +610,50 @@ owner verifiers. One commit that dropped a held surface from the manifest read
 `BLAST-RADIUS COLD` under its own classifier and HOT, exit 4, under the landed
 one.
 
-**The receipt chain is a held surface (DND-1807).** A diff that touches
-`integration-gate` (the script and its `ai/bin` shim), `ai/lib/integration-receipt.sh`,
-`ai/lib/receipt_seal.rb`, `ai/bin/receipt-seal`, the merge and push guards
-(`ai/lib/gh-merge-guard.sh`, `ai/lib/glab-merge-guard.sh`,
-`ai/lib/forge-git-passthrough.sh`, and its forge transport,
-`ai/lib/forge-transport/git-remote-athena-forge` and
-`ai/lib/forge-transport/refuse-signing`, the only holder of the bot's
-header, DND-1868), the merge role guard
-(`ai/hooks/merge-role-guard.sh`, `ai/lib/merge_role.rb`,
-`ai/lib/merge_role_io.rb`), the forge identity guards that refuse a forge
-write or push not made as Athena (`ai/hooks/forge-identity-guard.sh`, the agent
-PATH wrappers `ai/agent-bin/git`, `ai/agent-bin/gh` and `ai/agent-bin/glab`,
-`ai/lib/agent-forge-push.sh`, `ai/lib/agent-forge-cli.sh`, and
-`ai/agent-env/session-env.sh`, which puts the wrappers on PATH), the forge
-auth guard that keeps the owner's forge credentials from agents
-(`ai/hooks/forge-auth-guard.sh`), and what they load to decide a call is a
-merge, a push or a forge write (`ai/lib/forge-api-scan.sh`,
-`ai/lib/forge-cli-isolation.sh`, `ai/lib/forge-write-class.awk`),
-the red-main content declaration the merge guard reads its bar from
-(`ai/config/main-content-checks.json`, DND-1905), the per-namespace GitLab
-bot identity map that decides as whom `glab-athena` writes and pushes
-(`ai/config/forge-identities.json`, `ai/lib/forge-identity.sh`,
-`ai/lib/forge-identity.jq`, `ai/lib/forge-identity-lookup.jq`, DND-1936),
-`ai/bin/gh-athena`, `ai/bin/glab-athena`,
-`locked-merge`,
-`ai/bin/main-health` and `ai/lib/main-health.sh` (the push guard's fix-push
-exception reads a receipt), the private overlay resolver and rules the
-owner-click verifier reads the owner's id through
-(`ai/lib/private_overlay_resolver.rb`, `ai/lib/private_overlay.rb`), or the
-critic verdict producer
-(`ai/bin/critic-review`, `ai/lib/critic_carry.rb`,
-`ai/lib/critic_verdict_stores.rb`), or the declared merge gate and what it loads
-(`ai/bin/harness-gate`, `ai/lib/first_party.rb`, `ai/lib/landed.rb`,
-`ai/lib/reap_tags.rb`, `ai/lib/scratch_home_sentinel.rb`, and `ai/lib/harness_tools.rb`,
-the scope table `check-bin-help` reads) is `owner-approval-policy`, hold `always`:
-exit 4, cleared by the owner's verified decision (*Owner approval policy* ->
-*Asking, and what counts as approval*). The gate judges with the manifest as
-landed on the target, so a new hold binds after it lands, never in the PR that
-adds it. Not held: `confirm-merged`, `ai/bin/test-slot`,
-`ai/bin/ready-and-idle` (it reads a receipt to
-report, and decides nothing), `ai/lib/critic_prompt.rb` (the rubric text, not a
-trust decision) and the judge-set utilities `proc-stat.sh` and
-`telemetry-emit.sh`, which write no verdict. The manifest's
-`enforcers.excluded` names every other candidate left out, with its reason.
+**Only the approval policy is a held surface.** The `owner-approval-policy`
+class, hold `always`, is exactly: the *Owner approval policy* section of
+`ai/CLAUDE.md` and the *Owner approval grants* section of
+`ai/contracts/athena-events.md` (by section, not file); the grant allowlist
+module (`**/athena/owner_approvals/action_class.ex` and its test);
+`ai/bin/blast-radius` and its manifest `ai/blast-radius/surfaces.json`; and
+the owner verifiers `ai/lib/owner_turn.rb` and `ai/lib/owner_click.rb`, with
+the private overlay resolver and rules the click verifier reads the owner's
+id through (`ai/lib/private_overlay_resolver.rb`, `ai/lib/private_overlay.rb`).
+A hit there is exit 4, cleared by the owner's verified decision (*Owner
+approval policy* -> *Asking, and what counts as approval*). The gate judges
+with the manifest as landed on the target, so a manifest change binds after
+it lands, never in the PR that makes it.
 
-**Later (2026-10-03, DND-1873):** this paragraph listed `ai/lib/glab-merge-guard.sh`
-as not held, "though it decides GitLab merges on the receipt since DND-1845".
-Superseded: the guard and `ai/bin/glab-athena` are in the same class as the
-GitHub pair, so a diff that weakened `glmg_receipt_gate` no longer reads COLD.
-`blast-radius --self-test` walks every tracked file that sources
-`integration-receipt.sh` and fails, with a `Fix:`, on one that decides a merge
-or push and is not held.
+Merge and push tooling is not held. That covers `integration-gate`, the
+receipt reader and seal, the merge and push guards and what they load, the
+merge role guard, the forge identity and auth guards, the agent PATH wrappers
+and session env, the forge identity map, `gh-athena`, `glab-athena`,
+`locked-merge`, `main-health`, `critic-review`, and `harness-gate` with its
+libraries. It ships on the normal bar: tests, a critic PASS, green CI. A diff
+that weakens a check in it is item 5, and the critic judges that from the
+diff, not by path. A new forge or merge tool needs no manifest entry.
+Widening the held set is itself an approval-rule change (item 6), so only the
+owner's own words widen it; the manifest is held, so such a diff exits 4.
+`blast-radius --self-test` pins the held patterns and has a COLD case for
+each merge tool above.
 
-**Later (2026-10-03, DND-1888):** this paragraph did not name the merge role
-guard, so DND-1865's change to it read COLD. It enforces that merging is the
-admiral's alone (DND-726) and now sits in the same class: a diff that weakens
-who may merge needs the owner's record. `blast-radius --self-test` has a case
-per file.
-
-**Later (2026-10-03, DND-1892):** this paragraph did not name the forge
-identity guards, so DND-1881's and DND-1887's changes to them read COLD: a diff
-that let an agent push to a forge on the owner's key needed no owner record.
-They sit in the same class from DND-1892, with the forge auth guard and the
-libraries the held files load. The third such gap in one night, so the class
-is closed by a walk, not a list: `blast-radius --self-test` computes the
-candidate enforcers (every hook wired or retired in `ai/hooks/registry.json`;
-every file under `ai/agent-bin`, `ai/agent-env` and `ai/git-hooks`; every file
-under `ai/lib`, `ai/bin`, `scripts/wt-lib` and a skill's `scripts/` or `bin/`
-named for forge, merge, receipt, seal, agent or push; and every `ai/lib` file a
-held file loads) and fails, with a `Fix:`, on one that neither holds nor sits in
-the manifest's `enforcers.excluded` with a reason, or that is both.
-
-**Later (2026-10-03, DND-1895):** the declared merge gate `ai/bin/harness-gate`
-was in neither the held list nor `enforcers.excluded`, so a diff that dropped a
-check from it read COLD: a lowered bar (item 5) with no owner hold. It sits in
-the same class from DND-1895. So do the libraries it loads that discover its
-checks, read their bar from what landed, or can fail a check (`first_party.rb`,
-`landed.rb`, `reap_tags.rb`, `scratch_home_sentinel.rb`), and `harness_tools.rb`,
-the scope table `check-bin-help` reads through `first_party.rb`. The
-`blast-radius --self-test` walk also reads `IR_DECLARED_GATES` in
-`ai/lib/integration-receipt.sh`, so the gate the target declares is a
-candidate whatever its path: a renamed gate fails the self-test until it is
-held or excluded. The gate's other loaded libraries (`proc_state.rb`,
-`athena_telemetry.rb`) are in `enforcers.excluded` with reasons.
+**Later (2026-10-05):** this paragraph was *The receipt chain is a held
+surface (DND-1807)*. DND-1807, DND-1873, DND-1888, DND-1892, DND-1895,
+DND-1905 and DND-1936 held the whole merge and push chain: the receipt chain,
+the GitLab merge guard and `glab-athena`, the merge role guard, the forge
+identity and auth guards with the agent PATH wrappers, `harness-gate` and its
+libraries, `ai/config/main-content-checks.json`, and the forge identity map.
+`blast-radius --self-test` walked every candidate enforcer and failed unless
+each was held or listed in the manifest's `enforcers.excluded`. Superseded by
+owner decision, Cody, coordinator terminal, 2026-10-05, session
+`0cc59a5e-6c65-495e-a216-83c6a0bf2d56`: message
+`31bcf5d3-130f-422b-a14a-c3e2bf687350` (08:06:25Z), "which rules and
+guidances do we need to update so this confusion doesn't happen in the
+future?", and message `051d0ae2-784b-4e77-8028-b7bda3253b77` (08:08:02Z),
+"Please have a shipwright update those things causing confusion so we can
+consistently make progress." Cody had never decided the widening, and every
+GitLab-migration PR from 2026-10-03 to 2026-10-05 needed a Cody click. The walk and
+`enforcers.excluded` are removed.
 
 **The gate comes from the landed target, not from you.** The first of
 `bin/prep-commit.sh` (gen_saas) and `ai/bin/harness-gate` (`~/dev/custom`) that

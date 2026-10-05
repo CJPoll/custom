@@ -529,8 +529,9 @@ grep -q "INTEGRATION OK [0-9a-f]* (GATE: ${R}/g.sh -- caller-supplied; no gate d
 R="${TMP}/c19"; declared_repo "$R" ai/bin/harness-gate
 ( cd "$R" && printf '#!/bin/sh\nexit 0\n' > ai/bin/harness-gate && git commit -qam "weaken gate" )
 record_pass "$R"
-# DND-1895: ai/bin/harness-gate is held, so this edit is HOT and needs the owner's record (a synthetic one here).
-out="$( cd "$R" && HOME="$FIXTURE_HOME" "$GATE" --target main --no-fetch --owner-approval "$APPROVAL" 2>&1 )"; rc=$?
+# ai/bin/harness-gate is merge tooling, not the approval policy (owner decision, 2026-10-05), so this
+# edit is COLD and needs no owner record. A weakened gate is item 5, judged by the critic from the diff.
+out="$( cd "$R" && "$GATE" --target main --no-fetch 2>&1 )"; rc=$?
 [ "$rc" -eq 0 ] && ok "c19 an edited declared gate still runs" || bad "c19 expected exit 0, got $rc" "$out"
 grep -q 'WARN gate .*ai/bin/harness-gate.* differs from main' <<<"$out" && ok "c19 warns that this branch edits its own gate" || bad "c19 no edited-gate warning" "$out"
 grep -q 'INTEGRATION OK [0-9a-f]* (GATE: ai/bin/harness-gate -- declared on main; EDITED BY THIS BRANCH)' <<<"$out" && ok "c19 OK line marks the gate as edited by the branch" || bad "c19 OK line does not mark the edit" "$out"
@@ -1902,58 +1903,14 @@ done
 # fixture branch cannot edit). No declared gate is copied (harness-gate would
 # run for real), so each case passes a stub --gate.
 DND1796_REPO="$(cd "${ROOT}/../../.." && pwd)"
-# unhold_chain_manifest <src> <dst> -- the fixture manifest: the landed one with the
-# receipt chain unheld, so a branch that edits the gate can LAND in a mechanics case.
-# The chain is not copied here (DND-1848; the copied name regex of DND-1807 missed every
-# chain file added later). The manifest's unconditional owner-approval-policy surface
-# holds the chain beside the classifier and the owner verifiers. This list names what the
-# fixture KEEPS held (the classifier, its manifest, the owner verifiers, and the merge-role,
-# forge-identity, forge-auth, private-overlay and harness-gate neighbours, and the
-# harness-gate libraries, none of which the cases edit); every other pattern of that surface, so any chain file added later, is unheld.
-FIXTURE_KEEP_HELD='**/athena/owner_approvals/action_class.ex
-**/athena/owner_approvals/action_class_test.exs
-ai/blast-radius/**
-ai/bin/blast-radius
-ai/lib/owner_click.rb
-ai/lib/owner_message.rb
-ai/lib/owner_turn.rb
-ai/config/main-content-checks.json
-ai/hooks/merge-role-guard.sh
-ai/lib/merge_role.rb
-ai/lib/merge_role_io.rb
-ai/lib/forge-transport/git-remote-athena-forge
-ai/lib/forge-transport/refuse-signing
-ai/lib/forge-http-pin.sh
-ai/hooks/forge-identity-guard.sh
-ai/agent-bin/git
-ai/lib/agent-forge-push.sh
-ai/agent-bin/gh
-ai/agent-bin/glab
-ai/lib/agent-forge-cli.sh
-ai/lib/forge-write-class.awk
-ai/agent-env/session-env.sh
-ai/hooks/forge-auth-guard.sh
-ai/lib/private_overlay_resolver.rb
-ai/lib/private_overlay.rb
-ai/bin/harness-gate
-ai/lib/first_party.rb
-ai/lib/harness_tools.rb
-ai/lib/landed.rb
-ai/lib/reap_tags.rb
-ai/lib/scratch_home_sentinel.rb'
-unhold_chain_manifest() {
-  jq --arg keep "$FIXTURE_KEEP_HELD" '($keep | split("\n")) as $k
-    | .surfaces |= map(if .class == "owner-approval-policy" and (has("content") | not)
-        then .patterns |= map(select(. as $p | $k | index($p))) else . end)' "$1" > "$2"
-}
+# The fixture manifest is the real one. It holds only the approval policy (owner decision,
+# Cody, 2026-10-05), so the mechanics cases below, which edit the gate and its libs, land
+# under it; the classifier, its manifest and the owner verifiers stay held.
 landed_layout() {
   mkdir -p "$1/ai/skills/athena:merge-boarding/scripts" "$1/ai/bin" "$1/ai/blast-radius"
   cp "$GATE" "$1/ai/skills/athena:merge-boarding/scripts/integration-gate"
   cp -R "${DND1796_REPO}/ai/lib" "$1/ai/lib"
-  # The mechanics cases below edit the gate and its libs and expect a LANDING, so
-  # their manifest leaves the receipt chain unheld (DND-1807 holds it for real;
-  # lb10 runs the real manifest). The owner verifiers and the rest stay held.
-  unhold_chain_manifest "${DND1796_REPO}/ai/blast-radius/surfaces.json" "$1/ai/blast-radius/surfaces.json"
+  cp "${DND1796_REPO}/ai/blast-radius/surfaces.json" "$1/ai/blast-radius/surfaces.json"
   for b in integration-gate blast-radius test-slot critic-review receipt-seal; do cp "${DND1796_REPO}/ai/bin/${b}" "$1/ai/bin/${b}"; done
   ( cd "$1" && git init -q -b main . && git add -A && git commit -qm layout \
     && printf '/g.sh\n/GATE_RAN\n' >> .git/info/exclude )
@@ -2095,41 +2052,18 @@ out="$( cd "$W" && "${W}/${LBG}" --target main --no-fetch --gate "${W}/g.sh" 2>&
 grep -q 'INTEGRATION OK' <<<"$out" && bad "lb4 fell back to the branch's classifier" "$out" || ok "lb4 no INTEGRATION OK"
 [ ! -f "${W}/GATE_RAN" ] && ok "lb4 the gate did not run on an unjudgeable head" || bad "lb4 ran the gate before finding no classifier"
 
-# lb10 (DND-1807): with the REAL manifest as the landed one, a branch that edits
-# the gate script is HOT: exit 4, no OK line, no receipt. The mechanics cases
-# above run with the receipt chain unheld (landed_layout) so they can land.
+# lb10 (owner decision, Cody, 2026-10-05): with the REAL manifest as the landed one, a
+# branch that edits the gate script is COLD and lands, with no owner record: merge tooling
+# ships on the normal bar. (DND-1807 held it; that hold is reversed.)
 L="${TMP}/lb10-layout"; landed_layout "$L"
-cp "${DND1796_REPO}/ai/blast-radius/surfaces.json" "${L}/ai/blast-radius/surfaces.json"
-( cd "$L" && git commit -qam 'land the real manifest' )
 W="${TMP}/lb10-wt"; landed_branch "$L" "$W"
 ( cd "$W" && sed -i 's/^OK_LINE="INTEGRATION OK /OK_LINE="BRANCH-COPY INTEGRATION OK /' "$LBG" && git commit -qam 'edit the gate' ) || bad "lb10 fixture: could not edit the gate"
 record_pass "$W"
 out="$( cd "$W" && "${W}/${LBG}" --target main --no-fetch --gate "${W}/g.sh" 2>&1 )"; rc=$?
-[ "$rc" -eq 4 ] && grep -q 'BLAST-RADIUS HOT' <<<"$out" && grep -q 'owner-approval-policy' <<<"$out" && ok "lb10 a gate-editing branch is HOT under the landed manifest, exit 4" \
-  || bad "lb10 expected exit 4 HOT [owner-approval-policy], got $rc" "$out"
-grep -q 'INTEGRATION OK' <<<"$out" && bad "lb10 printed INTEGRATION OK" "$out" || ok "lb10 no INTEGRATION OK"
-[ ! -e "$(git -C "$W" rev-parse --path-format=absolute --git-common-dir)/integration-receipts/$(git -C "$W" rev-parse HEAD).json" ] \
-  && ok "lb10 no receipt for the HOT head" || bad "lb10 a receipt was written for a HOT head"
-
-# lb11 (DND-1848): the fixture's unheld set is derived from the manifest, not copied. A
-# chain entry added to the manifest is unheld without editing this file.
-SYN="ai/lib/synthetic-chain-entry-dnd1848.sh"
-jq --arg p "$SYN" '(.surfaces | map(.class == "owner-approval-policy" and (has("content") | not)) | index(true)) as $i | .surfaces[$i].patterns += [$p]' \
-  "${DND1796_REPO}/ai/blast-radius/surfaces.json" > "${TMP}/lb11-synthetic.json"
-unhold_chain_manifest "${TMP}/lb11-synthetic.json" "${TMP}/lb11-fixture.json"
-jq -e --arg p "$SYN" '[.surfaces[].patterns[]?] | index($p) | not' "${TMP}/lb11-fixture.json" >/dev/null \
-  && ok "lb11 a chain entry added to the manifest is unheld in the fixture" \
-  || bad "lb11 the fixture kept a synthetic chain entry held: its strip list is a copy, not derived from the manifest"
-unhold_chain_manifest "${DND1796_REPO}/ai/blast-radius/surfaces.json" "${TMP}/lb11-real.json"
-jq -e '[.surfaces[].patterns[]?] | (index("ai/bin/blast-radius") != null) and (index("ai/lib/owner_click.rb") != null)' "${TMP}/lb11-real.json" >/dev/null \
-  && ok "lb11 the classifier and owner verifiers stay held in the fixture" || bad "lb11 the fixture unheld the classifier or an owner verifier"
-jq -e '[.surfaces[].patterns[]?] | index("ai/lib/integration-receipt.sh") | not' "${TMP}/lb11-real.json" >/dev/null \
-  && ok "lb11 a real chain file is unheld in the fixture" || bad "lb11 the fixture kept a real chain file held"
-
-jq -e --arg keep "$FIXTURE_KEEP_HELD" '($keep | split("\n")) as $k | [.surfaces[] | select(.class == "owner-approval-policy" and (has("content") | not)) | .patterns[]?] as $all | $k | all(. as $e | $all | index($e))' \
-  "${DND1796_REPO}/ai/blast-radius/surfaces.json" >/dev/null \
-  && ok "lb11 every kept-held entry is still a pattern of the manifest" \
-  || bad "lb11 FIXTURE_KEEP_HELD names a pattern the manifest no longer holds. Fix: drop or rename the stale entry in FIXTURE_KEEP_HELD in this file."
+head_sha="$(git -C "$W" rev-parse HEAD)"
+[ "$rc" -eq 0 ] && grep -q "^INTEGRATION OK ${head_sha} " <<<"$out" && ! grep -q 'BLAST-RADIUS HOT' <<<"$out" \
+  && ok "lb10 a gate-editing branch is not held under the real landed manifest, and lands" \
+  || bad "lb10 expected exit 0, not HOT, under the real manifest, got $rc" "$out"
 
 # ---------------------------------------------------------------- DND-1878
 # One gate per worktree. A second run in the same worktree while one holds the

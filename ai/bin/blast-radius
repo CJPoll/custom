@@ -4191,42 +4191,11 @@ def self_test
      ["the owner-turn verifier", "ai/lib/owner_turn.rb", "[owner-approval-policy]"],
      ["the owner-click verifier", "ai/lib/owner_click.rb", "[owner-approval-policy]"],
      ["the owner-message verifier", "ai/lib/owner_message.rb", "[owner-approval-policy]"],
-     # DND-1807: the files whose code decides whether a receipt is accepted
-     ["the integration-gate script", "ai/skills/athena:merge-boarding/scripts/integration-gate", "[owner-approval-policy]"],
-     ["the integration-gate shim", "ai/bin/integration-gate", "[owner-approval-policy]"],
-     ["the integration receipt reader", "ai/lib/integration-receipt.sh", "[owner-approval-policy]"],
-     ["the receipt seal library", "ai/lib/receipt_seal.rb", "[owner-approval-policy]"],
-     ["the receipt-seal CLI", "ai/bin/receipt-seal", "[owner-approval-policy]"],
-     ["the merge guard", "ai/lib/gh-merge-guard.sh", "[owner-approval-policy]"],
-     ["the push guard", "ai/lib/forge-git-passthrough.sh", "[owner-approval-policy]"],
-     ["the gh-athena entry point", "ai/bin/gh-athena", "[owner-approval-policy]"],
-     # DND-1873: the GitLab merge guard decides a merge on the receipt since DND-1845
-     ["the GitLab merge guard", "ai/lib/glab-merge-guard.sh", "[owner-approval-policy]"],
-     ["the glab-athena entry point", "ai/bin/glab-athena", "[owner-approval-policy]"],
-     # DND-1888: the role guard enforces "merging is the admiral's alone" (DND-726)
-     ["the merge role guard hook", "ai/hooks/merge-role-guard.sh", "[owner-approval-policy]"],
-     ["the merge role library", "ai/lib/merge_role.rb", "[owner-approval-policy]"],
-     ["the merge role IO library", "ai/lib/merge_role_io.rb", "[owner-approval-policy]"],
-     # DND-1892: the push and forge-write identity enforcers (DND-1803, DND-1862, DND-1881)
-     ["the forge identity guard hook", "ai/hooks/forge-identity-guard.sh", "[owner-approval-policy]"],
-     ["the agent PATH git wrapper", "ai/agent-bin/git", "[owner-approval-policy]"],
-     ["the agent forge push check", "ai/lib/agent-forge-push.sh", "[owner-approval-policy]"],
-     ["the agent PATH gh wrapper", "ai/agent-bin/gh", "[owner-approval-policy]"],
-     ["the agent PATH glab wrapper", "ai/agent-bin/glab", "[owner-approval-policy]"],
-     ["the agent forge cli library", "ai/lib/agent-forge-cli.sh", "[owner-approval-policy]"],
-     ["the forge write classifier", "ai/lib/forge-write-class.awk", "[owner-approval-policy]"],
-     ["the agent session env that puts the wrappers on PATH", "ai/agent-env/session-env.sh", "[owner-approval-policy]"],
-     ["the forge auth guard that keeps the owner's credentials from agents", "ai/hooks/forge-auth-guard.sh", "[owner-approval-policy]"],
+     # owner decision, Cody, 2026-10-05: what the owner verifiers load to tell the owner's identity
      ["the private overlay resolver the owner-click verifier loads", "ai/lib/private_overlay_resolver.rb", "[owner-approval-policy]"],
      ["the private overlay rules the resolver loads", "ai/lib/private_overlay.rb", "[owner-approval-policy]"],
-     ["locked-merge", "ai/skills/athena:merge-boarding/scripts/locked-merge", "[owner-approval-policy]"],
-     ["the push-guard fix-push exception", "ai/lib/main-health.sh", "[owner-approval-policy]"],
-     ["the main-health CLI", "ai/bin/main-health", "[owner-approval-policy]"],
-     ["the forge api scan the merge guard loads", "ai/lib/forge-api-scan.sh", "[owner-approval-policy]"],
-     ["the forge cli isolation the entry point loads", "ai/lib/forge-cli-isolation.sh", "[owner-approval-policy]"],
-     ["the critic-review producer", "ai/bin/critic-review", "[owner-approval-policy]"],
-     ["the critic carry library", "ai/lib/critic_carry.rb", "[owner-approval-policy]"],
-     ["the critic verdict stores", "ai/lib/critic_verdict_stores.rb", "[owner-approval-policy]"]].each do |label, path, cls|
+     ["the grant allowlist module", "apps/athena/lib/athena/owner_approvals/action_class.ex", "[owner-approval-policy]"],
+     ["the grant allowlist module test", "apps/athena/test/athena/owner_approvals/action_class_test.exs", "[owner-approval-policy]"]].each do |label, path, cls|
       dd = File.join(tmp, "policy-#{path.tr('/.', '__')}")
       bb, hh = mkrepo.call(dd) { |r| FileUtils.mkdir_p(File.dirname(File.join(r, path))); File.write(File.join(r, path), "x\n") }
       out, _, code = run_br.call(["--base", bb, "--head", hh, "--repo", dd] + real)
@@ -4234,128 +4203,38 @@ def self_test
                  code == 4 && out.include?("BLAST-RADIUS HOT") && out.include?(cls) && out.include?("hold: yes, always"),
                  "exit=#{code} out=#{out}")
     end
-    # DND-1807: the receipt chain's non-trust neighbours stay COLD
-    %w[ai/bin/confirm-merged ai/bin/test-slot ai/lib/critic_prompt.rb ai/bin/ready-and-idle ai/lib/proc-stat.sh].each do |path|
-      dd = File.join(tmp, "policy-cold-#{path.tr('/.', '__')}")
+    # Owner decision, Cody, 2026-10-05 (session 0cc59a5e-6c65-495e-a216-83c6a0bf2d56, messages
+    # 31bcf5d3-130f-422b-a14a-c3e2bf687350 and 051d0ae2-784b-4e77-8028-b7bda3253b77): merge and push
+    # tooling ships on the normal bar, so none of it holds. A diff that weakens a check in it is item 5,
+    # judged by the critic from the diff, not by path. This replaces the DND-1873 receipt-sourcer walk
+    # and the DND-1892 enforcer walk, which forced every merge or push enforcer into the held set.
+    %w[ai/bin/glab-athena ai/bin/gh-athena ai/skills/athena:merge-boarding/scripts/locked-merge
+       ai/skills/athena:merge-boarding/scripts/integration-gate ai/bin/integration-gate ai/lib/integration-receipt.sh
+       ai/lib/receipt_seal.rb ai/bin/receipt-seal ai/lib/gh-merge-guard.sh ai/lib/glab-merge-guard.sh
+       ai/lib/forge-git-passthrough.sh ai/hooks/merge-role-guard.sh ai/lib/merge_role.rb ai/hooks/forge-identity-guard.sh
+       ai/hooks/forge-auth-guard.sh ai/agent-bin/git ai/agent-bin/gh ai/agent-bin/glab ai/agent-env/session-env.sh
+       ai/config/main-content-checks.json ai/config/forge-identities.json ai/lib/forge-identity.sh
+       ai/bin/main-health ai/lib/main-health.sh ai/bin/critic-review ai/lib/critic_carry.rb ai/bin/harness-gate
+       ai/lib/first_party.rb ai/lib/harness_tools.rb ai/lib/landed.rb
+       ai/bin/confirm-merged ai/bin/test-slot ai/lib/critic_prompt.rb ai/bin/ready-and-idle ai/lib/proc-stat.sh].each do |path|
+      dd = File.join(tmp, "policy-cold-#{path.tr('/.:', '___')}")
       bb, hh = mkrepo.call(dd) { |r| FileUtils.mkdir_p(File.dirname(File.join(r, path))); File.write(File.join(r, path), "x\n") }
       out, _, code = run_br.call(["--base", bb, "--head", hh, "--repo", dd] + real)
-      check.call("policy: #{path} is not a receipt-trust surface and stays COLD",
+      check.call("policy: #{path} is merge or push tooling, not the approval policy, and stays COLD",
                  code.zero? && out.include?("BLAST-RADIUS COLD"), "exit=#{code} out=#{out}")
     end
-    # DND-1873: every tracked file that directly sources the receipt reader to ENFORCE a merge or
-    # push is held. A new sourcer (the GitLab guard, DND-1845, was one) reads COLD until the manifest
-    # names it; this walks the tree so the next one fails here instead of landing unheld.
-    # The readers below only REPORT or time a receipt and decide nothing; a new entry here is a
-    # decision about what the file does, made in this held file. An indirect sourcer (one that
-    # reaches the reader through another library) is not found: the chain's libraries are held.
-    non_enforcing = %w[ai/bin/ready-and-idle ai/bin/test-slot ai/lib/lead_time_phases_io.rb]
-    repo_root = File.expand_path("../..", __dir__)
-    tracked = IO.popen(["git", "-C", repo_root, "ls-files", "ai/bin", "ai/lib", "ai/hooks", "ai/skills", "scripts"], &:read).split("\n")
-    sourcers = tracked.select do |f|
-      next false if f.include?("/test/") || f.end_with?(".md")
-      full = File.join(repo_root, f)
-      body = File.file?(full) ? File.binread(full) : ""
-      body.include?("integration-receipt.sh") && body.match?(/^\s*(\.|source)\s/)
-    end
-    check.call("policy: the receipt-sourcer walk finds the merge guards (an empty walk would pass for nothing)",
-               sourcers.include?("ai/lib/gh-merge-guard.sh") && sourcers.include?("ai/lib/glab-merge-guard.sh"),
-               "sourcers=#{sourcers.inspect}. Fix: the walk in ai/bin/blast-radius --self-test no longer sees a known sourcer; repair the walk, never shrink it.")
-    (sourcers - non_enforcing).each do |path|
-      dd = File.join(tmp, "policy-sourcer-#{path.tr('/.:', '___')}")
-      bb, hh = mkrepo.call(dd) { |r| FileUtils.mkdir_p(File.dirname(File.join(r, path))); File.write(File.join(r, path), "x\n") }
-      out, _, code = run_br.call(["--base", bb, "--head", hh, "--repo", dd] + real)
-      check.call("policy: #{path} sources integration-receipt.sh and is held (exit 4)",
-                 code == 4 && out.include?("BLAST-RADIUS HOT") && out.include?("hold: yes, always"),
-                 "exit=#{code} out=#{out}. Fix: add #{path} to the receipt-chain patterns in ai/blast-radius/surfaces.json, or, if it only reports or times a receipt, add it to non_enforcing in this self-test.")
-    end
-    # DND-1892: every candidate enforcer of the merge or push bar is classified. Three held-set
-    # gaps landed in one night (DND-1873, DND-1888, DND-1892), each a guard that read COLD until a
-    # reviewer noticed. The candidates are computed, not listed:
-    #   - every script wired or retired in ai/hooks/registry.json (a retired row can stay wired);
-    #   - every file under ai/agent-bin, ai/agent-env and ai/git-hooks;
-    #   - every file under ai/lib, ai/bin, scripts/wt-lib and a skill's scripts/ or bin/ whose
-    #     name says forge, merge, receipt, seal, agent or push;
-    #   - every ai/config/*.json a held owner-approval-policy file names (DND-1905: the bar a guard reads);
-    #   - every ai/lib file a held owner-approval-policy file loads (a `$(dirname …)/../lib/X`,
-    #     `BASH_SOURCE`, `__dir__` or `${x%/*}` path, or a require_relative), so a guard's new
-    #     library is a candidate whatever its name (DND-1873's glab guard was found by a reviewer).
-    # Each one either holds (exit 4, hold: yes, always) or sits in the manifest's
-    # `enforcers.excluded` with a reason, and never both. A new file fails here until classified.
-    enforcer_manifest = JSON.parse(File.read(DEFAULT_MANIFEST))
-    enf = enforcer_manifest["enforcers"]
-    excluded = enf.is_a?(Hash) && enf["excluded"].is_a?(Hash) ? enf["excluded"] : nil
-    check.call("policy: the manifest declares enforcers.excluded, the classified non-enforcers of the merge and push bar",
-               !excluded.nil?,
-               "enforcers=#{enf.inspect}. Fix: add an `enforcers` object with an `excluded` map {path: reason} to ai/blast-radius/surfaces.json.")
-    excluded ||= {}
-    registry = JSON.parse(File.read(File.join(repo_root, "ai/hooks/registry.json")))
-    candidates = (registry.fetch("hooks", []) + registry.fetch("retired", [])).map { |h| h["script"] }.compact
-    candidates += IO.popen(["git", "-C", repo_root, "ls-files", "ai/agent-bin", "ai/agent-env", "ai/git-hooks"], &:read).split("\n")
-    candidates += IO.popen(["git", "-C", repo_root, "ls-files", "ai/lib", "ai/bin", "scripts/wt-lib", "ai/skills"], &:read).split("\n")
-                    .select { |f| !f.start_with?("ai/skills/") || f.match?(%r{\Aai/skills/[^/]+/(scripts|bin)/[^/]+\z}) }
-                    .select { |f| File.basename(f).match?(/forge|merge|receipt|seal|agent|push/i) }
-    held_policy = enforcer_manifest["surfaces"].select { |s| s["class"] == "owner-approval-policy" && s["hold"] == "always" && s["content"].nil? }
-                                               .flat_map { |s| s["patterns"] }
-    held_files = held_policy.reject { |pat| pat.include?("*") }.select { |f| File.file?(File.join(repo_root, f)) }
-    held_files.each do |f|
-      File.readlines(File.join(repo_root, f)).each do |line|
-        next if line.lstrip.start_with?("#")
-        if line.match?(/\$\(dirname|BASH_SOURCE|__dir__|%\/\*\}/)
-          line.scan(%r{(?:/lib/|\)/)([A-Za-z0-9_.-]+\.(?:sh|rb|awk))}) do |(name)|
-            lib = "ai/lib/#{name}"
-            candidates << lib if File.file?(File.join(repo_root, lib))
-          end
-        end
-        # DND-1905: a config file a held enforcer (the merge guard's red-main content declaration) reads its bar
-        # from is a candidate, so loosening it cannot read COLD. Only the LITERAL forms ai/config/X.json and
-        # ../config/X.json are read, on CODE lines only (a comment line is skipped above; File.file? bounds it).
-        line.scan(%r{(?:ai/|\.\./)config/([A-Za-z0-9_.-]+\.json)}) do |(name)|
-          cfg = "ai/config/#{name}"
-          candidates << cfg if File.file?(File.join(repo_root, cfg))
-        end
-        line.scan(/require_relative\s+["']([^"']+)["']/) do |(rel)|
-          rel = "#{rel}.rb" unless rel.end_with?(".rb")
-          lib = File.expand_path(rel, File.join(repo_root, File.dirname(f))).delete_prefix("#{repo_root}/")
-          candidates << lib if File.file?(File.join(repo_root, lib))
-        end
-      end
-    end
-    # DND-1895: the merge gate the target DECLARES is a candidate whatever its path, so a renamed gate
-    # cannot fall out of the walk. integration-gate resolves it from IR_DECLARED_GATES in
-    # ai/lib/integration-receipt.sh (held), so the walk reads the same list.
-    declared_gates = lambda do |text|
-      text.scan(/^IR_DECLARED_GATES=\(([^)]*)\)/).flat_map { |(body)| body.split }
-    end
-    gate_list = declared_gates.call(File.read(File.join(repo_root, "ai/lib/integration-receipt.sh")))
-    check.call("policy: the declared-gate list is read from integration-receipt.sh (an unreadable list would pass for nothing)",
-               !gate_list.empty? && gate_list.include?("ai/bin/harness-gate"),
-               "gate_list=#{gate_list.inspect}. Fix: IR_DECLARED_GATES in ai/lib/integration-receipt.sh changed shape; repair the declared-gate read in the enforcer walk of ai/bin/blast-radius --self-test, never drop it.")
-    check.call("policy: the declared-gate read finds a renamed gate",
-               declared_gates.call("x=1\nIR_DECLARED_GATES=( bin/prep-commit.sh ai/tools/renamed-gate )\n") == %w[bin/prep-commit.sh ai/tools/renamed-gate],
-               "Fix: the declared-gate read in the enforcer walk no longer parses IR_DECLARED_GATES; repair it.")
-    candidates += gate_list.select { |g| File.file?(File.join(repo_root, g)) }
-    candidates = candidates.reject { |f| f.include?("/test/") || f.end_with?(".md") }.uniq.sort
-    anchors = %w[ai/bin/harness-gate ai/hooks/forge-identity-guard.sh ai/hooks/merge-role-guard.sh ai/agent-bin/git ai/lib/forge-git-passthrough.sh
-                 ai/bin/receipt-seal ai/lib/gh-outbound-scan.sh ai/config/main-content-checks.json]
-    check.call("policy: the enforcer walk finds the known enforcers (an empty walk would pass for nothing)",
-               (anchors - candidates).empty?,
-               "missing=#{(anchors - candidates).inspect} candidates=#{candidates.inspect}. Fix: the enforcer walk in ai/bin/blast-radius --self-test no longer sees a known enforcer; repair the walk, never shrink it.")
-    excluded.each do |path, reason|
-      check.call("policy: enforcers.excluded #{path} is a current candidate with a reason",
-                 candidates.include?(path) && reason.is_a?(String) && !reason.strip.empty?,
-                 "reason=#{reason.inspect}. Fix: a stale or unreasoned exclusion in ai/blast-radius/surfaces.json enforcers.excluded; give it a reason, or remove it if the file is gone.")
-      check.call("policy: enforcers.excluded #{path} is not also held (one classification per file)",
-                 held_policy.none? { |pat| match?(pat, path) },
-                 "Fix: #{path} is both held and excluded in ai/blast-radius/surfaces.json; it holds, so drop it from enforcers.excluded (never drop the hold).")
-    end
-    (candidates - excluded.keys).each do |path|
-      dd = File.join(tmp, "policy-enforcer-#{path.tr('/.:', '___')}")
-      bb, hh = mkrepo.call(dd) { |r| FileUtils.mkdir_p(File.dirname(File.join(r, path))); File.write(File.join(r, path), "x\n") }
-      out, _, code = run_br.call(["--base", bb, "--head", hh, "--repo", dd] + real)
-      check.call("policy: enforcer candidate #{path} is held (exit 4)",
-                 code == 4 && out.include?("[owner-approval-policy]") && out.include?("hold: yes, always"),
-                 "exit=#{code} out=#{out}. Fix: if #{path} decides whether a merge or push is accepted, or as whom, add it to the owner-approval-policy patterns in ai/blast-radius/surfaces.json and name it in athena:merge-boarding; if it does not, add it to enforcers.excluded there with the reason.")
-    end
+    # The held set is exactly the approval policy (owner decision, 2026-10-05). Widening it is an
+    # approval-rule change (item 6) that only the owner's words make; the manifest and this file are
+    # themselves held, so a widening exits 4 for the owner's record. This pin makes the change visible
+    # here too: a pattern added or dropped fails until this list is edited in the same held diff.
+    want_held = %w[**/athena/owner_approvals/action_class.ex **/athena/owner_approvals/action_class_test.exs
+                   ai/blast-radius/** ai/bin/blast-radius ai/lib/owner_click.rb ai/lib/owner_message.rb ai/lib/owner_turn.rb
+                   ai/lib/private_overlay_resolver.rb ai/lib/private_overlay.rb]
+    held_paths = JSON.parse(File.read(DEFAULT_MANIFEST))["surfaces"]
+                     .select { |sf| sf["class"] == "owner-approval-policy" && sf["content"].nil? }.flat_map { |sf| sf["patterns"] }
+    check.call("policy: the path-held owner-approval-policy patterns are exactly the approval policy set",
+               held_paths.sort == want_held.sort,
+               "added=#{(held_paths - want_held).inspect} dropped=#{(want_held - held_paths).inspect}. Fix: the held set changes only on the owner's own words (~/.claude/CLAUDE.md -> Owner approval policy -> What still holds mechanically); revert the manifest change, or, with the owner's record, edit want_held here in the same diff.")
     # the approval table: only its SECTION holds
     claude = lambda do |extra_policy, extra_other, dup: false|
       "# Top\n\n## Shipping\n\nship it#{extra_other}\n\n## Owner approval policy\n\n| 1 | destroy |#{extra_policy}\n\n" \

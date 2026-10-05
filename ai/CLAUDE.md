@@ -289,10 +289,50 @@ makes reasonable changes to the system." Only sudo, password and console steps
 remain Cody's.
 
 **What still holds mechanically.** `integration-gate` exit 4 (`blast-radius`)
-fires where a diff shows a destructive migration, forge settings files, a
-check's suppression list, this section, or the classifier itself. Terraform
-that merging applies holds, whatever the plan, until DND-998 can tell a
-destroy or a cost change from a harmless update. Only Cody's verified
+fires for exactly these, and nothing else:
+
+- a destructive migration, under merge-time automation;
+- terraform that merging applies (see the end of this list);
+- forge settings files (`.github/settings.yml`, `CODEOWNERS`);
+- a check's suppression list;
+- this section, and the *Owner approval grants* section of
+  `ai/contracts/athena-events.md`;
+- the owner approval grant allowlist (`action_class.ex` and its test);
+- `blast-radius` and its manifest, `ai/blast-radius/surfaces.json`;
+- the owner verifiers (`ai/lib/owner_turn.rb`, `ai/lib/owner_click.rb`) and
+  what they load to tell Cody's identity (`ai/lib/private_overlay_resolver.rb`,
+  `ai/lib/private_overlay.rb`).
+
+Terraform that merging applies holds, whatever the plan, until DND-998 can
+tell a destroy or a cost change from a harmless update.
+
+- **Merge and push tooling ships on the normal bar**: tests, a critic PASS,
+  green CI. That is `integration-gate`, `gh-athena`, `glab-athena`,
+  `locked-merge`, the merge and push guards, the forge identity and auth
+  guards, the agent PATH wrappers, `main-health`, `critic-review`,
+  `harness-gate`, and what they load. A new tool needs no manifest entry.
+- **A diff that weakens a check is still item 5**, wherever it lives. The
+  critic judges that from the diff, not by path.
+- **A deploy-automation hit is report-only** (`hold: no`). It is never an
+  ask.
+- **Widening this list is an approval-rule change (item 6).** Only Cody's own
+  words widen it. The manifest is on the list, so a diff that widens it
+  exits 4.
+
+**Later (2026-10-05):** the list read "a destructive migration, forge
+settings files, a check's suppression list, this section, or the classifier
+itself", and the manifest had grown, through DND-1807, DND-1873, DND-1888,
+DND-1892, DND-1895, DND-1905 and DND-1936, to hold the whole merge and push
+chain, which Cody never decided. So every GitLab-migration PR needed a Cody
+click. Superseded by owner decision, Cody, coordinator terminal, 2026-10-05,
+session `0cc59a5e-6c65-495e-a216-83c6a0bf2d56`, message
+`051d0ae2-784b-4e77-8028-b7bda3253b77` (08:08:02Z): "Please have a shipwright
+update those things causing confusion so we can consistently make progress."
+It answers message `31bcf5d3-130f-422b-a14a-c3e2bf687350` (08:06:25Z):
+"which rules and guidances do we need to update so this confusion doesn't
+happen in the future?"
+
+Only Cody's verified
 decision clears exit 4: Cody's words in a terminal turn; Cody's click on
 the decision DM that names the PR and head, or an earlier head of that PR
 whose own diff is byte-identical; or Cody's own Slack message naming the PR
@@ -382,6 +422,15 @@ as amended below it:
   **Later (2026-09-28, ~07:15Z):** this read "Ask for a table item; hold only
   that item." Superseded by the owner decision above: items 1–4 and 7 are
   judgement calls, not asks.
+- **Read the hit classes before you ask.** Cody, coordinator terminal,
+  2026-10-05 08:12:05Z (session `0cc59a5e-6c65-495e-a216-83c6a0bf2d56`,
+  message `8a50dd43-d7f1-401e-8841-9d5719c3046a`): "Do not ask me for
+  approval on the things my policy does not require." Before an exit-4 ask,
+  read each hit's class in the `blast-radius` output. Ask only for a hit
+  that *What still holds mechanically* names. A hit it does not name, or a
+  `hold: no` line, is never an ask. An ask rehydrates Cody's context
+  (`athena:slack` → *Asking the owner for a decision* → *An approval ask
+  rehydrates Cody's context*).
 - **Approval is Cody's own words in a terminal turn**, recorded where a tool
   can verify them (`integration-gate --help` → `--owner-approval`); **or
   Cody's click on the decision DM** that passes the four checks in

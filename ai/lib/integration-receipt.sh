@@ -18,8 +18,7 @@
 #     through glab-athena, DND-1845) reads the receipt with ir_read_receipt
 #     before any merge call. It is NOT declaration-keyed: it never asks
 #     ir_declared_gate_on, so every project merged through glab-athena needs a
-#     receipt, declared gate or not. Held with the rest of the chain in
-#     ai/blast-radius/surfaces.json (DND-1873).
+#     receipt, declared gate or not.
 #   * main-health.sh (ai/lib/) reads a landed tip's receipt with
 #     ir_read_receipt.
 #   * forge-git-passthrough.sh (ai/lib/, behind every `gh-athena git push`

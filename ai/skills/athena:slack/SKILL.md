@@ -463,6 +463,28 @@ options that names the recommendation, e.g. `Your call (Yes)`. Give it the
 recommended option's `value` and its own `action_id`, so the relay can say the
 owner deferred. See the worked example in `athena:slack:interactive-messages`.
 
+**An approval ask rehydrates Cody's context.** Cody, verbatim (2026-10-05
+08:14:41Z, coordinator terminal, session
+`0cc59a5e-6c65-495e-a216-83c6a0bf2d56`, message
+`db1226e9-4269-4ecc-9201-2046cb2b38b1`): *"Assume my attention is elsewhere
+at the time of reading, so I need you to help rehydrate my mental context
+(that's a universaal rule when asking for approvals for something via
+slack)"*. Every approval ask carries, in its visible text:
+
+1. **Where we are**: the larger goal this change serves.
+2. **The problem**, in plain words.
+3. **Why it needs Cody**: the exact policy clause the change hits. For an
+   exit 4, that is the `blast-radius` hit class and the item of
+   `~/.claude/CLAUDE.md` → *Owner approval policy* → *What still holds
+   mechanically* it falls under. No such clause means no ask.
+4. **What approving does, and what declining does.**
+5. **The checks and the head**: tests, the critic verdict, CI, and the full
+   head SHA.
+6. **A recommendation**, and why.
+
+One ask per message: one approve and one decline button, plus the *your
+call* button above. Never put two PRs' buttons in one message.
+
 **Discussion queue: one message, edited in place.** Cody, verbatim
 (2026-10-02, in a Slack thread, relayed by the walt_ui session): *"When running a discussion queue
 over slack, please favor editing the discussion queue message over creating
