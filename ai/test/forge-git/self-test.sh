@@ -47,6 +47,11 @@ trap 'rm -rf -- "${TMP}"' EXIT
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid
 export ATHENA_SECRETS_ROOT="${TMP}/secrets"
+# The gitlab.com fixtures use a synthetic namespace, keyed in a fixture
+# identity map (DND-1936), so no fixture names a real namespace and a
+# wrapper that resolved the bot would find one.
+export ATHENA_FORGE_IDENTITIES_FILE="${TMP}/forge-identities.json"
+printf '{"kind":"athena-forge-identities","schema":1,"identities":[{"host":"gitlab.com","namespace":"synth-group","bot":"synthetic-agent-bot","token_file":"%s/glab-token","refresh":"group_service_account"}]}\n' "${TMP}" > "${ATHENA_FORGE_IDENTITIES_FILE}"
 
 REAL_GIT="$(command -v git)"
 
@@ -221,9 +226,9 @@ i=0
 for case in \
   "git@github.com:CJPoll/custom.git|gh-athena" \
   "https://github.com/CJPoll/custom.git|gh-athena" \
-  "git@gitlab.com:cjpoll/custom.git|glab-athena" \
-  "https://gitlab.com/cjpoll/custom.git|glab-athena" \
-  "git@GitLab.com:cjpoll/custom.git|glab-athena"; do
+  "git@gitlab.com:synth-group/synth-repo.git|glab-athena" \
+  "https://gitlab.com/synth-group/synth-repo.git|glab-athena" \
+  "git@GitLab.com:synth-group/synth-repo.git|glab-athena"; do
   i=$((i + 1)); url="${case%%|*}"; want="${case##*|}"
   r="${TMP}/push-${i}"; mkrepo "${r}" "${url}"; reset_logs
   STUB_RC=0 PATH="${TRIP}:${FSG_DIR}:${PATH}" "${FP}" -C "${r}" origin HEAD:main >/dev/null 2>&1; rc=$?
@@ -235,7 +240,7 @@ for case in \
   fi
 done
 
-r="${TMP}/push-fail"; mkrepo "${r}" "git@gitlab.com:cjpoll/custom.git"; reset_logs
+r="${TMP}/push-fail"; mkrepo "${r}" "git@gitlab.com:synth-group/synth-repo.git"; reset_logs
 STUB_RC=3 "${FP}" -C "${r}" origin HEAD:main >/dev/null 2>&1; rc=$?
 [ "${rc}" = 3 ] && [ "$(wc -l < "${TMP}/routed.log")" = 1 ] \
   && ok "push: a wrapper refusal (exit 3: RED MAIN, NO RECEIPT, ...) is returned as is, with no fallback attempt" \
@@ -243,7 +248,7 @@ STUB_RC=3 "${FP}" -C "${r}" origin HEAD:main >/dev/null 2>&1; rc=$?
 
 pbare="${TMP}/push-bare.git"; git init -q --bare "${pbare}"
 j=0
-for url in "ssh://git@github.com/CJPoll/custom.git" "ssh://git@gitlab.com/cjpoll/custom.git" "git@gitlab.com-work:cjpoll/custom.git" \
+for url in "ssh://git@github.com/CJPoll/custom.git" "ssh://git@gitlab.com/synth-group/synth-repo.git" "git@gitlab.com-work:synth-group/synth-repo.git" \
            "gh:CJPoll/custom.git" "git@example.com:o/r.git" "https://example.com/o/r.git" "${pbare}" "file://${pbare}"; do
   j=$((j + 1)); r="${TMP}/push-refuse-${j}"; mkrepo "${r}" "${url}"; reset_logs
   err="$(STUB_RC=0 PATH="${TRIP}:${FSG_DIR}:${PATH}" "${FP}" -C "${r}" origin HEAD:main 2>&1 >/dev/null)"; rc=$?
@@ -254,7 +259,7 @@ for url in "ssh://git@github.com/CJPoll/custom.git" "ssh://git@gitlab.com/cjpoll
   fi
 done
 
-r="${TMP}/push-keys"; mkrepo "${r}" "git@gitlab.com:cjpoll/custom.git"
+r="${TMP}/push-keys"; mkrepo "${r}" "git@gitlab.com:synth-group/synth-repo.git"
 expect64p() { # expect64p <label> <args...>
   local label="$1"; shift; reset_logs
   err="$(STUB_RC=0 PATH="${TRIP}:${FSG_DIR}:${PATH}" "${FP}" "$@" 2>&1 >/dev/null)"; rc=$?
@@ -277,7 +282,7 @@ expect64p "a word that is neither a remote nor a URL is refused" -C "${r}" nosuc
 # takes the next word, bundled (-fo <v>) or abbreviated (--e <v>, --push-opt
 # <v>), so the routed remote is the one git pushes to. A github remote named
 # beside a gitlab origin must route to gh-athena, never by the value word.
-r="${TMP}/push-grammar"; mkrepo "${r}" "git@gitlab.com:cjpoll/custom.git"
+r="${TMP}/push-grammar"; mkrepo "${r}" "git@gitlab.com:synth-group/synth-repo.git"
 git -C "${r}" remote add github "git@github.com:CJPoll/custom.git"
 for args in "-o origin github HEAD:main" "-fo origin github HEAD:main" "-vfoorigin github HEAD:main" \
             "--push-opt origin github HEAD:main" "--e origin github HEAD:main" "-- github HEAD:main"; do
@@ -292,8 +297,8 @@ done
 # A URL literal is routed after git's pushInsteadOf rewrite: a gitlab.com
 # word that pushInsteadOf sends to github.com routes to gh-athena.
 git -C "${r}" config url.git@github.com:.pushInsteadOf git@gitlab.com:
-reset_logs; STUB_RC=0 "${FP}" -C "${r}" git@gitlab.com:cjpoll/custom.git HEAD:main >/dev/null 2>&1
-[ "$(cat "${TMP}/routed.log")" = "gh-athena git -C ${r} push git@gitlab.com:cjpoll/custom.git HEAD:main" ] \
+reset_logs; STUB_RC=0 "${FP}" -C "${r}" git@gitlab.com:synth-group/synth-repo.git HEAD:main >/dev/null 2>&1
+[ "$(cat "${TMP}/routed.log")" = "gh-athena git -C ${r} push git@gitlab.com:synth-group/synth-repo.git HEAD:main" ] \
   && ok "push: a URL word routes by its pushInsteadOf rewrite (what git pushes to)" \
   || bad "push: pushInsteadOf URL word" "routed=[$(cat "${TMP}/routed.log")]"
 git -C "${r}" config --unset url.git@github.com:.pushInsteadOf
@@ -312,7 +317,7 @@ reset_logs; err="$(STUB_RC=0 FORGE_PUSH_FORGE_GIT="${TMP}/fg-broken" "${FP}" -C 
   || bad "push: broken forge-git" "rc=${rc} routed=[$(cat "${TMP}/routed.log")] err=${err}"
 
 r="${TMP}/push-url"; mkrepo "${r}" "git@github.com:CJPoll/custom.git"
-git -C "${r}" remote set-url --push origin "git@gitlab.com:cjpoll/custom.git"
+git -C "${r}" remote set-url --push origin "git@gitlab.com:synth-group/synth-repo.git"
 reset_logs; STUB_RC=0 "${FP}" -C "${r}" origin HEAD:main >/dev/null 2>&1
 [ "$(cat "${TMP}/routed.log")" = "glab-athena git -C ${r} push origin HEAD:main" ] \
   && ok "push: a pushurl override routes by the URL the push really reaches (gitlab pushurl on a github url)" \
@@ -323,7 +328,7 @@ reset_logs; err="$(STUB_RC=0 "${FP}" -C "${r}" origin HEAD:main 2>&1 >/dev/null)
   && ok "push: push URLs on two forges are refused (exit 3, Fix:), nothing pushed" \
   || bad "push: two forges" "rc=${rc} routed=[$(cat "${TMP}/routed.log")] err=${err}"
 
-r="${TMP}/push-two"; mkrepo "${r}" "git@gitlab.com:cjpoll/custom.git"
+r="${TMP}/push-two"; mkrepo "${r}" "git@gitlab.com:synth-group/synth-repo.git"
 git -C "${r}" remote add github "git@github.com:CJPoll/custom.git"
 reset_logs; STUB_RC=0 "${FP}" -C "${r}" github HEAD:main >/dev/null 2>&1
 [ "$(cat "${TMP}/routed.log")" = "gh-athena git -C ${r} push github HEAD:main" ] \
@@ -360,7 +365,7 @@ reset_logs; STUB_RC=0 FORGE_PUSH_FORGE_GIT="${TMP}/fg-glab" "${FP}" -C "${r}" or
 [ "$(cat "${TMP}/routed.log")" = "glab-athena git -C ${r} push origin HEAD:main" ] \
   && ok "push: the route is forge-git's (--route), not a second table in forge-push" \
   || bad "push: one table" "routed=[$(cat "${TMP}/routed.log")]"
-for u in "git@github.com:a/b.git" "https://gitlab.com/a/b.git" "/a/local/path"; do
+for u in "git@github.com:a/b.git" "https://gitlab.com/synth-group/b.git" "/a/local/path"; do
   got="$("${FG}" --route "${u}" 2>/dev/null)"; rc=$?
   case "${u}" in git@github.com:*) w=gh-athena ;; https://gitlab.com/*) w=glab-athena ;; *) w=local ;; esac
   [ "${rc}" = 0 ] && [ "${got}" = "${w}" ] && ok "forge-git --route ${u} -> ${w}" || bad "forge-git --route ${u}" "rc=${rc} got=${got}"
@@ -413,7 +418,7 @@ expect_routed "wt merge's pull, under WT_AGENT_PUSH=1, goes through forge-git" \
 
 # The push class (DND-1995): each unattended push, against a github.com and a
 # gitlab.com origin, reaches the matching wrapper through forge-push.
-FXL="${TMP}/fxl"; mkrepo "${FXL}" "git@gitlab.com:example/widgets.git"
+FXL="${TMP}/fxl"; mkrepo "${FXL}" "git@gitlab.com:synth-group/synth-repo.git"
 for pair in "${FX}|gh-athena" "${FXL}|glab-athena"; do
   fx="${pair%%|*}"; w="${pair##*|}"
   expect_routed "landing / lane sync-up (forge-push -C <lane> origin HEAD:main) pushes through ${w}" \
