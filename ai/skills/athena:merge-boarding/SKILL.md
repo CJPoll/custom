@@ -719,11 +719,12 @@ each merge; that's the point of the parallel merges." A head behind the target
 with no textual conflict is gated on its own base, and its receipt's base is
 `merge-base(head, origin/main)`, which every receipt reader accepts. A textual
 conflict is exit 2, naming each path. `--rebase` stays for a deliberate rebase
-only. Design: `ai/docs/parallel-merge-deploy-latest.md` → *D7*. Where this
-section says "contains", read "merges cleanly into".
+only. Design: `ai/docs/parallel-merge-deploy-latest.md` → *D7*.
 
-Exit 0 means: your HEAD contains current `origin/main`, **and** the local gate
-is green on that integrated head. It prints `INTEGRATION OK <sha> (GATE: <cmd>
+Exit 0 means: your HEAD merges into current `origin/main` with no textual
+conflict, **and** the local gate is green on HEAD as it stands. A head that
+contains `origin/main` is gated on it; a head behind it is gated on its own
+base, `merge-base(HEAD, origin/main)`, with no rebase. It prints `INTEGRATION OK <sha> (GATE: <cmd>
 -- <source>)` — merge *that* SHA, and copy the line whole so the record says
 which gate ran (the same SHA-match discipline as the merge bar's "confirm the head
 you are landing is the one the report names"). On GitHub, `locked-merge` merges
@@ -733,8 +734,9 @@ exit tells you what to do next. Without `--rebase` it never rebases or touches
 the working tree or a ref; with it, it rebases only a clean branch and refuses
 on a conflict (below). Its one other write is its **receipt**: on exit 0,
 and only then, it records the pass at
-`<git common dir>/integration-receipts/<head-sha>.json` (head, the target SHA it
-contained, gate and source, any override or owner approval, blast radius, the OK
+`<git common dir>/integration-receipts/<head-sha>.json` (head, the base it was
+gated on: the target SHA when HEAD contains it, else `merge-base(HEAD,
+target)`; gate and source, any override or owner approval, blast radius, the OK
 line, UTC time), sealed (DND-1814): the producer (the git blobs of the gate
 files that wrote it) and an HMAC under this machine's receipt-seal key, added by
 `ai/bin/receipt-seal`. Every other exit removes the receipt for that head, and a
@@ -765,10 +767,9 @@ branch inside the test slot and refuses on a conflict (see *`--rebase`* below).
 `integration-gate` takes a slot of
 the main checkout's `ai/bin/test-slot`
 (`~/dev/custom`, found from the script's own git common dir, so a worktree copy
-never sets the budget) before it fetches. The fetch, the containment check, `--rebase`,
-the gate and the verdict all run inside that slot, so "HEAD contains
-`origin/main`" is judged when the gate starts, never before the queue wait. The
-bar is unchanged; only when it is read moved. You do nothing extra. A
+never sets the budget) before it fetches. The fetch, the conflict check, `--rebase`,
+the gate and the verdict all run inside that slot, so HEAD is judged against
+`origin/main` as it is when the gate starts, never before the queue wait. You do nothing extra. A
 `test-slot: WAITING` line is a queue, not a stall. **Exit 6 means GATE NOT RUN**: no slot freed within the wait window (or
 test-slot left no outcome). Nothing was checked, so it is neither OK nor RED.
 Re-run `integration-gate`; never merge on it. A `--with-critic` judge is still
@@ -817,8 +818,8 @@ pre-rebase branch point. It refuses a main checkout and a detached HEAD. After
 a clean rebase the branch stays rebased whatever the gate or judge then say
 (the old head is `ORIG_HEAD`). Push a rebased captain branch as Athena
 (`athena:github` → *Pushing as Athena*) before landing it. Without `--rebase`,
-a head that does not contain the target read inside the slot is refused
-exactly as before, and the `Fix:` offers `--rebase`.
+a head that does not contain the target read inside the slot is gated on its
+own base (DND-2076), and only a textual conflict is refused.
 
 **Later (2026-09-28, DND-1064):** the gate read `origin/main` and judged
 containment before its test-slot wait. A captain that wrapped it in test-slot

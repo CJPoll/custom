@@ -392,7 +392,7 @@ ARG_SINCE="$SINCE"
 # from its EXIT trap, so its at/duration cover the whole invocation (slot wait
 # included) and its exit code is the caller's. The run inside the slot knows
 # what the outer cannot: the head it judged (after a --rebase, the rebased
-# head), the target SHA it contained and whether it rebased. It appends those
+# head), the base it gated on (DND-2076) and whether it rebased. It appends those
 # to a facts file in the outer run's private temp dir (INTEGRATION_GATE_FACTS);
 # a fact it never reached stays unknown, and the event omits it (null, never a
 # guess). Contract: ai/contracts/athena-telemetry.md. Fails open: the emit runs
