@@ -132,9 +132,26 @@ case "${REG_MATCH}" in
          || bad "registry matcher covers ${t}" "matcher '${REG_MATCH}' does not match ${P}${t}"
      done
      ok "registry matcher '${REG_MATCH}' is checked against every plugin tool"
-     for t in mcp__athena__slack_post Bash mcp__notion-personal__API-post-page; do
-       echo "${t}" | "${RUBY_BIN}" -e 'm = ARGV[0]; t = STDIN.read.strip; exit(Regexp.new("\\A(?:#{m})\\z").match?(t) ? 1 : 0)' "${REG_MATCH}" \
-         && ok "registry matcher leaves ${t} alone" || bad "registry matcher leaves ${t} alone" "it matches"
+     # The matcher and the guard's SCOPE must agree on every name, whether
+     # Claude Code anchors the matcher or not.
+     # Each name is <expected scope>=<tool name>.
+     for e in false=mcp__athena__slack_post false=mcp__athena__slack_react false=Bash \
+              false=mcp__notion-personal__API-post-page false=mcp__claude_ai_Gmail__send_message \
+              true=mcp__plugin_slack_slack__slack_send_message true=mcp__plugin_slack-by-salesforce_slack__slack_send_message \
+              true=mcp__slack__slack_send_message true=mcp__slack-work__x true=mcp__claude_ai_Slack__slack_send_message \
+              true=mcp__claude_ai_SLACK__slack_send_message; do
+       want="${e%%=*}"; t="${e#*=}"
+       V=$(echo "${t}" | "${RUBY_BIN}" -e '
+         require File.join(ARGV[1], "lib", "slack_plugin_write")
+         m = ARGV[0]; t = STDIN.read.strip
+         a = Regexp.new("\\A(?:#{m})\\z").match?(t); u = Regexp.new(m).match?(t)
+         s = !SlackPluginWrite.server_tool(t).nil?
+         print(a == s && u == s ? "agree:#{s}" : "disagree anchored=#{a} unanchored=#{u} scope=#{s}")' "${REG_MATCH}" "${SRC_AI}" 2>&1)
+       case "${V}" in
+         "agree:${want}") ok "matcher and SCOPE agree on ${t} (in scope: ${want})" ;;
+         agree:*) bad "matcher and SCOPE agree on ${t}" "both say in scope ${V#agree:}, expected ${want}" ;;
+         *) bad "matcher and SCOPE agree on ${t}" "${V}" ;;
+       esac
      done ;;
 esac
 
@@ -153,6 +170,10 @@ expect_deny  "subagent of a headless session: canvas write denied" headless "$(p
 expect_allow "headless top-level: read allowed" headless "$(payload top "${P}slack_read_channel")"
 EMPTY_ID=$(jq -nc --arg t "${P}slack_send_message" '{tool_name:$t,tool_input:{},agent_id:"",agent_type:"general-purpose"}')
 expect_deny  "empty agent_id with an agent_type: denied" cli "${EMPTY_ID}"
+EMPTY_BOTH=$(jq -nc --arg t "${P}slack_send_message" '{tool_name:$t,tool_input:{},agent_id:"",agent_type:""}')
+expect_deny  "empty agent_id and agent_type (the key is there): denied" cli "${EMPTY_BOTH}"
+NULL_ID=$(jq -nc --arg t "${P}slack_send_message" '{tool_name:$t,tool_input:{},agent_id:null}')
+expect_deny  "null agent_id (the key is there): denied" cli "${NULL_ID}"
 
 # --- Fail closed: tools the read list does not name ----------------------
 expect_deny "future tool slack_delete_message: denied" cli "$(payload sub "${P}slack_delete_message")"
@@ -160,6 +181,9 @@ expect_deny "future tool slack_read_new_thing (not listed): denied" cli "$(paylo
 expect_deny "the same Slack server through another plugin: denied" cli "$(payload sub "mcp__plugin_slack-by-salesforce_slack__slack_send_message")"
 expect_allow "the same server's read through another plugin: allowed" cli "$(payload sub "mcp__plugin_slack-by-salesforce_slack__slack_read_thread")"
 expect_deny "a claude.ai Slack connector write: denied" cli "$(payload sub "mcp__claude_ai_Slack__slack_send_message")"
+expect_deny "a user server named slack: denied" cli "$(payload sub "mcp__slack__slack_send_message")"
+expect_deny "a user server named slack-work: denied" cli "$(payload sub "mcp__slack-work__slack_send_message")"
+expect_deny "an upper-case claude.ai SLACK connector: denied" cli "$(payload sub "mcp__claude_ai_SLACK__slack_send_message")"
 expect_allow "out of scope: mcp__athena__slack_post allowed" cli "$(payload sub "mcp__athena__slack_post")"
 expect_allow "out of scope: Bash allowed" cli "$(payload sub Bash)"
 
@@ -175,8 +199,10 @@ mkdir -p "${NORUBY}"
 for c in cat dirname realpath date mkdir printf; do
   p=$(command -v "${c}" 2>/dev/null) && [ -n "${p}" ] && [ "${p#/}" != "${p}" ] && ln -sf "${p}" "${NORUBY}/${c}"
 done
-OUT=$(payload sub "${P}slack_read_channel" | PATH="${NORUBY}" "$(command -v bash)" "${HOOK}" 2>/dev/null); RC=$?
-if denied && has_fix; then ok "no ruby on PATH: denied with Fix:"; else bad "no ruby on PATH" "rc=${RC} out=${OUT}"; fi
+for t in slack_read_channel slack_send_message; do
+  OUT=$(payload sub "${P}${t}" | PATH="${NORUBY}" "$(command -v bash)" "${HOOK}" 2>/dev/null); RC=$?
+  if denied && has_fix; then ok "no ruby on PATH: ${t} denied with Fix:"; else bad "no ruby on PATH: ${t}" "rc=${RC} out=${OUT}"; fi
+done
 
 # A checker that dies before printing: the shell answers with a deny.
 mkdir -p "${TMP}/badlib"

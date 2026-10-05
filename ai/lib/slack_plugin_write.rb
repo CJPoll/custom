@@ -14,11 +14,15 @@
 require_relative "merge_role"
 
 module SlackPluginWrite
-  # A tool on a Slack MCP server: the plugin's own (`mcp__plugin_slack_slack__`),
-  # the same server through another plugin (`mcp__plugin_<p>_slack__`), a
-  # user-configured server named slack, or a claude.ai Slack connector. The
-  # capture is the server's tool name.
-  SCOPE = /\Amcp__(?:plugin_.+_|claude_ai_)?slack__(.+)\z/i
+  # A tool on a Slack MCP server: any tool whose server segment (the text
+  # between `mcp__` and the next `__`) contains "slack" in any case. That is
+  # the plugin's own (`mcp__plugin_slack_slack__`), the same server through
+  # another plugin, a user server named slack or slack-work, and a claude.ai
+  # Slack connector. `mcp__athena__slack_post` is out: its server is athena.
+  # The registry matcher is the same regex, spelled case-insensitively
+  # (ai/hooks/registry.json), so the two agree on what reaches the hook.
+  # The second capture is the server's tool name.
+  SCOPE = /\Amcp__((?:[^_]|_(?!_))*slack(?:[^_]|_(?!_))*)__(.+)\z/i
 
   # The plugin's READ-ONLY tools, from the tool list Claude Code presented for
   # slack@claude-plugins-official 1.3.0 on 2026-10-05 (27 tools: these 14
@@ -46,9 +50,10 @@ module SlackPluginWrite
 
   FIX = "Fix: say it as Athena, never as Cody. Post, reply, react, update or upload through the athena MCP " \
         "(mcp__athena__slack_post, slack_update, slack_react, slack_upload, slack_open_dm) or the athena:slack " \
-        "skill's bin/ scripts (post, reply, react, dm, upload); both act as the Athena bot. Slack plugin READS " \
-        "(read_*, search_*, list_*, get_reactions) stay allowed. If this tool only reads and is new to the " \
-        "plugin, add it to READ_TOOLS in ai/lib/slack_plugin_write.rb; never add a tool that writes."
+        "skill's bin/ scripts (post, reply, react, dm, upload); both act as the Athena bot. The plugin's 14 " \
+        "listed reads (READ_TOOLS in ai/lib/slack_plugin_write.rb) stay allowed; a tool not listed is denied, " \
+        "even a read_* one. If this tool only reads and is new to the plugin, add it to READ_TOOLS; never add " \
+        "a tool that writes."
 
   module_function
 
@@ -56,21 +61,22 @@ module SlackPluginWrite
   # tool is not on a Slack MCP server (out of scope: allowed).
   def server_tool(tool_name)
     m = SCOPE.match(tool_name.to_s)
-    m && m[1]
+    m && m[2]
   end
 
   def read_only?(server_tool)
     READ_TOOLS.include?(server_tool.to_s)
   end
 
-  # attended_top_level?(agent_id, agent_type, mode) -> true only for a session
-  # with a person at it and no subagent running: MergeRole's top-level test
-  # AND its attended test (CLAUDE_CODE_ENTRYPOINT=cli and
-  # CLAUDE_CODE_SESSION_ATTENDED=1). A headless top-level session (`claude
-  # -p`, a cron runner) is not: nobody is there to own the words.
-  def attended_top_level?(agent_id, agent_type, mode)
-    MergeRole.top_level?(agent_id, agent_type, mode) &&
-      MergeRole.attended?(mode[:entrypoint], mode[:attended])
+  # attended_top_level?(payload, mode) -> true only for a session with a
+  # person at it and no subagent running: the payload has NO agent_id key at
+  # all (a subagent always sends one; an empty or null value is malformed, so
+  # it is denied, never read as top level), and MergeRole's attended test
+  # holds (CLAUDE_CODE_ENTRYPOINT=cli and CLAUDE_CODE_SESSION_ATTENDED=1). A
+  # headless top-level session (`claude -p`, a cron runner) is not attended:
+  # nobody is there to own the words.
+  def attended_top_level?(payload, mode)
+    !payload.key?("agent_id") && MergeRole.attended?(mode[:entrypoint], mode[:attended])
   end
 
   # decide(payload, mode) -> nil (allow) or {tool:, caller:, reason:} (deny).
@@ -87,8 +93,7 @@ module SlackPluginWrite
     st = server_tool(tool)
     return nil if st.nil? || read_only?(st)
 
-    agent_id = payload.key?("agent_id") ? payload["agent_id"] : nil
-    return nil if attended_top_level?(agent_id, payload["agent_type"], mode)
+    return nil if attended_top_level?(payload, mode)
 
     deny(tool, caller_label(payload),
          "#{tool} writes to Slack as the OWNER (the plugin uses Cody's OAuth user token), and " \

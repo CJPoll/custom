@@ -30,9 +30,12 @@ call — Slack restricts search to user tokens — so keyword search across the
 workspace stays a plugin job.
 
 `ai/hooks/slack-plugin-write-guard.sh` enforces this (DND-2043). It denies
-every plugin tool that is not a read (send, schedule, draft, react, canvas,
-list, conversation, upload) to every subagent and every session with no
-person at it. Only an attended top-level session may still write as Cody.
+every plugin tool but the 14 listed reads (send, schedule, draft, react,
+canvas, Slack List edits, conversation, upload) to every subagent, and to
+every session that Claude Code's mode variables do not mark as attended. An
+attended top-level session may still write as Cody. The hook header names
+what it cannot see, such as an interactive `claude` started in a terminal
+multiplexer.
 
 `bin/whoami` settles which identity a token actually is. Run it first when
 anything is confusing.

@@ -1178,18 +1178,19 @@ The canary reads usage under LC_ALL=C. After: `RESULT: 429 passed, 0 failed`.
   mutation applied to a scratch copy of `ai/` passed as `SPW_SRC` (never the
   worktree).
 - **Regression evidence:** the same suite with `SPW_SRC` set to `ai/` from
-  origin/main `58631601`: exit 1, 1 passed, 54 failed, first line
+  origin/main `58631601`: exit 1, 1 passed, 60 failed, first line
   `FAIL - registry: a PreToolUse row denies a subagent's
   mcp__plugin_slack_slack__slack_send_message: no registered PreToolUse hook
-  denied it (deniers: ''); the write is ALLOWED`. With the fix: 58 passed,
+  denied it (deniers: ''); the write is ALLOWED`. With the fix: 72 passed,
   0 failed.
 
 | id | Mutation | Observed failure |
 |---|---|---|
-| S-2043-1 | attended test `&&` becomes `\|\|` (top level alone allows) | every "subagent (attended parent): <write> denied" case, headless, half and no-mode cases |
+| S-2043-1 | attended test `&&` becomes `\|\|` (no agent_id key alone allows) | every "subagent (attended parent): <write> denied" case, headless, half and no-mode cases |
 | S-2043-2 | `slack_send_message` added to READ_TOOLS | registry case, "subagent: slack_send_message denied", the headless, half and no-mode send cases |
 | S-2043-3 | unparseable stdin parsed as `nil` instead of a fault | survives (equivalent: `decide` denies a payload that is not a Hash, with Fix:) |
 | S-2043-4 | the shell prints nothing when the checker exits non-zero | "checker exits before deciding" |
 | S-2043-5 | the guard's registry row deleted | "registry: a PreToolUse row denies ...", "registry: the guard has a PreToolUse row" |
-| S-2043-6 | scope narrowed to `mcp__plugin_slack_slack__` only | "the same Slack server through another plugin", "a claude.ai Slack connector write" |
+| S-2043-6 | SCOPE narrowed to `mcp__plugin_slack_slack__` only | "matcher and SCOPE agree on" each other Slack server, "the same Slack server through another plugin" |
 | S-2043-7 | the deny reason loses its Fix: | every deny case (a deny without Fix: fails `has_fix`) |
+| S-2043-8 | an empty or null agent_id read as no agent_id | "empty agent_id with an agent_type", "empty agent_id and agent_type", "null agent_id" |
