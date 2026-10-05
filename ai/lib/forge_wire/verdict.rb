@@ -11,7 +11,9 @@
 #
 # The order of judgement:
 #   1. a method override (an X-HTTP-Method-Override-style header, or a
-#      `_method` parameter in the query or a form body)  REFUSED, exit 3
+#      `_method` parameter anywhere Fields.param_values reads one: the
+#      query, a form, JSON or multipart body, a raw JSON body)
+#                                                         REFUSED, exit 3
 #   2. a body that does not parse                         REFUSED, exit 3
 #   3. a read                                             forwarded, unjudged
 #   4. a write to a host outside the forge's list         REFUSED, exit 3
@@ -120,9 +122,10 @@ module ForgeWire
     def override?(req, body)
       return true if OVERRIDE_HEADERS.any? { |h| req.header(h) }
 
-      pairs = Fields.form_pairs(req.query.to_s)
-      pairs += body.value if body.kind == :form
-      pairs.any? { |k, _| k == "_method" }
+      # Wherever a framework reads params from (Rack::MethodOverride reads the
+      # parsed POST body, urlencoded or multipart), the same reader as
+      # target_project_id: query, form, JSON, multipart, raw JSON.
+      !Fields.param_values(req, body, "_method").empty?
     end
 
     # The verdict for bytes Request.parse refused.

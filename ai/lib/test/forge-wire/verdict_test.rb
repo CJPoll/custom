@@ -200,6 +200,13 @@ end
 check("a _method parameter in a form body is a method override") do
   judge(wire("POST", "/repos/synth-owner/pub/issues", body: "_method=DELETE&title=x", type: "application/x-www-form-urlencoded")).state == :method_override
 end
+check("a _method part in a multipart body is a method override") do
+  mp = "--BND\r\nContent-Disposition: form-data; name=\"_method\"\r\n\r\nPUT\r\n--BND--\r\n"
+  judge(wire("POST", "/repos/synth-owner/pub/issues", body: mp, type: "multipart/form-data; boundary=BND")).state == :method_override
+end
+check("a _method key in a JSON body is a method override") do
+  judge(wire("POST", "/repos/synth-owner/pub/issues", body: JSON.generate({ _method: "PUT", title: "x" }))).state == :method_override
+end
 check("a GET to a GraphQL-looking path that is not the endpoint is not a read") do
   !judge(wire("GET", "/graphql/?query=mutation%7Bx%7D")).forward? &&
     !judge(wire("GET", "/api/graphql.json?query=mutation%7Bx%7D", host: GL_HOST), forge: :gitlab).forward?
