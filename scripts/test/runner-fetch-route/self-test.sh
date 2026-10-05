@@ -74,8 +74,8 @@ for runner in "${RUNNERS[@]}"; do
   for case in \
     "git@github.com:CJPoll/custom.git|gh-athena" \
     "https://github.com/CJPoll/custom.git|gh-athena" \
-    "git@gitlab.com:cjpoll/custom.git|glab-athena" \
-    "https://gitlab.com/cjpoll/custom.git|glab-athena"; do
+    "git@gitlab.com:athena-ai-harness/custom.git|glab-athena" \
+    "https://gitlab.com/athena-ai-harness/custom.git|glab-athena"; do
     i=$((i + 1))
     url="${case%%|*}"
     want="${case##*|}"
@@ -94,7 +94,7 @@ for runner in "${RUNNERS[@]}"; do
   # with exit 3 and a Fix, and neither a stub nor plain git (the owner's key)
   # is tried.
   j=0
-  for url in "ssh://git@github.com/CJPoll/custom.git" "ssh://git@gitlab.com/cjpoll/custom.git" "git@github.com-work:CJPoll/custom.git"; do
+  for url in "ssh://git@github.com/CJPoll/custom.git" "ssh://git@gitlab.com/athena-ai-harness/custom.git" "git@github.com-work:CJPoll/custom.git"; do
     j=$((j + 1))
     dir="${TMP}/${name}-refuse-${j}"
     make_checkout "${dir}" "${url}" 0

@@ -163,7 +163,7 @@ write_map
 R="$(ATHENA_FORGE_IDENTITIES_FILE= fid fid_resolve_url https://gitlab.com/athena-ai-harness/gen_saas.git)"
 expect M11 "the tracked map: athena-ai-harness/ -> athena-ai-harness-bot, its token file under HOME" 0 FOUND athena-ai-harness-bot "${HOME}/.claude/gitlab-personal-athena-token"
 R="$(ATHENA_FORGE_IDENTITIES_FILE= fid fid_resolve_url https://gitlab.com/cjpoll/custom.git)"
-expect M11b "the tracked map: cjpoll/ is PENDING (the group bot cannot write there), its reason and Fix: given" 4 PENDING "" "member of the athena-ai-harness group only"; neither_bot M11c "cjpoll/ is never handed the group bot"
+expect M11b "the tracked map: a stale cjpoll/ remote is PENDING, its reason naming the moved path (DND-1947) and Fix: given" 4 PENDING "" "git remote set-url origin git@gitlab.com:athena-ai-harness/<project>.git"; neither_bot M11c "cjpoll/ is never handed the group bot"
 R="$(ATHENA_FORGE_IDENTITIES_FILE= fid fid_resolve_url https://gitlab.com/Athena-AI-Harness/gen_saas.git)"
 expect M11d "the tracked map: a case variant of athena-ai-harness -> NO ENTRY naming the canonical path, not the bot" 1 "NO ENTRY" "" "canonical path 'athena-ai-harness'"
 

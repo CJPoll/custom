@@ -29,9 +29,10 @@ reads as a project must name that same namespace, or the call is refused: a
 positional MR or issue URL, `mr create -H/--head`, `-g/--group`, and a `repo`
 command's repository. One call acts on one namespace. The map is
 `ai/config/forge-identities.json` (the personal entries) plus the private
-overlay's `gitlab` `.identities` (work entries). `cjpoll/` has no bot:
-`athena-ai-harness-bot` is a member of the `athena-ai-harness` group only, so a
-`cjpoll/` write is refused (PENDING) until its project moves into that group. A namespace with no entry, a
+overlay's `gitlab` `.identities` (work entries). custom and gen_saas live at
+`gitlab.com/athena-ai-harness/` (DND-1947). `cjpoll/` has no bot and is
+refused (PENDING), so a stale `cjpoll/` remote names the move instead of an
+unknown namespace: set origin to `athena-ai-harness/<project>`. A namespace with no entry, a
 differently cased one, a bot not named yet, or an unreadable map is refused
 with a `Fix:`. It never falls back to another bot or to Cody's login, so run
 from the project's checkout or pass `-R <namespace>/<project>`. A work
