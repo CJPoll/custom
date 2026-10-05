@@ -24,6 +24,7 @@ require "open3"
 require "fileutils"
 require_relative "outbound_scan"
 require_relative "private_overlay_resolver"
+require_relative "outbound_mark"
 
 module OutboundScan
   module Sources
@@ -122,7 +123,8 @@ module OutboundScan
     #               hook cannot read the destination; the transport sending
     #               this very push holds the listing and scans these refs
     #               with it, so the hook leaves them to it;
-    #   :ls_remote  any other push: `git ls-remote <url>`.
+    #   :ls_remote  any other push: `git ls-remote <url>` (:ls_remote_name for
+    #               a remote NAME given without --url, by hand).
     Destination = Struct.new(:kind, :source, keyword_init: true)
 
     def destination(remote, url, advertised)
@@ -130,7 +132,10 @@ module OutboundScan
       return Destination.new(kind: :listing, source: advertised) if advertised
       return Destination.new(kind: :route, source: target) if target.start_with?(ROUTE_PREFIX)
 
-      Destination.new(kind: :ls_remote, source: target)
+      # git always passes the hook the URL; a run by hand with a remote NAME
+      # alone lets git resolve the name, so only a URL is checked for a
+      # second rewrite.
+      Destination.new(kind: url ? :ls_remote : :ls_remote_name, source: target)
     end
 
     # -> the destination's tip object ids. Raises Unmeasurable (COULD NOT
@@ -145,15 +150,61 @@ module OutboundScan
                               "(#{e.class.name.split('::').last}) (COULD NOT LOOK)"
         end
         OutboundScan.parse_advertisement(text, "the destination's ref listing")
-      when :ls_remote
-        out, _err, st = Open3.capture3("git", "ls-remote", "--", dest.source, binmode: true)
-        unless st.success?
-          raise Unmeasurable, "git ls-remote could not read the destination's refs " \
-                              "(exit #{st.exitstatus.inspect}), so the range of a new ref is unknown (COULD NOT LOOK)"
-        end
-        OutboundScan.parse_advertisement(out, "git ls-remote's listing of the destination")
+      when :ls_remote, :ls_remote_name
+        ls_remote_tips(dest.source, check_url: dest.kind == :ls_remote)
       else
         raise Unmeasurable, "no ref listing can be read for a #{dest.kind} destination (COULD NOT LOOK)"
+      end
+    end
+
+    LS_REMOTE_ENV = { "GIT_TERMINAL_PROMPT" => "0" }.freeze
+
+    # `git ls-remote <url>` -> tips. git hands the hook a URL its insteadOf and
+    # pushInsteadOf rules already rewrote; ls-remote would apply insteadOf to
+    # it again and could read another repository than the one pushed to. So
+    # the URL ls-remote would use must be the pushed URL itself, or the
+    # listing is COULD NOT LOOK.
+    def ls_remote_tips(url, check_url:)
+      if check_url
+        got, _e, st = Open3.capture3(LS_REMOTE_ENV, "git", "ls-remote", "--get-url", "--", url)
+        same = st.success? && got.chomp == url
+      end
+      if check_url && !same
+        raise Unmeasurable, "git ls-remote would read a different URL than the one pushed to " \
+                            "(an insteadOf rule rewrites it again), so the destination's refs cannot be read (COULD NOT LOOK)"
+      end
+      out, _err, st = Open3.capture3(LS_REMOTE_ENV, "git", "ls-remote", "--", url, binmode: true)
+      unless st.success?
+        raise Unmeasurable, "git ls-remote could not read the destination's refs " \
+                            "(exit #{st.exitstatus.inspect}), so the range of a new ref is unknown (COULD NOT LOOK)"
+      end
+      OutboundScan.parse_advertisement(out, "git ls-remote's listing of the destination")
+    end
+
+    # Inside a route push the hook leaves a new ref to the transport. That
+    # holds only where the transport scans: its fg_outbound_marked
+    # (ai/lib/forge-transport/git-remote-athena-forge) scans when any of three
+    # pre-push paths holds the outbound marker, or cannot be read. This reads
+    # the same three paths with the same marker rule (OutboundMark.classify)
+    # in the same environment (the push's). false -> the hook refuses rather
+    # than defer to a transport that would not scan.
+    def transport_scans?
+      common, _e, st = Open3.capture3("git", "rev-parse", "--path-format=absolute", "--git-common-dir")
+      return true unless st.success? && !common.strip.empty?
+
+      hook_path = ["git", "rev-parse", "--path-format=absolute", "--git-path", "hooks/pre-push"]
+      plain_env = { "GIT_CONFIG_PARAMETERS" => nil, "GIT_CONFIG_COUNT" => nil }
+      resolved = [Open3.capture3(*hook_path), Open3.capture3(plain_env, *hook_path)]
+      paths = [File.join(common.strip, "hooks", "pre-push")]
+      resolved.each do |out, _err, s|
+        return true unless s.success? && !out.strip.empty?
+
+        paths << out.strip
+      end
+      paths.any? do |p|
+        next false unless File.exist?(p) # the transport skips an absent (or dangling) path
+
+        %i[marked unknown].include?(OutboundMark.classify(p).first)
       end
     end
 
@@ -164,6 +215,7 @@ module OutboundScan
       deletes = 0
       deferred = []
       tips = nil
+      scans = nil
       stdin_text.each_line.with_index(1) do |raw, n|
         line = raw.strip
         next if line.empty?
@@ -177,6 +229,12 @@ module OutboundScan
           next
         end
         if dest.kind == :route && !known_commit?(rsha)
+          scans = transport_scans? if scans.nil?
+          unless scans
+            raise Unmeasurable, "this route push's transport does not scan (no pre-push path it reads holds the " \
+                                "outbound hook), and the hook cannot read the destination inside a route push, so the " \
+                                "range of #{rref} is unknown (COULD NOT LOOK)"
+          end
           deferred << rref
           next
         end

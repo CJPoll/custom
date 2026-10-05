@@ -21,7 +21,9 @@
 # as the destination advertised it on this connection (`list for-push`, or
 # git-receive-pack's advertisement). The scan bounds a new ref's range by it
 # (DND-2086); the hook as git runs it inside a route push cannot read the
-# destination and leaves those refs here. It is
+# destination and leaves those refs here, only when one of the pre-push paths
+# fg_outbound_marked reads would send the push here (outbound_scan_sources.rb,
+# transport_scans?, reads the same three with the same marker). It is
 # the same script, scanner and pattern bar the hook runs, so a branch
 # cannot weaken the scanner or the patterns that judge its own push. Only a
 # scan that exits 0 lets the push through: CLEAN, or WAIVED - NOT SCANNED

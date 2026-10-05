@@ -283,12 +283,17 @@ the error's class, never its message, which could quote a pattern.
   `<local sha>` that no tip of the **destination** reaches. The tips come from
   the destination's own ref listing, never from local remote-tracking refs:
   FILE (the listing the route's transport read on its connection; see *The
-  transport's push-range scan*) or `git ls-remote URL`. A listing that cannot
-  be read is COULD NOT MEASURE, with the reason `COULD NOT LOOK`; an empty
-  destination bounds nothing. The hook as git runs it inside a route push (URL
-  `athena-forge::…`) cannot read the destination, because the route's grant
-  is one-shot; it prints `DEFERRED <ref>` for such a ref and leaves it to the
-  transport, which scans it with the listing. For
+  transport's push-range scan*) or `git ls-remote URL`. `ls-remote` is used
+  only when `git ls-remote --get-url URL` is URL itself: an `insteadOf` rule
+  that rewrites the pushed URL again would list another repository. A listing
+  that cannot be read is COULD NOT MEASURE, with the reason `COULD NOT LOOK`;
+  an empty destination bounds nothing. The hook as git runs it inside a route
+  push (URL `athena-forge::…`) cannot read the destination, because the
+  route's grant is one-shot. It prints `DEFERRED <ref>` for such a ref and
+  leaves it to the transport, which scans it with the listing, but only where
+  the transport scans: one of the pre-push paths the transport reads holds the
+  outbound hook or cannot be read (the same three paths and marker rule).
+  Otherwise the ref is COULD NOT LOOK. For
   each commit: the lines and paths it **introduces**, and its message. A root
   commit introduces its whole tree. A one-parent commit introduces the added
   lines and new or renamed paths of its diff against that parent. A merge
