@@ -13,7 +13,9 @@
 #     ir_declared_gate_on whether the PR's repo declares a gate on the base tip,
 #     and if so reads the receipt with ir_read_receipt before any merge call.
 #     Both readers accept a recorded base that is the tip or an ancestor of it
-#     (DND-1463).
+#     (DND-1463). integration-gate records merge-base(head, target) for a head
+#     behind the target (DND-2076, D7), which is such an ancestor, so a head
+#     gated on its own base passes every reader here unchanged.
 #   * glab-merge-guard.sh (ai/lib/, behind every GitLab merge or train board
 #     through glab-athena, DND-1845) reads the receipt with ir_read_receipt
 #     before any merge call. It is NOT declaration-keyed: it never asks

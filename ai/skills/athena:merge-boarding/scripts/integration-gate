@@ -16,6 +16,17 @@
 # invisible to both git and the forge. This ADDS a check at a moment where none
 # ran; it never drops, skips, downgrades, or path-excludes one.
 #
+# DND-2076 (design D7; owner, Cody, 2026-10-05 08:26:29Z, session
+# 0cc59a5e-6c65-495e-a216-83c6a0bf2d56, message
+# 2b344496-478d-4b7f-a4cf-635a2273ab94: "I do NOT want to require a rebase on
+# each merge; that's the point of the parallel merges."): a head that does not
+# contain the target is no longer refused. It is gated on its own base, and its
+# receipt records merge-base(head, target). Only a textual conflict with the
+# target refuses. That narrows the paragraph above for a head behind the
+# target: the merged tree is read by the landing's conflict check and by
+# main-health after the landing, not by this gate. It is an owner-approved
+# lowering of the bar (item 5), not a speed-up.
+#
 # This script is an ASSERTION: without --rebase it never rebases, commits,
 # pushes, or touches the working tree or any ref. A conflicting rebase is a
 # judgement call, so --rebase only ever replays a clean branch onto the target
@@ -117,17 +128,30 @@ Usage: integration-gate [--target <ref>] [--since <ref>] [--gate '<cmd>']
                         [--no-fetch] [--with-critic] [--rebase]
                         [--slot-wait-timeout <secs>] [--self-test]
 
-Asserts that HEAD contains the current target ref AND that the local gate is
-green on that integrated head. Exits 0 only when both hold.
+Asserts that HEAD merges into the current target ref with no textual
+conflict AND that the local gate is green on HEAD. Exits 0 only when both
+hold.
+
+A head behind the target is gated on its OWN base, as it stands (DND-2076;
+design D7; Cody, 2026-10-05: "I do NOT want to require a rebase on each
+merge; that's the point of the parallel merges."). It is not refused and not
+rebased: the gate runs on HEAD, and the receipt's base is merge-base(HEAD,
+target), an ancestor of the tip that every receipt reader accepts. A head
+that conflicts textually with the target (git merge-tree) is refused, exit
+2, naming each path. What this narrows: the gate tests HEAD on its own base,
+not the merged tree; the landing's conflict check and main-health after the
+landing read that tree.
 
 It takes its machine test slot FIRST (DND-1064), then fetches and judges
-containment inside the slot, so "HEAD contains <target>" is evaluated when the
-gate starts, never before a queue wait that main can move during. Run under
-test-slot already (the captain form), it re-enters the held slot at once.
+HEAD against the target inside the slot, so the conflict check reads the
+target as it is when the gate starts, never before a queue wait that main
+can move during. Run under test-slot already (the captain form), it
+re-enters the held slot at once.
 
 On exit 0 (and only then) it writes a RECEIPT for the head, atomically, at
   <git common dir>/integration-receipts/<head-sha>.json
-recording the head, the target SHA it contained (base), the gate and its
+recording the head, the base it was gated on (the target SHA when HEAD
+contains it, else merge-base(HEAD, target); DND-2076), the gate and its
 source, any --critic-override / --owner-approval, the SHA a carried critic
 PASS came from (critic_carried_from; the OK line then says CRITIC CARRIED) and
 the upstream range its interaction review covered (critic_upstream_range; the
@@ -162,7 +186,7 @@ after a merge if the containers are gone by then (DND-1576). Its lines are
 prefixed `integration-gate: `; it never changes the verdict or exit code.
 
   --target <ref>   integration target (default: origin/main). It sets the
-                   containment check and the critic base ONLY. The declared
+                   conflict check, the receipt base and the critic base ONLY. The declared
                    gate runs unchanged and is not told the target, so a
                    stage of its own may still compare against main
                    (gen_saas bin/checks/merge-conflicts.sh always merges
@@ -223,8 +247,10 @@ prefixed `integration-gate: `; it never changes the verdict or exit code.
                    rebase, names the conflicting paths, and exits 2 with the
                    branch at its original head -- it never resolves one.
                    Without --since, the intersection is measured from the
-                   pre-rebase branch point. The containment bar is unchanged:
-                   the gated head contains the target read at gate start.
+                   pre-rebase branch point. The rebased head contains the
+                   target read at gate start. Not needed to be mergeable: a
+                   head behind the target is gated on its own base without it
+                   (DND-2076); use it only for a deliberate rebase.
                    Refused in a main checkout and on a detached HEAD. After a
                    clean rebase the branch STAYS rebased whatever the gate or
                    judge then say; the old head is ORIG_HEAD (or the reflog).
@@ -297,7 +323,9 @@ prefixed `integration-gate: `; it never changes the verdict or exit code.
   --self-test      run the dedicated test suite and exit
 
 Exit codes: 0 integration OK | 1 gate RED on the integrated head
-            2 usage / unresolvable ref / branch behind target /
+            2 usage / unresolvable ref / CONFLICT (HEAD conflicts
+              textually with the target; a head merely behind it is
+              gated, DND-2076) /
               --rebase refused (dirty tree, main checkout, detached
               HEAD), REBASE CONFLICT, or REBASE FAILED /
               gate refused (a no-op, or not the gate the target declares) /
@@ -971,13 +999,15 @@ if ! TARGET_SHA="$(git rev-parse --verify "${TARGET}^{commit}" 2>/dev/null)"; th
   echo "Fix: name a ref that exists here (git remote -v; git branch -r). A wrong ref must not be mistaken for 'no drift' -- this is an error, not an empty result." >&2
   exit 2
 fi
-ig_fact base "$TARGET_SHA"
 BASE_SHA="$(git merge-base HEAD "$TARGET_SHA" 2>/dev/null)"
 if [ -z "$BASE_SHA" ]; then
   echo "${PROG}: HEAD and '${TARGET}' share no merge base (unrelated histories)." >&2
   echo "Fix: confirm you are in the right worktree and that '${TARGET}' is this repo's integration target." >&2
   exit 2
 fi
+# The base the head is gated on, and the receipt's base (DND-2076): the target
+# itself when HEAD contains it, else merge-base(HEAD, target).
+ig_fact base "$BASE_SHA"
 
 # --- 3a'. the judges are the LANDED ones, read out of git (DND-1796) -------
 # ~/dev/custom/CLAUDE.md -> "A check's own bar must not live in the diff it is
@@ -1206,20 +1236,32 @@ fi
 # and running the landed copy would mean writing it into this tree -- this
 # script never writes -- or running it out of place, where its sibling-relative
 # paths break). So it is marked, loudly, in the run and in every OK line.
+#
+# A head behind the target (DND-2076, D7) runs its own base's copy of the
+# gate. "Edited by this branch" is judged against that base, so a gate the
+# target changed after the branch point is not blamed on the branch; it is
+# named separately, as OLDER THAN the target. When HEAD contains the target,
+# the base IS the target and only the first case can fire.
 GATE_EDITED=0
+GATE_OLDER=0
 GATE_FILE="$(norm_path "$GATE_CMD")"; GATE_FILE="${GATE_FILE%% *}"
 if [ -n "$GATE_FILE" ]; then
   landed_blob="$(git rev-parse -q --verify "${TARGET_SHA}:${GATE_FILE}" 2>/dev/null)"
+  base_blob="$(git rev-parse -q --verify "${BASE_SHA}:${GATE_FILE}" 2>/dev/null)"
   head_blob="$(git rev-parse -q --verify "${HEAD_SHA}:${GATE_FILE}" 2>/dev/null)"
-  if [ -n "${landed_blob}${head_blob}" ]; then
-    if [ "$landed_blob" != "$head_blob" ] || ! git diff --quiet HEAD -- "$GATE_FILE" 2>/dev/null; then
+  if [ -n "${landed_blob}${base_blob}${head_blob}" ]; then
+    if [ "$base_blob" != "$head_blob" ] || ! git diff --quiet HEAD -- "$GATE_FILE" 2>/dev/null; then
       GATE_EDITED=1
-      echo "${PROG}: WARN gate '${GATE_FILE}' differs from ${TARGET} ($(short "$TARGET_SHA")) -- this branch (or its working tree) edits the gate that judges it. The copy that runs is the branch's, not the landed one: review that diff (git diff ${TARGET} -- ${GATE_FILE}) before merging." >&2
+      echo "${PROG}: WARN gate '${GATE_FILE}' differs from ${TARGET} ($(short "$TARGET_SHA")) -- this branch (or its working tree) edits the gate that judges it. The copy that runs is the branch's, not the landed one: review that diff (git diff ${BASE_SHA:0:12} HEAD -- ${GATE_FILE}) before merging." >&2
+    elif [ "$landed_blob" != "$head_blob" ]; then
+      GATE_OLDER=1
+      echo "${PROG}: WARN gate '${GATE_FILE}' on this head is its base's copy ($(short "$BASE_SHA")), older than ${TARGET} ($(short "$TARGET_SHA")); the branch does not edit it. A head behind the target is gated as it stands (D7, DND-2076), so the landed gate first judges this change after it lands (main-health)." >&2
     fi
   fi
 fi
 GATE_LABEL="${GATE_CMD} -- ${GATE_SOURCE}"
 [ "$GATE_EDITED" -eq 1 ] && GATE_LABEL="${GATE_LABEL}; EDITED BY THIS BRANCH"
+[ "$GATE_OLDER" -eq 1 ] && GATE_LABEL="${GATE_LABEL}; OLDER THAN ${TARGET}"
 
 # The anchor the file sets are measured from. An unresolvable --since is an
 # ERROR, not a silent fallback to the merge-base -- falling back would quietly
@@ -1331,11 +1373,53 @@ if [ -n "$SHARED_HITS" ]; then
   printf '%s\n' "$SHARED_HITS" | sed 's/^/    /'
 fi
 
-# --- 7. HEAD must CONTAIN the target --------------------------------------
-if ! git merge-base --is-ancestor "$TARGET_SHA" HEAD; then
-  echo "${PROG}: HEAD ($(short "$HEAD_SHA")) does not contain ${TARGET} ($(short "$TARGET_SHA")). NOT safe to merge." >&2
-  echo "Fix: your branch does not contain ${TARGET} ($(short "$TARGET_SHA")), read inside the test slot just now. Re-run with --rebase to rebase onto it inside the slot (it refuses on a conflict), or rebase yourself (git rebase ${TARGET}), resolve conflicts, re-run the local gate, then re-run this script (passing --since $(short "$TARGET_SHA") to keep the intersection meaningful)." >&2
-  exit 2
+# --- 7. a head behind the target is gated on its OWN base (DND-2076, D7) ---
+# Owner, Cody, 2026-10-05 08:26:29Z: "I do NOT want to require a rebase on
+# each merge; that's the point of the parallel merges." and ~08:28Z: "I don't
+# want a branch to have to be built on latest main to be mergeable." So a head
+# that does not contain the target is no longer refused (it was exit 2,
+# "does not contain"). It is gated as it stands, and its receipt records
+# BASE_SHA = merge-base(head, target): an ancestor of the tip that the head
+# contains, which every receipt reader accepts (ai/lib/integration-receipt.sh,
+# DND-1463). The one refusal left here is a TEXTUAL conflict with the target,
+# read by git merge-tree exactly as the landing merge would meet it; it names
+# every conflicting path. What this gate no longer tests is the merged tree
+# merge(target, head): the landing's own conflict check and main-health after
+# the landing are what read it (design ai/docs/parallel-merge-deploy-latest.md
+# -> D7, which names this as an owner-approved lowering of the bar).
+OWN_BASE=0
+git merge-base --is-ancestor "$TARGET_SHA" HEAD 2>/dev/null; ANC_RC=$?
+case "$ANC_RC" in
+  0) ;;
+  1) OWN_BASE=1 ;;
+  *) echo "${PROG}: git merge-base --is-ancestor ${TARGET_SHA} HEAD failed (exit ${ANC_RC}), so whether HEAD contains ${TARGET} is unknown." >&2
+     echo "Fix: this is a repository fault, not a result: check both commits are readable (git cat-file -t $(short "$TARGET_SHA"); git cat-file -t $(short "$HEAD_SHA")), repair the object database (git fsck), then re-run." >&2
+     exit 2 ;;
+esac
+if [ "$OWN_BASE" -eq 1 ]; then
+  MT_ERR="$(mktemp 2>/dev/null)" || { echo "${PROG}: mktemp failed; cannot check HEAD for a conflict with ${TARGET}." >&2; echo "Fix: ensure \$TMPDIR (or /tmp) is writable and re-run. Nothing was gated." >&2; exit 2; }
+  MT_OUT="$(git merge-tree --write-tree --name-only --no-messages "$TARGET_SHA" "$HEAD_SHA" 2>"$MT_ERR")"; MT_RC=$?
+  MT_ERRTEXT="$(cat "$MT_ERR" 2>/dev/null)"; rm -f "$MT_ERR"
+  case "$MT_RC" in
+    0) ;;
+    1)
+      # Line 1 is the tree; every later line is one conflicting path.
+      MT_PATHS="$(sed '1d;/^$/d' <<<"$MT_OUT" | sort -u)"
+      echo "${PROG}: CONFLICT: HEAD ($(short "$HEAD_SHA")) conflicts textually with ${TARGET} ($(short "$TARGET_SHA")). NOT safe to merge. Conflicting paths:" >&2
+      if [ -n "$MT_PATHS" ]; then
+        printf '%s\n' "$MT_PATHS" | sed 's/^/  conflict: /' >&2
+      else
+        echo "  conflict: (git merge-tree reported a conflict but named no path)" >&2
+      fi
+      echo "Fix: resolve the conflict on this branch: merge ${TARGET} into it (git merge ${TARGET}) or rebase onto it (re-run with --rebase, which refuses on a conflict, or git rebase ${TARGET}), resolve the paths named above, commit, then re-run integration-gate. A head that does not conflict needs no rebase (D7, DND-2076)." >&2
+      exit 2 ;;
+    *)
+      echo "${PROG}: git merge-tree --write-tree ${TARGET} HEAD failed (exit ${MT_RC}), so whether HEAD conflicts with ${TARGET} is unknown -- not the same as no conflict. git said:" >&2
+      printf '%s\n' "${MT_ERRTEXT:-<nothing>}" | sed 's/^/    /' >&2
+      echo "Fix: git >= 2.38 is needed for merge-tree --write-tree (git --version); otherwise repair what git names above (git fsck), then re-run. Nothing was gated." >&2
+      exit 2 ;;
+  esac
+  echo "${PROG}: HEAD ($(short "$HEAD_SHA")) is behind ${TARGET} ($(short "$TARGET_SHA")) with no textual conflict: gated on its own base $(short "$BASE_SHA"), as it stands, with no rebase (D7, DND-2076). The receipt records that base."
 fi
 
 # --- 8. run the gate ON THE INTEGRATED HEAD, inside a machine test slot ----
@@ -1528,7 +1612,7 @@ if [ ! -x "$BLAST" ]; then
   echo "Fix: run this script from its committed path under ~/dev/custom so the blast-radius classifier resolves. A classifier that cannot be found is an ERROR, never a pass -- 'no surface touched' and 'nothing was checked' must never read the same." >&2
   exit 2
 fi
-BLAST_ARGS=( --base "$TARGET_SHA" --head "$HEAD_SHA" --repo "$ROOT" --gate-ran "$GATE_LABEL" )
+BLAST_ARGS=( --base "$BASE_SHA" --head "$HEAD_SHA" --repo "$ROOT" --gate-ran "$GATE_LABEL" )
 if [ -n "$OWNER_APPROVAL" ]; then
   BLAST_ARGS+=( --owner-approval "$OWNER_APPROVAL" )
 fi
@@ -1569,7 +1653,7 @@ write_receipt() {
   mkdir -p "$RECEIPT_DIR" 2>/dev/null || return 1
   RECEIPT_TMP="$(mktemp "${RECEIPT_DIR}/.${HEAD_SHA}.json.tmp.XXXXXX" 2>/dev/null)" || return 1
   jq -n \
-    --arg head "$HEAD_SHA" --arg target_ref "$TARGET" --arg base "$TARGET_SHA" \
+    --arg head "$HEAD_SHA" --arg target_ref "$TARGET" --arg base "$BASE_SHA" \
     --arg gate "$GATE_CMD" --arg gate_source "$GATE_SOURCE" --argjson edited "$EDITED_JSON" \
     --arg co "$CRITIC_OVERRIDE" --arg co_state "$OVERRIDE_STATE" --arg oa "$OWNER_APPROVAL" \
     --arg blast "$BLAST_LINE" --arg ok_line "$OK_LINE" --arg checkout "$ROOT" \

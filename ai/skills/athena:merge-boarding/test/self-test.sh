@@ -124,17 +124,73 @@ grep -q 'unchanged since branch point' <<<"$out" && ok "c1 reports 'unchanged' e
 grep -q 'INTEGRATION OK' <<<"$out" && ok "c1 prints INTEGRATION OK" || bad "c1 missing INTEGRATION OK" "$out"
 
 # ---------------------------------------------------------------- case 2
-# Target advanced and HEAD does NOT contain it: refuse, and say how to fix it.
+# DND-2076 (D7): a head BEHIND the target with no textual conflict is gated on
+# its own base. Owner, Cody, 2026-10-05 08:26:29Z: "I do NOT want to require a
+# rebase on each merge; that's the point of the parallel merges." It used to
+# be refused, exit 2 "does not contain". Now: the gate runs, INTEGRATION OK,
+# and the receipt's base is merge-base(head, target), which every receipt
+# reader accepts (an ancestor of the tip that the head contains).
 R="${TMP}/c2"; new_repo "$R"
 ( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f \
   && git checkout -q main && echo m > m.txt && git add m.txt && git commit -qm m \
   && git checkout -q feature )
 stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
+record_pass "$R"
 out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
-[ "$rc" -eq 2 ] && ok "c2 exit 2 when branch is behind the target" || bad "c2 expected exit 2, got $rc" "$out"
-grep -q 'git rebase main' <<<"$out" && ok "c2 Fix: names the rebase" || bad "c2 Fix: does not name git rebase" "$out"
+head_sha="$( cd "$R" && git rev-parse HEAD )"; mb="$( cd "$R" && git merge-base HEAD main )"
+tip="$( cd "$R" && git rev-parse main )"
+[ "$rc" -eq 0 ] && grep -q "^INTEGRATION OK ${head_sha} " <<<"$out" \
+  && ok "c2 a head behind the target with no conflict is gated: INTEGRATION OK (D7)" \
+  || bad "c2 expected INTEGRATION OK on a head behind the target, got $rc" "$out"
 grep -q 'advanced' <<<"$out" && ok "c2 reports the drift" || bad "c2 drift not reported" "$out"
-[ ! -f "${R}/GATE_RAN" ] && ok "c2 does not run the gate on a branch it refused" || bad "c2 ran the gate despite refusing"
+grep -q 'gated on its own base' <<<"$out" && ok "c2 says the head is gated on its own base" || bad "c2 does not name the own-base gating" "$out"
+[ -f "${R}/GATE_RAN" ] && ok "c2 the gate ran on the head as it stands" || bad "c2 the gate did not run"
+[ "$(git -C "$R" rev-parse HEAD)" = "$head_sha" ] && ok "c2 the head was not rewritten (no forced rebase)" || bad "c2 the head moved"
+c2_rf="$(git -C "$R" rev-parse --path-format=absolute --git-common-dir)/integration-receipts/${head_sha}.json"
+[ "$(jq -r .base "$c2_rf" 2>/dev/null)" = "$mb" ] && ok "c2 the receipt's base is merge-base(head, target)" \
+  || bad "c2 receipt base is $(jq -r .base "$c2_rf" 2>/dev/null), want the merge-base ${mb}"
+# Every receipt reader goes through ai/lib/integration-receipt.sh: the merge
+# guards and locked-merge through ir_read_receipt against the tip, the push
+# guard through ir_push_covered. Each must accept the new receipt.
+c2_reader() { # <fn> <args...> -- run one reader in a subshell, print its outcome
+  ( cd "$R" && . "${ROOT}/../../lib/integration-receipt.sh" && "$@"; rc=$?
+    printf 'rc=%s kind=%s cover=%s base=%s moved=%s\n' "$rc" "${IR_KIND-}" "${IR_COVER-}" "${IR_BASE-}" "${IR_BASE_MOVED-}" )
+}
+c2_common="$(git -C "$R" rev-parse --path-format=absolute --git-common-dir)"
+got="$(c2_reader ir_read_receipt "$c2_common" "$head_sha" "$tip")"
+grep -q "^rc=0 .*base=${mb} moved=1" <<<"$got" \
+  && ok "c2 ir_read_receipt (locked-merge, gh and glab merge guards) accepts it against the tip" \
+  || bad "c2 ir_read_receipt refused the own-base receipt" "$got"
+git -C "$R" merge-base --is-ancestor "$mb" "$head_sha" \
+  && ok "c2 the recorded base is contained in the head (locked-merge's ancestry check)" || bad "c2 the head does not contain its recorded base"
+# The landing D1 pushes: M = merge(tip, head), a merge commit, never a rebase.
+( cd "$R" && git checkout -q main && git merge -q --no-ff --no-edit feature && git checkout -q feature )
+m_sha="$(git -C "$R" rev-parse main)"
+got="$(c2_reader ir_push_covered "$c2_common" "$m_sha" "$tip")"
+grep -q '^rc=0 .*cover=rebase' <<<"$got" \
+  && ok "c2 ir_push_covered (the push guard) covers merge(tip, head) by this receipt" \
+  || bad "c2 the push guard does not cover merge(tip, head)" "$got"
+
+# ---------------------------------------------------------------- case 2b
+# DND-2076: a head that conflicts TEXTUALLY with the target is still refused,
+# exit 2, naming each conflicting path, and the gate never runs.
+R="${TMP}/c2b"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo mine > f.txt && echo ok > g.txt && git add f.txt g.txt && git commit -qm f \
+  && git checkout -q main && echo theirs > f.txt && git add f.txt && git commit -qm m \
+  && git checkout -q feature )
+stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
+record_pass "$R"
+before="$(git -C "$R" rev-parse HEAD)"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 2 ] && grep -q 'CONFLICT' <<<"$out" && grep -q '^  conflict: f.txt$' <<<"$out" \
+  && ok "c2b a textual conflict with the target is refused, exit 2, naming the path" \
+  || bad "c2b expected exit 2 naming f.txt as a conflict, got $rc" "$out"
+grep -q '^  conflict: g.txt$' <<<"$out" && bad "c2b named a path that does not conflict" "$out" || ok "c2b names only the conflicting path"
+grep -q '^Fix:' <<<"$out" && ok "c2b the refusal carries Fix:" || bad "c2b no Fix:" "$out"
+[ ! -f "${R}/GATE_RAN" ] && ok "c2b does not run the gate on a head it refused" || bad "c2b ran the gate despite refusing"
+grep -q 'INTEGRATION OK' <<<"$out" && bad "c2b printed INTEGRATION OK" "$out" || ok "c2b no INTEGRATION OK"
+[ "$(git -C "$R" rev-parse HEAD)" = "$before" ] && [ -z "$(git -C "$R" status --porcelain)" ] \
+  && ok "c2b the branch and tree are untouched" || bad "c2b the refusal changed the branch or tree"
 
 # ---------------------------------------------------------------- case 3
 # Branch contains the advanced target and the gate is green: INTEGRATION OK,
@@ -678,15 +734,17 @@ out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; 
 [ -e "$rf" ] && bad "c25 a passing receipt survived a RED gate" "$(cat "$rf")" || ok "c25 RED gate removed the stale receipt"
 
 # ---------------------------------------------------------------- case 26
-# A REFUSED run (branch behind the target, exit 2) also removes a stale pass.
+# A REFUSED run (a textual conflict with the target, exit 2; DND-2076: a head
+# merely behind it is gated, so the refusal here is the conflict) also removes
+# a stale pass.
 R="${TMP}/c26"; new_repo "$R"
 ( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f \
-  && git checkout -q main && echo m > m.txt && git add m.txt && git commit -qm m && git checkout -q feature )
+  && git checkout -q main && echo m > f.txt && git add f.txt && git commit -qm m && git checkout -q feature )
 stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
 head_sha="$( cd "$R" && git rev-parse HEAD )"; rf="$(receipt_of "$R" "$head_sha")"
 mkdir -p "$(dirname "$rf")"; printf '{"schema":"integration-receipt/1","verdict":"pass","head":"%s"}\n' "$head_sha" > "$rf"
 out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
-[ "$rc" -eq 2 ] && ok "c26 exit 2 (behind target)" || bad "c26 expected exit 2, got $rc" "$out"
+[ "$rc" -eq 2 ] && grep -q 'CONFLICT' <<<"$out" && ok "c26 exit 2 (conflicts with the target)" || bad "c26 expected exit 2 CONFLICT, got $rc" "$out"
 if [ -e "$rf" ]; then bad "c26 a passing receipt survived a refused run"; else ok "c26 refused run removed the stale receipt"; fi
 
 # ---------------------------------------------------------------- case 26b
@@ -1476,17 +1534,22 @@ gate_behind_moving_main() {
 }
 
 # r1: unwrapped, no --rebase. main moves while the run waits for its slot.
-# Before DND-1064 the containment check had already passed before the wait, so
-# the gate started (and printed INTEGRATION OK) on a head that did not contain
-# the main of gate start. The bar is now evaluated inside the slot: refused.
+# The target is still read inside the slot (DND-1064), so the run sees the
+# move. Since DND-2076 (D7) a head behind the target with no conflict is gated
+# on its own base: INTEGRATION OK, the head is not rewritten, and the receipt's
+# base is the merge-base, the main the branch was cut from.
 D="${TMP}/r1"; remote_repo "$D" "touch '${D}.GATE_RAN'"
+old_main="$(git -C "$D/wt" rev-parse origin/main)"; head_sha="$(git -C "$D/wt" rev-parse HEAD)"
 gate_behind_moving_main r1 "$D" "$GATE" --with-critic
-[ "$RC" -eq 2 ] && grep -q 'does not contain origin/main' <<<"$OUT" \
-  && ok "r1 main moved during the slot wait: containment is judged at gate start and refuses" \
-  || bad "r1 expected exit 2 'does not contain origin/main', got $RC" "$OUT"
-grep -q '^INTEGRATION OK' <<<"$OUT" && bad "r1 printed INTEGRATION OK on a head that did not contain main at gate start" "$OUT" || ok "r1 no INTEGRATION OK"
-[ ! -f "${D}.GATE_RAN" ] && ok "r1 the gate never started on the stale head" || bad "r1 the gate ran on a head that did not contain main at gate start"
-grep -q 'Fix:.*--rebase' <<<"$OUT" && ok "r1 Fix: names --rebase" || bad "r1 Fix: does not offer --rebase" "$OUT"
+new_main="$(git -C "$D/up" rev-parse HEAD)"
+[ "$RC" -eq 0 ] && grep -q "^INTEGRATION OK ${head_sha} " <<<"$OUT" \
+  && ok "r1 main moved during the slot wait: the head is gated on its own base (D7)" \
+  || bad "r1 expected INTEGRATION OK on the unrebased head, got $RC" "$OUT"
+grep -q "advanced .* -> ${new_main:0:7}" <<<"$OUT" && ok "r1 the move during the wait was read inside the slot" || bad "r1 the target was not re-read inside the slot" "$OUT"
+[ -f "${D}.GATE_RAN" ] && ok "r1 the gate ran on the head as it stands" || bad "r1 the gate did not run"
+[ "$(git -C "$D/wt" rev-parse HEAD)" = "$head_sha" ] && ok "r1 no rebase was forced" || bad "r1 the head was rewritten"
+rcpt="$(git -C "$D/wt" rev-parse --path-format=absolute --git-common-dir)/integration-receipts/${head_sha}.json"
+[ "$(jq -r .base "$rcpt" 2>/dev/null)" = "$old_main" ] && ok "r1 the receipt's base is the head's own base" || bad "r1 receipt base is not the old main ($(jq -r .base "$rcpt" 2>/dev/null))"
 
 # r2: unwrapped, --rebase. The same move is absorbed: the head is rebased
 # inside the slot, the judge and the gate run on the rebased head, and the
@@ -1515,11 +1578,13 @@ new_main="$(git -C "$D/up" rev-parse HEAD)"
 [ "$RC" -eq 0 ] && grep -q '^INTEGRATION OK' <<<"$OUT" && git -C "$D/wt" merge-base --is-ancestor "$new_main" HEAD \
   && ok "r3 wrapped in test-slot: a move during the outer wait still ends in one INTEGRATION OK" \
   || bad "r3 expected INTEGRATION OK on a head containing the new main, got $RC" "$OUT"
-# ...and without --rebase the wrapped form still refuses: the bar did not move.
+# ...and without --rebase the wrapped form gates the head on its own base
+# (DND-2076), exactly as the unwrapped r1.
 D="${TMP}/r3b"; remote_repo "$D" "touch '${D}.GATE_RAN'"
+head_sha="$(git -C "$D/wt" rev-parse HEAD)"
 gate_behind_moving_main r3b "$D" "$TEST_SLOT" -- "$GATE" --with-critic
-[ "$RC" -eq 2 ] && grep -q 'does not contain origin/main' <<<"$OUT" && [ ! -f "${D}.GATE_RAN" ] \
-  && ok "r3 wrapped, no --rebase: still refused, gate not run" || bad "r3b expected exit 2 refusal, got $RC" "$OUT"
+[ "$RC" -eq 0 ] && grep -q "^INTEGRATION OK ${head_sha} " <<<"$OUT" && [ -f "${D}.GATE_RAN" ] \
+  && ok "r3 wrapped, no --rebase: gated on its own base, gate ran" || bad "r3b expected INTEGRATION OK on the unrebased head, got $RC" "$OUT"
 
 # r4: --rebase onto a CONFLICTING move refuses, names the conflict, never
 # auto-resolves, and leaves the branch exactly where it was.

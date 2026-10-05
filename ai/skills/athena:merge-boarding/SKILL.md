@@ -710,6 +710,18 @@ verdict. It changes the wall time,
 max(gate, critic) instead of the sum, and nothing else. The judge runs in its
 own process group, and the script stops that group if it leaves early.
 
+**Later (2026-10-05, DND-2076):** exit 0 required HEAD to contain current
+`origin/main`; a head behind it was refused (exit 2) or rebased with
+`--rebase`. Superseded by owner decision (Cody, coordinator terminal,
+2026-10-05T08:26:29Z, session `0cc59a5e-6c65-495e-a216-83c6a0bf2d56`, message
+`2b344496-478d-4b7f-a4cf-635a2273ab94`): "I do NOT want to require a rebase on
+each merge; that's the point of the parallel merges." A head behind the target
+with no textual conflict is gated on its own base, and its receipt's base is
+`merge-base(head, origin/main)`, which every receipt reader accepts. A textual
+conflict is exit 2, naming each path. `--rebase` stays for a deliberate rebase
+only. Design: `ai/docs/parallel-merge-deploy-latest.md` → *D7*. Where this
+section says "contains", read "merges cleanly into".
+
 Exit 0 means: your HEAD contains current `origin/main`, **and** the local gate
 is green on that integrated head. It prints `INTEGRATION OK <sha> (GATE: <cmd>
 -- <source>)` — merge *that* SHA, and copy the line whole so the record says
