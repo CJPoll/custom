@@ -1881,11 +1881,13 @@ def grant_eligible(repo, base, head, surfaces)
   end
 
   # The argument assumes merging makes the tree the head's tree, which holds only
-  # when base is an ancestor of head (integration-gate checks the same).
+  # when base is an ancestor of head. integration-gate no longer requires that
+  # of the target (DND-2076: a head behind it is gated on its own base), so
+  # this check is the eligibility path's own.
   _, _, anc = git(repo, "merge-base", "--is-ancestor", base_sha, head_sha)
   unless anc
     die("--base #{short(base_sha)} is not an ancestor of --head #{short(head_sha)}.",
-        "pass the SHA pair integration-gate printed (the base it merged onto, then the head). " \
+        "pass the target tip the merge lands on, then a head that contains it. " \
         "Eligibility over any other pair says nothing about what merging does.")
   end
 
