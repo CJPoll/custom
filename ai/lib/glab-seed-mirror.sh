@@ -9,7 +9,7 @@
 # fg_refuse_ungated_main) refuses that push: a GitHub squash-merge SHA, or a
 # tip landed by a clean rebase, has no integration-gate receipt of its own, and
 # a fresh GitLab project has no landed main to judge a clean rebase against.
-# This is the one sanctioned way past it, and only for that seed. It is not a
+# This is the one sanctioned way past it, and only for these seeds. It is not a
 # skip flag: the push guard accepts the commit because THIS command proved,
 # in-process and immediately before the push, every condition below.
 #
@@ -32,10 +32,8 @@
 #   2 POST-FLIP     origin does not reach gitlab.com (its URL, its resolved
 #                   fetch URL, any push URL). Once the cutover flips a
 #                   checkout's origin to the GitLab project the mode refuses
-#                   there. Across clones it rests on GitHub main being frozen
-#                   after the flip (the push mirror, and the `retired` mark,
-#                   design §3.2 step 6): a clone not yet flipped can only
-#                   mirror what GitHub main is.
+#                   there. It is per checkout only; across clones see the
+#                   POST-FLIP residual below.
 #   3 SOURCE        origin's URL and resolved fetch URL are github.com
 #                   project URLs (https://github.com/<o>/<r>, git@github.com:
 #                   <o>/<r>, ssh://git@github.com/<o>/<r>), and it names no
@@ -57,7 +55,8 @@
 #                   too. Equal: nothing to push, exit 0.
 # Then it runs `push <target> <sha>:refs/heads/main` through the same route as
 # `glab-athena git push` (fg_refuse_non_https, fg_git_exec): every other check
-# there still applies. Branches and tags are not this command's: push them with
+# there still applies, and so does the route transport's outbound scan of every
+# pushed range (DND-2023; a seed of an empty project scans the whole history). Branches and tags are not this command's: push them with
 # `glab-athena git push`, under the normal rules.
 #
 # The sanction: gsm_main sets FG_SEED_SHA and FG_SEED_URL, which
@@ -68,6 +67,12 @@
 #   * this mirrors GitHub main as landed. It does not check that main passed a
 #     gate on GitHub: a web-UI merge or an owner push is mirrored too. That is
 #     no new exposure, since the commit is already the canonical main;
+#   * POST-FLIP sees only this checkout. A clone whose origin still names
+#     GitHub can seed GitLab main from GitHub main after another checkout
+#     flipped, for as long as GitHub main still accepts pushes. Nothing in
+#     this command checks that GitHub main is frozen; the cutover must freeze
+#     it at the flip. FAST-FORWARD bounds the damage: such a push can only
+#     fast-forward GitLab main to a GitHub main commit, never rewrite it;
 #   * a shell that sources the library itself and sets the variables is past
 #     this guard, as it is past every other one here, since it could run git
 #     directly; the agent PATH git wrapper (ai/lib/agent-forge-push.sh) is the

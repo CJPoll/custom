@@ -903,7 +903,7 @@ sm_refused USAGE && ok "S8d. no --to: refused (USAGE)" \
   || bad "S8d. missing --to" "rc=${RC} out='${OUT}' err='${ERR}'"
 
 sm "${SW}" --to "https://gitlab.com/seed-ns/../seed-ns/seed.git"
-sm_refused TARGET && [[ "${ERR}" == *"path segment"* ]] \
+sm_refused TARGET && [[ "${ERR}" == *"so the project it reaches is not the one it names"* ]] \
   && ok "S8e. a target with a '..' path segment: refused (TARGET)" \
   || bad "S8e. dot-segment target refused" "rc=${RC} out='${OUT}' err='${ERR}'"
 sm "${SW}" --to "https://gitlab.com/seed-ns/other.git"
