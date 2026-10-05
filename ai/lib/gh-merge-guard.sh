@@ -40,9 +40,10 @@
 #     ai/config/main-content-checks.json forbids (a duplicated migration
 #     version) is REFUSED (stop the line, DND-1902), unless the pinned head
 #     contains that tip and removes every duplicate (a red-main fix). A red
-#     or pending CI or deploy RUN on the tip is read and named, never refused
-#     (DND-2061: the owner's parallel merges). What cannot be read is COULD
-#     NOT LOOK and refused. See gmg_line_check. glab-athena's guard
+#     or pending CI or deploy RUN on the tip, no run at all, or runs that
+#     cannot be read are named, never refused (DND-2061: the owner's parallel
+#     merges). Content that cannot be read is COULD NOT LOOK and refused. See
+#     gmg_line_check. glab-athena's guard
 #     (ai/lib/glab-merge-guard.sh) loads this file and runs the same
 #     gmg_line_check and content judge on GitLab, with its own pipelines
 #     read as the runs judge (DND-1941).
@@ -789,8 +790,10 @@ ${old%$'\n'}}" >&2
 #     and names the runs. Holding on pending would block every merge for the
 #     length of a deploy, and a pending run that turns red is caught by the
 #     next merge's read.
-#   * Unreadable (the rollup, its shape, the judge): COULD NOT LOOK, refused,
-#     never green, and never reported as red.
+#   * Unreadable (the rollup, its shape, the judge): LOOK, never reported as
+#     red or green. Since DND-2061 gmg_line_check names it and does not
+#     refuse: it runs only after the head's own checks are green at the pinned
+#     head and its receipt is sealed, and the tip's runs decide nothing.
 #   * No check reported on the tip (a repo with no CI, custom's shape): not
 #     red; the merge proceeds as before and says so.
 # No flag or env var skips it (~/dev/custom/CLAUDE.md -> "A check's own bar must
@@ -1118,9 +1121,9 @@ GMG_LOOK_MARK="COULD NOT LOOK:"
 # gmg_line_check <owner> <repo> <base> <tip> <head|""> <gitdir> [runs judge] :
 # the whole stop-the-line judgment, the runs and the content
 # (gmg_content_health). Never exits. Returns 0 (GMG_LINE_NOTE says why the
-# merge may proceed, a red run on the tip included, DND-2061), 1 RED CONTENT
-# or 2 COULD NOT LOOK (GMG_LINE_WHY says why). Red content outranks a COULD
-# NOT LOOK in the runs half: either refuses.
+# merge may proceed: a red, pending, absent or unreadable run on the tip
+# included, DND-2061), 1 RED CONTENT or 2 COULD NOT LOOK at the content
+# (GMG_LINE_WHY says why).
 #
 # The runs judge is GitHub's gmg_tip_health unless [runs judge] names another
 # function with its contract: called as `<judge> <owner> <repo> <tip> <head|"">
@@ -1149,22 +1152,26 @@ $GMG_CONTENT_DUPS"
     [ "$rr" = 1 ] && GMG_LINE_WHY+="
   Red run(s) on the tip (not by themselves a refusal, DND-2061):
 $GMG_TIP_RUNS"
+    [ "$rr" = 2 ] && GMG_LINE_WHY+="
+  The tip's runs could not be read (not by themselves a refusal, DND-2061): $GMG_TIP_WHY"
     GMG_LINE_WHY+="
   The head ${head:-(none: --auto)} is not a red-main fix: it must contain $tip and remove every duplicate."
-    [ "$rr" = 2 ] && GMG_LINE_WHY+="
-  Also COULD NOT LOOK at the runs: $GMG_TIP_WHY"
     [ "$cr" = 2 ] && GMG_LINE_WHY+="
   Also COULD NOT LOOK at the content: $GMG_CONTENT_WHY"
     return 1
   fi
-  if [ "$rr" = 2 ] || [ "$cr" = 2 ]; then
-    GMG_LINE_WHY="${GMG_LOOK_MARK} whether the $base tip $tip is red cannot be told:"
-    [ "$rr" = 2 ] && GMG_LINE_WHY+=" $GMG_TIP_WHY."
-    [ "$cr" = 2 ] && GMG_LINE_WHY+=" $GMG_CONTENT_WHY."
+  # DND-2061: the runs half never refuses, so a runs read that fails cannot
+  # either. This judge runs only after the head's own checks are green at the
+  # pinned head and its receipt is sealed; what the tip's runs say changes
+  # nothing, so not being able to read them changes nothing. Only the content
+  # half can be COULD NOT LOOK.
+  if [ "$cr" = 2 ]; then
+    GMG_LINE_WHY="${GMG_LOOK_MARK} whether the $base tip $tip's content is red cannot be told: $GMG_CONTENT_WHY."
     return 2
   fi
   case "$GMG_TIP_STATE" in
-    NONE) GMG_LINE_NOTE="BASE-TIP $base $tip: no check has reported on it, so no run is red" ;;
+    NONE) GMG_LINE_NOTE="BASE-TIP $base $tip: no check has reported on it (no pipeline, no check run), so no run is red" ;;
+    LOOK) GMG_LINE_NOTE="BASE-TIP $base $tip: its runs could not be read ($GMG_TIP_WHY); not a refusal: a tip's runs never hold a gated head whose own checks are green (DND-2061)" ;;
     CLEAN) GMG_LINE_NOTE="BASE-TIP $base $tip: no judged run is red" ;;
     PENDING) GMG_LINE_NOTE="BASE-TIP $base $tip PENDING: no judged run is red, and these have not concluded; a pending run is not red, so this merge is not held:
 $GMG_TIP_RUNS" ;;
@@ -1201,7 +1208,7 @@ gmg_tip_gate() {
     0) printf '%s: %s\n' "$GMG_TOOL" "$GMG_LINE_NOTE" >&2; return 0 ;;
     1) gmg_refuse "$shown" "$GMG_LINE_WHY" "$(gmg_line_fix "$owner" "$repo" "$base" "$tip"). Then $GMG_LAND" ;;
     *) gmg_refuse "$shown" "$GMG_LINE_WHY" \
-         "make the tip readable (network up, the right -R <owner>/<repo>, gh auth, \`git fetch origin\` in this checkout; an undeclared path of a declared product is added to that product's paths in ~/dev/custom/ai/config/main-content-checks.json, landed on custom main, DND-2034), then $GMG_LAND" ;;
+         "make the tip's content readable (\`git fetch origin\` in this checkout so the tip and the head are local; an undeclared path of a declared product is added to that product's paths in ~/dev/custom/ai/config/main-content-checks.json, landed on custom main, DND-2034), then $GMG_LAND. The tip's runs are never the cause: a red, pending, absent or unreadable run on the tip is a note (DND-2061)" ;;
   esac
 }
 

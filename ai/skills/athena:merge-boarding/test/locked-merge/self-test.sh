@@ -494,10 +494,11 @@ run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/b1b.lock"; expect b1b 9; 
 # from main's tip) -> merges, and says so.
 fixture b2; tip_rollup COMPLETED '"FAILURE"'
 run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/b2.lock"; expect b2 0; names b2 "RED-MAIN FIX"
-# b3 the tip's runs cannot be read -> COULD NOT LOOK (exit 2), never green.
+# b3 the tip's runs cannot be read -> merges, the error named (DND-2061: the
+# head's checks and receipt already passed; the runs decide nothing).
 fixture b3; : > "${ST}/tip_fail"
-run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/b3.lock"; expect b3 2; no_merge b3
-names b3 "COULD NOT LOOK"; names b3 "HTTP 401"
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/b3.lock"; expect b3 0
+names b3 "could not be read"; names b3 "HTTP 401"
 # b4 a pending run on the tip is not red: merges now, naming it.
 fixture b4; commit_on_main m.txt m; tip_rollup IN_PROGRESS null
 run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/b4.lock"; expect b4 0; names b4 "PENDING"

@@ -935,14 +935,13 @@ tip_ran P4 "a head that does not contain the red tip -> runs (DND-2061)" "does n
 reset_fx; green_fx; tip_pipes failed; fx mergebase '' 1 'glab: 500'
 tip_ran P5 "red tip, containment unreadable -> runs, and says containment could not be read (it no longer decides anything)" "could not be read" "${MERGE_ARGS[@]}"
 reset_fx; green_fx; fx pipes '[]'
-tip_refused P6 "THE MISS: a tip with NO pipeline -> COULD NOT LOOK, never green" "COULD NOT LOOK:" "${MERGE_ARGS[@]}"
-[[ "${ERR}" == *"no pipeline"* ]] && ok "P6b. the refusal says no pipeline ran on the tip" || bad "P6b. no pipeline named" "$(detail)"
-[[ "$(grep -m1 'Fix:' <<<"${ERR}")" == *'api -X POST "projects/7000001/pipeline?ref=main"'* ]] && ok "P6c. the Fix names the call that runs a pipeline on the tip" || bad "P6c. pipeline Fix" "$(detail)"
+tip_ran P6 "DND-2061: a tip with NO pipeline (custom after DND-2067; a fresh merge commit) -> runs" "no pipeline" "${MERGE_ARGS[@]}"
+[[ "${ERR}" == *"no check has reported on it (no pipeline"* ]] && [[ "${ERR}" != *"REFUSING"* ]] && ok "P6b. no pipeline is a note, never a refusal" || bad "P6b. no-pipeline note" "$(detail)"
 reset_fx; green_fx; fx pipes '' 1 'glab: 503 Service Unavailable'
-tip_refused P7 "the tip's pipelines cannot be read -> COULD NOT LOOK, the error named" "503 Service Unavailable" "${MERGE_ARGS[@]}"
-[[ "${ERR}" == *"COULD NOT LOOK:"* ]] && ok "P7b. it is COULD NOT LOOK" || bad "P7b. LOOK mark" "$(detail)"
+tip_ran P7 "DND-2061: the tip's pipelines cannot be read (API error) -> runs, the error named in the note" "503 Service Unavailable" "${MERGE_ARGS[@]}"
+[[ "${ERR}" == *"its runs could not be read"* ]] && [[ "${ERR}" != *"REFUSING"* ]] && ok "P7b. it is a note: the head's pipeline and receipt already passed" || bad "P7b. unreadable-runs note" "$(detail)"
 reset_fx; green_fx; fx pipes '{"message":"404 Not Found"}'
-tip_refused P8 "a pipelines answer that is not a list -> COULD NOT LOOK" "COULD NOT LOOK:" "${MERGE_ARGS[@]}"
+tip_ran P8 "a pipelines answer that is not a list -> runs, named in the note" "could not be read" "${MERGE_ARGS[@]}"
 reset_fx; green_fx; tip_pipes running
 tip_ran P9 "a running tip pipeline is not red: the merge runs and names it PENDING" "PENDING" "${MERGE_ARGS[@]}"
 reset_fx; green_fx; pipes_are "$(pipe 8000000003 success)" "$(pipe 8000000002 failed)"
@@ -958,14 +957,14 @@ tip_ran P13b "a canceling tip pipeline is red (it ends canceled), and runs" "is 
 reset_fx; green_fx; pipes_are "$(pipe 8000000003 success web)" "$(pipe 8000000002 failed push)"
 tip_ran P13c "a newer SUCCESS of another source (a web run) does not clear a failed push pipeline: red, and runs" "is RED" "${MERGE_ARGS[@]}"
 reset_fx; green_fx; tip_pipes bogus_status
-tip_refused P14 "a status the judge does not know -> COULD NOT LOOK" "COULD NOT LOOK:" "${MERGE_ARGS[@]}"
+tip_ran P14 "a status the judge does not know -> runs, named in the note" "could not be read" "${MERGE_ARGS[@]}"
 reset_fx; green_fx; printf '[%s]\n' "$(pipe 8000000001 success push "${OLD_TIP}")" > "${FX}/pipes.out"
-tip_refused P15 "a listed pipeline whose sha is not the tip -> COULD NOT LOOK" "COULD NOT LOOK:" "${MERGE_ARGS[@]}"
+tip_ran P15 "a listed pipeline whose sha is not the tip -> runs, named in the note" "could not be read" "${MERGE_ARGS[@]}"
 reset_fx; green_fx; printf '[%s]\n' "$(pipe 8000000001 success push "${TIP_FX}" other-branch)" > "${FX}/pipes.out"
-tip_refused P16 "a listed pipeline on another ref -> COULD NOT LOOK" "COULD NOT LOOK:" "${MERGE_ARGS[@]}"
+tip_ran P16 "a listed pipeline on another ref -> runs, named in the note" "could not be read" "${MERGE_ARGS[@]}"
 reset_fx; green_fx
 p100="$(for i in $(seq 1 100); do pipe "$((8000000100 + i))" success; printf ','; done)"; printf '[%s]\n' "${p100%,}" > "${FX}/pipes.out"
-tip_refused P17 "a full page of 100 pipelines (more may exist) -> COULD NOT LOOK" "COULD NOT LOOK:" "${MERGE_ARGS[@]}"
+tip_ran P17 "a full page of 100 pipelines (more may exist) -> runs, named in the note" "could not be read" "${MERGE_ARGS[@]}"
 reset_fx; green_fx
 receipt_ran P18 "a green tip: the merge runs and names the tip" "${MERGE_ARGS[@]}"
 [[ "${ERR}" == *"BASE-TIP main ${TIP_FX}"* ]] && [[ "$(reads)" == *"api --hostname gitlab.com projects/7000001/pipelines?sha=${TIP_FX}&ref=main&per_page=100"* ]] \
@@ -988,9 +987,18 @@ lock_class() {
 reset_fx; green_fx; tip_pipes failed
 tip_ran P20 "the lock tool's argv onto a failed tip the head does not contain -> runs (DND-2061)" "is RED" "${LOCK_ARGS[@]}"
 reset_fx; green_fx; fx pipes '[]'
-tip_refused P21 "the lock tool's argv onto a tip with no pipeline -> COULD NOT LOOK" "COULD NOT LOOK:" "${LOCK_ARGS[@]}"
-lock_class "COULD NOT LOOK:" && ok "P21b. the lock tool's classifier reads it as COULD NOT LOOK (its exit 2)" || bad "P21b. LOOK classified" "$(detail)"
-! lock_class "MAIN RED:" && ok "P21c. and not as MAIN RED" || bad "P21c. LOOK misread as red" "$(detail)"
+tip_ran P21 "the lock tool's argv onto a tip with no pipeline -> runs (DND-2061)" "no pipeline" "${LOCK_ARGS[@]}"
+# DND-2061: every tip pipeline state is a note, never a refusal. With parallel
+# merges the tip is usually a fresh merge commit whose pipeline has not
+# finished. Each state: the merge runs; the kept checks still refuse (P1d-P1g).
+for st in created waiting_for_resource preparing pending running scheduled manual skipped canceled failed success; do
+  reset_fx; green_fx; tip_pipes "${st}"
+  tip_ran "P26-${st}" "a tip pipeline that is ${st} -> runs" "BASE-TIP main" "${LOCK_ARGS[@]}"
+done
+reset_fx; status_fx running; fx pipes '[]'
+expect_refused P27 "KEPT: a tip with no pipeline does not excuse a running MR pipeline at the head" "'running', not success" "${MERGE_ARGS[@]}"
+reset_fx; nogate_fx; fx pipes '' 1 'glab: 503 Service Unavailable'
+receipt_refused P28 "KEPT: an unreadable tip does not excuse a missing receipt" "NO RECEIPT" "${MERGE_ARGS[@]}"
 reset_fx; green_fx
 receipt_ran P22 "the lock tool's argv onto a green tip -> runs" "${LOCK_ARGS[@]}"
 # DND-2061, the 2026-10-05 gen_saas case: main red at its deploy stage (a
@@ -1061,6 +1069,8 @@ reset_fx; gs_fx "0123456789abcdef0123456789abcdef01234567" "${GS_DUP}"
 tip_refused GS6 "a duplicated tip and a head not in the local store -> COULD NOT LOOK (whether it is a fix cannot be read)" "COULD NOT LOOK:" mr merge 77 --sha 0123456789abcdef0123456789abcdef01234567 --auto-merge=false --yes
 [[ "${ERR}" == *"fetch the PR branch"* ]] && [[ "${ERR}" == *"holds a duplicated migration version"* ]] \
   && ok "GS6b. it says to fetch the head, and still names the duplicate" || bad "GS6b. fetch named" "$(detail)"
+lock_class "COULD NOT LOOK:" && ok "GS6c. the lock tool's classifier reads a content COULD NOT LOOK as its exit 2" || bad "GS6c. LOOK classified" "$(detail)"
+! lock_class "MAIN RED:" && ok "GS6d. and not as MAIN RED" || bad "GS6d. LOOK misread as red" "$(detail)"
 
 # DND-2034: gen_saas moved to the athena-ai-harness group (the same GitLab
 # project). The declaration was keyed on cjpoll/gen_saas alone, so an MR on

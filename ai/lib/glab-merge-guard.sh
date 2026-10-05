@@ -547,14 +547,14 @@ glmg_receipt_gate() {
 #     pipeline of ANOTHER source (a "Run pipeline" click is source `web`, a
 #     schedule may run other jobs) never clears a red push pipeline; retrying
 #     the red pipeline does, since its status becomes its retried jobs'. A
-#     status the judge does not know is COULD NOT LOOK.
-#   * A tip with NO pipeline is COULD NOT LOOK, never green. This is stricter
-#     than GitHub, where a repo with no CI (custom's shape) reports no run and
-#     passes. So a project merged through this guard must run a pipeline on its
-#     target branch (gen_saas's post-merge deploy does). A project whose target
-#     branch runs none (custom, which lands by a fast-forward `glab-athena git
-#     push`, not by an MR merge) cannot merge here: every such merge is refused
-#     COULD NOT LOOK, closed, by design.
+#     status the judge does not know, or an answer it cannot read, is LOOK.
+#   * A tip with NO pipeline is NONE, as on GitHub: a fresh merge commit whose
+#     pipeline is not created yet, or a target branch that runs none (custom
+#     after DND-2067).
+#   * None of RED, PENDING, NONE or LOOK refuses (DND-2061): each is named in
+#     the note. This judge runs only after the MR's own pipeline is green at
+#     the pinned head and its receipt is sealed, so the tip's pipelines decide
+#     nothing, and a read of them that fails decides nothing either.
 #   * CONTENT: gmg_content_health, the same code and the same declaration
 #     (ai/config/main-content-checks.json) as on GitHub, looked up by the MR's
 #     full project path in each product's paths, so
@@ -568,7 +568,7 @@ glmg_receipt_gate() {
 #     contains the red tip (the local object store, else the forge's merge
 #     base) only decides whether the note says RED-MAIN FIX. Red CONTENT
 #     refuses every MR but a head that contains the tip and removes every
-#     duplicate. What cannot be read is COULD NOT LOOK and refused.
+#     duplicate. Content that cannot be read is COULD NOT LOOK and refused.
 # Residuals (named, not closed): those of DND-1902 and DND-2061 (a merge lands
 # onto a red tip and does not fix it); a red pipeline beyond the first page of
 # 100 is COULD NOT LOOK; a pipeline on the tip that GitLab lists under another
@@ -629,7 +629,7 @@ glmg_tip_health() {
   fi
   case "$shape" in
     OK) ;;
-    EMPTY) GMG_TIP_WHY="no pipeline has run on the $base tip $tip (\`glab ${req[*]}\` listed none), so nothing shows it green; a tip with no pipeline is never read as green"; return 2 ;;
+    EMPTY) GMG_TIP_STATE="NONE"; return 0 ;;
     *) GMG_TIP_WHY="the pipelines on $tip could not be read: ${shape#ERR$'\t'}"; return 2 ;;
   esac
   if ! judged="$(jq -r "$GLMG_TIP_JUDGE" <<<"$pipes" 2>&1)"; then
@@ -689,20 +689,19 @@ ${odd%$'\n'}"; return 2
 # glmg_tip_gate <shown> : returns 0 when the target tip does not stop the
 # merge; exits 3 otherwise. Called after glmg_receipt_gate, which read the tip.
 glmg_tip_gate() {
-  local shown="$1" owner repo rc fix enc
+  local shown="$1" owner repo rc fix
   if [[ "${GLMG_PROJ_PATH:-}" != ?*/?* ]]; then
     glmg_refuse "$shown" "${GMG_LOOK_MARK} the MR's project path '${GLMG_PROJ_PATH:-}' has no namespace, so its content declaration cannot be looked up" \
       "make the MR readable (right iid, right -R <group>/<project>), then $GLMG_SAFE_PATH"
   fi
   owner="${GLMG_PROJ_PATH%/*}" repo="${GLMG_PROJ_PATH##*/}"
-  enc="$(jq -rn --arg b "$GLMG_BRANCH" '$b | @uri' 2>/dev/null)" || enc="<the URL-encoded target branch>"
   if gmg_line_check "$owner" "$repo" "$GLMG_BRANCH" "$GLMG_TIP" "$GLMG_HEAD" "$GLMG_TOP" glmg_tip_health; then rc=0; else rc=$?; fi
   case "$rc" in
     0) printf '%s: %s\n' "$GLMG_TOOL" "$GMG_LINE_NOTE" >&2; return 0 ;;
     1) fix="land only a red-main fix: a head that contains $GLMG_TIP, removes every duplicate named above, and carries its own INTEGRATION OK receipt (merge origin/$GLMG_BRANCH into it, fix it, push as Athena, re-gate with \`$GLMG_IG\`). Every other MR waits until that fix lands on $GLMG_BRANCH. A red pipeline on the tip is not by itself a refusal (DND-2061). Then $GLMG_BOARD"
        glmg_refuse "$shown" "$GMG_LINE_WHY" "$fix" ;;
     *) glmg_refuse "$shown" "$GMG_LINE_WHY" \
-         "make the tip readable (network up, the right -R <group>/<project>, glab-athena's token, \`git fetch origin\` in this checkout). A tip with no pipeline needs one: \`~/dev/custom/ai/bin/$GLMG_TOOL api -X POST \"projects/$GLMG_PID/pipeline?ref=$enc\"\`, then wait for it to finish. An undeclared path of a declared product (DND-2034) is fixed by adding that path to the product's paths in ~/dev/custom/ai/config/main-content-checks.json, landed on custom main. A malformed repo key or an unloadable runs judge is a defect in the guard: escalate it to your admiral with this output. Then $GLMG_BOARD" ;;
+         "make the tip's content readable (\`git fetch origin\` in this checkout so the tip and the head are local). The tip's pipelines are never the cause: a red, pending, absent or unreadable tip pipeline is a note (DND-2061). An undeclared path of a declared product (DND-2034) is fixed by adding that path to the product's paths in ~/dev/custom/ai/config/main-content-checks.json, landed on custom main. A malformed repo key is a defect in the guard: escalate it to your admiral with this output. Then $GLMG_BOARD" ;;
   esac
 }
 

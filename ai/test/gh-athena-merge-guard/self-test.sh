@@ -1047,15 +1047,15 @@ run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
 
 reset_fx; pr_view "${GREEN}"; base_is "${TIP}"; fx tiprollup '' 1 'gh: Bad credentials (HTTP 401)'
 run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
-if refused && [[ "${ERR}" == *"COULD NOT LOOK"* ]] && [[ "${ERR}" == *"HTTP 401"* ]] && [[ "${ERR}" == *"${TIP}"* ]]; then
-  ok "T5. the base tip's runs cannot be read -> COULD NOT LOOK, refused, never green"
-else bad "T5. unreadable tip refused" "$(detail)"; fi
+if [ "${RC}" = 0 ] && merged && [[ "${ERR}" == *"could not be read"* ]] && [[ "${ERR}" == *"HTTP 401"* ]] && [[ "${ERR}" == *"${TIP}"* ]]; then
+  ok "T5. the base tip's runs cannot be read -> merges, the error named in the note (DND-2061: the head's checks already passed)"
+else bad "T5. unreadable tip runs" "$(detail)"; fi
 [[ "${ERR}" != *"is RED"* ]] && ok "T5b. an unreadable tip is not reported as red" || bad "T5b. could-not-look vs red" "$(detail)"
 
 reset_fx; pr_view "${GREEN}"; base_is "${TIP}"; fx tiprollup '{"errors":[{"message":"Something went wrong"}]}'
 run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
-refused && [[ "${ERR}" == *"COULD NOT LOOK"* ]] \
-  && ok "T5c. a GraphQL answer carrying errors for the tip -> COULD NOT LOOK" || bad "T5c. GraphQL errors refused" "$(detail)"
+[ "${RC}" = 0 ] && merged && [[ "${ERR}" == *"could not be read"* ]] \
+  && ok "T5c. a GraphQL answer carrying errors for the tip -> merges, named in the note" || bad "T5c. GraphQL errors" "$(detail)"
 
 reset_fx; pr_view "${GREEN}"; base_is "${TIP}"; tip_rollup "${TIP_PENDING}"
 run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
@@ -1200,8 +1200,8 @@ run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
 
 reset_fx; pr_view "${GREEN}"; base_is "${TIP}"; tip_rollup '[{"__typename":"SomethingNew","name":"x"}]'
 run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
-refused && [[ "${ERR}" == *"COULD NOT LOOK"* ]] && [[ "${ERR}" == *"unknown type"* ]] \
-  && ok "T11. a tip context of a type the judge does not know -> COULD NOT LOOK" || bad "T11. unknown context type" "$(detail)"
+[ "${RC}" = 0 ] && merged && [[ "${ERR}" == *"unknown type"* ]] \
+  && ok "T11. a tip context of a type the judge does not know -> merges, named in the note" || bad "T11. unknown context type" "$(detail)"
 
 # DND-1647: no gh/glab call may have fallen through past its stub.
 if fsg_verify; then ok "no gh/glab call fell through past its stub (DND-1647)"

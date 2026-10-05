@@ -171,9 +171,9 @@ The landing, as Cody confirmed it (2026-10-01):
    pending RUN on the base tip (CI or a post-merge deploy) never refuses a
    green, gated head, whether or not the head contains the tip. The guard
    reads and names it, and says RED-MAIN FIX when the head contains it
-   (DND-2061). What cannot be read (the tip's runs, its tree) is COULD NOT
-   LOOK and refused (DND-1902; `ai/lib/gh-merge-guard.sh` →
-   `gmg_line_check`). No flag or env var skips it. The head's own checks, the
+   (DND-2061). So does a tip with no run at all, or runs that cannot be read:
+   a note, never a refusal. Content that cannot be read is COULD NOT LOOK and
+   refused (DND-1902; `ai/lib/gh-merge-guard.sh` → `gmg_line_check`). No flag or env var skips it. The head's own checks, the
    pinned head SHA and the receipt still refuse whatever the tip shows.
    `locked-merge` also reads its expected squash tree against the same
    declaration, so two PRs that each add one migration version are refused
@@ -181,14 +181,17 @@ The landing, as Cody confirmed it (2026-10-01):
    In a GitLab project, the `glab-athena` merge guard applies the same
    judgment through the same code (`gmg_line_check`) to `mr merge` and train
    boarding, with the target tip's pipelines as its runs: the latest pipeline
-   of each source on the tip. A tip with no pipeline is COULD NOT LOOK there,
-   never green (DND-1941; `ai/lib/glab-merge-guard.sh` → `glmg_tip_health`).
+   of each source on the tip. A tip with no pipeline (a fresh merge commit,
+   or a project whose target branch runs none) is a note there too (DND-2061;
+   `ai/lib/glab-merge-guard.sh` → `glmg_tip_health`).
 
 **Later (2026-10-05, DND-2061):** this step read "Stop the line on a red main
 or a failed deploy", and a judged red run on the base tip refused every merge
 but a red-main fix, a head that contains the red tip; a containment read that
 failed was COULD NOT LOOK. So every branch had to be rebased onto the red tip
-and re-run CI to merge. Superseded by owner decision (Cody, coordinator
+and re-run CI to merge. A GitLab tip with no pipeline, or with pipelines that
+could not be read, was COULD NOT LOOK and refused, which also refuses a merge
+onto a fresh merge commit whose pipeline does not exist yet. Superseded by owner decision (Cody, coordinator
 terminal, 2026-10-05, session `0cc59a5e-6c65-495e-a216-83c6a0bf2d56`): "Specifically, I don't
 want a branch to have to be built on latest main to be mergeable. That's the
 point of parallel merges." A red or pending tip run is a note; red content
@@ -1226,10 +1229,9 @@ of the project (`--repo`): the receipt is in its git common dir.
   and a merge GitLab defers until a pipeline ends would land outside the lock.
   Never make that call yourself.
 - **The tip's pipelines are judged inside that call**, by glab-athena's merge
-  guard (`glmg_tip_gate`, DND-1941). A red or pending pipeline is named, never
-  refused (DND-2061); a tip whose pipelines cannot be read, or that has none,
-  is refused `COULD NOT LOOK`. Its `MAIN RED` refusal (red content) is exit 11
-  and its `COULD NOT LOOK` exit 2, at once, with no confirm retries, exactly as
+  guard (`glmg_tip_gate`, DND-1941). A red, pending, absent or unreadable
+  pipeline is named, never refused (DND-2061). Its `MAIN RED` refusal (red
+  content) is exit 11 and its `COULD NOT LOOK` (content it cannot read) exit 2, at once, with no confirm retries, exactly as
   gh-athena's on GitHub; that mapping reads the guard's own refusal shape and
   marks (`gmg_refusal_has_reason`). Before the lock the tool asks the guard
   the wrapper loads whether `glmg_tip_gate` is defined, and refuses with

@@ -360,13 +360,14 @@ What the wrapper refuses, exit 3 with a `Fix:`:
   duplicate. A red or running tip PIPELINE (the latest pipeline of some
   source failed, was canceled, or has not finished) never refuses a green,
   gated head, whether or not the head contains the tip: the wrapper names it
-  and merges (DND-2061). A tip with no pipeline, or one the wrapper cannot
-  read, is `COULD NOT LOOK` and refused, so a project merged this way must
-  run a pipeline on its target branch. These are the judges gh-athena runs
+  and merges (DND-2061). So does a tip with no pipeline (a fresh merge
+  commit, or a project whose target branch runs none) and one whose
+  pipelines the wrapper cannot read. These are the judges gh-athena runs
   (DND-1902).
 
   **Later (2026-10-05, DND-2061):** a red tip pipeline also refused every
-  merge but a red-main fix. Superseded by owner decision (Cody, 2026-10-05):
+  merge but a red-main fix, and a tip with no pipeline, or one the wrapper
+  could not read, was `COULD NOT LOOK` and refused. Superseded by owner decision (Cody, 2026-10-05):
   "I don't want a branch to have to be built on latest main to be
   mergeable. That's the point of parallel merges."
 - API writes that create or move a ref, or change protection: `repository/

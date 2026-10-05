@@ -95,7 +95,8 @@ path fleets already share) it:
      migration version). A duplicate refuses (exit 11), naming each, unless
      --head contains B and removes every duplicate (RED-MAIN FIX). A judged
      red or pending run (CI or a post-merge deploy) is named and merges
-     (DND-2061: --head need not contain B). What it cannot read is COULD NOT
+     (DND-2061: --head need not contain B), and so are runs it cannot read.
+     The content it cannot read is COULD NOT
      LOOK (exit 2). No check on B and no declared content check merge as
      before. The
      expected squash tree from step 3 is read against the same declaration:
@@ -297,14 +298,15 @@ if [ "${FORGE}" = gitlab ]; then
   # On GitLab a red base tip's PIPELINES are judged inside the merge call, by
   # the guard the wrapper sources (glmg_tip_gate). This tool does not copy that
   # judge. So it asks the guard the wrapper at ${AI_BIN} will load whether the
-  # judge is there, and refuses when it is not: a tool that read as a full
-  # locked merge while nothing read the tip (a red pipeline is named, never
-  # refused, DND-2061; an unreadable one is COULD NOT LOOK) would be the claim with no
+  # judge is there, and refuses when it is not. Since DND-2061 its pipelines
+  # are a note in every state; what it still refuses is the tip's CONTENT at
+  # merge time (the DND-1906 re-check), so a tool that read as a full locked
+  # merge without that re-check would be the claim with no
   # mechanism behind it (CLAUDE.md -> "A claimed mechanism must be able to
   # fire"). Before DND-1941 lands, every --mr merge stops here.
   GLMG_FOR_WRAPPER="$(dirname "$(readlink -f "${AI_BIN}/${WRAPPER}")")/../lib/glab-merge-guard.sh"
   if ! ( . "${GLMG_FOR_WRAPPER}" >/dev/null 2>&1 && declare -F glmg_tip_gate >/dev/null ); then
-    die 2 "NO TIP JUDGE (COULD NOT LOOK): the merge guard ${WRAPPER} loads (${GLMG_FOR_WRAPPER}) defines no tip-pipeline judge (glmg_tip_gate, DND-1941), or does not load, so a ${GL_PROJECT} target tip with no pipeline, or one whose pipelines cannot be read, would not stop this merge" \
+    die 2 "NO TIP JUDGE (COULD NOT LOOK): the merge guard ${WRAPPER} loads (${GLMG_FOR_WRAPPER}) defines no tip-pipeline judge (glmg_tip_gate, DND-1941), or does not load, so the merge-time re-check of the ${GL_PROJECT} target tip's content (DND-1906) would not run" \
       "land DND-1941 (glab merge guard parity: red tip and content) in ~/dev/custom and fast-forward the main checkout, then re-run. Merging around it is lowering the merge bar, an owner decision (~/.claude/CLAUDE.md -> Owner approval policy, item 5). Nothing was locked or merged."
   fi
   echo "TIP-JUDGE ${GLMG_FOR_WRAPPER}: glmg_tip_gate runs inside the merge call"
@@ -548,7 +550,7 @@ if [ "${FORGE}" = github ]; then
     0) echo "${GMG_LINE_NOTE}" ;;
     1) die 11 "${GMG_LINE_WHY}" "$(gmg_line_fix "${GH_OWNER}" "${GH_REPO}" "${base}" "${B}"), then re-run locked-merge. Nothing was merged." ;;
     *) die 2 "${GMG_LINE_WHY}" \
-         "make the tip readable (network up, gh auth, git fetch origin), then re-run locked-merge. Could-not-read is never green; nothing was merged." ;;
+         "make the tip's content readable (git fetch origin; fix the declaration if the message names it), then re-run locked-merge. The tip's runs are never the cause (a note, DND-2061); nothing was merged." ;;
   esac
 else
   # GitLab (DND-1943): the tip's CONTENT is forge-free (git and
