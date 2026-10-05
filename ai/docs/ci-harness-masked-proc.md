@@ -62,8 +62,10 @@ The `harness-gate` job becomes a thin launcher:
    --security-opt seccomp=unconfined --security-opt apparmor=unconfined
    --security-opt systempaths=unconfined
    -v "$CI_PROJECT_DIR:$CI_PROJECT_DIR" -w "$CI_PROJECT_DIR" <image>
-   ai/bin/harness-gate`.
-4. The sibling runs a boundary probe before the gate (*The boundary*).
+   ai/bin/harness-gate`. `ci` is the non-root user #389's `setup.sh`
+   creates in the image.
+4. Before the gate, a second short-lived container with the same options
+   runs the boundary probe (*The boundary*).
 5. `after_script` removes the sibling by name, so a cancelled job leaves no
    container behind.
 
@@ -88,8 +90,8 @@ It weakens the check:
   (`~/dev/custom/CLAUDE.md` → *A check's own bar must not live in the diff
   it is checking*).
 
-That is item 5 (`~/.claude/CLAUDE.md` → *Owner approval policy*). The
-decision above makes it unnecessary, so the default is not to do it.
+That is item 5 (`~/.claude/CLAUDE.md` → *Owner approval policy*). *Decision:
+run the gate in a sibling container the job starts* makes it unnecessary, so the default is not to do it.
 
 **(b) A runner config that unmasks `/proc`.** No Engine API form exists for
 the runner to send. `privileged = true` is refused by the runbook's
@@ -133,8 +135,8 @@ fork guard in `.gitlab-ci.yml`). A narrow seccomp profile (DND-2005) is
 unaffected.
 
 The boundary probe asserts the rows that must stay denied on every run.
-Inside the sibling, as the image's root (`--user 0`, a separate short
-`docker run` with the same options), a write to `/proc/sys/kernel/core_pattern`
+In its own container, started with the gate's options but as the image's
+root (`--user 0`), a write to `/proc/sys/kernel/core_pattern`
 and to `/proc/sysrq-trigger` must fail, and `/proc/kcore` must not open. If
 any succeeds, the job fails with `Fix:` naming a rootful daemon behind the
 socket. This catches the one change that would make the decision unsafe: the
