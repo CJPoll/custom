@@ -50,7 +50,11 @@ mkdir -p "${TMP}/bin"
 export STUB_LOG="${TMP}/calls.log" STUB_VIS="${TMP}/vis"
 # The stub glab. A visibility read answers from ${STUB_VIS}.<ref> (the ref as
 # given, `/` and `%` turned into `_`), else ${STUB_VIS}.default; an empty or
-# missing fixture is a failed read (exit 1). Every other call is a SEND: it is
+# missing fixture is a failed read (exit 1). A branch read (`api
+# projects/<p>/repository/branches/<ref>`: the fork MR pipeline refusal,
+# DND-1942, reads a release's --ref before the scan runs) answers that <ref> is
+# a branch, so each release case reaches the scan; that refusal has its own
+# suite (ai/test/glab-athena-fork-pipeline). Every other call is a SEND: it is
 # logged, and the content of each file glab would read (`-F k=@f`, `--input f`,
 # `--notes-file f`) is echoed so a replaced stdin is observable.
 cat > "${TMP}/bin/glab" <<'STUB'
@@ -66,6 +70,10 @@ if [ "${#args[@]}" = 2 ] && [ "${args[0]}" = api ] && [[ "${args[1]}" =~ ^(proje
   f="${STUB_VIS}.${ref}"; [ -e "$f" ] || f="${STUB_VIS}.default"
   if [ -s "$f" ]; then cat "$f"; exit 0; fi
   echo "stub: 404 Project Not Found" >&2; exit 1
+fi
+if [ "${#args[@]}" = 2 ] && [ "${args[0]}" = api ] && [[ "${args[1]}" =~ ^projects/[^/]+/repository/branches/([^/]+)$ ]]; then
+  enc="${BASH_REMATCH[1]}"
+  jq -nc --arg n "$(printf '%b' "${enc//%/\\x}")" '{name: $n}'; exit 0
 fi
 prev=""
 for a in "$@"; do

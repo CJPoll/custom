@@ -388,7 +388,7 @@ ai/lib/glab-outbound-scan.sh	guard
 ai/lib/outbound-text-scan.sh	guard
 ai/lib/gh-flag-table.sh	library	generated data sourced by ai/lib/gh-outbound-scan.sh (DND-1976): the pinned gh flag table, built and checked by ai/bin/cli-flag-table; it runs nothing, and the scan refuses with a Fix: when it is missing or lacks a command
 ai/lib/gh-target-repo.sh	guard
-ai/lib/glab-flag-table.sh	library	generated data sourced by ai/lib/glab-outbound-scan.sh (DND-1976): the pinned glab flag table, built and checked by ai/bin/cli-flag-table; it runs nothing, and the scan refuses with a Fix: when it is missing or lacks a command
+ai/lib/glab-flag-table.sh	library	generated data sourced by ai/lib/glab-outbound-scan.sh (DND-1976) and ai/lib/glab-fork-pipeline-guard.sh (DND-1942): the pinned glab flag table, built and checked by ai/bin/cli-flag-table; it runs nothing, and each reader refuses with a Fix: when it is missing or lacks a command
 ai/lib/outbound_tree_check.rb	guard
 ai/lib/outbound_mark.rb	library	git/filesystem probe required by ai/bin/check-outbound-tree (DND-699); returns :marked, :unmarked or :unknown, and the check prints the verdict that carries Fix:
 ai/git-hooks/outbound-pre-push.sh	guard

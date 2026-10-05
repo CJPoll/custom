@@ -31,7 +31,12 @@
 #   glab schedule|sched|skd run <id>         the schedule's ref
 #   glab schedule … create|update --ref <r>  the ref
 #   glab release create --ref|-r <r>         the ref (a new tag on it runs a
-#                                            tag pipeline here)
+#                                            tag pipeline here); its argv is
+#                                            read with the pinned glab flag
+#                                            table the outbound scan reads
+#                                            (ai/lib/glab-flag-table.sh,
+#                                            DND-1976), so `--ref -n` is ref
+#                                            `-n`, as pflag reads it
 #   glab api, a write (not GET/HEAD, or a method override) to
 #     projects/<p>/merge_requests/<iid>/pipelines       the MR
 #     projects/<p>/pipeline(s)                          the ref field/query
@@ -119,6 +124,16 @@
   echo "  Fix: run it from a full ~/dev/custom checkout (ai/bin, ai/lib and ai/agent-bin side by side)." >&2
   exit 3
 }
+
+# The pinned glab flag table (DND-1976), the one the outbound scan reads. A
+# table that is missing or does not define LFT_FLAGS refuses every command it
+# would be read for (glfp_table), never a guess at the flags.
+GLFP_TABLE_OK=""
+# shellcheck source=glab-flag-table.sh
+if . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/glab-flag-table.sh" 2>/dev/null \
+  && declare -p LFT_FLAGS >/dev/null 2>&1; then
+  GLFP_TABLE_OK=1
+fi
 
 GLFP_TOOL="${GLFP_TOOL:-glab-athena}"
 GLFP_MUTATIONS="pipelineCreate|pipelineRetry|pipelineSchedulePlay|pipelineScheduleCreate|pipelineScheduleUpdate|jobRetry|jobPlay|mergeRequestCreatePipeline|mergeTrainsAddCar|mergeRequestAccept"
@@ -569,10 +584,31 @@ glfp_schedule() {
   return 0
 }
 
-# glfp_release <args...> : `glab release create <tag> [files] --ref <r>`.
+# glfp_table <command> : sets GLFP_TLV, GLFP_TLB (long valued and switch
+# flags, space-delimited) and GLFP_TSV, GLFP_TSB (their short letters) from the
+# pinned table's entry for <command>; refuses when the table or the entry is
+# missing.
+glfp_table() {
+  local e kind short long
+  if [ -z "$GLFP_TABLE_OK" ] || [ -z "${LFT_FLAGS[$1]+x}" ]; then
+    glfp_refuse "$GLFP_SHOWN" "COULD NOT LOOK: the pinned glab flag table (ai/lib/glab-flag-table.sh) is missing, does not define LFT_FLAGS, or has no \`$1\`, so this argv cannot be read the way glab reads it" "run it from a full ~/dev/custom checkout; if the file is damaged, regenerate it with \`ai/bin/cli-flag-table --cli glab --write\`"
+  fi
+  GLFP_TLV=" " GLFP_TLB=" " GLFP_TSV="" GLFP_TSB=""
+  for e in ${LFT_FLAGS[$1]}; do
+    IFS=: read -r kind short long <<<"$e"
+    case "$kind" in
+      v) GLFP_TLV+="--$long "; GLFP_TSV+="$short" ;;
+      b) GLFP_TLB+="--$long "; GLFP_TSB+="$short" ;;
+    esac
+  done
+  return 0
+}
+
+# glfp_release <args...> : `glab release create <tag> [files] --ref <r>`, its
+# flags read from the pinned table.
 glfp_release() {
-  glfp_cli_parse " --assets-links --milestone --name --notes --notes-file --package-name --ref --released-at --repo --tag-message " \
-    " --no-close-milestone --no-update --publish-to-catalog --use-package-registry --help " "amnNFrDRT" "h" "$@"
+  glfp_table "release create"
+  glfp_cli_parse "$GLFP_TLV" "$GLFP_TLB" "$GLFP_TSV" "$GLFP_TSB" "$@"
   glfp_repo "$GLFP_REPO"
   if [ "$GLFP_REF_N" -gt 1 ]; then glfp_refuse "$GLFP_SHOWN" "COULD NOT LOOK: --ref is given $GLFP_REF_N times" "pass --ref once"; fi
   [ "$GLFP_REF_N" = 1 ] && glfp_check_ref "$GLFP_P" "$GLFP_REFOPT" "$GLFP_HOST" given
