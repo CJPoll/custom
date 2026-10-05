@@ -36,12 +36,13 @@
 #     it (DND-1463), and `--auto` is refused outright (DND-969; see
 #     gmg_receipt_gate). The one recommended merge path
 #     is integration-gate, then locked-merge, which makes this call.
-#   * A merge onto a base tip whose own CI or deploy run is RED, or whose tree
-#     holds what ai/config/main-content-checks.json forbids (a duplicated
-#     migration version), is REFUSED (stop the line, DND-1902), unless the
-#     pinned head contains that tip and removes every duplicate (a red-main
-#     fix). What cannot be read is COULD NOT LOOK and refused; a pending run
-#     is not red. See gmg_line_check. glab-athena's guard
+#   * A merge onto a base tip whose tree holds what
+#     ai/config/main-content-checks.json forbids (a duplicated migration
+#     version) is REFUSED (stop the line, DND-1902), unless the pinned head
+#     contains that tip and removes every duplicate (a red-main fix). A red
+#     or pending CI or deploy RUN on the tip is read and named, never refused
+#     (DND-2061: the owner's parallel merges). What cannot be read is COULD
+#     NOT LOOK and refused. See gmg_line_check. glab-athena's guard
 #     (ai/lib/glab-merge-guard.sh) loads this file and runs the same
 #     gmg_line_check and content judge on GitLab, with its own pipelines
 #     read as the runs judge (DND-1941).
@@ -778,15 +779,18 @@ ${old%$'\n'}}" >&2
 #   * RED: a judged run concluded red (a CheckRun COMPLETED and not
 #     SUCCESS/NEUTRAL/SKIPPED, a StatusContext FAILURE/ERROR), and it is not
 #     superseded by a newer suite whose runs of that check are all SUCCESS.
-#     Refused, naming every red run and its URL, unless the head CONTAINS the
-#     tip: a red-main fix, custom's rule. Containment is read from the local
-#     object store when both commits are there, else from the forge's compare.
+#     Named with every red run and its URL, and NOT refused (DND-2061, owner
+#     2026-10-05: "I don't want a branch to have to be built on latest main
+#     to be mergeable."). Containment, read from the local object store when
+#     both commits are there, else from the forge's compare, only decides
+#     whether the note says RED-MAIN FIX; a containment read that fails is
+#     named in the note.
 #   * PENDING: a run has not concluded. NOT red, so the merge proceeds at once
 #     and names the runs. Holding on pending would block every merge for the
 #     length of a deploy, and a pending run that turns red is caught by the
 #     next merge's read.
-#   * Unreadable (the rollup, its shape, the judge, or containment of a red
-#     tip): COULD NOT LOOK, refused, never green, and never reported as red.
+#   * Unreadable (the rollup, its shape, the judge): COULD NOT LOOK, refused,
+#     never green, and never reported as red.
 #   * No check reported on the tip (a repo with no CI, custom's shape): not
 #     red; the merge proceeds as before and says so.
 # No flag or env var skips it (~/dev/custom/CLAUDE.md -> "A check's own bar must
@@ -797,12 +801,10 @@ ${old%$'\n'}}" >&2
 # failed attempt re-run inside the SAME check suite still reads red (the
 # head judge's residual too), so the tip stays red until a new commit or a
 # fix; a red run beyond the rollup's first 100 contexts is COULD NOT LOOK.
-# For a red RUN, containing the tip is the only fix evidence read (the brief's
-# rule, mirroring custom's push rule): a head rebased onto the red tip for
-# any reason passes as a fix. That is sound where the receipt's gate re-runs
-# the red check (custom); a deploy never runs on a PR, so for a red deploy the
-# merger must judge that the head fixes it. The content half asks more: the
-# head's own tree must drop every duplicate. The content declaration is read
+# Since DND-2061 a red RUN refuses nothing, so a merge lands onto a red main
+# and does not fix it; the red tip stays named in every merge's note until
+# its own fix lands. The content half still refuses: the head's own tree must
+# drop every duplicate. The content declaration is read
 # from the custom checkout this file is loaded from, so a custom branch that
 # edits it moves the bar for merges run from that branch's copy.
 GMG_TIP_JUDGE="$GMG_ROLLUP_DEFS"'

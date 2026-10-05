@@ -65,9 +65,10 @@
 #     merge_requests/<iid>/rebase; and the GraphQL mutations in
 #     GLMG_REF_MUTATIONS. See glmg_ref_route for the scope decision.
 #
-# AND the target tip is not RED (DND-1941, the GitLab side of DND-1902): its
-# own pipelines and its content are judged by gmg_line_check, the code
-# gh-athena runs, with glmg_tip_health in place of the GitHub runs read. See
+# AND the target tip's content is not RED (DND-1941, the GitLab side of
+# DND-1902): its own pipelines and its content are judged by gmg_line_check,
+# the code gh-athena runs, with glmg_tip_health in place of the GitHub runs
+# read. A red or pending tip pipeline is named, never refused (DND-2061). See
 # "stop the line" below.
 #
 # AND integration-gate passed that head (DND-1845, glmg_receipt_gate). Both
@@ -561,14 +562,17 @@ glmg_receipt_gate() {
 #     no entry lists whose project name is a declared product's (the pre-move
 #     gitlab.com/cjpoll/gen_saas) is COULD NOT LOOK, never "no check"
 #     (DND-2034).
-#   * The red-main fix and the composition are gmg_line_check's: a head that
-#     contains the tip (from the local object store, else the forge's merge
-#     base) and removes every duplicate passes; any other MR is refused. What
-#     cannot be read is COULD NOT LOOK and refused.
-# Residuals (named, not closed): those of DND-1902 (a merge onto a PENDING tip
-# that turns red; containing a red tip is the only fix evidence read for a red
-# pipeline); a red pipeline beyond the first page of 100 is COULD NOT LOOK; a
-# pipeline on the tip that GitLab lists under another ref (a tag) is not read.
+#   * The composition is gmg_line_check's. A RED or PENDING pipeline is named
+#     and never refuses (DND-2061, owner 2026-10-05: "I don't want a branch to
+#     have to be built on latest main to be mergeable."); whether the head
+#     contains the red tip (the local object store, else the forge's merge
+#     base) only decides whether the note says RED-MAIN FIX. Red CONTENT
+#     refuses every MR but a head that contains the tip and removes every
+#     duplicate. What cannot be read is COULD NOT LOOK and refused.
+# Residuals (named, not closed): those of DND-1902 and DND-2061 (a merge lands
+# onto a red tip and does not fix it); a red pipeline beyond the first page of
+# 100 is COULD NOT LOOK; a pipeline on the tip that GitLab lists under another
+# ref (a tag) is not read.
 
 # GLMG_TIP_SHAPE: OK, EMPTY or ERR<TAB><why>, for the pipelines answer.
 GLMG_TIP_SHAPE='

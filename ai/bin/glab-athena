@@ -411,8 +411,9 @@ unset TOKEN
 # <iid>`) needs -f sha=<head>. Both also need integration-gate's sealed receipt
 # for that head, read from the checkout the wrapper runs in (DND-1845).
 # Both also refuse a deferred merge (`mr merge` needs --auto-merge=false) and
-# a RED target tip unless the head is a red-main fix; API ref writes are
-# refused outright (DND-1941).
+# a target tip whose content is RED unless the head is a red-main fix (a red
+# or pending tip pipeline is named, never refused, DND-2061); API ref writes
+# are refused outright (DND-1941).
 # A REST PUT …/merge_requests/<iid>/merge and the
 # GraphQL mergeRequestAccept are REFUSED outright, and so is `mcp serve`. The
 # mechanism, its measurements and its named residuals live in

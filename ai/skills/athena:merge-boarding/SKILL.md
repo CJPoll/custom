@@ -157,21 +157,21 @@ The landing, as Cody confirmed it (2026-10-01):
    a row the landing added is a skipped install, not a bad landing: run step
    5's `landing-installers` for that landing, then `main-health check
    --recheck`. In a GitHub repo, `locked-merge` (exit 11, `MAIN RED`) and
-   the `gh-athena pr merge` guard refuse a merge while a judged run on the
-   base tip itself (CI or a post-merge deploy) is red, or while the tip's
-   tree breaks what `ai/config/main-content-checks.json` declares for the
-   repo (gen_saas: a duplicated migration version in one app). The
-   declaration lists each product's project paths on every forge; a path it
-   does not list whose project name is a declared product's is COULD NOT
-   LOOK, never "no check" (DND-2034). So a project move adds the new path to
-   that entry first. The one
-   exception is a red-main fix: a head that contains the red tip, removes
-   every duplicate, and carries its own `INTEGRATION OK` receipt. What cannot
-   be read is COULD NOT LOOK and refused; a pending run is not red and does
-   not hold the merge (DND-1902; `ai/lib/gh-merge-guard.sh` →
-   `gmg_line_check`). No flag or env var skips it. For a red run, containing
-   the tip is the only fix evidence read, so any head rebased onto it
-   passes: before landing onto a red deploy, judge that the head fixes it.
+   the `gh-athena pr merge` guard refuse a merge while the tip's tree breaks
+   what `ai/config/main-content-checks.json` declares for the repo (gen_saas:
+   a duplicated migration version in one app). The declaration lists each
+   product's project paths on every forge; a path it does not list whose
+   project name is a declared product's is COULD NOT LOOK, never "no check"
+   (DND-2034). So a project move adds the new path to that entry first. The
+   one exception is a red-main fix: a head that contains the tip, removes
+   every duplicate, and carries its own `INTEGRATION OK` receipt. A red or
+   pending RUN on the base tip (CI or a post-merge deploy) never refuses a
+   green, gated head, whether or not the head contains the tip. The guard
+   reads and names it, and says RED-MAIN FIX when the head contains it
+   (DND-2061). What cannot be read (the tip's runs, its tree) is COULD NOT
+   LOOK and refused (DND-1902; `ai/lib/gh-merge-guard.sh` →
+   `gmg_line_check`). No flag or env var skips it. The head's own checks, the
+   pinned head SHA and the receipt still refuse whatever the tip shows.
    `locked-merge` also reads its expected squash tree against the same
    declaration, so two PRs that each add one migration version are refused
    (exit 3, `SEMANTIC CONFLICT`) before the second lands.
@@ -180,6 +180,15 @@ The landing, as Cody confirmed it (2026-10-01):
    boarding, with the target tip's pipelines as its runs: the latest pipeline
    of each source on the tip. A tip with no pipeline is COULD NOT LOOK there,
    never green (DND-1941; `ai/lib/glab-merge-guard.sh` → `glmg_tip_health`).
+
+**Later (2026-10-05, DND-2061):** a judged red run on the base tip refused
+every merge but a red-main fix, a head that contains the red tip, and a
+containment read that failed was COULD NOT LOOK. So every branch had to be
+rebased onto the red tip and re-run CI to merge. Superseded by owner decision
+(Cody, coordinator terminal, 2026-10-05 ~08:28Z): "Specifically, I don't
+want a branch to have to be built on latest main to be mergeable. That's the
+point of parallel merges." A red or pending tip run is a note; red content
+still refuses.
 
 **Later (2026-10-02, DND-1664):** step 5 was "Check `main` after the push"
 and ran `main-health check` first, with no fast-forward or installer before
@@ -960,13 +969,18 @@ every GitLab project with no merge train (`locked-merge --mr`, *GitLab path
     idle, unless the commit carries a skip marker;
   - the base-branch run list must show nothing live.
 
-  The base run's conclusion is printed. A failed deploy stops the line
-  (owner, 2026-10-01), and `locked-merge` enforces it: a deploy run that
-  reports red on the base tip is refused by the red-tip check (exit 11,
-  DND-1902) unless the head contains the tip, so the fix still merges. A
-  non-success this check prints that the tip's rollup does not show stays a
-  `WARN`: merge nothing but the fix or the revert until a deploy succeeds. Do
-  not hand-roll a deploy waiter around it; retry on exit 5.
+  The base run's conclusion is printed. A deploy run that reports red on the
+  base tip is named by the red-tip check, which no longer refuses it
+  (DND-2061, *The merge bar* → *Stop the line*): a green, gated head merges
+  whether or not it contains the tip. A non-success this check prints that
+  the tip's rollup does not show stays a `WARN`. Do not hand-roll a deploy
+  waiter around it; retry on exit 5.
+
+  **Later (2026-10-05, DND-2061):** this said a red deploy run on the base
+  tip was refused (exit 11) unless the head contained the tip, and to merge
+  nothing but the fix or the revert until a deploy succeeded. Superseded by
+  owner decision (Cody, 2026-10-05): "I don't want a branch to have to be
+  built on latest main to be mergeable."
 
   **Later (2026-10-03, DND-1902):** this said "A non-success is a `WARN`, not
   a refusal", and `locked-merge` only warned on a failed deploy, so holding

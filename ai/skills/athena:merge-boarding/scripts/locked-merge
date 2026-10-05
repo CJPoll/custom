@@ -92,11 +92,12 @@ path fleets already share) it:
      (exit 2). The base run's conclusion is printed; a non-success is a WARN;
   4b. stops the line (DND-1902): reads the runs on the base tip B itself,
      and B's tree against ai/config/main-content-checks.json (a duplicated
-     migration version). A judged red run (CI or a post-merge deploy) or a
-     duplicate refuses (exit 11), naming each, unless --head contains B and
-     removes every duplicate (RED-MAIN FIX). What it cannot read is COULD NOT
-     LOOK (exit 2). A pending run is not red: it merges now and names the
-     run. No check on B and no declared content check merge as before. The
+     migration version). A duplicate refuses (exit 11), naming each, unless
+     --head contains B and removes every duplicate (RED-MAIN FIX). A judged
+     red or pending run (CI or a post-merge deploy) is named and merges
+     (DND-2061: --head need not contain B). What it cannot read is COULD NOT
+     LOOK (exit 2). No check on B and no declared content check merge as
+     before. The
      expected squash tree from step 3 is read against the same declaration:
      a duplicate there is a SEMANTIC CONFLICT (exit 3);
   5. merges via gh-athena pr merge --squash --match-head-commit <head> (no --auto);
@@ -152,8 +153,8 @@ Exit (every non-zero prints a Fix: line):
     (recorded base not an ancestor of origin/<base>), or RECEIPT BASE
     UNKNOWN (COULD NOT LOOK) -- run integration-gate on this head (nothing landed)
   10 LANDED and confirmed, but the worktree stack teardown failed -- do not re-merge
-  11 MAIN RED: the base tip has a red run or a duplicated migration version,
-     and --head is not a fix (contains the tip, removes every duplicate) --
+  11 MAIN RED: the base tip holds a duplicated migration version, and
+     --head is not a fix (contains the tip, removes every duplicate) --
      land only a red-main fix; others wait for a green base (nothing landed).
      Also when the tip turns red after this check and the merge guard's own
      re-check refuses (DND-1906): no confirm retries, the guard's message kept.
@@ -474,7 +475,8 @@ echo "EXPECTED-TREE ${EXPECTED_TREE} (${HEAD_SHA} merged into ${B})"
 # re-run of an older run still holds. The base run's conclusion is printed. A
 # failed deploy that reports on B is refused earlier, by the red-tip check
 # (DND-1902), which lets a red-main fix through; a non-success that check did
-# not see is a WARN here.
+# not see is a WARN here. Since DND-2061 that check names a red run and does
+# not refuse it.
 BASE_RUN_GRACE_S=600
 idle_check() {
   local wf="$1" commit_json ids id view st conc now ct age msg marker branch_json live
@@ -523,7 +525,7 @@ idle_check() {
     "wait for each run with ~/dev/custom/ai/bin/gh-ci-wait --repo <owner>/<repo> --run-id <id> (a 60 s poll on the App budget, DND-1706), then re-run; nothing was merged."
   if [ -n "${base_run}" ]; then
     echo "IDLE ${wf} base ${B}: BASE-RUN ${base_run} completed/${base_conc}; ${base} list counted $(jq length <<<"${branch_json}") runs, none live"
-    [ "${base_conc}" = success ] || echo "WARN base deploy ${base_run} for ${B} concluded ${base_conc:-unknown}; the stop-the-line check next reads ${B}'s own runs and refuses a red one (DND-1902). A failed deploy stops the line: merge nothing but the fix or the revert (athena:merge-boarding -> The merge bar, step Stop the line)"
+    [ "${base_conc}" = success ] || echo "WARN base deploy ${base_run} for ${B} concluded ${base_conc:-unknown}; the stop-the-line check next reads ${B}'s own runs and names a red one, without refusing it (DND-2061; athena:merge-boarding -> The merge bar, step Stop the line)"
   fi
 }
 [ -z "${IDLE_WF}" ] || idle_check "${IDLE_WF}"

@@ -351,19 +351,24 @@ What the wrapper refuses, exit 3 with a `Fix:`:
 - `mr merge` / `mr accept` with auto-merge on: no `--auto-merge=false`, or a
   later `--auto-merge`, or any `--when-pipeline-succeeds`. Train boarding with
   an `auto_merge` or `when_pipeline_succeeds` field. Each is a deferred merge.
-- Either merge path while the target branch's tip is RED: the latest pipeline
-  of some source on the tip failed or was canceled, or the tip's tree breaks
-  what `ai/config/main-content-checks.json` declares for the project
-  (gen_saas: a duplicated migration version). A project path the
-  declaration does not list, whose project name is a declared product's (a
-  moved project or a stale path), is `COULD NOT LOOK` and refused
-  (DND-2034). The one exception is a red-main fix, a head that contains the
-  tip and removes every duplicate. A newer
-  pipeline of another source (a web run, a schedule) does not clear a red
-  one; retrying the red pipeline does. A tip with no pipeline, or one the
-  wrapper cannot read, is `COULD NOT LOOK` and refused, so a project merged
-  this way must run a pipeline on its target branch. A running tip pipeline
-  is not red. These are the judges gh-athena runs (DND-1902).
+- Either merge path while the target branch's tip's tree breaks what
+  `ai/config/main-content-checks.json` declares for the project (gen_saas: a
+  duplicated migration version). A project path the declaration does not
+  list, whose project name is a declared product's (a moved project or a
+  stale path), is `COULD NOT LOOK` and refused (DND-2034). The one exception
+  is a red-main fix, a head that contains the tip and removes every
+  duplicate. A red or running tip PIPELINE (the latest pipeline of some
+  source failed, was canceled, or has not finished) never refuses a green,
+  gated head, whether or not the head contains the tip: the wrapper names it
+  and merges (DND-2061). A tip with no pipeline, or one the wrapper cannot
+  read, is `COULD NOT LOOK` and refused, so a project merged this way must
+  run a pipeline on its target branch. These are the judges gh-athena runs
+  (DND-1902).
+
+  **Later (2026-10-05, DND-2061):** a red tip pipeline also refused every
+  merge but a red-main fix. Superseded by owner decision (Cody, 2026-10-05):
+  "I don't want a branch to have to be built on latest main to be
+  mergeable. That's the point of parallel merges."
 - API writes that create or move a ref, or change protection: `repository/
   branches` and `repository/tags` (a plain DELETE of one passes),
   `repository/commits` and its `cherry_pick`/`revert`, `repository/files`,
