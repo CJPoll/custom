@@ -277,11 +277,24 @@ the error's class, never its message, which could quote a pattern.
 
 **Surfaces.** Three modes of `ai/bin/outbound-scan`, exactly one per run:
 
-- `--pre-push --remote NAME [--url URL]` — git's pre-push stdin. For each pushed
-  ref, the commits in `<remote sha>..<local sha>` (a new ref, or a remote tip
-  not present locally: every commit not on a `refs/remotes/<NAME>/*` ref). When
-  git passes a URL as NAME, it is mapped back to the configured remote with that
-  url or pushurl. For
+- `--pre-push --remote NAME [--url URL] [--advertised FILE]` — git's pre-push
+  stdin. For each pushed ref, the commits in `<remote sha>..<local sha>`. For a
+  new ref, or a remote tip not present locally, every commit reachable from
+  `<local sha>` that no tip of the **destination** reaches. The tips come from
+  the destination's own ref listing, never from local remote-tracking refs:
+  FILE (the listing the route's transport read on its connection; see *The
+  transport's push-range scan*) or `ls-remote URL` read through
+  `ai/bin/forge-git` (Athena's route for a github.com or gitlab.com URL, plain
+  git for a local path, any other URL refused). `ls-remote` is used only when `git ls-remote --get-url URL` is URL itself: an `insteadOf` rule
+  that rewrites the pushed URL again would list another repository. A listing
+  that cannot be read is COULD NOT MEASURE, with the reason `COULD NOT LOOK`;
+  an empty destination bounds nothing. The hook as git runs it inside a route
+  push (URL `athena-forge::…`) cannot read the destination, because the
+  route's grant is one-shot. It prints `DEFERRED <ref>` for such a ref and
+  leaves it to the transport, which scans it with the listing, but only where
+  the transport scans: one of the pre-push paths the transport reads holds the
+  outbound hook or cannot be read (the same three paths and marker rule).
+  Otherwise the ref is COULD NOT LOOK. For
   each commit: the lines and paths it **introduces**, and its message. A root
   commit introduces its whole tree. A one-parent commit introduces the added
   lines and new or renamed paths of its diff against that parent. A merge
@@ -294,6 +307,14 @@ the error's class, never its message, which could quote a pattern.
   diff), so a `.gitattributes` in the pushed commit cannot mark its own content
   binary and skip the scan. Tag messages and the author and committer
   identities are not scanned.
+
+  **Later (2026-10-05, DND-2086):** a new ref's range was "every commit not on
+  a `refs/remotes/<NAME>/*` ref", and a URL passed as NAME was mapped back to
+  the configured remote with that url or pushurl. Superseded by the
+  destination's own listing. A push by URL that matched no configured remote
+  had no tracking ref, so the whole history read as new: the first push of a
+  branch to the GitLab remote reported 271 historical hits and was refused.
+
 - `--tree` — every tracked file of the current repository: its path and its
   INDEX copy (what is tracked, not an unstaged working-tree edit). Binary
   content is scanned too, as bytes split on newlines: no file opts out.
@@ -357,7 +378,11 @@ repository's pre-push hook is the outbound hook, the route's transport
 (`ai/lib/forge-transport/git-remote-athena-forge`) runs
 `ai/lib/forge-push-scan`, which reads the ref updates git asks the transport to
 send and runs the main checkout's `ai/git-hooks/outbound-pre-push.sh` on them
-before anything reaches the forge (DND-2023). Same script, same scanner, same
+before anything reaches the forge (DND-2023). It passes the hook a third
+argument, a file holding the destination's ref listing as the destination
+advertised it on that connection, which bounds a new ref's range (DND-2086);
+a push on a connection that never listed the destination's refs is refused
+as COULD NOT LOOK. Same script, same scanner, same
 pattern bar and waiver as the hook: those load from the main checkout. The
 transport and `forge-push-scan` load beside the wrapper invoked, as the rest
 of the route does, so `~/dev/custom/ai/bin/gh-athena` runs the landed copies

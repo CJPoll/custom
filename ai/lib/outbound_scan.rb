@@ -116,6 +116,33 @@ module OutboundScan
     end
   end
 
+  OID_RE = /\A(?:[0-9a-f]{40}|[0-9a-f]{64})\z/.freeze
+  ZERO_OID_RE = /\A0+\z/.freeze
+
+  # A destination's ref advertisement (`git ls-remote` output, or the
+  # transport's "<oid> <ref>" listing) -> its tip object ids (unique, in
+  # order). The separator is a TAB or a space; a peeled tag line
+  # ("<oid> refs/tags/x^{}") is a tip like any other, and a zero id (an
+  # empty repository's "capabilities^{}" placeholder) is none. Raises
+  # Unmeasurable on any other line: a listing that cannot be read is never
+  # an empty destination (DND-2086).
+  def parse_advertisement(text, origin)
+    text = text.dup.force_encoding(Encoding::UTF_8)
+    raise Unmeasurable, "#{origin} is not valid UTF-8 (COULD NOT LOOK)" unless text.valid_encoding?
+
+    text.each_line.with_index(1).each_with_object([]) do |(raw, n), oids|
+      next if raw.strip.empty?
+
+      oid, ref = raw.chomp.split(/[\t ]/, 2)
+      unless OID_RE.match?(oid.to_s) && ref && !ref.strip.empty?
+        raise Unmeasurable, "#{origin} line #{n} is not '<oid> <ref>' (COULD NOT LOOK)"
+      end
+      next if ZERO_OID_RE.match?(oid) || oids.include?(oid)
+
+      oids << oid
+    end
+  end
+
   # The SCANNED counts line every measured run prints.
   def counts_line(counts)
     "SCANNED commits=#{counts[:commits].to_i} lines=#{counts[:lines].to_i} " \
@@ -130,6 +157,24 @@ module OutboundScan
     "Fix: #{reason_fix(reason)} Until then this scan cannot call anything clean."
   end
 
+  def look_fix(reason)
+    case reason
+    when /insteadOf/
+      "git ls-remote would read another URL than the one pushed to: push to the URL your insteadOf rules " \
+        "produce (`git ls-remote --get-url <url>`), or drop the rule that rewrites it again, then push again."
+    when /transport does not scan/
+      "this route push has no transport scan to leave it to: install the outbound hook in the main checkout " \
+        "(scripts/setup-private-overlay --install) or push through ~/dev/custom/ai/bin/gh-athena / glab-athena, then push again."
+    when /ls-remote/
+      "`ai/bin/forge-git -C <repo> ls-remote <url>` could not list it: forge-git reads a github.com or gitlab.com " \
+        "URL as Athena and a local path with plain git, and refuses any other URL. Push to such a URL, check that " \
+        "it is reachable (and that gh-athena / glab-athena authenticate), then push again."
+    else
+      "the listing the route's transport handed the scan was missing or malformed: push again through " \
+        "~/dev/custom/ai/bin/gh-athena git / glab-athena git, and report it if it recurs."
+    end
+  end
+
   def reason_fix(reason)
     case reason
     when /overlay is ABSENT/
@@ -139,6 +184,9 @@ module OutboundScan
       "correct the overlay problem named above (`ai/bin/private-overlay status` shows it)."
     when /not a git repository|has no commits|not committed|no committed/
       "commit outbound/patterns.tsv in the overlay's local git history (the committed copy is the floor)."
+    when /COULD NOT LOOK/
+      "a new ref's range is everything the destination does not already have, read from the destination's " \
+        "own ref listing, and #{look_fix(reason)}"
     when /zero patterns/
       "add at least one `label<TAB>regex` line to outbound/patterns.tsv in the overlay and commit it."
     else
