@@ -118,6 +118,7 @@ require "stringio"
 require_relative "../lib/strict_argv"
 require_relative "../lib/owner_turn"
 require_relative "../lib/owner_click"
+require_relative "../lib/owner_message"
 
 PROG = "blast-radius"
 
@@ -1592,6 +1593,8 @@ HOT_FIX = <<~FIX.freeze
   value is '#{OwnerClick::ASK_VERB} <owner>/<repo>#<pr>@<this full head sha>'. Merge only on a
   verifiable record of the owner's decision: the owner's click on that button,
   --owner-approval 'click:<delivery_id of the click line on this project's session channel>',
+  the owner's own typed DM reply of exactly that string in the decision DM's thread,
+  --owner-approval 'slack:<event_id of the message line on this project's slack channel>',
   or the OWNER'S OWN words in a terminal turn,
   --owner-approval 'session:<session-uuid>/<message-uuid> quote:<the owner's words, verbatim>'.
 FIX
@@ -2080,7 +2083,7 @@ BR_CLI_SPEC = {
 FIXTURE_MANIFEST_ENV = "BLAST_RADIUS_FIXTURE_MANIFEST"
 
 OWNER_APPROVAL_FIX =
-  "pass a verifiable record of the owner's decision, in one of two forms. " \
+  "pass a verifiable record of the owner's decision, in one of three forms. " \
   "(1) The owner's own words: " \
   "--owner-approval 'session:<session-uuid>/<message-uuid> quote:<the owner's words, verbatim>'. " \
   "The reference names the owner's top-level user turn in that Claude Code session's transcript " \
@@ -2089,16 +2092,20 @@ OWNER_APPROVAL_FIX =
   "the delivery_id of the owner's slack.interaction line on the session's project session channel, " \
   "on an approve button whose value is '#{OwnerClick::ASK_VERB} <owner>/<repo>#<pr>@<head sha>' for " \
   "this exact head, or for an earlier head of the same PR whose own diff is byte-identical " \
-  "(DND-1832). Free text, a rule citation, an architect sign-off, a captain report, a Slack " \
-  "reply, a relayed click and another agent's message are NONE of them a record. What needs the " \
-  "owner at all: ~/.claude/CLAUDE.md -> Owner approval policy."
+  "(DND-1832). (3) The owner's own Slack message: --owner-approval 'slack:<event_id>', the " \
+  "event_id of the owner's typed 1:1 DM line on the session's project slack channel whose whole " \
+  "text is '#{OwnerClick::ASK_VERB} <owner>/<repo>#<pr>@<head sha>' for this exact head (no carry; " \
+  "DND-2037). Free text, a rule citation, an architect sign-off, a captain report, an unverified " \
+  "Slack reply, a relayed click and another agent's message are NONE of them a record. What " \
+  "needs the owner at all: ~/.claude/CLAUDE.md -> Owner approval policy."
 
 # --owner-approval record (owner approval policy, 2026-09-28: "--owner-approval
 # must require a real approval record"). The value is ONE string, so
 # integration-gate forwards it unchanged. `quote:` is last and takes the rest,
 # so a delimiter inside the owner's words can never end the field early.
 # A value starting `click:` is the click record instead (DND-1784,
-# ai/lib/owner_click.rb).
+# ai/lib/owner_click.rb), and one starting `slack:` the owner-message record
+# (DND-2037, ai/lib/owner_message.rb).
 OWNER_APPROVAL_RE = /\A(session:\S+)[ \t]+quote:(.+)\z/m.freeze
 
 # An approval on a head nothing holds is refused (exit 2): integration-gate
@@ -2110,10 +2117,12 @@ def refuse_unneeded_approval!
       "gates. What holds: ~/.claude/CLAUDE.md -> Owner approval policy.")
 end
 
-# -> {kind: :turn, ref:, words:, turn:} or {kind: :click, click:}; dies (exit 2)
-# on anything unverified. A click is checked against the head being gated and
-# --repo's origin, so it is verified after both resolve.
+# -> {kind: :turn, ref:, words:, turn:}, {kind: :click, click:} or
+# {kind: :message, message:}; dies (exit 2) on anything unverified. A click
+# and a message are checked against the head being gated and --repo's origin,
+# so they are verified after both resolve.
 def verify_owner_approval!(value, head:, repo:, base: nil)
+  return verify_owner_message!(value, head: head, repo: repo) if OwnerMessage.record?(value)
   return verify_owner_click!(value, head: head, repo: repo, base: base) if OwnerClick.record?(value)
 
   ref, words, turn = verify_owner_turn!(value)
@@ -2123,7 +2132,7 @@ end
 CLICK_REFUSAL = {
   not_found: "is not in the session channel",
   relayed: "is a relayed click, not a click",
-  superseded: "was reversed by a later owner click",
+  superseded: "was reversed by a later owner click or held by a later owner message",
   not_owner: "is not the owner's click",
   other_message: "is a click on a different message",
   other_head: "is a click for a different head",
@@ -2140,6 +2149,28 @@ def verify_owner_click!(value, head:, repo:, base: nil)
 
   die("--owner-approval #{value.to_s.strip[0, 60].inspect} #{CLICK_REFUSAL.fetch(kind_or_info)} " \
       "(#{kind_or_info}): #{reason}.", fix || OwnerClick::FIX)
+end
+
+MESSAGE_REFUSAL = {
+  not_found: "is not in the session's project slack channel",
+  relayed: "is a click line, not a message",
+  not_owner: "is not the owner's message",
+  not_dm: "is not in a 1:1 DM with Athena",
+  not_direct: "is not a message the owner typed",
+  not_approve: "is not an unambiguous approve",
+  other_repo: "approves a PR in another repo",
+  other_head: "approves a different head",
+  superseded: "was held by a later owner message or click",
+  unverifiable: "cannot be verified"
+}.freeze
+
+# A message approves only the exact head it names: no carry (DND-2037).
+def verify_owner_message!(value, head:, repo:)
+  verdict, kind_or_info, reason, fix = OwnerMessage.check(value.to_s.strip, head: head, repo: repo)
+  return { kind: :message, message: kind_or_info } if verdict == :verified
+
+  die("--owner-approval #{value.to_s.strip[0, 60].inspect} #{MESSAGE_REFUSAL.fetch(kind_or_info)} " \
+      "(#{kind_or_info}): #{reason}.", fix || OwnerMessage::FIX)
 end
 
 # -> [ref, words, owner_turn_text]; dies (exit 2) on anything unverified.
@@ -2294,7 +2325,17 @@ def run(argv)
 
   if approval
     gate_note = gate_ran ? " (GATE: #{gate_ran})" : ""
-    if approval[:kind] == :click
+    if approval[:kind] == :message
+      msg = approval[:message]
+      # The event id and the approved ref only: never the Slack channel id,
+      # the user id or the message text, which a public repo's PR body must
+      # not carry.
+      puts "BLAST-RADIUS HOT-OWNER-APPROVED #{short(head)} (OWNER-APPROVED: slack:#{msg[:event_id]} " \
+           "author:owner approve #{msg[:slug]}##{msg[:pr]}@#{msg[:sha]})#{gate_note}"
+      puts "  owner-message (verified): the owner's typed 1:1 DM on #{msg[:where]};"
+      puts "    it approves #{msg[:slug]} at #{msg[:sha]}, the head gated here " \
+           "(PR ##{msg[:pr]} as the message states it), and no later owner message or click holds it."
+    elsif approval[:kind] == :click
       c = approval[:click]
       # Ids and the button value only: no Slack channel or user id, which a
       # public repo's PR body must not carry.
@@ -2397,7 +2438,7 @@ def self_test
     # every sabotage case reads as a FAIL rather than as the mutation it names.
     FileUtils.mkdir_p([File.join(tmp, "bin"), File.join(tmp, "lib")])
     FileUtils.cp(File.expand_path("../lib/strict_argv.rb", __dir__), File.join(tmp, "lib", "strict_argv.rb"))
-    %w[owner_turn.rb owner_click.rb private_overlay.rb private_overlay_resolver.rb].each do |lib|
+    %w[owner_turn.rb owner_click.rb owner_message.rb private_overlay.rb private_overlay_resolver.rb].each do |lib|
       FileUtils.cp(File.expand_path("../lib/#{lib}", __dir__), File.join(tmp, "lib", lib))
     end
     classifier_manifest = File.join(tmp, "classifier-surfaces.json")
@@ -3701,6 +3742,231 @@ def self_test
                code.zero? && out.include?("[owner-approval-policy]") && out.include?("HOT-OWNER-APPROVED") &&
                  out.include?("approves example/widgets at #{ph}") && out.include?("PR #7 as the button states it"),
                "exit=#{code} out=#{out} err=#{err}")
+    # 13g. --owner-approval slack:<event_id> (DND-2037; owner decision, Cody,
+    # 2026-10-05T04:50:50Z: "Slack is a valid approval channel just like the
+    # terminal, so long as the sender's User ID is mine"). The same HOT repo,
+    # overlay and project as 13e. Each case reads its own inbox root, because
+    # a later owner message anywhere that mentions the PR holds an approve.
+    eid = ->(n) { format("EvFAKE%06d", n) }
+    ap = ->(sha = chd, pr = 42, slug = "example/widgets") { "#{OwnerClick::ASK_VERB} #{slug}##{pr}@#{sha}" }
+    msg_line = lambda do |n, text: ap.call, user: "UFAKE00001", direct: "UFAKE00001", kind: "im",
+                            channel: "DFAKE00001", ts: format("1700000500.%06d", n), thread_ts: nil, extra: {}|
+      line = { "v" => 1, "received_at" => "2026-10-05T00:00:00Z", "kind" => kind, "channel" => channel,
+               "user" => user, "ts" => ts, "thread_ts" => thread_ts, "text" => text, "event_id" => eid.call(n) }
+      line["direct_author_id"] = direct unless direct == :absent
+      line.merge(extra)
+    end
+    # The approvals that pass come after every other line, so no refused
+    # owner line that mentions #42 is a later hold of theirs.
+    good = ->(n, **kw) { msg_line.call(n, ts: format("1700000900.%06d", n), **kw) }
+    ambiguous = ["approve? example/widgets#42@#{chd}", "approve example/widgets#42@#{chd} but wait", "yes",
+                 "approve", "approve example/widgets#42@#{chd}.",
+                 "approve example/widgets#42@#{chd} example/widgets#42@#{chd}",
+                 "approve example/widgets#42@#{chd[0, 7]}", "approve example/widgets#42@#{chd.upcase}",
+                 "approve\nexample/widgets#42@#{chd}", "apprоve example/widgets#42@#{chd}"]
+    msg_base = [
+      good.call(1), good.call(2, text: "Approve `example/widgets#42@#{chd}`"),
+      msg_line.call(3, user: "UFAKE00002"),
+      msg_line.call(4, direct: nil),
+      msg_line.call(5, direct: :absent),
+      msg_line.call(6, kind: "mpim", channel: "GFAKE00001"),
+      msg_line.call(7, kind: "thread_reply", channel: "CFAKE00001", thread_ts: "1700000400.000001"),
+      msg_line.call(9, text: ap.call(chd, 42, "example/other")),
+      msg_line.call(10, text: ap.call(cb)),
+      # 21: two lines share one channel and ts and disagree on the text.
+      msg_line.call(21), msg_line.call(21, text: "approve example/widgets#42@#{chd} ", extra: { "event_id" => eid.call(91) }),
+      { "v" => 1, "kind" => "slack.interaction", "event_id" => eid.call(31), "delivery_id" => did.call(31) }
+    ] + ambiguous.each_with_index.map { |t, i| msg_line.call(40 + i, text: t) }
+    msg_root = lambda do |name, slack: [], session: [], gen: nil, entry: nil|
+      root = File.join(tmp, "inbox-msg-#{name}")
+      FileUtils.mkdir_p(File.join(root, "projects"))
+      File.write(File.join(root, "projects", "proj.json"),
+                 entry ? JSON.dump(entry) : File.read(File.join(inbox, "projects", "proj.json")))
+      lines = (msg_base + slack).map { |j| JSON.dump(j) }.join("\n") + "\n"
+      File.write(File.join(root, "proj-slack.jsonl"), lines)
+      File.write(File.join(root, "proj-slack.jsonl.1"), gen.map { |j| JSON.dump(j) }.join("\n") + "\n") if gen
+      File.write(File.join(root, "proj-session.jsonl"), session.map { |j| JSON.dump(j) }.join("\n") + "\n")
+      click_env.merge("ATHENA_INBOX_ROOT" => root)
+    end
+    msg_br = lambda do |rec, env, base: cb, head: chd, repo: ck|
+      run_br.call(["--base", base, "--head", head, "--repo", repo, "--owner-approval", rec,
+                   "--gate-ran", "ai/bin/harness-gate"], env: env)
+    end
+    msg_env = msg_root.call("base", session: [msg_line.call(8)])
+    out, err, code = msg_br.call("slack:#{eid.call(1)}", msg_env)
+    check.call("a VERIFIED owner message exits 0, STILL prints the HOT block, and records the event, PR and head " \
+               "with no channel id, user id or text",
+               code.zero? && out.include?("BLAST-RADIUS HOT") &&
+                 out.include?("HOT-OWNER-APPROVED #{chd[0, 7]} (OWNER-APPROVED: slack:#{eid.call(1)} author:owner " \
+                              "approve example/widgets#42@#{chd}) (GATE: ai/bin/harness-gate)") &&
+                 out.include?("owner-message (verified)") && out.include?("proj-slack.jsonl") &&
+                 !out.include?("UFAKE00001") && !out.include?("DFAKE00001") && !out.include?(ap.call),
+               "exit=#{code} out=#{out} err=#{err}")
+    out, err, code = msg_br.call("slack:#{eid.call(2)}", msg_env)
+    check.call("an owner message with a capital verb and a backticked ref is an approve (exit 0)",
+               code.zero? && out.include?("HOT-OWNER-APPROVED"), "exit=#{code} out=#{out} err=#{err}")
+    [["a non-owner sender", 3, "is not the owner's message"],
+     ["a message the owner did not type (direct_author_id null)", 4, "not a message the owner typed"],
+     ["a line from a server that predates direct_author_id", 5, "predates direct_author_id"],
+     ["a group DM (mpim)", 6, "not in a 1:1 DM"],
+     ["a channel thread reply", 7, "not in a 1:1 DM"],
+     ["a message only on the session channel", 8, "not in the session's project slack channel"],
+     ["a PR in another repo", 9, "another repo"],
+     ["a different head (no carry)", 10, "approves a different head"],
+     ["two lines with one channel and ts that disagree", 21, "cannot be verified"],
+     ["a click line under the event id", 31, "is a click line"],
+     ["an event id the slack channel never received", 99, "not in the session's project slack channel"]].each do |label, n, want|
+      out, err, code = msg_br.call("slack:#{eid.call(n)}", msg_env)
+      check.call("--owner-approval slack refuses #{label} (exit 2, says so, Fix:, no HOT-OWNER-APPROVED)",
+                 code == 2 && err.include?(want) && err.include?("Fix:") && !out.include?("HOT-OWNER-APPROVED"),
+                 "exit=#{code} out=#{out} err=#{err}")
+    end
+    out, err, code = msg_br.call("slack:#{eid.call(10)}", msg_env)
+    check.call("a message for another head asks for a NEW message naming this head",
+               code == 2 && err.include?("new message") && err.include?(ap.call(chd)), "exit=#{code} err=#{err}")
+    ambiguous.each_with_index do |t, i|
+      out, err, code = msg_br.call("slack:#{eid.call(40 + i)}", msg_env)
+      check.call("--owner-approval slack refuses the ambiguous text #{t[0, 50].inspect} (not_approve)",
+                 code == 2 && err.include?("not an unambiguous approve") && err.include?("Fix:") &&
+                   !out.include?("HOT-OWNER-APPROVED"), "exit=#{code} out=#{out} err=#{err}")
+    end
+    # Twin project: another registry entry's slack file holds an approve.
+    File.write(File.join(tmp, "inbox-msg-base", "projects", "twin.json"), JSON.dump({
+      "v" => 1, "repo" => File.realpath(File.join(d, ".git")),
+      "channels" => { "slack" => { "kind" => "log", "path" => "twin-slack.jsonl", "producer" => "slack" } }
+    }))
+    File.write(File.join(tmp, "inbox-msg-base", "twin-slack.jsonl"), JSON.dump(good.call(11)) + "\n")
+    out, err, code = msg_br.call("slack:#{eid.call(11)}", msg_env)
+    check.call("--owner-approval slack refuses a message delivered to another project's slack channel (not_found)",
+               code == 2 && err.include?("not in the session's project slack channel") && !out.include?("HOT-OWNER-APPROVED"),
+               "exit=#{code} out=#{out} err=#{err}")
+    t1 = "1700000900.000001"
+    later = ->(n, **kw) { msg_line.call(n, ts: format("1700000950.%06d", n), **kw) }
+    [["a later owner reply in the same thread that is not the approve (R1)", "r1",
+      [later.call(60, text: "thanks", thread_ts: t1)], [], "held by a later owner", "same conversation"],
+     ["a later owner top-level hold naming the PR (R2)", "r2a",
+      [later.call(61, text: "hold example/widgets#42")], [], "held by a later owner", "mentioning"],
+     ["a later owner message mentioning #42 (R2)", "r2b",
+      [later.call(62, text: "please wait on #42", channel: "DFAKE00002")], [], "held by a later owner", "mentioning"],
+     ["a later owner approve of another head of the PR", "r2c",
+      [later.call(63, text: ap.call(cb))], [], "held by a later owner", "mentioning"],
+     ["a later owner 'wait' that names no PR (R3)", "r3",
+      [later.call(64, text: "wait", channel: "DFAKE00002")], [], "cannot be verified", "names no PR"],
+     ["a later owner Hold click on the PR (R4)", "r4", [],
+      [click_line.call(65, value: "hold-exit4 example/widgets#42@#{chd}", extra: { "action_ts" => "1700000950.000065" })],
+      "held by a later owner", "later owner click"],
+     ["an owner hold with the approve's own ts (a tie counts as later)", "tie",
+      [msg_line.call(66, text: "hold #42", ts: t1, channel: "DFAKE00002")], [], "held by a later owner", "mentioning"],
+     ["an owner message mentioning the PR whose ts cannot be ordered", "undated",
+      [msg_line.call(67, text: "hold #42", ts: "x", channel: "DFAKE00002")], [], "cannot be verified", "cannot be ordered"]
+    ].each do |label, name, slack, session, want, why|
+      out, err, code = msg_br.call("slack:#{eid.call(1)}", msg_root.call(name, slack: slack, session: session))
+      check.call("--owner-approval slack refuses an approve held by #{label} (exit 2, Fix:)",
+                 code == 2 && err.include?(want) && err.include?(why) && err.include?("Fix:") &&
+                   !out.include?("HOT-OWNER-APPROVED"), "exit=#{code} out=#{out} err=#{err}")
+    end
+    [["an earlier owner Hold click on the PR", "early-click", [],
+      [click_line.call(68, value: "hold-exit4 example/widgets#42@#{chd}", extra: { "action_ts" => "1700000800.000068" })]],
+     ["a later NON-owner hold naming the PR", "nonowner",
+      [later.call(69, text: "hold example/widgets#42", user: "UFAKE00002", direct: "UFAKE00002")], []],
+     ["an earlier owner hold naming the PR (the last word wins)", "early-hold",
+      [msg_line.call(70, text: "hold example/widgets#42")], []]].each do |label, name, slack, session|
+      out, err, code = msg_br.call("slack:#{eid.call(1)}", msg_root.call(name, slack: slack, session: session))
+      check.call("--owner-approval slack accepts an approve beside #{label}", code.zero? && out.include?("HOT-OWNER-APPROVED"),
+                 "exit=#{code} out=#{out} err=#{err}")
+    end
+    out, err, code = msg_br.call("slack:#{eid.call(80)}", msg_root.call("gen", gen: [good.call(80)]))
+    check.call("a verified owner message found only in the rotated .1 generation is accepted",
+               code.zero? && out.include?("HOT-OWNER-APPROVED") && out.include?("proj-slack.jsonl.1"),
+               "exit=#{code} out=#{out} err=#{err}")
+    out, err, code = msg_br.call("slack:#{eid.call(1)}", msg_env.merge("ATHENA_PRIVATE_ROOT" => File.join(tmp, "no-overlay")))
+    check.call("--owner-approval slack refuses when the overlay does not resolve the owner id (could not verify)",
+               code == 2 && err.include?("cannot be verified") && err.include?("owner id cannot be resolved") &&
+                 err.include?("Fix:"), "exit=#{code} err=#{err}")
+    ["slack:not-an-id", "slack:", "slack:evfake000001"].each do |rec|
+      out, err, code = msg_br.call(rec, msg_env)
+      check.call("--owner-approval slack refuses the malformed record #{rec.inspect} (exit 2, could not verify, Fix:)",
+                 code == 2 && err.include?("cannot be verified") && err.include?("Fix:") &&
+                   !out.include?("HOT-OWNER-APPROVED"), "exit=#{code} out=#{out} err=#{err}")
+    end
+    no_slack = { "v" => 1, "repo" => File.realpath(File.join(ck, ".git")),
+                 "channels" => { "session" => { "kind" => "log", "path" => "proj-session.jsonl", "producer" => "platform" } } }
+    out, err, code = msg_br.call("slack:#{eid.call(1)}", msg_root.call("no-slack", entry: no_slack))
+    check.call("--owner-approval slack refuses when the project's entry declares no slack channel, naming it",
+               code == 2 && err.include?("declares no `slack` channel") && err.include?("Fix:"),
+               "exit=#{code} out=#{out} err=#{err}")
+    bad_slack = no_slack.merge("channels" => no_slack["channels"].merge(
+      "slack" => { "kind" => "log", "path" => "proj-slack.jsonl", "producer" => "platform" }))
+    out, err, code = msg_br.call("slack:#{eid.call(1)}", msg_root.call("bad-slack", entry: bad_slack))
+    check.call("--owner-approval slack refuses a slack channel that is not a Slack-producer log",
+               code == 2 && err.include?("not a Slack-producer") && err.include?("Fix:"), "exit=#{code} err=#{err}")
+    mc = File.join(tmp, "msg-cold")
+    mcb, mch = mkrepo.call(mc, config: origin_cfg) { |r| File.write(File.join(r, "app.rb"), "x\n") }
+    out, err, code = msg_br.call("slack:#{eid.call(81)}", msg_root.call("cold", slack: [good.call(81, text: ap.call(mch))]),
+                                 base: mcb, head: mch, repo: mc)
+    check.call("a verified owner message on a head nothing holds is refused (exit 2), never recorded",
+               code == 2 && err.include?("nothing in this diff holds") && !out.include?("HOT-OWNER-APPROVED"),
+               "exit=#{code} out=#{out} err=#{err}")
+    # Pure: the grammar, the PR mention and the record.
+    sha40 = "a" * 40
+    [["approve-exit4 CJPoll/custom#12@#{sha40}", true], ["Approve CJPoll/custom#12@#{sha40}", true],
+     ["approve `CJPoll/custom#12@#{sha40}`", true], ["`approve CJPoll/custom#12@#{sha40}`", true],
+     [" \tAPPROVE-EXIT4 CJPoll/custom#12@#{sha40}\t", true],
+     ["approve? CJPoll/custom#12@#{sha40}", false], ["approve CJPoll/custom#12@#{sha40} but wait", false],
+     ["approve CJPoll/custom#12@#{sha40}.", false], ["lgtm", false], ["ship it", false], ["no", false],
+     ["don't approve CJPoll/custom#12@#{sha40}", false], ["approve CJPoll/custom#012@#{sha40}", false],
+     ["approves CJPoll/custom#12@#{sha40}", false], ["approve “CJPoll/custom#12@#{sha40}”", false],
+     ["approve CJPoll/custom#12@#{sha40}\n", false], ["Kapprove CJPoll/custom#12@#{sha40}", false]].each do |text, want|
+      got = !OwnerMessage.parse_approve_text(text).nil?
+      check.call("OwnerMessage.parse_approve_text(#{text[0, 44].inspect}) -> #{want}", got == want, got.inspect)
+    end
+    mref = { slug: "example/widgets", pr: 42, sha: "0123456789abcdef0123456789abcdef01234567" }
+    [["see example/widgets#42", true], ["see example/widgets#420", false], ["Example/Widgets/pull/42 is it", true],
+     ["example/widgets/-/merge_requests/42", true], ["about #42", true], ["about #421", false],
+     ["head 0123456 there", true], ["head 012345 there", false], ["sub/example/widgets#7", false]].each do |text, want|
+      got = OwnerMessage.mentions_pr?(text, mref)
+      check.call("OwnerMessage.mentions_pr?(#{text.inspect}) -> #{want}", got == want, got.inspect)
+    end
+    [["slack:EvFAKE0001AB", "EvFAKE0001AB"], ["slack:evfake0001ab", nil], ["slack:", nil], ["slack:Ev1 x", nil],
+     ["click:EvFAKE0001AB", nil]].each do |rec, want|
+      check.call("OwnerMessage.parse_record(#{rec.inspect}) -> #{want.inspect}", OwnerMessage.parse_record(rec) == want,
+                 OwnerMessage.parse_record(rec).inspect)
+    end
+    # Click tightening (DND-2037): an owner hold MESSAGE after a click wins
+    # too. The decision post is click 1's message (DFAKE00001, ts ...000001).
+    click_msg_root = lambda do |name, slack, entry: nil|
+      root = File.join(tmp, "inbox-clickmsg-#{name}")
+      FileUtils.mkdir_p(File.join(root, "projects"))
+      File.write(File.join(root, "projects", "proj.json"),
+                 entry ? JSON.dump(entry) : File.read(File.join(inbox, "projects", "proj.json")))
+      File.write(File.join(root, "proj-session.jsonl"), JSON.dump(click_line.call(1)) + "\n")
+      File.write(File.join(root, "proj-slack.jsonl"), slack.map { |j| JSON.dump(j) }.join("\n") + "\n") unless entry
+      click_env.merge("ATHENA_INBOX_ROOT" => root)
+    end
+    after_click = ->(n, **kw) { msg_line.call(n, ts: format("1700000200.%06d", n), **kw) }
+    [["an owner reply 'no' in the decision post's thread", "no",
+      [after_click.call(70, text: "no", thread_ts: "1700000000.000001")], "held by a later owner", "same conversation"],
+     ["an owner message naming the PR", "named",
+      [after_click.call(71, text: "hold example/widgets#42", channel: "DFAKE00002")], "held by a later owner", "mentioning"],
+     ["an owner 'wait' naming no PR", "wait",
+      [after_click.call(72, text: "wait", channel: "DFAKE00002")], "cannot be verified", "names no PR"]].each do |label, name, slack, want, why|
+      out, err, code = run_br.call(["--base", cb, "--head", chd, "--repo", ck, "--owner-approval", "click:#{did.call(1)}"],
+                                   env: click_msg_root.call(name, slack))
+      check.call("--owner-approval click refuses a click held by a later #{label} (exit 2, Fix:)",
+                 code == 2 && err.include?(want) && err.include?(why) && err.include?("Fix:") &&
+                   !out.include?("HOT-OWNER-APPROVED"), "exit=#{code} out=#{out} err=#{err}")
+    end
+    out, err, code = run_br.call(["--base", cb, "--head", chd, "--repo", ck, "--owner-approval", "click:#{did.call(1)}"],
+                                 env: click_msg_root.call("early", [msg_line.call(73, text: "hold example/widgets#42", ts: "1700000050.000073")]))
+    check.call("--owner-approval click accepts a click after an earlier owner hold message naming the PR",
+               code.zero? && out.include?("HOT-OWNER-APPROVED") && out.include?("1 owner messages"),
+               "exit=#{code} out=#{out} err=#{err}")
+    out, err, code = run_br.call(["--base", cb, "--head", chd, "--repo", ck, "--owner-approval", "click:#{did.call(1)}"],
+                                 env: click_msg_root.call("noslack", [], entry: no_slack))
+    check.call("--owner-approval click still verifies when the entry declares no slack channel, and says so",
+               code.zero? && out.include?("HOT-OWNER-APPROVED") && out.include?("slack channel: not declared, 0 messages read"),
+               "exit=#{code} out=#{out} err=#{err}")
+
     # 13f. A click carries to a later head of the SAME PR whose own diff is
     # byte-identical (DND-1832; the owner approved the rule by click, relayed
     # 2026-10-03). The PR's own diff is `git diff --binary
@@ -3844,6 +4110,17 @@ def self_test
     check.call("carry: the click on head A itself still clears A with no carry",
                code.zero? && out.include?("HOT-OWNER-APPROVED #{ca[0, 7]}") && !out.include?("carried from"),
                "exit=#{code} out=#{out} err=#{err}")
+    # DND-2037: a later owner hold MESSAGE naming the PR overrides the carry.
+    msg_hold_root = File.join(tmp, "inbox-carry-msg-hold")
+    FileUtils.mkdir_p(File.join(msg_hold_root, "projects"))
+    FileUtils.cp(File.join(carry_root, "projects", "proj.json"), File.join(msg_hold_root, "projects", "proj.json"))
+    FileUtils.cp(File.join(carry_root, "proj-session.jsonl"), msg_hold_root)
+    File.write(File.join(msg_hold_root, "proj-slack.jsonl"),
+               JSON.dump(msg_line.call(74, text: "hold example/widgets#42", ts: "1700000400.000074")) + "\n")
+    out, err, code = carry.call(b_rebase, 30, env: carry_env.merge("ATHENA_INBOX_ROOT" => msg_hold_root))
+    check.call("carry: a later owner hold MESSAGE naming the PR overrides the carry (exit 2, a new-click Fix:)",
+               code == 2 && err.include?("held by a later owner message") && err.include?("new click") &&
+                 !out.include?("HOT-OWNER-APPROVED"), "exit=#{code} out=#{out} err=#{err}")
     # Pure: what counts as a later click naming the PR.
     [["hold-exit4 example/widgets#44@#{b_rebase}", true], ["hold example/widgets#44", true],
      ["hold-exit4 example/widgets#440@#{b_rebase}", false], ["hold-exit4 example/other#44", false],
@@ -3892,6 +4169,7 @@ def self_test
      ["the blast-radius classifier", "ai/bin/blast-radius", "[owner-approval-policy]"],
      ["the owner-turn verifier", "ai/lib/owner_turn.rb", "[owner-approval-policy]"],
      ["the owner-click verifier", "ai/lib/owner_click.rb", "[owner-approval-policy]"],
+     ["the owner-message verifier", "ai/lib/owner_message.rb", "[owner-approval-policy]"],
      # DND-1807: the files whose code decides whether a receipt is accepted
      ["the integration-gate script", "ai/skills/athena:merge-boarding/scripts/integration-gate", "[owner-approval-policy]"],
      ["the integration-gate shim", "ai/bin/integration-gate", "[owner-approval-policy]"],
