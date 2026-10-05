@@ -667,7 +667,7 @@ ${odd%$'\n'}"; return 2
   # A head that does not contain the red tip, or one whose containment cannot
   # be read, is RED (return 1), which gmg_line_check does not refuse.
   if ! [[ "$head" =~ ^[0-9a-f]{40}$ ]]; then
-    GMG_TIP_WHY="may not contain it: it is not a full SHA, so whether it does could not be read"; return 1
+    GMG_TIP_WHY="may not contain it: the head is not a full SHA, so whether it does could not be read"; return 1
   fi
   req=(api)
   [ -n "$GLMG_HOST" ] && req+=(--hostname "$GLMG_HOST")

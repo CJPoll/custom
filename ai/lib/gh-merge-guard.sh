@@ -1118,8 +1118,9 @@ GMG_LOOK_MARK="COULD NOT LOOK:"
 # gmg_line_check <owner> <repo> <base> <tip> <head|""> <gitdir> [runs judge] :
 # the whole stop-the-line judgment, the runs and the content
 # (gmg_content_health). Never exits. Returns 0 (GMG_LINE_NOTE says why the
-# merge may proceed), 1 RED or 2 COULD NOT LOOK (GMG_LINE_WHY says why). A red
-# finding outranks a COULD NOT LOOK in the other half: either refuses.
+# merge may proceed, a red run on the tip included, DND-2061), 1 RED CONTENT
+# or 2 COULD NOT LOOK (GMG_LINE_WHY says why). Red content outranks a COULD
+# NOT LOOK in the runs half: either refuses.
 #
 # The runs judge is GitHub's gmg_tip_health unless [runs judge] names another
 # function with its contract: called as `<judge> <owner> <repo> <tip> <head|"">
@@ -1167,9 +1168,9 @@ $GMG_TIP_RUNS"
     CLEAN) GMG_LINE_NOTE="BASE-TIP $base $tip: no judged run is red" ;;
     PENDING) GMG_LINE_NOTE="BASE-TIP $base $tip PENDING: no judged run is red, and these have not concluded; a pending run is not red, so this merge is not held:
 $GMG_TIP_RUNS" ;;
-    FIX) GMG_LINE_NOTE="BASE-TIP $base $tip is RED, and the head contains it: RED-MAIN FIX, merging onto the red tip. Containing the tip is the only evidence read for a red RUN, so this head must really fix it. Red run(s):
+    FIX) GMG_LINE_NOTE="BASE-TIP $base $tip is RED, and the head contains it: RED-MAIN FIX, merging onto the red tip. Red run(s):
 $GMG_TIP_RUNS" ;;
-    RED) GMG_LINE_NOTE="BASE-TIP $base $tip is RED, and the head ${head:-(none: --auto)} ${GMG_TIP_WHY:-does not contain it}; merging anyway: a red or pending tip never holds a green, gated head for being behind it (DND-2061, owner 2026-10-05: parallel merges). Red run(s):
+    RED) GMG_LINE_NOTE="BASE-TIP $base $tip is RED, and the head ${head:-(none: --auto)} ${GMG_TIP_WHY:-does not contain it}; merging anyway: a red or pending tip never holds a gated head for being behind it (DND-2061, owner 2026-10-05: parallel merges). Red run(s):
 $GMG_TIP_RUNS${GMG_TIP_OLD:+
   superseded red runs, not judged:
 ${GMG_TIP_OLD%$'\n'}}" ;;
@@ -1186,8 +1187,8 @@ ${GMG_TIP_OLD%$'\n'}}" ;;
 # gmg_line_fix <owner> <repo> <base> <tip> : the Fix: text for a tip whose
 # CONTENT is red (a red run alone never refuses, DND-2061).
 gmg_line_fix() {
-  printf 'land only a red-main fix: a head that contains %s, removes every duplicate named above, and (in a repo that declares an integration gate) carries its own INTEGRATION OK receipt (merge origin/%s into it, fix it, push as Athena, re-gate). Every other PR waits until that fix lands on %s (read %s/%s %s with `git ls-tree -r origin/%s`)' \
-    "$4" "$3" "$3" "$1" "$2" "$3" "$3"
+  printf 'land only a red-main fix: a head that contains %s, removes every duplicate named above, and (in a repo that declares an integration gate) carries its own INTEGRATION OK receipt (merge origin/%s into it, fix it, push as Athena, re-gate). Every other PR waits until that fix lands on %s (`git fetch origin`, then re-run; the guard re-reads the tip)' \
+    "$4" "$3" "$3"
 }
 
 # gmg_tip_gate <shown> <owner> <repo> <base> <tip> <head|""> : returns 0 when

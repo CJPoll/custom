@@ -145,8 +145,11 @@ The landing, as Cody confirmed it (2026-10-01):
    runner fast-forwards the main checkout, and nothing on the cron path
    authorizes an installer. So a cron run whose step-3 dry run names one
    does not push (`athena:shipwright-lane` → *Sync up*).
-6. **Stop the line** on a red main or a failed deploy: land nothing more until
-   it is fixed, and fix it first. In `~/dev/custom`, `main-health` exit 1 (or
+6. **Stop the line** on a red `main` in `~/dev/custom` (`main-health`) or on
+   red `main` content in a forge repo: land nothing more until it is fixed,
+   and fix it first. A red or pending CI or deploy run on a forge repo's
+   target tip is named by the merge guard, never held (DND-2061; the
+   paragraph ends with the label). In `~/dev/custom`, `main-health` exit 1 (or
    a `main-red` message on harness-alerts) means `main` is red. While it is,
    `gh-athena git push` refuses any push to `main` (exit 3, `RED MAIN`) except
    a gated fix: a head that contains the red SHA and has its own
@@ -181,11 +184,12 @@ The landing, as Cody confirmed it (2026-10-01):
    of each source on the tip. A tip with no pipeline is COULD NOT LOOK there,
    never green (DND-1941; `ai/lib/glab-merge-guard.sh` → `glmg_tip_health`).
 
-**Later (2026-10-05, DND-2061):** a judged red run on the base tip refused
-every merge but a red-main fix, a head that contains the red tip, and a
-containment read that failed was COULD NOT LOOK. So every branch had to be
-rebased onto the red tip and re-run CI to merge. Superseded by owner decision
-(Cody, coordinator terminal, 2026-10-05 ~08:28Z): "Specifically, I don't
+**Later (2026-10-05, DND-2061):** this step read "Stop the line on a red main
+or a failed deploy", and a judged red run on the base tip refused every merge
+but a red-main fix, a head that contains the red tip; a containment read that
+failed was COULD NOT LOOK. So every branch had to be rebased onto the red tip
+and re-run CI to merge. Superseded by owner decision (Cody, coordinator
+terminal, 2026-10-05, session `0cc59a5e-6c65-495e-a216-83c6a0bf2d56`): "Specifically, I don't
 want a branch to have to be built on latest main to be mergeable. That's the
 point of parallel merges." A red or pending tip run is a note; red content
 still refuses.
@@ -1222,8 +1226,10 @@ of the project (`--repo`): the receipt is in its git common dir.
   and a merge GitLab defers until a pipeline ends would land outside the lock.
   Never make that call yourself.
 - **The tip's pipelines are judged inside that call**, by glab-athena's merge
-  guard (`glmg_tip_gate`, DND-1941). Its `MAIN RED` refusal is exit 11 and
-  its `COULD NOT LOOK` exit 2, at once, with no confirm retries, exactly as
+  guard (`glmg_tip_gate`, DND-1941). A red or pending pipeline is named, never
+  refused (DND-2061); a tip whose pipelines cannot be read, or that has none,
+  is refused `COULD NOT LOOK`. Its `MAIN RED` refusal (red content) is exit 11
+  and its `COULD NOT LOOK` exit 2, at once, with no confirm retries, exactly as
   gh-athena's on GitHub; that mapping reads the guard's own refusal shape and
   marks (`gmg_refusal_has_reason`). Before the lock the tool asks the guard
   the wrapper loads whether `glmg_tip_gate` is defined, and refuses with

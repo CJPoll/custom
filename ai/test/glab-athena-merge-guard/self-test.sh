@@ -993,6 +993,15 @@ lock_class "COULD NOT LOOK:" && ok "P21b. the lock tool's classifier reads it as
 ! lock_class "MAIN RED:" && ok "P21c. and not as MAIN RED" || bad "P21c. LOOK misread as red" "$(detail)"
 reset_fx; green_fx
 receipt_ran P22 "the lock tool's argv onto a green tip -> runs" "${LOCK_ARGS[@]}"
+# DND-2061, the 2026-10-05 gen_saas case: main red at its deploy stage (a
+# failed push pipeline, an older green one superseded by nothing), the fix MR
+# cut from an earlier main, and an unrelated green MR. Neither head contains
+# the red tip; BOTH merge, through the lock tool's argv.
+reset_fx; green_fx; pipes_are "$(pipe 8000000012 failed push)" "$(pipe 8000000011 success schedule)"
+tip_ran P23 "the deploy-red tip, the fix MR cut from an earlier main -> runs" "is RED" "${LOCK_ARGS[@]}"
+[[ "${ERR}" == *"pipelines/8000000012"* ]] && ok "P23b. the note names the failed deploy pipeline" || bad "P23b. deploy pipeline named" "$(detail)"
+reset_fx; green_fx; pipes_are "$(pipe 8000000012 failed push)" "$(pipe 8000000011 success schedule)"
+tip_ran P24 "the same deploy-red tip, an unrelated green MR -> runs" "does not contain it" "${MERGE_ARGS[@]}"
 
 echo
 echo "--- DND-1941: the tip's CONTENT (ai/config/main-content-checks.json) ---"
@@ -1033,6 +1042,7 @@ reset_fx; gs_fx "${GS_FEAT}" "${GS_DUP}"
 tip_refused GS1 "THE MISS: an ordinary MR onto a tip with a duplicated migration version -> refused" "Duplicated migration version" mr merge 77 --sha "${GS_FEAT}" --auto-merge=false --yes
 [[ "${ERR}" == *"MAIN RED:"* ]] && [[ "${ERR}" == *"20250101000000_init.exs, 20250101000000_other.exs"* ]] \
   && ok "GS1b. it is MAIN RED and names both files" || bad "GS1b. dup files named" "$(detail)"
+lock_class "MAIN RED:" && ok "GS1c. the lock tool's classifier reads a content refusal as MAIN RED (its exit 11)" || bad "GS1c. content MAIN RED classified" "$(detail)"
 reset_fx; gs_fx "${GS_FIX}" "${GS_DUP}"
 tip_ran GS2 "a red-main fix (contains the tip, removes the duplicate) -> runs" "RED-MAIN FIX" mr merge 77 --sha "${GS_FIX}" --auto-merge=false --yes
 reset_fx; gs_fx "${GS_STILL}" "${GS_DUP}"

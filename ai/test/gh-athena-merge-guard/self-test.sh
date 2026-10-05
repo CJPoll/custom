@@ -988,10 +988,11 @@ echo "--- DND-1902: a merge onto a RED base tip is REFUSED (stop the line) ---"
 # The defect: on 2026-10-03 gen_saas main went red at 14:06Z (a duplicate
 # migration version), and a merge landed onto it at 14:23Z because the
 # stop-the-line message reached its admiral a minute late. Nothing in the merge
-# path read the base tip's own runs. The guard now reads the rollup of the
-# base tip and refuses while a judged run there is red, unless the pinned head
-# CONTAINS that tip (a red-main fix). Unreadable is COULD NOT LOOK; a pending
-# run is not red. NOGATE_BASE is the tip throughout, so no receipt is needed.
+# path read the base tip's own runs. The guard reads the rollup of the base
+# tip and names every red run; since DND-2061 a red run never refuses, and the
+# note says RED-MAIN FIX when the pinned head CONTAINS the tip. Unreadable is
+# COULD NOT LOOK; a pending run is not red. NOGATE_BASE is the tip throughout,
+# so no receipt is needed.
 TIP="${NOGATE_BASE}"
 TIP_RED='[{"__typename":"CheckRun","name":"Test","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-10-03T14:00:00Z","detailsUrl":"https://github.com/athena-ai-harness/gen_saas/actions/runs/9001/job/1","checkSuite":{"databaseId":71,"app":{"databaseId":15368,"slug":"github-actions"},"workflowRun":{"event":"push","workflow":{"databaseId":5}}}},{"__typename":"CheckRun","name":"Build","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-10-03T14:00:00Z","checkSuite":{"databaseId":71,"app":{"databaseId":15368,"slug":"github-actions"},"workflowRun":{"event":"push","workflow":{"databaseId":5}}}}]'
 TIP_PENDING='[{"__typename":"CheckRun","name":"Deploy","status":"IN_PROGRESS","conclusion":null,"startedAt":"2026-10-03T14:00:00Z","checkSuite":{"databaseId":72,"app":{"databaseId":15368,"slug":"github-actions"},"workflowRun":{"event":"push","workflow":{"databaseId":6}}}},{"__typename":"CheckRun","name":"Build","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-10-03T14:00:00Z","checkSuite":{"databaseId":71,"app":{"databaseId":15368,"slug":"github-actions"},"workflowRun":{"event":"push","workflow":{"databaseId":5}}}}]'
@@ -1032,7 +1033,7 @@ else bad "T3. red-main fix merges" "$(detail)"; fi
 
 reset_fx; pr_view "${GREEN}"; base_is "${TIP}"; tip_rollup "${TIP_RED}"; compare_is identical 0
 run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
-[ "${RC}" = 0 ] && merged && ok "T3b. compare 'identical' (behind_by 0) is a head that contains the tip" || bad "T3b. identical" "$(detail)"
+[ "${RC}" = 0 ] && merged && [[ "${ERR}" == *"RED-MAIN FIX"* ]] && ok "T3b. compare 'identical' (behind_by 0) is a head that contains the tip" || bad "T3b. identical" "$(detail)"
 
 reset_fx; pr_view "${GREEN}"; base_is "${TIP}"; tip_rollup "${TIP_RED}"; fx compare '' 1 'gh: Server Error (HTTP 502)'
 run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"

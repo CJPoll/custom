@@ -134,8 +134,11 @@ module LeadTimeProduct
   end
 
   # The latest run of R's post-merge workflow on main: a failed deploy stops
-  # the line (merge-boarding: on a failed deploy, merge nothing but the fix or
-  # the revert). -> a reason to hold, or nil. Busy is locked-merge's to wait on.
+  # this unattended lane's line until the owner re-arms it (~/dev/custom
+  # CLAUDE.md -> Lead-time improver cron -> Failures). The lane's own rule: the
+  # merge guard names a red tip run and merges (DND-2061), but an improver
+  # does not pile changes onto a failing deploy. -> a reason to hold, or nil.
+  # Busy is locked-merge's to wait on.
   def base_deploy_hold(runs)
     latest = Array(runs).find { |r| r["status"] == "completed" }
     return nil unless latest && DEPLOY_FAILED.include?(latest["conclusion"].to_s)
@@ -332,8 +335,8 @@ module LeadTimeProduct
     case exit_code
     when 0 then Decision.new(:merged, "locked-merge landed it")
     when 10 then Decision.new(:merged, "locked-merge landed it (the worktree stack teardown failed)")
-    # 11 is MAIN RED (DND-1902): the base's own line is stopped, not this
-    # PR's; nothing landed, and the PR lands once the base is green.
+    # 11 is MAIN RED (DND-1902): the base's content is red, not this PR;
+    # nothing landed, and the PR lands once that fix lands on the base.
     when 2, 3, 4, 5, 6, 9, 11 then Decision.new(:retry, "locked-merge exit #{exit_code}: nothing landed")
     when 7 then Decision.new(:stop_line, "locked-merge exit 7: LANDED UNGATED (parent or tree mismatch)")
     when 8 then Decision.new(:stop_line, "locked-merge exit 8: the merge ran but the landing is not confirmed")

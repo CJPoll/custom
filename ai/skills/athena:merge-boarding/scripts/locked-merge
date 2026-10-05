@@ -155,7 +155,8 @@ Exit (every non-zero prints a Fix: line):
   10 LANDED and confirmed, but the worktree stack teardown failed -- do not re-merge
   11 MAIN RED: the base tip holds a duplicated migration version, and
      --head is not a fix (contains the tip, removes every duplicate) --
-     land only a red-main fix; others wait for a green base (nothing landed).
+     land only a red-main fix; others wait until that fix lands on the base
+     (nothing landed).
      Also when the tip turns red after this check and the merge guard's own
      re-check refuses (DND-1906): no confirm retries, the guard's message kept.
   12 MERGE TRAIN: the GitLab project has merge trains enabled -- board the
@@ -297,12 +298,13 @@ if [ "${FORGE}" = gitlab ]; then
   # the guard the wrapper sources (glmg_tip_gate). This tool does not copy that
   # judge. So it asks the guard the wrapper at ${AI_BIN} will load whether the
   # judge is there, and refuses when it is not: a tool that read as a full
-  # locked merge while nothing stopped a red tip would be the claim with no
+  # locked merge while nothing read the tip (a red pipeline is named, never
+  # refused, DND-2061; an unreadable one is COULD NOT LOOK) would be the claim with no
   # mechanism behind it (CLAUDE.md -> "A claimed mechanism must be able to
   # fire"). Before DND-1941 lands, every --mr merge stops here.
   GLMG_FOR_WRAPPER="$(dirname "$(readlink -f "${AI_BIN}/${WRAPPER}")")/../lib/glab-merge-guard.sh"
   if ! ( . "${GLMG_FOR_WRAPPER}" >/dev/null 2>&1 && declare -F glmg_tip_gate >/dev/null ); then
-    die 2 "NO TIP JUDGE (COULD NOT LOOK): the merge guard ${WRAPPER} loads (${GLMG_FOR_WRAPPER}) defines no tip-pipeline judge (glmg_tip_gate, DND-1941), or does not load, so a red ${GL_PROJECT} target tip would not stop this merge" \
+    die 2 "NO TIP JUDGE (COULD NOT LOOK): the merge guard ${WRAPPER} loads (${GLMG_FOR_WRAPPER}) defines no tip-pipeline judge (glmg_tip_gate, DND-1941), or does not load, so a ${GL_PROJECT} target tip with no pipeline, or one whose pipelines cannot be read, would not stop this merge" \
       "land DND-1941 (glab merge guard parity: red tip and content) in ~/dev/custom and fast-forward the main checkout, then re-run. Merging around it is lowering the merge bar, an owner decision (~/.claude/CLAUDE.md -> Owner approval policy, item 5). Nothing was locked or merged."
   fi
   echo "TIP-JUDGE ${GLMG_FOR_WRAPPER}: glmg_tip_gate runs inside the merge call"
@@ -473,10 +475,9 @@ echo "EXPECTED-TREE ${EXPECTED_TREE} (${HEAD_SHA} merged into ${B})"
 # NOT SEEN YET / NO RUN FOR BASE, never idle (ai/CLAUDE.md -> "A failed lookup
 # must never look like an empty one"). The base-branch count stays on top, so a
 # re-run of an older run still holds. The base run's conclusion is printed. A
-# failed deploy that reports on B is refused earlier, by the red-tip check
-# (DND-1902), which lets a red-main fix through; a non-success that check did
-# not see is a WARN here. Since DND-2061 that check names a red run and does
-# not refuse it.
+# failed deploy that reports on B is named by the red-tip check below, which
+# never refuses a red run (DND-2061); a non-success that check does not see is
+# a WARN here.
 BASE_RUN_GRACE_S=600
 idle_check() {
   local wf="$1" commit_json ids id view st conc now ct age msg marker branch_json live
@@ -569,7 +570,7 @@ ${GMG_CONTENT_DUPS}" ;;
   Duplicated migration version(s) (ai/config/main-content-checks.json):
 ${GMG_CONTENT_DUPS}
   The head ${HEAD_SHA} is not a red-main fix: it must contain ${B} and remove every duplicate." \
-         "land only a red-main fix: a head that contains ${B}, removes every duplicate named above, and carries its own INTEGRATION OK receipt (merge origin/${base} into it, fix it, push as Athena, re-gate), then re-run locked-merge. Every other MR waits until ${base} is green again. Nothing was merged." ;;
+         "land only a red-main fix: a head that contains ${B}, removes every duplicate named above, and carries its own INTEGRATION OK receipt (merge origin/${base} into it, fix it, push as Athena, re-gate), then re-run locked-merge. Every other MR waits until that fix lands on ${base}. Nothing was merged." ;;
     *) die 2 "${GMG_LOOK_MARK} whether the origin/${base} tip ${B} is red cannot be told: ${GMG_CONTENT_WHY}" \
          "make the tip readable (git fetch origin; fix the declaration if the message names it: an undeclared path of a declared product is added to that entry's paths in ~/dev/custom/ai/config/main-content-checks.json, landed on custom main), then re-run locked-merge. Could-not-read is never green; nothing was merged." ;;
   esac
@@ -626,8 +627,8 @@ rm -f "${merge_err}"
 # DND-1906: the tip turned red between the check above and the guard's own
 # re-check. The guard refused before any call to the forge, so nothing landed:
 # exit 11 at once, with no confirm retries (they read as exit 4).
-[ -z "${merge_red}" ] || die 11 "${GMG_RED_MARK} the merge guard refused ${CH_NAME}: ${base} went red after the check above; its message is above" \
-  "land only a red-main fix: a head that contains the red tip the guard names above (not ${B}, which this tool read before the tip moved), removes every duplicate it names, and carries its own INTEGRATION OK receipt; re-run integration-gate on it, then re-run locked-merge. Every other ${CH_NAME%% *} waits until ${base} is green again. Nothing was merged."
+[ -z "${merge_red}" ] || die 11 "${GMG_RED_MARK} the merge guard refused ${CH_NAME}: ${base}'s content went red after the check above; its message is above" \
+  "land only a red-main fix: a head that contains the red tip the guard names above (not ${B}, which this tool read before the tip moved), removes every duplicate it names, and carries its own INTEGRATION OK receipt; re-run integration-gate on it, then re-run locked-merge. Every other ${CH_NAME%% *} waits until that fix lands on ${base}. Nothing was merged."
 # DND-1907: exit 2 at once, with no confirm retries (they read as exit 4).
 [ -z "${merge_look}" ] || die 2 "${GMG_LOOK_MARK} the merge guard refused ${CH_NAME} because it could not look (at ${base}, or at what its message above names)" \
   "read the guard's own Fix: above, fix what it could not read (${READER} auth, the checkout), then re-run locked-merge. Nothing was merged."
