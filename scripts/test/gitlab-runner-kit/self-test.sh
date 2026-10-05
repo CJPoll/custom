@@ -370,7 +370,7 @@ done
 
 kit setup-gitlab-runner --help "${NOIN}"
 for want in "builds_dir" "/var/run/docker.sock" "services_tmpfs" "runner token" "DND-1942" \
-            "security_opt" "seccomp:unconfined" "Docker's default seccomp" "user namespaces" "mount /proc"; do
+            "security_opt" "systempaths=unconfined" "seccomp:unconfined" "Docker's default seccomp" "user namespaces" "mount /proc"; do
   case "${OUT}" in *"${want}"*) ok "setup-gitlab-runner --help states the role contract and its residual (${want})" ;;
     *) bad "setup-gitlab-runner --help states the role contract and its residual (${want})" ;; esac
 done

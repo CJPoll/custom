@@ -29,12 +29,12 @@
 # per-role contract and its named residual.
 #
 # Later (2026-10-04, DND-1999): the security_opt below is the untagged role's.
-# A `ci` entry has the same pair; a `deploy` entry, or any other tag, has no
-# security_opt line (Docker's defaults). The runbook has the table.
+# A `ci` entry adds "systempaths=unconfined"; a `deploy` entry, or any other
+# tag, has no security_opt line (Docker's defaults). The runbook has the table.
 #
-# Later (2026-10-05, DND-2039): DND-1999 briefly gave `ci` a third value,
-# "systempaths=unconfined". The Docker Engine API refuses it (a docker CLI flag
-# only), so no ci job could start. `ci` is the pair again.
+# Later (2026-10-05, DND-2039): the `ci` addition above is withdrawn. The Docker
+# Engine API refuses "systempaths=unconfined" (a docker CLI flag only), so no
+# ci job could start. `ci` has the same pair as the untagged role.
 
 concurrent = 3          # global cap on parallel jobs on this box; tune to capacity
 check_interval = 0

@@ -64,7 +64,7 @@ no longer holds for `security_opt`: an unknown tag gets Docker's defaults.
 
 | Role | `[runners.docker] security_opt` | Why |
 |---|---|---|
-| `ci` | `["seccomp:unconfined", "apparmor:unconfined"]` | tool-sandbox runs `bwrap --unshare-all ... --proc /proc`. Docker's default seccomp refuses the user namespace, and `/proc` stays masked, so the proc mount is still refused (DND-1998, reopened). |
+| `ci` | `["seccomp:unconfined", "apparmor:unconfined"]` | tool-sandbox runs `bwrap --unshare-all ... --proc /proc`. Docker's default seccomp refuses the user namespace, and `/proc` stays masked, so the proc mount is still refused (DND-1998 tracks unmasking it). |
 | `deploy` | none: Docker's default seccomp, masked `/proc` | Its jobs only drive the mounted socket (`docker build`; buildx's buildkitd is a sibling container the daemon starts). |
 | untagged (`-`) | `["seccomp:unconfined", "apparmor:unconfined"]` | Rootless BuildKit as a job image nests a user namespace (the invariants above). `/proc` stays masked. |
 | other | none: Docker's defaults | The kit knows no need for it. Deny by default. |

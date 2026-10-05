@@ -523,6 +523,10 @@ for `ci` a database `services_tmpfs`. `setup-gitlab-runner --help` and
 `security_opt` is per role (DND-1999, `grk_role_security_opt`): `ci` and
 untagged (`-`) get the unconfined pair, `deploy` and any other tag get none.
 Every value must be one the Docker Engine API accepts; the self-test checks
-the grammar (DND-2039: the CLI-only `systempaths=unconfined` stopped every ci
-job). A re-run names a kept entry whose
+the grammar.
+
+**Later (2026-10-05, DND-2039):** DND-1999 had `ci` add
+`systempaths=unconfined` to the pair. The Engine API refuses that CLI-only
+flag, so no ci job started. `ci` is the pair again, and the self-test rejects
+any value outside the API grammar. A re-run names a kept entry whose
 `security_opt` differs, with `Fix:`.
