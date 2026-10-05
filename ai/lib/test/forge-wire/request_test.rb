@@ -90,6 +90,14 @@ check("a short body is Incomplete") do
   incomplete?(http("POST /x HTTP/1.1", "Host: #{H}", "Content-Length: 10", body: "abc"))
 end
 check("empty input is Incomplete") { incomplete?("".b) }
+# RFC 9112 2.2 lets a server ignore one empty line before the request line.
+# This judge refuses it instead: gh and glab never send one, and a refusal
+# fails closed where a tolerance is one more rule two parsers could disagree on.
+check("an empty head (CRLF CRLF) is Unparseable, naming the empty request line") { unparseable?("\r\n\r\n".b, "request line is empty") }
+check("a leading empty line before a request is Unparseable") do
+  unparseable?("\r\n".b + http("GET / HTTP/1.1", "Host: #{H}"), "request line is empty")
+end
+check("a lone CRLF is Unparseable, not Incomplete (no more bytes can fix it)") { unparseable?("\r\n".b, "request line is empty") }
 
 # --- refused shapes ----------------------------------------------------------
 check("HTTP/1.0 is refused") { unparseable?(http("GET / HTTP/1.0", "Host: #{H}"), "HTTP/1.1") }

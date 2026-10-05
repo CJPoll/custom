@@ -16,7 +16,8 @@
 # and the forge's -- could read different requests from the same bytes, and a
 # write could pass judged as one thing and land as another):
 #   - any version but HTTP/1.1; any request target but origin-form; a fragment;
-#     a request line not split by exactly one SP
+#     a request line not split by exactly one SP; an empty request line,
+#     including the leading empty line RFC 9112 2.2 lets a server skip
 #   - bare LF or CR line endings, obs-fold, whitespace before a colon, a header
 #     line without a colon, a NUL or control character anywhere in a header
 #     value (only SP and HTAB are trimmed), a control character in a chunk
@@ -104,6 +105,10 @@ module ForgeWire
     # The index of "\r\n\r\n". A bare LF or CR anywhere in the head is
     # Unparseable even before the head is complete: no more bytes can fix it.
     def locate_head_end
+      # RFC 9112 2.2 lets a server skip one empty line before the request
+      # line; this judge refuses it (gh and glab never send one, and a
+      # tolerance is one more rule two parsers could read differently).
+      unparseable("the request line is empty (a leading CRLF is refused)") if @b.start_with?("\r\n")
       idx = @b.index("\r\n\r\n")
       head = idx ? @b.byteslice(0, idx + 4) : @b
       unparseable("a line ending is not CRLF") if head.match?(/(?<!\r)\n|\r(?!\n|\z)/n)
@@ -114,6 +119,7 @@ module ForgeWire
     end
 
     def request_line(line)
+      unparseable("the request line is empty") if line.nil? || line.empty?
       parts = line.split(/ /, -1)
       unparseable("the request line is not METHOD SP TARGET SP VERSION") unless parts.length == 3
       method, target, version = parts

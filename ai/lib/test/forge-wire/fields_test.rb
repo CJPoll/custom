@@ -94,9 +94,28 @@ check("a raw body that parses as JSON is also read as JSON") { texts(sneaky).inc
 check("an empty body has no body fields") { fields(wire("POST", "/x")).none? { |f| f.name.start_with?("body") } }
 
 # --- every body is also read raw ----------------------------------------------
-dup = wire("POST", "/x", body: '{"body":"first SYNTH","body":"second"}')
+# Declared JSON with a repeated key is refused (below); a raw body is still
+# scanned whole, so the first of two keys cannot hide there either.
+dup = wire("POST", "/x", body: '{"body":"first SYNTH","body":"second"}', type: "text/plain")
+check("a JSON body that repeats a top-level key (query) is refused") do
+  raises?(ForgeWire::Unparseable, "repeats a key") do
+    F.parse_body(wire("POST", "/graphql", body: '{"query":"mutation{x}","query":"query{y}"}'))
+  end
+end
+check("a JSON body that repeats a nested key is refused") do
+  raises?(ForgeWire::Unparseable, "repeats a key") do
+    F.parse_body(wire("POST", "/graphql", body: '{"variables":{"input":{"subjectId":"A","subjectId":"B"}}}'))
+  end
+end
+check("a raw body that is JSON with a repeated target_project_id is refused when read for params") do
+  r = wire("POST", "/x", body: '{"target_project_id":1,"target_project_id":2}', type: "text/plain")
+  raises?(ForgeWire::Unparseable, "repeats a key") { F.param_values(r, F.parse_body(r), "target_project_id") }
+end
+check("the same key in two different objects is not a repeat") do
+  F.parse_body(wire("POST", "/x", body: '{"a":{"id":"1"},"b":{"id":"2"}}')).kind == :json
+end
 check("the first of two duplicate JSON keys is still scanned") { texts(dup).any? { |t| t.include?("first SYNTH") } }
-dup_esc = wire("POST", "/x", body: %({"body":"#{ESC_S}YNTH-first","body":"second"}))
+dup_esc = wire("POST", "/x", body: %({"body":"#{ESC_S}YNTH-first","body":"second"}), type: "text/plain")
 check("an escaped value under a duplicate key is decoded and scanned") { texts(dup_esc).include?("SYNTH-first") }
 form_json = wire("POST", "/x", body: %({"t":"#{ESC_S}YNTH"}), type: "application/x-www-form-urlencoded")
 check("JSON sent with a form Content-Type is read as JSON too") { texts(form_json).include?("SYNTH") }

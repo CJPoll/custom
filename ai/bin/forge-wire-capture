@@ -37,7 +37,9 @@ HELP = <<~HELP
   ai/lib/test/forge-wire/fixtures/<scenario>/NN-<host>.http, plus meta.json.
   --explore prints each request line and the CLI's output, and writes nothing
   under fixtures/. CLIs: /usr/bin/gh (2.96.0) and FW_GLAB or ~/.local/bin/glab
-  (1.92.1); a different version is refused.
+  (1.92.1); a different version is refused. Files are numbered in arrival
+  order, and requests a CLI sends concurrently (gh pr merge's two schema
+  queries) can arrive in either order, so a re-run may renumber those.
 
   Exit: 0 every scenario captured; 1 a scenario failed (named, with Fix:);
   2 usage.
@@ -113,14 +115,16 @@ def cli_env(cli, work, port)
 end
 
 # Bounded wait for a file the child writes; the child's exit is checked too.
+# Polls every 0.5 s, up to 20 times: the same 10 s bound, no sub-second
+# hammering. Returns early when the child exits.
 def wait_ready(path, pid)
-  200.times do
+  20.times do
     return true if File.size?(path)
     return false if Process.waitpid(pid, Process::WNOHANG)
 
-    sleep 0.05
+    sleep 0.5
   end
-  false
+  File.size?(path) ? true : false
 end
 
 def run_scenario(sc, explore)

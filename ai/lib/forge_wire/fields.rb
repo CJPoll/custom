@@ -7,7 +7,7 @@
 #   parse_body    the body by Content-Type: JSON (application/json,
 #                 */*+json), form-urlencoded, multipart/form-data, or raw
 #                 bytes. A body declared JSON or multipart that does not
-#                 parse is Unparseable (refused): a body the judge cannot read
+#                 parse, or JSON that repeats a key in one object, is Unparseable (refused): a body the judge cannot read
 #                 is never read as clean. A multipart part with a transfer
 #                 encoding other than 7bit, 8bit or binary is refused too: its
 #                 text would be scanned still encoded.
@@ -37,6 +37,24 @@ module ForgeWire
     Body = Struct.new(:kind, :value, keyword_init: true)
 
     JSON_MAX_NESTING = 64
+
+    # JSON.parse keeps the last of two equal keys in one object; a forge's
+    # parser may keep the first. Where the judge reads a decision from the body
+    # (query, operationName, variables, an id, target_project_id, _method), two
+    # readings of one body are the duplicate-header ambiguity again, so any
+    # repeat anywhere is refused, the same rule as a repeated framing header.
+    # The json gem refuses with `allow_duplicate_key: false`. A gem too old to
+    # know that option would ignore it and parse last-wins, so this file checks
+    # at load that the option bites, and refuses to load otherwise.
+    DUP_KEY = /duplicate key/i.freeze
+    begin
+      JSON.parse('{"a":1,"a":2}', allow_duplicate_key: false)
+      raise LoadError, "forge_wire/fields.rb: json #{JSON::VERSION} parses a repeated key instead of refusing it. " \
+                       "Fix: run with a json gem that supports allow_duplicate_key (Ruby 3.4's stdlib json does)."
+    rescue JSON::ParserError
+      nil
+    end
+
     PLAIN_KEY = /\A[A-Za-z0-9_]{1,40}\z/.freeze
     # A JSON string literal: no raw control character, only JSON's escapes.
     JSON_STRING = /"(?:[^"\\\x00-\x1f]|\\(?:["\\\/bfnrt]|u[0-9a-fA-F]{4}))*"/.freeze
@@ -63,15 +81,26 @@ module ForgeWire
       type == "application/json" || type.match?(%r{\Aapplication/[a-z0-9.+-]*\+json\z})
     end
 
+    # JSON text -> value. A repeated key is Unparseable; anything else that
+    # does not parse raises JSON::ParserError (or NestingError) to the caller.
+    def strict_json(bytes)
+      JSON.parse(utf8(bytes), max_nesting: JSON_MAX_NESTING, allow_duplicate_key: false)
+    rescue JSON::ParserError => e
+      raise Unparseable, "the JSON body repeats a key" if DUP_KEY.match?(e.message) && !e.is_a?(JSON::NestingError)
+
+      raise
+    end
+
     def json(bytes)
-      JSON.parse(utf8(bytes), max_nesting: JSON_MAX_NESTING)
+      strict_json(bytes)
     rescue JSON::ParserError, JSON::NestingError, EncodingError
       raise Unparseable, "the JSON body does not parse"
     end
 
-    # The value or nil, never an error: a raw body is only maybe JSON.
+    # The value or nil when the bytes are not JSON: a raw body is only maybe
+    # JSON. JSON that repeats a key is still Unparseable.
     def maybe_json(bytes)
-      JSON.parse(utf8(bytes), max_nesting: JSON_MAX_NESTING)
+      strict_json(bytes)
     rescue JSON::ParserError, JSON::NestingError, EncodingError
       nil
     end

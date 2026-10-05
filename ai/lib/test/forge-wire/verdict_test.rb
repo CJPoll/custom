@@ -174,6 +174,10 @@ check("a declared-JSON body that does not parse is refused") do
   v = judge(wire("POST", "/repos/synth-owner/pub/issues", body: "{nope"))
   v.state == :unparseable && v.exit_code == 3
 end
+check("a GraphQL body with two `query` keys is refused, not judged a read") do
+  v = judge(wire("POST", "/graphql", body: '{"query":"mutation{deleteRepository(input:{}){x}}","query":"query{viewer{login}}"}'))
+  v.state == :unparseable && v.exit_code == 3
+end
 check("unparseable bytes have a verdict too") { J.unparseable("a line ending is not CRLF").state == :unparseable }
 check("a GitLab GraphQL GET with a mutation in the query string is a write") do
   r = wire("GET", "/api/graphql?query=mutation%7BcreateNote(input%3A%7B%7D)%7Bnote%7Bid%7D%7D%7D", host: GL_HOST)

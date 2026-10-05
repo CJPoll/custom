@@ -41,9 +41,10 @@
 #
 # What a refusal prints: the operation's table name or GraphQL field names,
 # field names, pattern labels, and a target's kind (with its id when numeric).
-# Never a matched value, never a raw path or project path (both are scanned
-# text), and a field name, path segment or GraphQL field that itself matches
-# a pattern is redacted.
+# Never a matched value and never a target's project path. An unknown
+# operation's refusal shows the method and path with each segment replaced by
+# `<segment>` unless the scanner is measured and no pattern matches it; a field
+# name or GraphQL field that matches a pattern is redacted the same way.
 
 require_relative "request"
 require_relative "fields"
