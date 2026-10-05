@@ -275,9 +275,10 @@ if [ "${RC}" = 0 ] && [[ "${OUT}" == *"SCANNED commits=0 "* ]]; then ok "a delet
 OUT="$(cd "${E}" && printf 'garbage\n' | "${SCAN}" --pre-push --remote origin 2>&1)"; RC=$?
 if [ "${RC}" = 3 ] && [[ "${OUT}" == *"pre-push stdin line 1 is not"* ]]; then ok "malformed pre-push stdin is COULD NOT MEASURE"; else bad "malformed stdin" "rc=${RC} ${OUT}"; fi
 OUT="$(cd "${E}" && printf 'refs/heads/x %s refs/heads/x %s\n' "$(git rev-parse HEAD)" "1111111111111111111111111111111111111111" | "${SCAN}" --pre-push --remote origin 2>&1)"; RC=$?
-if [ "${RC}" = 1 ] && [[ "${OUT}" == *"commits=1 "* ]]; then ok "an unknown remote tip falls back to 'not on any origin ref'"; else bad "unknown remote tip" "rc=${RC} ${OUT}"; fi
+if [ "${RC}" = 1 ] && [[ "${OUT}" == *"commits=1 "* ]]; then ok "an unknown remote tip is bounded by the destination's own refs (ls-remote)"; else bad "unknown remote tip" "rc=${RC} ${OUT}"; fi
+git init -q --bare "${TMP}/empty-dest.git"
 R="${TMP}/rootrepo"; git init -q "${R}"; printf 'root %s\n' "${TOKEN}" > "${R}/f"; git -C "${R}" add f; git -C "${R}" commit -q -m root
-OUT="$(cd "${R}" && printf 'refs/heads/main %s refs/heads/main 0000000000000000000000000000000000000000\n' "$(git rev-parse HEAD)" | "${SCAN}" --pre-push --remote /some/url 2>&1)"; RC=$?
+OUT="$(cd "${R}" && printf 'refs/heads/main %s refs/heads/main 0000000000000000000000000000000000000000\n' "$(git rev-parse HEAD)" | "${SCAN}" --pre-push --remote "${TMP}/empty-dest.git" 2>&1)"; RC=$?
 if [ "${RC}" = 1 ] && [[ "${OUT}" == *"f:1 (commit "* ]]; then ok "a root commit's diff is scanned"; else bad "root commit" "rc=${RC} ${OUT}"; fi
 
 echo "--- the pushed commit cannot opt its own content out (critic round 5) ---"
@@ -357,12 +358,75 @@ commit_file "${SP}" "sp ace/SYNTHPATH.md" "and ${TOKEN}\n" "space path"
 OUT="$(cd "${SP}" && printf 'refs/heads/main %s refs/heads/main %s\n' "$(git rev-parse HEAD)" "$(git rev-parse origin/main)" | ATHENA_PRIVATE_ROOT="${AN}" "${SCAN}" --pre-push --remote origin 2>&1)"; RC=$?
 if [ "${RC}" = 1 ] && [[ "${OUT}" != *"SYNTHPATH"* ]] && [[ "${OUT}" == *"<path redacted: it matches a pattern>:1"* ]]; then ok "anchored path pattern redacts a spaced path"; else bad "spaced path" "rc=${RC} ${OUT}"; fi
 
-echo "--- review floor: a push by URL uses that remote's tracking refs ---"
+echo "--- review floor: a push by URL is bounded by the destination's own refs ---"
 UR="$(mk_public byurl)"
 commit_file "${UR}" u.md "clean\n" "one new commit"
 URL="$(git -C "${UR}" remote get-url origin)"
 OUT="$(cd "${UR}" && printf 'refs/heads/main %s refs/heads/main 0000000000000000000000000000000000000000\n' "$(git rev-parse HEAD)" | "${SCAN}" --pre-push --remote "${URL}" --url "${URL}" 2>&1)"; RC=$?
 if [ "${RC}" = 0 ] && [[ "${OUT}" == *"SCANNED commits=1 "* ]]; then ok "URL remote mapped to origin: only the new commit"; else bad "URL remote" "rc=${RC} ${OUT}"; fi
+
+echo "--- DND-2086: a new branch pushed by URL is bounded by what the destination advertises ---"
+# The destination's main already holds a commit carrying the token (it was
+# published before any hook). The pushing checkout has no remote, so no
+# tracking ref, for that URL: the bound must come from the destination itself.
+NB="$(mk_public newbranch)"
+DEST="${TMP}/dest2086.git"; git init -q --bare "${DEST}"
+commit_file "${NB}" hist.md "historical ${TOKEN}\n" "history the destination already has"
+git -C "${NB}" push -q "${DEST}" main 2>/dev/null   # no hook yet: published history
+cp "${HOOK}" "${NB}/.git/hooks/pre-push" && chmod +x "${NB}/.git/hooks/pre-push"
+git -C "${NB}" checkout -q -b newb
+commit_file "${NB}" new.md "clean new work\n" "the only new commit"
+OUT="$(git -C "${NB}" push "${DEST}" HEAD:refs/heads/newb 2>&1)"; RC=$?
+if [ "${RC}" = 0 ] && [[ "${OUT}" == *"outbound-scan: CLEAN mode=pre-push"* ]] && [[ "${OUT}" == *"SCANNED commits=1 "* ]] \
+   && [ "$(git --git-dir="${DEST}" rev-parse -q --verify refs/heads/newb)" = "$(git -C "${NB}" rev-parse HEAD)" ]; then
+  ok "N1 new branch by URL: only the commit the destination lacks is scanned; the push lands"
+else
+  bad "N1 new branch by URL" "rc=${RC} ${OUT}"
+fi
+commit_file "${NB}" leak.md "new ${TOKEN}\n" "a new commit with the token"
+OUT="$(git -C "${NB}" push "${DEST}" HEAD:refs/heads/newb2 2>&1)"; RC=$?
+if [ "${RC}" != 0 ] && [[ "${OUT}" == *"leak.md:1 (commit "*"label=synth-token"* ]] && [[ "${OUT}" == *"hits=1"* ]] \
+   && [[ "${OUT}" != *"hist.md"* ]] && [ -z "$(git --git-dir="${DEST}" rev-parse -q --verify refs/heads/newb2)" ] && no_literal; then
+  ok "N2 a new commit with the token on a new branch by URL is still refused (history not re-reported)"
+else
+  bad "N2 new commit with the token" "rc=${RC} ${OUT}"
+fi
+NBH="$(git -C "${NB}" rev-parse HEAD)"
+OUT="$(cd "${NB}" && printf 'refs/heads/x %s refs/heads/x 0000000000000000000000000000000000000000\n' "${NBH}" | "${SCAN}" --pre-push --remote "${TMP}/no-such.git" --url "${TMP}/no-such.git" 2>&1)"; RC=$?
+if [ "${RC}" = 3 ] && [[ "${OUT}" == *"COULD NOT LOOK"* ]] && [[ "${OUT}" == *"Fix:"* ]] && [[ "${OUT}" != *"CLEAN"* ]]; then
+  ok "N3 a destination whose refs cannot be read: COULD NOT LOOK, refused"
+else
+  bad "N3 unreadable destination" "rc=${RC} ${OUT}"
+fi
+printf '%s refs/heads/main\n' "$(git --git-dir="${DEST}" rev-parse main)" > "${TMP}/adv-ok"
+OUT="$(cd "${NB}" && printf 'refs/heads/x %s refs/heads/x 0000000000000000000000000000000000000000\n' "${NBH}" | "${SCAN}" --pre-push --remote r --url "${TMP}/no-such.git" --advertised "${TMP}/adv-ok" 2>&1)"; RC=$?
+if [ "${RC}" = 1 ] && [[ "${OUT}" == *"SCANNED commits=2 "* ]] && [[ "${OUT}" != *"hist.md"* ]]; then
+  ok "N4 --advertised (the transport's listing) bounds the range without reading the destination again"
+else
+  bad "N4 --advertised" "rc=${RC} ${OUT}"
+fi
+for adv in "${TMP}/adv-missing" "${TMP}/adv-bad"; do
+  [ "${adv}" = "${TMP}/adv-bad" ] && printf 'not an advertisement line\n' > "${adv}"
+  OUT="$(cd "${NB}" && printf 'refs/heads/x %s refs/heads/x 0000000000000000000000000000000000000000\n' "${NBH}" | "${SCAN}" --pre-push --remote r --url u --advertised "${adv}" 2>&1)"; RC=$?
+  if [ "${RC}" = 3 ] && [[ "${OUT}" == *"COULD NOT LOOK"* ]] && [[ "${OUT}" == *"Fix:"* ]]; then
+    ok "N5 an unreadable --advertised listing (${adv##*/}) is COULD NOT LOOK"
+  else
+    bad "N5 unreadable --advertised ${adv##*/}" "rc=${RC} ${OUT}"
+  fi
+done
+: > "${TMP}/adv-empty"
+OUT="$(cd "${NB}" && printf 'refs/heads/x %s refs/heads/x 0000000000000000000000000000000000000000\n' "${NBH}" | "${SCAN}" --pre-push --remote r --url u --advertised "${TMP}/adv-empty" 2>&1)"; RC=$?
+if [ "${RC}" = 1 ] && [[ "${OUT}" == *"hist.md"* ]] && [[ "${OUT}" == *"leak.md"* ]]; then
+  ok "N6 an empty destination (empty listing) bounds nothing: the whole history is scanned"
+else
+  bad "N6 empty destination" "rc=${RC} ${OUT}"
+fi
+OUT="$(cd "${NB}" && printf 'refs/heads/x %s refs/heads/x 0000000000000000000000000000000000000000\nrefs/heads/main %s refs/heads/main %s\n' "${NBH}" "${NBH}" "$(git -C "${NB}" rev-parse main)" | "${SCAN}" --pre-push --remote https://github.com/o/r.git --url athena-forge::https://github.com/o/r.git 2>&1)"; RC=$?
+if [ "${RC}" = 1 ] && [[ "${OUT}" == *"DEFERRED refs/heads/x"* ]] && [[ "${OUT}" == *"leak.md"* ]] && [[ "${OUT}" == *"SCANNED commits=2 "* ]]; then
+  ok "N7 the hook on the route: a new ref is left to the transport (which holds the listing); a known tip is still scanned"
+else
+  bad "N7 route deferral" "rc=${RC} ${OUT}"
+fi
 
 echo "--- merges: only what differs from every parent is new ---"
 MG="$(mk_public merges)"
@@ -394,7 +458,7 @@ else
 fi
 
 echo "--- usage and --help ---"
-for args in "" "--tree --text x" "--pre-push" "--tree --remote o" "--text x --label BAD" "--bogus"; do
+for args in "" "--tree --text x" "--pre-push" "--tree --remote o" "--tree --advertised x" "--text x --label BAD" "--bogus"; do
   # shellcheck disable=SC2086
   OUT="$("${SCAN}" ${args} </dev/null 2>&1)"; RC=$?
   if [ "${RC}" = 2 ] && [[ "${OUT}" == *"USAGE"* ]] && [[ "${OUT}" == *"Fix:"* ]]; then ok "usage '${args}'"; else bad "usage '${args}'" "rc=${RC} ${OUT}"; fi

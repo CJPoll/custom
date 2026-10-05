@@ -17,7 +17,12 @@
 # remote-helper protocol between git and it. Before a push reaches the child,
 # it reads the ref updates git asks for, states them as the pre-push hook's
 # stdin, and runs the MAIN checkout's ai/git-hooks/outbound-pre-push.sh with
-# them: the same script, scanner and pattern bar the hook runs, so a branch
+# them, plus a third argument: a file holding the destination's ref listing
+# as the destination advertised it on this connection (`list for-push`, or
+# git-receive-pack's advertisement). The scan bounds a new ref's range by it
+# (DND-2086); the hook as git runs it inside a route push cannot read the
+# destination and leaves those refs here. It is
+# the same script, scanner and pattern bar the hook runs, so a branch
 # cannot weaken the scanner or the patterns that judge its own push. Only a
 # scan that exits 0 lets the push through: CLEAN, or WAIVED - NOT SCANNED
 # under ATHENA_OUTBOUND_WAIVE=<reason>, which the scan inherits and logs
@@ -27,7 +32,10 @@
 # the remote end hung up), and nothing reaches the forge:
 #   * the scan reports HITS, COULD NOT MEASURE, or any other non-zero exit;
 #   * the range is unreadable: a <src> git cannot resolve, a malformed spec or
-#     receive-pack command, a signed push (push-cert);
+#     receive-pack command, a signed push (push-cert), a receive-pack ref
+#     advertisement line that is not "<oid> <ref>" (an ERR line included);
+#   * a push batch on a connection that never listed the destination's refs
+#     (no `list for-push`): COULD NOT LOOK, never an empty destination;
 #   * a push form this program does not read: stateless-connect to
 #     git-receive-pack, or a remote-helper command it does not know;
 #   * the main checkout's outbound-pre-push.sh is missing or not executable;
@@ -47,7 +55,10 @@
 # Residuals, stated: this program and the transport load beside the wrapper
 # invoked (FG_TRANSPORT_DIR), so a worktree's gh-athena or glab-athena runs
 # that branch's copies, which decide whether the scan runs at all; agents
-# push with the main checkout's ~/dev/custom/ai/bin/gh-athena. A repository
+# push with the main checkout's ~/dev/custom/ai/bin/gh-athena. That includes
+# a new ref's range: inside a route push the hook leaves it to this program
+# (DND-2086), so a branch's copy of it decides that too, as it already can by
+# passing --no-verify, which the route accepts. A repository
 # with no outbound hook (it never had the
 # hook's scan either; deleting the hook unmarks it); a hook installed only
 # under a core.hooksPath that the caller's GIT_CONFIG_GLOBAL or
@@ -64,6 +75,7 @@
 #   forge-push-scan --header-index N --common DIR -- <git-remote-https> <remote> <url>
 
 require "open3"
+require "tempfile"
 require_relative "forge_push_scan"
 
 PROG = "forge-push-scan"
@@ -204,10 +216,19 @@ def relay_line
 end
 
 # ---- the scan -------------------------------------------------------------------
-# scan!(updates) : true when the main checkout's hook passes them; else prints
-# its output and the refusal, and returns false.
-def scan(updates)
+# scan(updates, listing) : true when the main checkout's hook passes them; else
+# prints its output and the refusal, and returns false. `listing` is the
+# destination's {ref => oid}, as it advertised them to this connection: the
+# scan bounds a new ref's range by it (DND-2086), so it is handed to the hook
+# as a file (the hook's third argument). nil means it was never read: refused
+# as COULD NOT LOOK, never scanned as an empty destination.
+def scan(updates, listing)
   return true if updates.empty?
+  if listing.nil?
+    refuse("the destination's ref listing was not read on this connection, so the range of a new ref is unknown (COULD NOT LOOK)",
+           "push with git's own git-remote-https through the route (it lists the destination's refs before a push); report the git version if it pushed without listing them.")
+    return false
+  end
   if COMMON_UNKNOWN
     refuse("the transport could not resolve this repository's common git dir (git rev-parse --git-common-dir failed), so it cannot find the main checkout whose outbound scan judges this push (COULD NOT LOOK)",
            "push from inside the repository's work tree, with GIT_DIR and GIT_COMMON_DIR unset or naming this repository, then retry; report the git error if `git rev-parse --git-common-dir` fails there.")
@@ -218,7 +239,11 @@ def scan(updates)
            "fast-forward the main checkout (git -C #{File.dirname(File.dirname(File.dirname(HOOK)))} merge --ff-only origin/main) so the landed hook exists, then push again.")
     return false
   end
-  out, st = Open3.capture2e(SCAN_ENV, HOOK, REMOTE, URL, stdin_data: ForgePushScan.pre_push_stdin(updates))
+  out, st = Tempfile.create("forge-push-scan-listing") do |f|
+    f.write(ForgePushScan.listing_text(listing))
+    f.flush
+    Open3.capture2e(SCAN_ENV, HOOK, REMOTE, URL, f.path, stdin_data: ForgePushScan.pre_push_stdin(updates))
+  end
   out.each_line { |l| warn "#{PROG}: #{l.chomp}" }
   return true if st.success?
 
@@ -242,9 +267,9 @@ UNREADABLE_FIX = "push a plain branch or tag through the route (gh-athena git pu
 def push_batch(specs_lines, remote_refs)
   specs = specs_lines.map { |line| ForgePushScan.parse_spec(line.chomp.delete_prefix("push ")) }
   updates = specs.map do |spec|
-    ForgePushScan.update_for_spec(spec, spec.src.empty? ? nil : resolve(spec.src), remote_refs)
+    ForgePushScan.update_for_spec(spec, spec.src.empty? ? nil : resolve(spec.src), remote_refs || {})
   end
-  if scan(updates)
+  if scan(updates, remote_refs)
     to_child(specs_lines.join + "\n")
     relay_until_blank
   else
@@ -294,7 +319,30 @@ def read_exact(io, n)
   buf
 end
 
+# read_advertisement : the server's ref advertisement, relayed to git as read,
+# through its flush -> {ref => oid}. git sends no command before it has read
+# it, so it is read here, before the raw relay starts.
+def read_advertisement
+  refs = {}
+  loop do
+    hdr = CHILD_OUT.read(4)
+    child_gone! if hdr.nil? || hdr.bytesize < 4
+    $stdout.write(hdr)
+    kind, len = ForgePushScan.pkt_header(hdr)
+    break if kind == :flush
+    raise ForgePushScan::Unreadable, "a #{kind} packet in the ref advertisement" unless kind == :data
+
+    payload = CHILD_OUT.read(len)
+    child_gone! if payload.nil? || payload.bytesize < len
+    $stdout.write(payload)
+    tip = ForgePushScan.parse_advertised(payload)
+    refs[tip[1]] = tip[0] unless tip == :skip
+  end
+  refs
+end
+
 def receive_pack_mode
+  listing = read_advertisement
   t = relay_from_child
   held = +""
   updates = []
@@ -312,7 +360,7 @@ def receive_pack_mode
     u = ForgePushScan.parse_command(payload)
     updates << u unless u == :shallow
   end
-  unless scan(updates)
+  unless scan(updates, listing)
     t.kill
     abort_push("the outbound scan did not pass", "see the scan output and Fix: above.")
   end
@@ -327,7 +375,7 @@ rescue ForgePushScan::Unreadable => e
 end
 
 # ---- the command loop -----------------------------------------------------------
-remote_refs = {}
+remote_refs = nil # the destination's tips, from `list for-push`; nil until read
 batch = []
 fetch_batch = []
 while (line = $stdin.gets)

@@ -159,11 +159,11 @@ echo "forge transport push-range scan self-test (DND-2023)"
 echo "wrapper: ${WRAPPER}"
 echo
 
-echo "--- the hook alone: a plain routed push of the token is refused by the hook ---"
+echo "--- a plain routed push of the token, hook and transport both on: refused (DND-2086: the hook leaves a new ref to the transport) ---"
 R="$(mk_repo r1 hook)"; plant "${R}" notes.md
 route "${R}" -- push origin HEAD:refs/heads/t1
 if [ "${RC}" != 0 ] && [ -z "$(landed r1 refs/heads/t1)" ] && [[ "${OUT}" == *"outbound-scan: HITS mode=pre-push"* ]] && no_literal; then
-  ok "H1. hook installed, plain push: refused by the hook, nothing landed"
+  ok "H1. hook installed, plain push: refused by the scan, nothing landed"
 else bad "H1. hook refuses a plain routed push" "rc=${RC} landed=$(landed r1 refs/heads/t1) out=${OUT}"; fi
 
 echo "--- every hook-skip route: the transport scans the range itself ---"
@@ -251,6 +251,38 @@ route "${TMP}" FX_MODE=connect -- clone -q https://github.com/o/r1.git "${TMP}/c
 if [ "${RC}" = 0 ] && [ -f "${TMP}/c5-clone/README" ]; then ok "C5. clone through the route still works"
 else bad "C5. clone" "rc=${RC} out=${OUT}"; fi
 
+echo "--- DND-2086: a new branch by URL is bounded by the destination's own refs ---"
+# The forge's main already holds a commit carrying the token (published
+# before any scan). The pushing checkout has no tracking ref for it and
+# pushes by URL, as a first push to a new forge does.
+RN="$(mk_repo rn hook)"; plant "${RN}" hist.md
+git -C "${RN}" push -q --no-verify "${FX_FORGE}/o/rn.git" HEAD:refs/heads/main
+git -C "${RN}" update-ref -d refs/remotes/origin/main
+# url_push <label> <branch> <env...> : a clean new branch by URL lands, and
+# only the commit the forge lacks is scanned.
+url_push() {
+  local label="$1" br="$2"; shift 2
+  clean_commit "${RN}" "${br}.md"
+  route "${RN}" "$@" -- push git@github.com:o/rn.git "HEAD:refs/heads/${br}"
+  if [ "${RC}" = 0 ] && [ "$(landed rn "refs/heads/${br}")" = "$(git -C "${RN}" rev-parse HEAD)" ] \
+     && [[ "${OUT}" == *"outbound-scan: CLEAN mode=pre-push"* ]] && [[ "${OUT}" == *"SCANNED commits=1 "* ]] \
+     && [[ "${OUT}" != *"hist.md"* ]] && [[ "${OUT}" != *"commits=2 "* ]]; then
+    ok "${label}"
+  else bad "${label}" "rc=${RC} landed=$(landed rn "refs/heads/${br}") out=${OUT}"; fi
+}
+url_push "N1. hook and transport, push capability: a clean new branch by URL scans only its new commit and lands" n1
+url_push "N2. hook and transport, connect capability: the same" n2 FX_MODE=connect
+if [[ "${OUT}" == *"DEFERRED refs/heads/n2"* ]]; then ok "N3. the hook inside the route push leaves the new ref to the transport, and says so"
+else bad "N3. hook deferral printed" "out=${OUT}"; fi
+plant "${RN}" n4.md
+for mode in push connect; do
+  route "${RN}" FX_MODE="${mode}" -- push git@github.com:o/rn.git "HEAD:refs/heads/n4-${mode}"
+  if [ "${RC}" != 0 ] && [ -z "$(landed rn "refs/heads/n4-${mode}")" ] && [[ "${OUT}" == *"n4.md:1 (commit "*"label=synth-token"* ]] \
+     && [[ "${OUT}" == *"hits=1"* ]] && [[ "${OUT}" != *"hist.md"* ]] && [[ "${OUT}" == *"forge-push-scan"* ]] && no_literal; then
+    ok "N4. a new commit carrying the token on a new branch by URL (${mode}): refused by the transport, nothing landed"
+  else bad "N4. new hit on a new branch (${mode})" "rc=${RC} landed=$(landed rn "refs/heads/n4-${mode}") out=${OUT}"; fi
+done
+
 echo "--- the scan's own bar: the hook's waiver, and COULD NOT MEASURE ---"
 plant "${R}" w1.md
 route "${R}" ATHENA_OUTBOUND_WAIVE=selftest -- push --no-verify origin HEAD:refs/heads/w1
@@ -282,14 +314,16 @@ while [ "${i}" -lt "${GIT_CONFIG_COUNT:-0}" ]; do
 done
 case "${GIT_CONFIG_PARAMETERS:-}" in *extraheader*) hdr=present ;; esac
 cfg=ok; git config --list >/dev/null 2>&1 || cfg=broken
-{ printf 'args=%s hdr=%s cfg=%s\n' "$*" "${hdr}" "${cfg}"; cat; } > "${FX_PROBE}"
+{ printf 'args=%s %s hdr=%s cfg=%s\n' "$1" "$2" "${hdr}" "${cfg}"; cat; printf 'listing:\n'; cat "$3"; } > "${FX_PROBE}"
 exit 0
 EOF
 chmod +x "${R4}/ai/git-hooks/outbound-pre-push.sh"
 clean_commit "${R4}" p.md
 route "${R4}" FX_PROBE="${TMP}/probe.out" -- push --no-verify origin HEAD:refs/heads/p1
 PROBE="$(cat "${TMP}/probe.out" 2>/dev/null)"
+LISTED="$(printf 'listing:\n%s refs/heads/main' "$(landed r4 refs/heads/main)")"
 if [ "${RC}" = 0 ] && [[ "${PROBE}" == "args=origin https://github.com/o/r4.git hdr=absent cfg=ok"* ]] \
+   && [[ "${PROBE}" == *"${LISTED}"* ]] \
    && [[ "${PROBE}" == *"HEAD $(git -C "${R4}" rev-parse HEAD) refs/heads/p1 0000000000000000000000000000000000000000"* ]]; then
   ok "P1. the scan gets <remote> <url> and git's pre-push ref lines, with no bot header and a readable config"
 else bad "P1. scan input and environment" "rc=${RC} probe=${PROBE} out=${OUT}"; fi
@@ -324,6 +358,17 @@ if [[ "${OUT}" == *"error refs/heads/u4 refused by the outbound scan"* ]] && [[ 
    && [[ "${OUT}" == *"Fix:"* ]] && [[ "${OUT}" != *"/nonexistent"* ]] && [ -z "$(landed r1 refs/heads/u4)" ]; then
   ok "U4. common dir unresolved: the push is refused as COULD NOT LOOK, nothing landed"
 else bad "U4. unresolved common dir" "rc=${RC} out=${OUT}"; fi
+
+# A push batch on a connection that never listed the destination's refs: the
+# range of a new ref is unknown, so it is refused as COULD NOT LOOK (DND-2086),
+# never scanned as if the destination were empty.
+OUT="$(cd "${R}" && printf 'capabilities\npush HEAD:refs/heads/u5\n\n' \
+  | env PATH="${XPATH}" GIT_DIR="${R}/.git" "${AI_DIR}/lib/forge-push-scan" --header-index 0 --common "${R}/.git" -- \
+    "${FX_EXEC}/git-remote-https" origin https://github.com/o/r1.git 2>&1)"; RC=$?
+if [[ "${OUT}" == *"error refs/heads/u5 refused by the outbound scan"* ]] && [[ "${OUT}" == *"COULD NOT LOOK"* ]] \
+   && [[ "${OUT}" == *"Fix:"* ]] && [[ "${OUT}" != *"CLEAN"* ]] && [ -z "$(landed r1 refs/heads/u5)" ]; then
+  ok "U5. a push with no ref listing read: refused as COULD NOT LOOK, nothing landed"
+else bad "U5. push without a listing" "rc=${RC} out=${OUT}"; fi
 
 echo "--- glab-athena shares the transport ---"
 printf 'glpat-SELFTESTFAKETOKEN0000\n' > "${TMP}/glab-token"; chmod 600 "${TMP}/glab-token"

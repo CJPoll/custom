@@ -89,6 +89,27 @@ module ForgePushScan
     Update.new(local_ref: deleted ? "(delete)" : new, local_oid: new, remote_ref: ref, remote_oid: old)
   end
 
+  # One pkt-line payload of git-receive-pack's ref advertisement -> [oid, ref],
+  # or :skip for a line that names no tip ("version 1", "shallow <oid>", and
+  # an empty repository's "<zero> capabilities^{}"). Anything else, an "ERR"
+  # line included, raises Unreadable: the destination's refs are unknown, and
+  # a new ref's range is bounded by them (DND-2086).
+  def parse_advertised(payload)
+    line = payload.split("\0", 2).first.to_s.chomp
+    return :skip if line.start_with?("version ", "shallow ")
+
+    oid, ref = line.split(" ", 2)
+    raise Unreadable, "a receive-pack ref advertisement line that is not '<oid> <ref>'" unless OID.match?(oid.to_s) && ref && !ref.empty?
+    return :skip if oid.match?(/\A0+\z/)
+
+    [oid, ref]
+  end
+
+  # {ref => oid} -> the "<oid> <ref>" listing the scan reads (--advertised).
+  def listing_text(refs)
+    refs.map { |ref, oid| "#{oid} #{ref}\n" }.join
+  end
+
   # A 4-byte pkt-line header -> [:flush] / [:delim] / [:end] / [:data, payload_length].
   def pkt_header(hdr)
     raise Unreadable, "a pkt-line header that is not 4 hex digits" unless hdr.is_a?(String) && hdr.match?(/\A[0-9a-f]{4}\z/)

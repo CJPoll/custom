@@ -108,29 +108,62 @@ module OutboundScan
       out
     end
 
-    # git's pre-push stdin -> list of new commit shas (deduplicated, stable).
-    # git passes the URL as the remote name when a push names a URL. Map it
-    # back to the configured remote whose url/pushurl is that URL, so its
-    # tracking refs bound the range; unmatched stays as given (then every
-    # commit not on any tracking ref of it is scanned: conservative).
-    def resolve_remote(remote, url)
-      return remote unless remote.include?("/") || remote.include?(":")
+    # The route's URL form (ai/lib/forge-transport/git-remote-athena-forge).
+    ROUTE_PREFIX = "athena-forge::"
 
-      out, _e, st = Open3.capture3("git", "config", "--get-regexp", '^remote\..*\.(push)?url$')
-      return remote unless st.success?
+    # Where a NEW ref's range ends: what the destination already has, read
+    # from the destination itself, never from local remote-tracking refs (a
+    # push by URL matches none of them, so the whole history read as new:
+    # DND-2086). One of:
+    #   :listing    the listing the route's transport read from the
+    #               destination (--advertised FILE, from forge-push-scan);
+    #   :route      the hook as git runs it inside a route push (URL
+    #               athena-forge::...). The route's grant is one-shot, so the
+    #               hook cannot read the destination; the transport sending
+    #               this very push holds the listing and scans these refs
+    #               with it, so the hook leaves them to it;
+    #   :ls_remote  any other push: `git ls-remote <url>`.
+    Destination = Struct.new(:kind, :source, keyword_init: true)
 
-      out.each_line do |line|
-        key, val = line.chomp.split(" ", 2)
-        next unless val == remote || (url && val == url)
+    def destination(remote, url, advertised)
+      target = url || remote
+      return Destination.new(kind: :listing, source: advertised) if advertised
+      return Destination.new(kind: :route, source: target) if target.start_with?(ROUTE_PREFIX)
 
-        return key.sub(/\Aremote\./, "").sub(/\.(push)?url\z/, "")
-      end
-      remote
+      Destination.new(kind: :ls_remote, source: target)
     end
 
-    def pre_push_commits(stdin_text, remote)
+    # -> the destination's tip object ids. Raises Unmeasurable (COULD NOT
+    # LOOK) when its listing cannot be read: never an empty destination.
+    def destination_tips(dest)
+      case dest.kind
+      when :listing
+        text = begin
+          File.binread(dest.source)
+        rescue SystemCallError, IOError => e
+          raise Unmeasurable, "the destination's ref listing #{dest.source} could not be read " \
+                              "(#{e.class.name.split('::').last}) (COULD NOT LOOK)"
+        end
+        OutboundScan.parse_advertisement(text, "the destination's ref listing")
+      when :ls_remote
+        out, _err, st = Open3.capture3("git", "ls-remote", "--", dest.source, binmode: true)
+        unless st.success?
+          raise Unmeasurable, "git ls-remote could not read the destination's refs " \
+                              "(exit #{st.exitstatus.inspect}), so the range of a new ref is unknown (COULD NOT LOOK)"
+        end
+        OutboundScan.parse_advertisement(out, "git ls-remote's listing of the destination")
+      else
+        raise Unmeasurable, "no ref listing can be read for a #{dest.kind} destination (COULD NOT LOOK)"
+      end
+    end
+
+    # git's pre-push stdin -> [new commit shas (deduplicated, stable),
+    # deletes, refs left to the route's transport].
+    def pre_push_commits(stdin_text, dest)
       shas = []
       deletes = 0
+      deferred = []
+      tips = nil
       stdin_text.each_line.with_index(1) do |raw, n|
         line = raw.strip
         next if line.empty?
@@ -138,29 +171,62 @@ module OutboundScan
         fields = line.split(" ")
         raise Unmeasurable, "pre-push stdin line #{n} is not '<local ref> <local sha> <remote ref> <remote sha>'" unless fields.length == 4
 
-        _lref, lsha, _rref, rsha = fields
+        _lref, lsha, rref, rsha = fields
         if ZERO_SHA.match?(lsha)
           deletes += 1
           next
         end
-        shas.concat(range_commits(lsha, rsha, remote))
+        if dest.kind == :route && !known_commit?(rsha)
+          deferred << rref
+          next
+        end
+        shas.concat(range_commits(lsha, rsha) { tips ||= destination_tips(dest) })
       end
-      [shas.uniq, deletes]
+      [shas.uniq, deletes, deferred]
     end
 
-    def range_commits(lsha, rsha, remote)
-      known = !ZERO_SHA.match?(rsha) &&
-              Open3.capture3("git", "cat-file", "-e", "#{rsha}^{commit}")[2].success?
-      args = if known
-               ["rev-list", "#{rsha}..#{lsha}"]
-             else
-               # A new ref, or a remote tip we do not have: everything not
-               # already on a remote-tracking ref of this remote. A URL remote
-               # matches no tracking ref, so this scans the whole history:
-               # conservative, never a miss.
-               ["rev-list", lsha, "--not", "--remotes=#{remote}"]
-             end
-      git!(*args, what: "list the commits being pushed").split("\n").map(&:strip).reject(&:empty?)
+    def known_commit?(rsha)
+      !ZERO_SHA.match?(rsha) && Open3.capture3("git", "cat-file", "-e", "#{rsha}^{commit}")[2].success?
+    end
+
+    # The one range rule, for the hook and the transport alike. A remote tip
+    # we have: <remote sha>..<local sha>. A new ref, or a remote tip we do not
+    # have: every commit reachable from <local sha> that no destination tip
+    # reaches (the block yields the destination's tips). A tip we do not have
+    # cannot be an ancestor of a commit we have, so only local commits bound it.
+    def range_commits(lsha, rsha)
+      return rev_list("#{rsha}..#{lsha}\n") if known_commit?(rsha)
+
+      exclude = local_commits(yield)
+      rev_list(([lsha] + exclude.map { |c| "^#{c}" }).join("\n") + "\n")
+    end
+
+    def rev_list(stdin)
+      out, _err, st = Open3.capture3("git", "rev-list", "--stdin", stdin_data: stdin, binmode: true)
+      raise Unmeasurable, "git could not list the commits being pushed" unless st.success?
+
+      out.split("\n").map(&:strip).reject(&:empty?)
+    end
+
+    # tips -> those that peel to a commit in this repository.
+    def local_commits(tips)
+      return [] if tips.empty?
+
+      out, _err, st = Open3.capture3("git", "cat-file", "--batch-check=%(objectname) %(objecttype)",
+                                     stdin_data: tips.map { |t| "#{t}^{commit}\n" }.join, binmode: true)
+      lines = out.split("\n")
+      unless st.success? && lines.length == tips.length
+        raise Unmeasurable, "git could not check which of the destination's tips are local commits"
+      end
+
+      lines.each_with_object([]) do |l, acc|
+        oid, type = l.split(" ", 2)
+        if type == "commit" && OutboundScan::OID_RE.match?(oid)
+          acc << oid
+        elsif type != "missing"
+          raise Unmeasurable, "git gave an unexpected answer checking a destination tip"
+        end
+      end
     end
 
     # -> Surface for a list of commits.
