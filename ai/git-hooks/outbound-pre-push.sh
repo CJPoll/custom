@@ -15,8 +15,10 @@
 # COULD NOT MEASURE). An installed hook marks this machine as one that must
 # measure, so an absent overlay refuses the push too.
 #
-# Residuals, stated (contract -> Outbound-scan interface): `git push
-# --no-verify`, ATHENA_OUTBOUND_WAIVE=<reason> (printed and logged), editing the
+# Residuals, stated (contract -> Outbound-scan interface): a push outside the
+# Athena route that skips this hook (`--no-verify`, a core.hooksPath override;
+# a routed push is scanned again by the route's transport, ai/lib/forge-push-scan,
+# DND-2023), ATHENA_OUTBOUND_WAIVE=<reason> (printed and logged), editing the
 # main checkout's scanner, a local commit that lowers the overlay's pattern
 # floor, and a value no pattern describes. Each raises the cost or leaves a
 # trace; none is impossible.

@@ -1,0 +1,320 @@
+#!/usr/bin/ruby
+# frozen_string_literal: true
+
+# forge-push-scan -- the route's forge transport runs the outbound scan on the
+# range it pushes (DND-2023).
+#
+# The pre-push hook (ai/git-hooks/outbound-pre-push.sh) is a hook, and git can
+# be told to skip hooks: `push --no-verify`, core.hooksPath set by -c, by
+# GIT_CONFIG_PARAMETERS or by GIT_CONFIG_COUNT/KEY/VALUE. Measured before this
+# change: each of those let `gh-athena git push` land a commit carrying a
+# work-domain value on the forge, unscanned (ai/test/forge-push-scan/self-test.sh).
+# The transport is not a hook: every routed connection goes through it.
+#
+# ai/lib/forge-transport/git-remote-athena-forge execs this program in place of
+# git's git-remote-https when the pushing repository's pre-push hook is the
+# outbound hook. It starts git-remote-https as its child and relays the
+# remote-helper protocol between git and it. Before a push reaches the child,
+# it reads the ref updates git asks for, states them as the pre-push hook's
+# stdin, and runs the MAIN checkout's ai/git-hooks/outbound-pre-push.sh with
+# them: the same script, scanner and pattern bar the hook runs, so a branch
+# cannot weaken the scan that judges its own push. Only a clean scan (exit 0)
+# lets the push through. Fetches, clones and ls-remote are relayed unread.
+#
+# Refused, with a Fix: line on stderr (git then reports the refs rejected, or
+# the remote end hung up), and nothing reaches the forge:
+#   * the scan reports HITS, COULD NOT MEASURE, or any other non-zero exit;
+#   * the range is unreadable: a <src> git cannot resolve, a malformed spec or
+#     receive-pack command, a signed push (push-cert);
+#   * a push form this program does not read: stateless-connect to
+#     git-receive-pack, or a remote-helper command it does not know;
+#   * the main checkout's outbound-pre-push.sh is missing or not executable.
+#
+# The scan runs without the bot header: the transport names the environment
+# config index that carries it (--header-index), and the scan's environment
+# drops it.
+#
+# Which repositories: the transport's fg_outbound_marked reads the pre-push
+# hook at <common>/hooks/pre-push, at the path git resolves in the push's
+# environment, and at the path it resolves with the caller's -c and
+# GIT_CONFIG_COUNT settings removed. Any of them holding the outbound hook,
+# or one that cannot be read, sends the connection here.
+#
+# Residuals, stated: a repository with no outbound hook (it never had the
+# hook's scan either; deleting the hook unmarks it); a hook installed only
+# under a core.hooksPath that the caller's GIT_CONFIG_GLOBAL or
+# GIT_CONFIG_SYSTEM replaces; a local ref moved by another process between
+# git computing the push and this program resolving its <src> (`push`
+# capability only); a same-uid process that edits the main checkout's hook or
+# scanner, or kills this one (the transport's own residual). A push whose hook
+# also ran is scanned twice; that is its cost.
+#
+# Bucket: Manager + Side Effects (processes, IO relay, git rev-parse). The
+# rules are ai/lib/forge_push_scan.rb (Domain).
+#
+# Usage (git-remote-athena-forge only):
+#   forge-push-scan --header-index N --common DIR -- <git-remote-https> <remote> <url>
+
+require "open3"
+require_relative "forge_push_scan"
+
+PROG = "forge-push-scan"
+
+if ARGV.include?("--help") || ARGV.include?("-h")
+  puts <<~HELP
+    forge-push-scan --header-index N --common DIR -- <git-remote-https> <remote> <url>
+      The Athena route's forge transport runs the outbound scan on the range it
+      pushes (DND-2023). git-remote-athena-forge execs it in place of git's
+      git-remote-https for a repository whose pre-push hook is the outbound hook;
+      it relays the remote-helper protocol and runs the main checkout's
+      ai/git-hooks/outbound-pre-push.sh on each push before the push is sent, so
+      --no-verify or a core.hooksPath override cannot skip the scan. A push it
+      cannot read or that the scan does not pass is refused, with a Fix: line.
+      Not run by hand. Tests: ai/test/forge-push-scan/self-test.sh.
+  HELP
+  exit 0
+end
+
+def die(msg, fix)
+  warn "#{PROG}: REFUSING: #{msg}\n  Fix: #{fix}"
+  exit 1
+end
+
+# ---- argv ---------------------------------------------------------------------
+sep = ARGV.index("--")
+die("no -- before the helper's argv", "run only from ai/lib/forge-transport/git-remote-athena-forge.") unless sep
+opts = ARGV[0...sep]
+HELPER = ARGV[(sep + 1)..]
+header_index = nil
+common = nil
+until opts.empty?
+  case opts.shift
+  when "--header-index" then header_index = opts.shift
+  when "--common" then common = opts.shift
+  else die("an argument it does not know", "run only from ai/lib/forge-transport/git-remote-athena-forge.")
+  end
+end
+unless header_index&.match?(/\A\d+\z/) && common && !common.empty? && HELPER.length >= 2
+  die("--header-index N, --common DIR and <helper> <remote> [<url>] are required",
+      "run only from ai/lib/forge-transport/git-remote-athena-forge.")
+end
+REMOTE = HELPER[1]
+URL = HELPER[2] || HELPER[1]
+HOOK = File.join(File.dirname(common), "ai", "git-hooks", "outbound-pre-push.sh")
+# The scan's environment: everything this process has, without the bot header.
+SCAN_ENV = {
+  "GIT_CONFIG_KEY_#{header_index}" => nil,
+  "GIT_CONFIG_VALUE_#{header_index}" => nil,
+  "GIT_CONFIG_COUNT" => header_index == "0" ? nil : header_index,
+}.freeze
+
+$stdin.binmode
+$stdout.binmode
+$stdout.sync = true
+
+# ---- the child helper ---------------------------------------------------------
+child_in, child_out, child_wait = Open3.popen2(*HELPER)
+child_in.binmode
+child_out.binmode
+child_in.sync = true
+CHILD_IN = child_in
+CHILD_OUT = child_out
+CHILD_WAIT = child_wait
+
+def finish(code = nil)
+  CHILD_IN.close unless CHILD_IN.closed?
+  st = CHILD_WAIT.value
+  exit(code || st.exitstatus || 1)
+end
+
+def refuse(msg, fix)
+  warn "#{PROG}: REFUSING the push to #{URL}: #{msg}. Nothing was sent.\n  Fix: #{fix}"
+end
+
+def abort_push(msg, fix)
+  refuse(msg, fix)
+  begin
+    Process.kill("TERM", CHILD_WAIT.pid)
+  rescue Errno::ESRCH
+    nil
+  end
+  CHILD_IN.close unless CHILD_IN.closed?
+  CHILD_WAIT.value
+  exit 1
+end
+
+# relay_until_blank : child lines to git, through the first blank line; returns them.
+def relay_until_blank
+  lines = []
+  while (l = CHILD_OUT.gets)
+    $stdout.write(l)
+    break if l == "\n"
+
+    lines << l
+  end
+  lines
+end
+
+def relay_line
+  l = CHILD_OUT.gets
+  $stdout.write(l) if l
+  l
+end
+
+# ---- the scan -------------------------------------------------------------------
+# scan!(updates) : true when the main checkout's hook passes them; else prints
+# its output and the refusal, and returns false.
+def scan(updates)
+  return true if updates.empty?
+  unless File.file?(HOOK) && File.executable?(HOOK)
+    refuse("the main checkout's outbound hook #{HOOK} is missing or not executable, so the range cannot be scanned (COULD NOT MEASURE)",
+           "fast-forward the main checkout (git -C #{File.dirname(File.dirname(File.dirname(HOOK)))} merge --ff-only origin/main) so the landed hook exists, then push again.")
+    return false
+  end
+  out, st = Open3.capture2e(SCAN_ENV, HOOK, REMOTE, URL, stdin_data: ForgePushScan.pre_push_stdin(updates))
+  out.each_line { |l| warn "#{PROG}: #{l.chomp}" }
+  return true if st.success?
+
+  refuse("the outbound scan the pre-push hook runs did not pass this range (exit #{st.exitstatus.inspect}; output above), and skipping the hook does not skip it",
+         "remove the work-domain values from the pushed commits (locations and labels above), or correct what the scan could not measure, then push again; --no-verify and core.hooksPath do not bypass this scan.")
+  false
+end
+
+def resolve(src)
+  out, _err, st = Open3.capture3(SCAN_ENV, "git", "rev-parse", "--verify", "-q", "--end-of-options", src)
+  oid = out.strip
+  raise ForgePushScan::Unreadable, "git could not resolve the pushed source of one ref" unless st.success? && ForgePushScan::OID.match?(oid)
+
+  oid
+end
+
+UNREADABLE_FIX = "push a plain branch or tag through the route (gh-athena git push origin <branch>), unsigned; " \
+                 "if git rejects the ref itself, correct the ref and retry."
+
+# ---- the push capability --------------------------------------------------------
+def push_batch(specs_lines, remote_refs)
+  updates = specs_lines.map do |line|
+    spec = ForgePushScan.parse_spec(line.chomp.delete_prefix("push "))
+    ForgePushScan.update_for_spec(spec, spec.src.empty? ? nil : resolve(spec.src), remote_refs)
+  end
+  if scan(updates)
+    CHILD_IN.write(specs_lines.join + "\n")
+    relay_until_blank
+  else
+    specs_lines.each { |l| $stdout.write("error #{l.chomp.split(':', 2).last} refused by the outbound scan\n") }
+    $stdout.write("\n")
+  end
+rescue ForgePushScan::Unreadable => e
+  abort_push("the pushed range is unreadable: #{e.message}", UNREADABLE_FIX)
+end
+
+# ---- the connect capability -----------------------------------------------------
+def relay_raw(src, dst)
+  loop do
+    dst.write(src.readpartial(65_536))
+  end
+rescue EOFError, IOError, Errno::EPIPE
+  nil
+end
+
+def raw_mode
+  t = Thread.new { relay_raw(CHILD_OUT, $stdout) }
+  relay_raw($stdin, CHILD_IN)
+  CHILD_IN.close unless CHILD_IN.closed?
+  t.join
+  finish
+end
+
+def read_exact(io, n)
+  buf = io.read(n)
+  raise ForgePushScan::Unreadable, "the command stream ended inside a pkt-line" unless buf && buf.bytesize == n
+
+  buf
+end
+
+def receive_pack_mode
+  t = Thread.new { relay_raw(CHILD_OUT, $stdout) }
+  held = +""
+  updates = []
+  loop do
+    hdr = $stdin.read(4)
+    break if hdr.nil? # git hung up before sending commands
+
+    kind, len = ForgePushScan.pkt_header(hdr)
+    held << hdr
+    break if kind == :flush
+    raise ForgePushScan::Unreadable, "a #{kind} packet among receive-pack commands" unless kind == :data
+
+    payload = read_exact($stdin, len)
+    held << payload
+    u = ForgePushScan.parse_command(payload)
+    updates << u unless u == :shallow
+  end
+  unless scan(updates)
+    t.kill
+    abort_push("the outbound scan did not pass", "see the scan output and Fix: above.")
+  end
+  CHILD_IN.write(held)
+  relay_raw($stdin, CHILD_IN)
+  CHILD_IN.close unless CHILD_IN.closed?
+  t.join
+  finish
+rescue ForgePushScan::Unreadable => e
+  t&.kill
+  abort_push("the pushed range is unreadable: #{e.message}", UNREADABLE_FIX)
+end
+
+# ---- the command loop -----------------------------------------------------------
+remote_refs = {}
+batch = []
+fetch_batch = []
+while (line = $stdin.gets)
+  if !batch.empty? && line != "\n" && !line.start_with?("push ")
+    abort_push("a remote-helper command inside a push batch", UNREADABLE_FIX)
+  end
+  case line
+  when /\Apush /
+    batch << line
+  when /\Afetch /
+    fetch_batch << line
+  when "\n"
+    if !batch.empty?
+      push_batch(batch, remote_refs)
+      batch = []
+    elsif !fetch_batch.empty?
+      CHILD_IN.write(fetch_batch.join + "\n")
+      fetch_batch = []
+      relay_until_blank
+    else
+      CHILD_IN.write(line)
+    end
+  when "capabilities\n"
+    CHILD_IN.write(line)
+    relay_until_blank
+  when /\Aoption /
+    CHILD_IN.write(line)
+    relay_line
+  when "list for-push\n"
+    CHILD_IN.write(line)
+    remote_refs = ForgePushScan.parse_list(relay_until_blank)
+  when /\Alist( |\n)/, /\Aget /
+    CHILD_IN.write(line)
+    relay_until_blank
+  when /\A(stateless-connect|connect) (\S+)\n\z/
+    verb = Regexp.last_match(1)
+    service = Regexp.last_match(2)
+    if service == "git-receive-pack" && verb == "stateless-connect"
+      abort_push("a stateless-connect push to git-receive-pack, whose commands this transport does not read",
+                 "push with git's own git-remote-https (the route's default); report the git version if it pushed this way.")
+    end
+    CHILD_IN.write(line)
+    ack = relay_line
+    next unless ack == "\n" # "fallback" or an error: the line protocol goes on
+
+    service == "git-receive-pack" ? receive_pack_mode : raw_mode
+  else
+    abort_push("a remote-helper command it does not read (#{line.split(' ', 2).first.to_s.chomp[0, 32]})",
+               "push and fetch with git's own git-remote-https through the route; report the git version if it sent this.")
+  end
+end
+finish

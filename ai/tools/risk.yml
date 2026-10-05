@@ -183,6 +183,10 @@ tools:
   lib/forge-transport/git-remote-athena-forge: { class: destructive, reason: forge }
   # Its signing program: it signs nothing and writes nothing; it only refuses.
   lib/forge-transport/refuse-signing: { class: readOnly, reason: refuse }
+  # The transport's push-range scan (DND-2023): it runs git's git-remote-https
+  # as its child and relays a push to the forge once the outbound scan passes,
+  # so a push through it writes the forge.
+  lib/forge-push-scan: { class: destructive, reason: forge }
   # fleet-report (DND-433) upserts this session's fleet registry rows on the
   # Athena server. Each report is an idempotent upsert, but it mutates EXTERNAL
   # state, which is this file's definition of destructive.

@@ -60,6 +60,8 @@
         "ai/lib/forge-git-passthrough.sh",
         "ai/lib/forge-transport/git-remote-athena-forge",
         "ai/lib/forge-transport/refuse-signing",
+        "ai/lib/forge-push-scan",
+        "ai/lib/forge_push_scan.rb",
         "ai/lib/forge-http-pin.sh",
         "ai/hooks/forge-identity-guard.sh",
         "ai/agent-bin/git",

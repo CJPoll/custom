@@ -58,6 +58,8 @@ ai/lib/forge-identity.jq	library	jq program for fid_load in ai/lib/forge-identit
 ai/lib/forge-identity.sh	library	the per-namespace GitLab bot identity resolver (DND-1936), sourced by ai/bin/glab-athena, ai/bin/forge-preflight and ai/bin/push-actor-check; returns a status with FID_STATE/FID_WHY/FID_FIX, and each caller composes the refusal that carries Fix:
 ai/lib/forge-transport/git-remote-athena-forge	guard	
 ai/lib/forge-transport/refuse-signing	guard	
+ai/lib/forge-push-scan	guard	
+ai/lib/forge_push_scan.rb	library	the pure push-reading rules (DND-2023) required by ai/lib/forge-push-scan; raises ForgePushScan::Unreadable naming the reason, and forge-push-scan prints the refusal that carries Fix:
 ai/lib/gh-merge-guard.sh	guard	
 ai/lib/glab-merge-guard.sh	guard	
 ai/lib/eval_score.rb	guard	

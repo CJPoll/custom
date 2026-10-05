@@ -26,6 +26,12 @@
 #   * ATHENA_FG_CRED_FD that does not name a pipe;
 #   * an empty pipe: the one grant for this command was already used.
 #
+# When the pushing repository's pre-push hook is the outbound hook
+# (fg_outbound_marked), it execs ai/lib/forge-push-scan in place of
+# git-remote-https: that program runs git-remote-https as its child and runs
+# the outbound scan on every push before the push is sent, so a push that
+# skipped the hook (--no-verify, core.hooksPath) is still scanned (DND-2023).
+#
 # It also runs with TLS verification on, no proxy and no curl trace,
 # whatever the caller set, and refuses a caller's CA or TLS-backend setting
 # (ai/lib/forge-http-pin.sh, DND-1899).
@@ -55,6 +61,31 @@ url="${2:-${1:-}}"
 refuse() {
   printf '%s: REFUSING the connection to %s: %s\n  Fix: %s\n' "${TAG}" "${url:-<no URL>}" "$1" "$2" >&2
   exit 1
+}
+
+# fg_outbound_marked : 0 when the pushing repository's pre-push hook is the
+# outbound hook (DND-2023), so the transport scans what it pushes; 1 when it
+# is not; 2 when that could not be read (scanned, as if marked: a failed
+# lookup never reads as "not marked"). Sets FG_OUTBOUND_COMMON to the
+# repository's common git dir. Every place the hook may be installed is read,
+# so no hook-skip setting hides it: <common>/hooks/pre-push itself, the path
+# git resolves in this environment, and the path it resolves from config
+# files alone (a caller's -c and GIT_CONFIG_COUNT cannot move it).
+fg_outbound_marked() {
+  local common hook rc=1
+  FG_OUTBOUND_COMMON=""
+  common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 2
+  [ -n "${common}" ] || return 2
+  FG_OUTBOUND_COMMON="${common}"
+  for hook in "${common}/hooks/pre-push" \
+              "$(git rev-parse --path-format=absolute --git-path hooks/pre-push 2>/dev/null)" \
+              "$(env -u GIT_CONFIG_PARAMETERS -u GIT_CONFIG_COUNT git rev-parse --path-format=absolute --git-path hooks/pre-push 2>/dev/null)"; do
+    [ -n "${hook}" ] || { rc=2; continue; }
+    [ -e "${hook}" ] || continue
+    [ -r "${hook}" ] || { rc=2; continue; }
+    grep -q -e outbound-scan -e outbound-pre-push "${hook}" 2>/dev/null && return 0
+  done
+  return "${rc}"
 }
 
 host="${ATHENA_FG_HOST:-}"
@@ -114,8 +145,20 @@ own="$(git --exec-path 2>/dev/null || true)"
 case "${header}" in "AUTHORIZATION: basic "?*) ;; *) refuse "the grant's second line is not an AUTHORIZATION: basic header." \
   "run the command again through the Athena route; do not write to ATHENA_FG_CRED_FD yourself." ;; esac
 
+# The push-range scan (DND-2023): decided after the grant pipe is closed, so
+# no git started here can read it, and before the header is exported, so none
+# holds the header.
+mark=0
+fg_outbound_marked || mark=$?
+scan_proxy="${HERE}/../forge-push-scan"
+if [ "${mark}" != 1 ] && ! [ -x "${scan_proxy}" ]; then
+  refuse "this repository's pre-push hook is the outbound hook (or it could not be read), and the transport's push-range scan (${scan_proxy}) is missing or not executable, so a push could not be scanned." \
+    "check that ai/lib/forge-push-scan exists beside ai/lib/forge-transport/ in this checkout and is executable, then retry."
+fi
+
 n="${GIT_CONFIG_COUNT:-0}"
 case "${n}" in '' | *[!0-9]*) n=0 ;; esac
+hidx="${n}"
 export "GIT_CONFIG_KEY_${n}=http.https://${host}/.extraheader" "GIT_CONFIG_VALUE_${n}=${header}"
 n=$((n + 1))
 export GIT_CONFIG_COUNT="${n}"
@@ -133,4 +176,5 @@ for kv in "gpg.program=${HERE}/refuse-signing" "gpg.openpgp.program=${HERE}/refu
 done
 export GIT_CONFIG_PARAMETERS
 unset GIT_ASKPASS SSH_ASKPASS
-exec "${rh}" "$@"
+[ "${mark}" = 1 ] && exec "${rh}" "$@"
+exec "${scan_proxy}" --header-index "${hidx}" --common "${FG_OUTBOUND_COMMON:-/nonexistent/.git}" -- "${rh}" "$@"

@@ -349,6 +349,19 @@ path below runs in its unmarked mode there.
 **Later (2026-09-28):** this paragraph said "Nothing installs it yet: the
 installer is DND-703." Superseded by DND-703's installer.
 
+**The transport's push-range scan.** git can be told to skip a hook
+(`--no-verify`, a `core.hooksPath` set by `-c`, `GIT_CONFIG_PARAMETERS` or
+`GIT_CONFIG_COUNT`). A push through the Athena route (`gh-athena git`,
+`glab-athena git`) therefore does not rely on the hook alone: when the pushing
+repository's pre-push hook is the outbound hook, the route's transport
+(`ai/lib/forge-transport/git-remote-athena-forge`) runs
+`ai/lib/forge-push-scan`, which reads the ref updates git asks the transport to
+send and runs the main checkout's `ai/git-hooks/outbound-pre-push.sh` on them
+before anything reaches the forge (DND-2023). Same script, same scanner, same
+pattern bar and waiver as the hook. A push it cannot read, and any scan exit
+but 0, is refused. Which hook locations count, the remote-helper forms it
+reads, and its residuals are in that program's header.
+
 **The forge path.** `ai/bin/gh-athena` scans every text field and text file
 of `pr create|new|edit|comment|review|merge|close|reopen`,
 `issue create|new|edit|comment|close|reopen` and `release create|new|edit`,
@@ -423,8 +436,17 @@ PUBLIC or read as private.
 
 **Residuals, stated.**
 
-- An agent or a human can push with `--no-verify`, set the waiver, edit the
-  main checkout's scanner, or move the overlay's `HEAD` to drop a pattern.
+- A push made outside the Athena route (a plain `git push` from a session
+  without the agent PATH `git`, or a human's) can skip the hook with
+  `--no-verify` or a `core.hooksPath` override. Anyone can set the waiver,
+  edit the main checkout's scanner, delete the installed hook, or move the
+  overlay's `HEAD` to drop a pattern.
+
+  **Later (2026-10-05, DND-2023):** this bullet read "An agent or a human can
+  push with `--no-verify`". Superseded for routed pushes: the route's
+  transport scans the pushed range itself (*The transport's push-range
+  scan*). Measured before the fix: `gh-athena git push --no-verify` landed a
+  planted synthetic value on a fixture forge.
 - The waiver is self-granted and is written to a local log that nothing reads
   today. It leaves a record, not an alert.
 - gh-athena's forge path does not scan `gh pr create --fill`, an editor or
@@ -444,8 +466,8 @@ PUBLIC or read as private.
   the guard, and a visibility read there would have read before the guard's
   read-free refusals, so the api scan had been left out.
 - gh-athena and glab-athena run the scanner beside them, so a worktree's
-  wrapper runs that branch's scanner. Only the pre-push hook pins the landed
-  scanner.
+  wrapper runs that branch's scanner. Only the pre-push hook and the
+  transport's push-range scan pin the landed scanner.
 - No scan catches a value it has no pattern for.
 
 Each bypass raises the cost or leaves a trace; none is impossible.

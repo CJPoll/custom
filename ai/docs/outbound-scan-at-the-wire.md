@@ -325,13 +325,17 @@ or mutation nobody listed.
 
 ### Residuals
 
-- **git content.** Pushes go over the git transport, and the pre-push hook
-  scans them. `gh-athena git push --no-verify` is accepted by the route's push
-  parse (`FG_PUSH_PLAIN` in `ai/lib/forge-git-passthrough.sh`), and no hook
-  found in `ai/hooks` refuses it, so the hook can be skipped. The git half of
-  this design is that the transport (`git-remote-athena-forge`) runs the landed
-  scan on the pushed range itself. It is its own ticket, starting with a
-  regression test that shows the skip.
+- **git content.** Pushes go over the git transport. The pre-push hook scans
+  them, and git can be told to skip it, so the transport
+  (`git-remote-athena-forge`) runs the landed scan on the pushed range itself
+  through `ai/lib/forge-push-scan` (DND-2023). Its residuals are in that
+  program's header.
+
+  **Later (2026-10-05, DND-2023):** this bullet said `gh-athena git push
+  --no-verify` skipped the scan and named the transport scan as its own
+  ticket. The regression test (`ai/test/forge-push-scan/self-test.sh`)
+  reproduced the skip for `--no-verify` and three `core.hooksPath` routes;
+  the transport scan closes them.
 - **Server-generated text.** `--generate-notes`, `--notes-from-tag`: GitHub
   composes it. Its sources (PR titles, tag messages) were scanned when written.
 - **Partial writes.** A multi-request command refused part-way leaves its
