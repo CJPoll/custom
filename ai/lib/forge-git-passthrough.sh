@@ -55,8 +55,9 @@
 #     fix. Also exit 3 with a Fix: line. See "Red-main refusal" below.
 #   * fg_refuse_ungated_main (DND-1690): in a repo that declares a gate, a push
 #     to main is refused, on a green main too, unless integration-gate covers
-#     the pushed commit. Also exit 3 with a Fix: line. See "Ungated-main
-#     refusal" below.
+#     the pushed commit, or it is the `glab-athena git seed-mirror` seed
+#     (DND-1983). Also exit 3 with a Fix: line. See "Ungated-main refusal"
+#     below.
 #
 # Residual (NOT checked; each still runs): an ~/.ssh/config Host entry named
 # exactly as the forge host whose HostName is elsewhere (a Host alias under
