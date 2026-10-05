@@ -141,6 +141,9 @@ no_literal() { [ "$(printf '%s\n' "${OUT}" | grep -v '^stub-body:' | grep -c -- 
 refused_hit() { [ "${RC}" = 1 ] && ! sent && [[ "${OUT}" == *"REFUSED"* ]] && [[ "${OUT}" == *"label=synth-token"* ]] \
   && [[ "${OUT}" == *"PUBLIC project"* ]] && [[ "${OUT}" == *"Fix:"* ]] && no_literal; }
 read_was() { [[ "${CALLS}" == *"$1"* ]]; }
+# id_refused : the identity map (DND-1936) refused before the scan: exit 3,
+# nothing sent, BAD KEY with a Fix:, and the planted text never echoed.
+id_refused() { [ "${RC}" = 3 ] && ! sent && [[ "${OUT}" == *"BAD KEY"* ]] && [[ "${OUT}" == *"Fix:"* ]] && no_literal; }
 # lib_guard <args...> : runs glos_guard straight from the library, as the
 # wrapper calls it after isolation, and prints "stub: SENT" and the argv it
 # would hand glab when it passes. For the merge commands, whose wrapper path
@@ -268,14 +271,22 @@ for argv in "mr update 5 -l -R -t x${TOKEN}" "mr update 5 -l --repo -t x${TOKEN}
   "release create v1 --ref -R -n x${TOKEN}" "release create v1 --ref -F x${TOKEN}"; do
   # shellcheck disable=SC2086
   gla ${argv}
-  if [ "${RC}" = 3 ] && ! sent && [[ "${OUT}" == *"looks like a flag"* ]] && [[ "${OUT}" == *"Fix:"* ]] && no_literal; then ok "a value naming a repo or file flag refused: ${argv%%x${TOKEN}}"; else bad "value names repo/file: ${argv%%x${TOKEN}}" "rc=${RC} ${OUT}"; fi
+  # An -R/--repo/--target-project that may be a flag's value is a key the
+  # identity map refuses first (DND-1936); the library keeps the scan's reading.
+  if id_refused || { [ "${RC}" = 3 ] && ! sent && [[ "${OUT}" == *"looks like a flag"* ]] && [[ "${OUT}" == *"Fix:"* ]] && no_literal; }; then ok "a value naming a repo or file flag refused: ${argv%%x${TOKEN}}"; else bad "value names repo/file: ${argv%%x${TOKEN}}" "rc=${RC} ${OUT}"; fi
+  # shellcheck disable=SC2086
+  lib_guard ${argv}
+  if [ "${RC}" = 3 ] && ! sent && [[ "${OUT}" == *"looks like a flag"* ]] && [[ "${OUT}" == *"Fix:"* ]] && no_literal; then ok "a value naming a repo or file flag refused (library): ${argv%%x${TOKEN}}"; else bad "value names repo/file (library): ${argv%%x${TOKEN}}" "rc=${RC} ${OUT}"; fi
 done
 echo "--- DND-1976: a flag the pinned table lacks, before a word that reads as a flag, is refused ---"
 for argv in "mr note 5 --frobnicate -m x${TOKEN}" "mr update 5 --frobnicate -- -t x${TOKEN}" \
   "mr create --frobnicate --target-project -t x${TOKEN}" "mr create -Zd x${TOKEN}" "mr create -Z -d x${TOKEN}"; do
   # shellcheck disable=SC2086
   gla ${argv}
-  if [ "${RC}" = 3 ] && ! sent && [[ "${OUT}" == *"not a flag of"* ]] && [[ "${OUT}" == *"Fix:"* ]] && no_literal; then ok "ambiguous refused: ${argv%%x${TOKEN}}"; else bad "ambiguous: ${argv%%x${TOKEN}}" "rc=${RC} ${OUT}"; fi
+  if id_refused || { [ "${RC}" = 3 ] && ! sent && [[ "${OUT}" == *"not a flag of"* ]] && [[ "${OUT}" == *"Fix:"* ]] && no_literal; }; then ok "ambiguous refused: ${argv%%x${TOKEN}}"; else bad "ambiguous: ${argv%%x${TOKEN}}" "rc=${RC} ${OUT}"; fi
+  # shellcheck disable=SC2086
+  lib_guard ${argv}
+  if [ "${RC}" = 3 ] && ! sent && [[ "${OUT}" == *"not a flag of"* ]] && [[ "${OUT}" == *"Fix:"* ]] && no_literal; then ok "ambiguous refused (library): ${argv%%x${TOKEN}}"; else bad "ambiguous (library): ${argv%%x${TOKEN}}" "rc=${RC} ${OUT}"; fi
 done
 gla mr note 5 --frobnicate value -m "x${TOKEN}"
 if refused_hit; then ok "a flag the table lacks, before a plain word, is read as a switch and the text is scanned"; else bad "unknown then plain" "rc=${RC} ${OUT}"; fi
@@ -313,17 +324,21 @@ echo "--- DND-2006 sweep: GITLAB_REPO cannot split the read from the write ---"
 # `glab api projects/:id` (measured 2026-10-04). glab-athena scrubs every
 # GITLAB_* variable before the guard and glab run, so the guard's
 # projects/:id read and glab's write both resolve the checkout. This pins that:
-# with GITLAB_REPO naming a PUBLIC project, neither call sees it.
+# with GITLAB_REPO naming a PUBLIC project, neither call sees it. -R '' is an
+# empty key the identity map refuses (DND-1936), so the scrub is pinned with -R
+# absent, where glab reads GITLAB_REPO too.
 : > "${STUB_LOG}.env"
 : > "${STUB_LOG}"
-OUT="$(cd "${WORK}" && GITLAB_REPO=synth-group/pub GITLAB_HEAD_REPO=synth-group/pub "${WRAPPER}" mr note 5 -R '' -m "x${TOKEN}" 2>&1)"; RC=$?
+OUT="$(cd "${WORK}" && GITLAB_REPO=synth-group/pub GITLAB_HEAD_REPO=synth-group/pub "${WRAPPER}" mr note 5 -m "x${TOKEN}" 2>&1)"; RC=$?
 CALLS="$(cat "${STUB_LOG}")"; ENVS="$(cat "${STUB_LOG}.env")"
 if [ "${RC}" = 0 ] && sent && read_was "api projects/:id" && ! read_was "synth-group%2Fpub" \
    && [ -n "${ENVS}" ] && [[ "${ENVS}" != *"synth-group"* ]]; then
-  ok "GITLAB_REPO=<public> with -R '': scrubbed, so the read and the write both resolve the checkout"
+  ok "GITLAB_REPO=<public> with no -R: scrubbed, so the read and the write both resolve the checkout"
 else
   bad "GITLAB_REPO scrubbed" "rc=${RC} calls=[${CALLS}] env=[${ENVS}] ${OUT}"
 fi
+OUT="$(cd "${WORK}" && : > "${STUB_LOG}" && GITLAB_REPO=synth-group/pub "${WRAPPER}" mr note 5 -R '' -m "x${TOKEN}" 2>&1)"; RC=$?
+if id_refused; then ok "an empty -R is refused by the identity map, never read as GITLAB_REPO or the checkout"; else bad "empty -R (identity)" "rc=${RC} ${OUT}"; fi
 gla mr create --target-project synth-group/pub -d "x${TOKEN}"
 if refused_hit && read_was "api projects/synth-group%2Fpub"; then ok "mr create --target-project is a target"; else bad "--target-project" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 vis default public
@@ -437,25 +452,39 @@ if refused_hit && read_was "api projects/synth-group%2Fpub"; then ok "DND-2009 r
 gla mr note "https://GitLab.COM/synth-group/pub/-/merge_requests/1" -m "x${TOKEN}"
 if refused_hit && read_was "api projects/synth-group%2Fpub" && [[ "${CALLS}" != *"--hostname"* ]]; then ok "DND-2009: an MR URL's host is case-folded"; else bad "DND-2009: GitLab.COM MR URL" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 gla api -X POST --hostname gitlab.com "https://public.example/api/v4/projects/4242/issues/3/notes" -f "body=x${TOKEN}"
-if refused_hit && [[ "${OUT}" == *"public.example"* ]] && [[ "${OUT}" == *"scanning as PUBLIC"* ]]; then ok "DND-2009 regression: a full URL's own host decides, not --hostname"; else bad "DND-2009 regression: full URL vs --hostname" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+if id_refused; then ok "an absolute or unusable key is refused by the identity map: DND-2009 regression: full URL vs --hostname"; else bad "identity: DND-2009 regression: full URL vs --hostname" "rc=${RC} ${OUT}"; fi
+lib_guard api -X POST --hostname gitlab.com "https://public.example/api/v4/projects/4242/issues/3/notes" -f "body=x${TOKEN}"
+if refused_hit && [[ "${OUT}" == *"public.example"* ]] && [[ "${OUT}" == *"scanning as PUBLIC"* ]]; then ok "(library) DND-2009 regression: a full URL's own host decides, not --hostname"; else bad "(library) DND-2009 regression: full URL vs --hostname" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 gla api -X POST "HTTPS://public.example/api/graphql" -f "query=query { project(fullPath: \"x${TOKEN}\") { id } }"
-if refused_hit && [[ "${OUT}" == *"scanning as PUBLIC"* ]]; then ok "DND-2009 regression: a full URL to another host is never a GraphQL read"; else bad "DND-2009 regression: other-host graphql" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+if id_refused; then ok "an absolute or unusable key is refused by the identity map: DND-2009 regression: other-host graphql"; else bad "identity: DND-2009 regression: other-host graphql" "rc=${RC} ${OUT}"; fi
+lib_guard api -X POST "HTTPS://public.example/api/graphql" -f "query=query { project(fullPath: \"x${TOKEN}\") { id } }"
+if refused_hit && [[ "${OUT}" == *"scanning as PUBLIC"* ]]; then ok "(library) DND-2009 regression: a full URL to another host is never a GraphQL read"; else bad "(library) DND-2009 regression: other-host graphql" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 gla api -X POST "HTTPS://GitLab.com/api/v4/projects/synth-group%2Fpriv/issues/3/notes" -f "body=x${TOKEN}"
-if [ "${RC}" = 0 ] && sent && read_was "api projects/synth-group%2Fpriv" && [[ "${CALLS}" != *"--hostname"* ]]; then ok "DND-2009: an upper-case gitlab.com URL reads its project's visibility"; else bad "DND-2009: HTTPS://GitLab.com api" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+if id_refused; then ok "an absolute or unusable key is refused by the identity map: DND-2009: HTTPS://GitLab.com api"; else bad "identity: DND-2009: HTTPS://GitLab.com api" "rc=${RC} ${OUT}"; fi
+lib_guard api -X POST "HTTPS://GitLab.com/api/v4/projects/synth-group%2Fpriv/issues/3/notes" -f "body=x${TOKEN}"
+if [ "${RC}" = 0 ] && sent && read_was "api projects/synth-group%2Fpriv" && [[ "${CALLS}" != *"--hostname"* ]]; then ok "(library) DND-2009: an upper-case gitlab.com URL reads its project's visibility"; else bad "(library) DND-2009: HTTPS://GitLab.com api" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 # A host is folded as ASCII only: bash's ${x,,} in a UTF-8 locale folds U+0130
 # to `i`, and glab sends gİtlab.com to an IDNA name, not gitlab.com.
 gla api -X POST "https://gİtlab.com/api/v4/projects/synth-group%2Fpriv/issues/3/notes" -f "body=x${TOKEN}"
-if refused_hit && [[ "${OUT}" == *"scanning as PUBLIC"* ]]; then ok "DND-2009 review regression: a non-ASCII host never folds into gitlab.com"; else bad "DND-2009 review regression: gİtlab.com URL" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+if id_refused; then ok "an absolute or unusable key is refused by the identity map: DND-2009 review regression: gİtlab.com URL"; else bad "identity: DND-2009 review regression: gİtlab.com URL" "rc=${RC} ${OUT}"; fi
+lib_guard api -X POST "https://gİtlab.com/api/v4/projects/synth-group%2Fpriv/issues/3/notes" -f "body=x${TOKEN}"
+if refused_hit && [[ "${OUT}" == *"scanning as PUBLIC"* ]]; then ok "(library) DND-2009 review regression: a non-ASCII host never folds into gitlab.com"; else bad "(library) DND-2009 review regression: gİtlab.com URL" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 gla api -X POST --hostname gİtlab.com projects/synth-group%2Fpriv/issues/3/notes -f "body=x${TOKEN}"
-if read_was "api --hostname gİtlab.com projects/synth-group%2Fpriv"; then ok "DND-2009 review regression: a non-ASCII --hostname is read on that host"; else bad "DND-2009 review regression: --hostname gİtlab.com" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+if id_refused; then ok "an absolute or unusable key is refused by the identity map: DND-2009 review regression: --hostname gİtlab.com"; else bad "identity: DND-2009 review regression: --hostname gİtlab.com" "rc=${RC} ${OUT}"; fi
+lib_guard api -X POST --hostname gİtlab.com projects/synth-group%2Fpriv/issues/3/notes -f "body=x${TOKEN}"
+if read_was "api --hostname gİtlab.com projects/synth-group%2Fpriv"; then ok "(library) DND-2009 review regression: a non-ASCII --hostname is read on that host"; else bad "(library) DND-2009 review regression: --hostname gİtlab.com" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 gla api -X POST --hostname GitLab.COM projects/synth-group%2Fpriv/issues/3/notes -f "body=x${TOKEN}"
 if [ "${RC}" = 0 ] && sent && [ "$(head -n1 <<<"${CALLS}")" = "api projects/synth-group%2Fpriv" ]; then ok "DND-2009: --hostname GitLab.COM is gitlab.com"; else bad "DND-2009: --hostname GitLab.COM" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 gla mr note "https://gİtlab.com/synth-group/pub/-/merge_requests/1" -m "x${TOKEN}"
 if refused_hit && read_was "api --hostname gİtlab.com projects/synth-group%2Fpub"; then ok "DND-2009: an MR URL's non-ASCII host is read on that host"; else bad "DND-2009: gİtlab.com MR URL" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 gla api -X POST "https://public.example/api/v4/projects/synth-group%2Fpriv/merge_requests" -f target_project_id=4242 -f "description=x${TOKEN}"
-if refused_hit && [[ "${OUT}" == *"target_project_id field names a project on a host"* ]] && ! read_was "api projects/4242"; then ok "DND-2009: target_project_id under another host's URL is unknown"; else bad "DND-2009: target_project_id other host" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+if id_refused; then ok "an absolute or unusable key is refused by the identity map: DND-2009: target_project_id other host"; else bad "identity: DND-2009: target_project_id other host" "rc=${RC} ${OUT}"; fi
+lib_guard api -X POST "https://public.example/api/v4/projects/synth-group%2Fpriv/merge_requests" -f target_project_id=4242 -f "description=x${TOKEN}"
+if refused_hit && [[ "${OUT}" == *"target_project_id field names a project on a host"* ]] && ! read_was "api projects/4242"; then ok "(library) DND-2009: target_project_id under another host's URL is unknown"; else bad "(library) DND-2009: target_project_id other host" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 gla api -X POST "https://gitlab.com/projects/synth-group%2Fpriv/issues/3/notes" -f "body=x${TOKEN}"
-if refused_hit && [[ "${OUT}" == *"scanning as PUBLIC"* ]]; then ok "DND-2009: a gitlab.com URL outside /api/v4/ names no project"; else bad "DND-2009: URL without api/v4" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+if id_refused; then ok "an absolute or unusable key is refused by the identity map: DND-2009: URL without api/v4"; else bad "identity: DND-2009: URL without api/v4" "rc=${RC} ${OUT}"; fi
+lib_guard api -X POST "https://gitlab.com/projects/synth-group%2Fpriv/issues/3/notes" -f "body=x${TOKEN}"
+if refused_hit && [[ "${OUT}" == *"scanning as PUBLIC"* ]]; then ok "(library) DND-2009: a gitlab.com URL outside /api/v4/ names no project"; else bad "(library) DND-2009: URL without api/v4" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 
 # Gap 2: glab fills :branch, :fullpath, :group, :id, :namespace, :repo, :user
 # and :username after the scan.
@@ -471,7 +500,9 @@ if refused3 "placeholder"; then ok "DND-2009 regression: a project segment glab 
 gla api -X POST "projects/:id/issues/3/notes?x=:repo" -f "body=clean"
 if refused3 "placeholder"; then ok "DND-2009: projects/:id still refuses a placeholder in its query"; else bad "DND-2009: :id + query :repo" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 gla api -X POST "https://public.example/api/v4/projects/:branch/notes" -f "body=clean"
-if refused3 "placeholder"; then ok "DND-2009: a placeholder in a full URL to another host is refused"; else bad "DND-2009: other-host :branch" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+if id_refused; then ok "an absolute or unusable key is refused by the identity map: DND-2009: other-host :branch"; else bad "identity: DND-2009: other-host :branch" "rc=${RC} ${OUT}"; fi
+lib_guard api -X POST "https://public.example/api/v4/projects/:branch/notes" -f "body=clean"
+if refused3 "placeholder"; then ok "(library) DND-2009: a placeholder in a full URL to another host is refused"; else bad "(library) DND-2009: other-host :branch" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 gla api -X POST projects/synth-group%2Fpriv/issues/:branch/approve
 if refused3 "placeholder"; then ok "DND-2009: a path placeholder is refused on a write with no text"; else bad "DND-2009: field-less :branch" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 gla api -X POST groups/:group/epics/1/notes -f "body=clean"
@@ -489,10 +520,14 @@ if [ "${RC}" = 0 ] && sent && read_was "api projects/:fullpath"; then ok "DND-20
 # decoded or not).
 vis "synth-group%2F..%2Fpriv" private
 gla api -X POST "projects/synth-group%2F..%2Fpriv/issues/3/notes" -f "body=x${TOKEN}"
-if refused3 "plainly"; then ok "DND-2009 regression: an escaped .. in the project segment is refused"; else bad "DND-2009 regression: %2F..%2F" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+if id_refused; then ok "an absolute or unusable key is refused by the identity map: DND-2009 regression: %2F..%2F"; else bad "identity: DND-2009 regression: %2F..%2F" "rc=${RC} ${OUT}"; fi
+lib_guard api -X POST "projects/synth-group%2F..%2Fpriv/issues/3/notes" -f "body=x${TOKEN}"
+if refused3 "plainly"; then ok "(library) DND-2009 regression: an escaped .. in the project segment is refused"; else bad "(library) DND-2009 regression: %2F..%2F" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 vis "synth-group%2F.%2Fpriv" private
 gla api -X POST "projects/synth-group%2F.%2Fpriv/issues/3/notes" -f "body=x${TOKEN}"
-if refused3 "plainly"; then ok "DND-2009 regression: an escaped . in the project segment is refused"; else bad "DND-2009 regression: %2F.%2F" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+if id_refused; then ok "an absolute or unusable key is refused by the identity map: DND-2009 regression: %2F.%2F"; else bad "identity: DND-2009 regression: %2F.%2F" "rc=${RC} ${OUT}"; fi
+lib_guard api -X POST "projects/synth-group%2F.%2Fpriv/issues/3/notes" -f "body=x${TOKEN}"
+if refused3 "plainly"; then ok "(library) DND-2009 regression: an escaped . in the project segment is refused"; else bad "(library) DND-2009 regression: %2F.%2F" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 vis "synth-group%2F%2Fpriv" private
 gla api -X POST "projects/synth-group%2F%2Fpriv/issues/3/notes" -f "body=x${TOKEN}"
 if refused3 "plainly"; then ok "DND-2009 regression: an empty segment in the project segment is refused"; else bad "DND-2009 regression: %2F%2F" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
