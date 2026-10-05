@@ -907,18 +907,33 @@ tip_ran() {
   if ran_once "$@" && [[ "${ERR}" == *"${note}"* ]]; then ok "${id}. ${label}"
   else bad "${id}. ${label} (want one exec and '${note}')" "$(detail)"; fi
 }
+# DND-2061 (owner, 2026-10-05: "I don't want a branch to have to be built on
+# latest main to be mergeable. That's the point of parallel merges."): a red or
+# pending tip never refuses a green, gated head for being behind it. The tip's
+# pipelines are still read and named; the KEPT checks (the MR's own pipeline at
+# the pinned head, the receipt, the content check) still refuse (P1d-P1g, P19,
+# GS1-GS6).
 reset_fx; green_fx; tip_pipes failed
-tip_refused P1 "THE MISS: an ordinary MR onto a failed tip -> refused (MAIN RED)" "MAIN RED:" "${MERGE_ARGS[@]}"
-[[ "${ERR}" == *"pipelines/8000000001"* ]] && ok "P1b. the refusal names the red pipeline" || bad "P1b. red pipeline named" "$(detail)"
-[[ "$(grep -m1 'Fix:' <<<"${ERR}")" == *"red-main fix"* ]] && ok "P1c. the Fix names the red-main fix" || bad "P1c. Fix" "$(detail)"
+tip_ran P1 "DND-2061 THE MISS: a green, gated MR whose head does not contain a failed tip -> runs, naming the red tip" "is RED" "${MERGE_ARGS[@]}"
+[[ "${ERR}" == *"pipelines/8000000001"* ]] && ok "P1b. the note names the red pipeline" || bad "P1b. red pipeline named" "$(detail)"
+[[ "${ERR}" == *"does not contain it"* ]] && [[ "${ERR}" == *"DND-2061"* ]] && ! refused \
+  && ok "P1c. the note says the head is behind the red tip and why that does not hold it" || bad "P1c. behind note" "$(detail)"
+reset_fx; status_fx failed; tip_pipes failed
+expect_refused P1d "KEPT: a red tip does not excuse a failed MR pipeline at the head" "'failed', not success" "${MERGE_ARGS[@]}"
 reset_fx; green_fx; tip_pipes failed
-tip_refused P2 "the same on the train" "MAIN RED:" "${BOARD_ARGS[@]}"
+expect_refused P1e "KEPT: a red tip does not excuse a --sha that is not the MR's head" "not the MR's head" mr merge 4242 --auto-merge=false --sha "${OTHER_SHA}" --yes
+reset_fx; status_fx running; tip_pipes running
+expect_refused P1f "KEPT: a pending tip does not excuse a running MR pipeline at the head" "'running', not success" "${MERGE_ARGS[@]}"
+reset_fx; nogate_fx; tip_pipes running
+receipt_refused P1g "KEPT: a pending tip does not excuse a missing receipt" "NO RECEIPT" "${MERGE_ARGS[@]}"
+reset_fx; green_fx; tip_pipes failed
+tip_ran P2 "the same on the train: a red tip the head does not contain -> boards" "is RED" "${BOARD_ARGS[@]}"
 reset_fx; green_fx; tip_pipes failed; printf '{"id":"%s"}\n' "${TIP_FX}" > "${FX}/mergebase.out"
 tip_ran P3 "a red-main fix (the forge's merge base of tip and head IS the tip) -> runs" "RED-MAIN FIX" "${MERGE_ARGS[@]}"
 reset_fx; green_fx; tip_pipes failed; printf '{"id":"%s"}\n' "${OLD_TIP}" > "${FX}/mergebase.out"
-tip_refused P4 "a head that does not contain the red tip -> refused" "MAIN RED:" "${MERGE_ARGS[@]}"
+tip_ran P4 "a head that does not contain the red tip -> runs (DND-2061)" "does not contain it" "${MERGE_ARGS[@]}"
 reset_fx; green_fx; tip_pipes failed; fx mergebase '' 1 'glab: 500'
-tip_refused P5 "red tip, containment unreadable -> COULD NOT LOOK" "COULD NOT LOOK:" "${MERGE_ARGS[@]}"
+tip_ran P5 "red tip, containment unreadable -> runs, and says containment could not be read (it no longer decides anything)" "could not be read" "${MERGE_ARGS[@]}"
 reset_fx; green_fx; fx pipes '[]'
 tip_refused P6 "THE MISS: a tip with NO pipeline -> COULD NOT LOOK, never green" "COULD NOT LOOK:" "${MERGE_ARGS[@]}"
 [[ "${ERR}" == *"no pipeline"* ]] && ok "P6b. the refusal says no pipeline ran on the tip" || bad "P6b. no pipeline named" "$(detail)"
@@ -933,16 +948,15 @@ tip_ran P9 "a running tip pipeline is not red: the merge runs and names it PENDI
 reset_fx; green_fx; pipes_are "$(pipe 8000000003 success)" "$(pipe 8000000002 failed)"
 tip_ran P10 "an older failed pipeline superseded by a newer SUCCESS of the same source -> runs" "no judged run is red" "${MERGE_ARGS[@]}"
 reset_fx; green_fx; pipes_are "$(pipe 8000000003 running)" "$(pipe 8000000002 failed)"
-tip_refused P11 "an older failed pipeline, the newer one only running -> still red" "does not supersede" "${MERGE_ARGS[@]}"
+tip_ran P11 "an older failed pipeline, the newer one only running -> still red, named, and runs (DND-2061)" "does not supersede" "${MERGE_ARGS[@]}"
 reset_fx; green_fx; pipes_are "$(pipe 8000000003 success)" "$(pipe 8000000002 failed parent_pipeline)"
-tip_refused P12 "a failed child pipeline, older than a green push pipeline -> red (each source's latest is judged; another source never supersedes it)" "MAIN RED:" "${MERGE_ARGS[@]}"
+tip_ran P12 "a failed child pipeline, older than a green push pipeline -> red (each source's latest is judged; another source never supersedes it), and runs" "is RED" "${MERGE_ARGS[@]}"
 reset_fx; green_fx; tip_pipes canceled
-tip_refused P13 "a canceled tip pipeline is red" "MAIN RED:" "${MERGE_ARGS[@]}"
+tip_ran P13 "a canceled tip pipeline is red, and runs" "is RED" "${MERGE_ARGS[@]}"
 reset_fx; green_fx; tip_pipes canceling
-tip_refused P13b "a canceling tip pipeline is red (it ends canceled)" "MAIN RED:" "${MERGE_ARGS[@]}"
+tip_ran P13b "a canceling tip pipeline is red (it ends canceled), and runs" "is RED" "${MERGE_ARGS[@]}"
 reset_fx; green_fx; pipes_are "$(pipe 8000000003 success web)" "$(pipe 8000000002 failed push)"
-tip_refused P13c "a newer SUCCESS of another source (a web run) does not clear a failed push pipeline" "MAIN RED:" "${MERGE_ARGS[@]}"
-[[ "$(grep -m1 'Fix:' <<<"${ERR}")" == *"/retry"* ]] && ok "P13d. the Fix says a red pipeline clears when it is retried and passes" || bad "P13d. retry Fix" "$(detail)"
+tip_ran P13c "a newer SUCCESS of another source (a web run) does not clear a failed push pipeline: red, and runs" "is RED" "${MERGE_ARGS[@]}"
 reset_fx; green_fx; tip_pipes bogus_status
 tip_refused P14 "a status the judge does not know -> COULD NOT LOOK" "COULD NOT LOOK:" "${MERGE_ARGS[@]}"
 reset_fx; green_fx; printf '[%s]\n' "$(pipe 8000000001 success push "${OLD_TIP}")" > "${FX}/pipes.out"
@@ -972,8 +986,7 @@ lock_class() {
     gmg_refusal_has_reason "${TMP}/lock-err" "$1" )
 }
 reset_fx; green_fx; tip_pipes failed
-tip_refused P20 "the lock tool's argv onto a failed tip -> refused (MAIN RED)" "MAIN RED:" "${LOCK_ARGS[@]}"
-lock_class "MAIN RED:" && ok "P20b. the lock tool's classifier reads it as MAIN RED (its exit 11)" || bad "P20b. MAIN RED classified" "$(detail)"
+tip_ran P20 "the lock tool's argv onto a failed tip the head does not contain -> runs (DND-2061)" "is RED" "${LOCK_ARGS[@]}"
 reset_fx; green_fx; fx pipes '[]'
 tip_refused P21 "the lock tool's argv onto a tip with no pipeline -> COULD NOT LOOK" "COULD NOT LOOK:" "${LOCK_ARGS[@]}"
 lock_class "COULD NOT LOOK:" && ok "P21b. the lock tool's classifier reads it as COULD NOT LOOK (its exit 2)" || bad "P21b. LOOK classified" "$(detail)"

@@ -480,11 +480,16 @@ tip_rollup() { # <status> <conclusion|null>
     checkSuite:{databaseId:71, app:{databaseId:15368, slug:"github-actions"}, workflowRun:{event:"push", workflow:{databaseId:6}}}}]}}}}}}' \
     > "${ST}/tip_rollup.json"
 }
-# b1 THE MISS: main moved to a red tip the head does not contain -> exit 11.
+# b1 DND-2061 THE MISS (owner, 2026-10-05: "I don't want a branch to have to
+# be built on latest main to be mergeable. That's the point of parallel
+# merges."): main moved to a red tip the gated head does not contain -> merges
+# (exit 0), naming the red tip and its run. Red CONTENT still refuses (b6).
 fixture b1; commit_on_main m.txt m; tip_rollup COMPLETED '"FAILURE"'; RED_TIP="$(git --git-dir="${BARE}" rev-parse main)"
-run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/b1.lock"; expect b1 11; no_merge b1
-names b1 "${RED_TIP}"; names b1 "Deploy: COMPLETED/FAILURE"; names b1 "actions/runs/9001"
-grep -q "^Fix: .*contains ${RED_TIP}" <<<"${out}" && ok "b1 Fix: names the red-main fix rule" || bad "b1 Fix: lacks the fix rule" "${out}"
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/b1.lock"; expect b1 0
+names b1 "${RED_TIP}"; names b1 "Deploy: COMPLETED/FAILURE"; names b1 "actions/runs/9001"; names b1 "DND-2061"
+# b1b KEPT: the same red tip does not excuse a missing receipt (exit 9).
+fixture b1b; commit_on_main m.txt m; tip_rollup COMPLETED '"FAILURE"'; rm -f "$(receipt_path "${H}")"
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/b1b.lock"; expect b1b 9; no_merge b1b
 # b2 a red-main fix: the head CONTAINS the red tip (the fixture's head is cut
 # from main's tip) -> merges, and says so.
 fixture b2; tip_rollup COMPLETED '"FAILURE"'

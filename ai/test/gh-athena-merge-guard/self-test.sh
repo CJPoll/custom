@@ -1001,17 +1001,28 @@ TIP_STATUS_RED='[{"__typename":"StatusContext","context":"deploy/prod","state":"
 tip_rollup() { rollup_fx "$1"; mv "${FX}/rollup.out" "${FX}/tiprollup.out"; rollup_fx "${GREEN}"; }
 compare_is() { printf '{"status":"%s","ahead_by":1,"behind_by":%s}\n' "$1" "$2" > "${FX}/compare.out"; }
 
+# DND-2061 (owner, 2026-10-05: "I don't want a branch to have to be built on
+# latest main to be mergeable. That's the point of parallel merges."): a red
+# RUN on the tip never refuses a green, gated head that does not contain it.
+# The run is still read and named; red CONTENT still refuses (C1-C8), and so do
+# the PR's own checks (T1c) and the pinned head (T1d).
 reset_fx; pr_view "${GREEN}"; base_is "${TIP}"; tip_rollup "${TIP_RED}"; compare_is diverged 3
 run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
-if refused && [[ "${ERR}" == *"RED"* ]] && [[ "${ERR}" == *"${TIP}"* ]] && [[ "${ERR}" == *"Test: COMPLETED/FAILURE"* ]] \
-   && [[ "${ERR}" == *"actions/runs/9001"* ]] && [[ "$(grep -m1 'Fix:' <<<"${ERR}")" == *"contains ${TIP}"* ]]; then
-  ok "T1. THE INCIDENT: green pinned head, base tip has a FAILED run -> refused before the merge call, names the tip SHA, the run and its URL"
-else bad "T1. merge onto a red tip refused" "$(detail)"; fi
+if [ "${RC}" = 0 ] && merged && [[ "${ERR}" == *"is RED"* ]] && [[ "${ERR}" == *"${TIP}"* ]] && [[ "${ERR}" == *"Test: COMPLETED/FAILURE"* ]] \
+   && [[ "${ERR}" == *"actions/runs/9001"* ]] && [[ "${ERR}" == *"does not contain it"* ]] && [[ "${ERR}" == *"DND-2061"* ]]; then
+  ok "T1. DND-2061 THE MISS: green pinned head behind a tip with a FAILED run -> merges, naming the tip SHA, the run and its URL"
+else bad "T1. merge behind a red tip" "$(detail)"; fi
+reset_fx; pr_view "${QUEUED}"; base_is "${TIP}"; tip_rollup "${TIP_RED}"; rollup_fx "${QUEUED}"; compare_is diverged 3
+run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
+refused && ok "T1c. KEPT: a red tip does not excuse the PR's own checks not being green" || bad "T1c. red tip + queued PR checks" "$(detail)"
+reset_fx; pr_view "${GREEN}"; base_is "${TIP}"; tip_rollup "${TIP_RED}"; compare_is diverged 3
+run pr merge 362 --squash --match-head-commit 0000000000000000000000000000000000000001
+refused && ok "T1d. KEPT: a red tip does not excuse a pinned SHA that is not the PR's head" || bad "T1d. red tip + wrong pin" "$(detail)"
 
 reset_fx; pr_view "${GREEN}"; base_is "${TIP}"; tip_rollup "${TIP_STATUS_RED}"; compare_is behind 1
 run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
-refused && [[ "${ERR}" == *"deploy/prod: FAILURE"* ]] \
-  && ok "T2. a red commit status (a deploy) on the tip -> refused" || bad "T2. red status refused" "$(detail)"
+[ "${RC}" = 0 ] && merged && [[ "${ERR}" == *"deploy/prod: FAILURE"* ]] \
+  && ok "T2. a red commit status (a deploy) on the tip, head behind it -> merges, naming it (DND-2061)" || bad "T2. red status behind" "$(detail)"
 
 reset_fx; pr_view "${GREEN}"; base_is "${TIP}"; tip_rollup "${TIP_RED}"; compare_is ahead 0
 run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
@@ -1025,13 +1036,13 @@ run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
 
 reset_fx; pr_view "${GREEN}"; base_is "${TIP}"; tip_rollup "${TIP_RED}"; fx compare '' 1 'gh: Server Error (HTTP 502)'
 run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
-refused && [[ "${ERR}" == *"COULD NOT LOOK"* ]] && [[ "${ERR}" == *"HTTP 502"* ]] \
-  && ok "T4. red tip and the containment read fails -> COULD NOT LOOK, refused, never read as a fix" || bad "T4. compare failure refused" "$(detail)"
+[ "${RC}" = 0 ] && merged && [[ "${ERR}" == *"could not be read"* ]] && [[ "${ERR}" == *"HTTP 502"* ]] && [[ "${ERR}" != *"RED-MAIN FIX"* ]] \
+  && ok "T4. red tip and the containment read fails -> merges (containment decides nothing, DND-2061), never named a fix" || bad "T4. compare failure" "$(detail)"
 
 reset_fx; pr_view "${GREEN}"; base_is "${TIP}"; tip_rollup "${TIP_RED}"; fx compare '{"status":"ahead"}'
 run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
-refused && [[ "${ERR}" == *"COULD NOT LOOK"* ]] \
-  && ok "T4b. a compare body with no behind_by -> COULD NOT LOOK" || bad "T4b. malformed compare refused" "$(detail)"
+[ "${RC}" = 0 ] && merged && [[ "${ERR}" == *"could not be read"* ]] \
+  && ok "T4b. a compare body with no behind_by -> merges, saying containment could not be read" || bad "T4b. malformed compare" "$(detail)"
 
 reset_fx; pr_view "${GREEN}"; base_is "${TIP}"; fx tiprollup '' 1 'gh: Bad credentials (HTTP 401)'
 run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
@@ -1066,8 +1077,8 @@ reset_fx; pr_view "${QUEUED}"; base_is "${TIP}"; tip_rollup "${TIP_RED}"
 fx protection '{"strict":true,"contexts":["Test"],"checks":[{"context":"Test","app_id":1}]}'
 fx rules '[]'
 run pr merge 362 --squash --auto
-refused && [[ "${ERR}" == *"RED"* ]] && [[ "${ERR}" == *"${TIP}"* ]] \
-  && ok "T9. --auto with a readable required-checks gate, onto a red tip -> refused" || bad "T9. --auto onto red tip" "$(detail)"
+[ "${RC}" = 0 ] && merged && [[ "${ERR}" == *"is RED"* ]] && [[ "${ERR}" == *"${TIP}"* ]] \
+  && ok "T9. --auto with a readable required-checks gate, onto a red tip -> runs, naming the red tip (DND-2061)" || bad "T9. --auto onto red tip" "$(detail)"
 
 echo
 echo "--- DND-1902: a merge onto a tip whose CONTENT is red (a duplicated migration version) ---"
@@ -1182,8 +1193,8 @@ gfx remote set-url origin git@github.com:athena-ai-harness/gen_saas.git
 TIP_OLD_RED_NEW_PENDING='[{"__typename":"CheckRun","name":"Test","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-10-03T14:00:00Z","checkSuite":{"databaseId":71,"app":{"databaseId":15368,"slug":"github-actions"},"workflowRun":{"event":"push","workflow":{"databaseId":5}}}},{"__typename":"CheckRun","name":"Test","status":"IN_PROGRESS","conclusion":null,"startedAt":"2026-10-03T14:30:00Z","checkSuite":{"databaseId":73,"app":{"databaseId":15368,"slug":"github-actions"},"workflowRun":{"event":"push","workflow":{"databaseId":5}}}}]'
 reset_fx; pr_view "${GREEN}"; base_is "${TIP}"; tip_rollup "${TIP_OLD_RED_NEW_PENDING}"; compare_is diverged 1
 run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
-refused && [[ "${ERR}" == *"does not supersede"* ]] \
-  && ok "T10. an older red run with a newer re-run still in progress -> still RED (only an all-SUCCESS suite supersedes)" \
+[ "${RC}" = 0 ] && merged && [[ "${ERR}" == *"does not supersede"* ]] \
+  && ok "T10. an older red run with a newer re-run still in progress -> still RED (only an all-SUCCESS suite supersedes), named, and merges (DND-2061)" \
   || bad "T10. old red + new pending" "$(detail)"
 
 reset_fx; pr_view "${GREEN}"; base_is "${TIP}"; tip_rollup '[{"__typename":"SomethingNew","name":"x"}]'

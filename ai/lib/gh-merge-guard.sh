@@ -841,10 +841,13 @@ GMG_TIP_JUDGE="$GMG_ROLLUP_DEFS"'
 
 # gmg_tip_health <owner> <repo> <tip> <head|""> <gitdir> : judges the base
 # tip's own runs. Never exits. Sets GMG_TIP_STATE to NONE, CLEAN, PENDING or FIX
-# (return 0, the merge may proceed), RED (return 1) or LOOK (return 2), with
-# GMG_TIP_RUNS (the red runs, then the pending ones, one per line), GMG_TIP_OLD
-# (superseded red runs) and GMG_TIP_WHY (the reason, for LOOK). An empty head
-# (`--auto`) can never be a red-main fix. It reads with `gh`, so the caller
+# (return 0), RED (return 1: a red run, and the head does not contain the tip
+# or whether it does could not be read, named in GMG_TIP_WHY) or LOOK (return
+# 2: the runs themselves could not be read), with GMG_TIP_RUNS (the red runs,
+# then the pending ones, one per line), GMG_TIP_OLD (superseded red runs) and
+# GMG_TIP_WHY. Since DND-2061 neither RED nor PENDING refuses a merge
+# (gmg_line_check); LOOK still does. An empty head (`--auto`) can never be a
+# red-main fix. It reads with `gh`, so the caller
 # sets the identity, and containment from git in <gitdir> when it can.
 gmg_tip_health() {
   local owner="$1" repo="$2" tip="$3" head="$4" gitdir="$5" rollup err rc why shape judged line red="" pend="" odd="" cmp behind
@@ -897,16 +900,18 @@ ${odd%$'\n'}"; return 2
     0) GMG_TIP_STATE="FIX"; return 0 ;;
     1) return 1 ;;
   esac
+  # DND-2061: from here on containment only names a red-main fix in the note.
+  # A head that does not contain the red tip, or one whose containment cannot
+  # be read, is RED (return 1), which gmg_line_check does not refuse.
   if ! err="$(mktemp)"; then
-    GMG_TIP_STATE="LOOK"; GMG_TIP_WHY="$tip is red, and mktemp failed, so whether the head $head contains it could not be read"; return 2
+    GMG_TIP_WHY="may not contain it: mktemp failed, so whether it does could not be read"; return 1
   fi
   if cmp="$(gh api "repos/$owner/$repo/compare/$tip...$head" 2>"$err")"; then rc=0; else rc=$?; fi
   why="$(tr '\n' ' ' <"$err")"; rm -f "$err"
   behind="$(jq -r 'if (.behind_by | type) == "number" then .behind_by else empty end' <<<"$cmp" 2>/dev/null)" || behind=""
   if [ "$rc" != 0 ] || ! [[ "$behind" =~ ^[0-9]+$ ]]; then
-    GMG_TIP_STATE="LOOK"
-    GMG_TIP_WHY="$tip is red (${GMG_TIP_RUNS#    }), and whether the head $head contains it could not be read (\`gh api repos/$owner/$repo/compare/$tip...$head\` exit $rc: ${why:-body '$(head -c 200 <<<"$cmp" | tr '\n' ' ')'})"
-    return 2
+    GMG_TIP_WHY="may not contain it: whether it does could not be read (\`gh api repos/$owner/$repo/compare/$tip...$head\` exit $rc: ${why:-body '$(head -c 200 <<<"$cmp" | tr '\n' ' ')'})"
+    return 1
   fi
   if [ "$behind" = 0 ]; then GMG_TIP_STATE="FIX"; return 0; fi
   return 1
@@ -1130,15 +1135,17 @@ gmg_line_check() {
     GMG_TIP_WHY="the runs judge '$judge' is not a defined function (a defect in the guard that called gmg_line_check)"; rr=2
   elif "$judge" "$owner" "$repo" "$tip" "$head" "$gitdir" "$base"; then rr=0; else rr=$?; fi
   if gmg_content_health "$owner" "$repo" "$tip" "$head" "$gitdir"; then cr=0; else cr=$?; fi
-  if [ "$rr" = 1 ] || [ "$cr" = 1 ]; then
-    GMG_LINE_WHY="${GMG_RED_MARK} $base tip $tip is RED, so the line is stopped (DND-1902)."
-    [ "$rr" = 1 ] && GMG_LINE_WHY+=" Red run(s):
-$GMG_TIP_RUNS${GMG_TIP_OLD:+
-  superseded red runs, not judged:
-${GMG_TIP_OLD%$'\n'}}"
-    [ "$cr" = 1 ] && GMG_LINE_WHY+="
+  # DND-2061 (owner, 2026-10-05: "I don't want a branch to have to be built
+  # on latest main to be mergeable. That's the point of parallel merges."): a
+  # red RUN on the tip never refuses (rr=1 is a note below). Red CONTENT does:
+  # a duplicated migration version on the tip is in every tree merged onto it.
+  if [ "$cr" = 1 ]; then
+    GMG_LINE_WHY="${GMG_RED_MARK} $base tip $tip is RED, so the line is stopped (DND-1902).
   Duplicated migration version(s) (ai/config/main-content-checks.json):
 $GMG_CONTENT_DUPS"
+    [ "$rr" = 1 ] && GMG_LINE_WHY+="
+  Red run(s) on the tip (not by themselves a refusal, DND-2061):
+$GMG_TIP_RUNS"
     GMG_LINE_WHY+="
   The head ${head:-(none: --auto)} is not a red-main fix: it must contain $tip and remove every duplicate."
     [ "$rr" = 2 ] && GMG_LINE_WHY+="
@@ -1160,6 +1167,10 @@ $GMG_CONTENT_DUPS"
 $GMG_TIP_RUNS" ;;
     FIX) GMG_LINE_NOTE="BASE-TIP $base $tip is RED, and the head contains it: RED-MAIN FIX, merging onto the red tip. Containing the tip is the only evidence read for a red RUN, so this head must really fix it. Red run(s):
 $GMG_TIP_RUNS" ;;
+    RED) GMG_LINE_NOTE="BASE-TIP $base $tip is RED, and the head ${head:-(none: --auto)} ${GMG_TIP_WHY:-does not contain it}; merging anyway: a red or pending tip never holds a green, gated head for being behind it (DND-2061, owner 2026-10-05: parallel merges). Red run(s):
+$GMG_TIP_RUNS${GMG_TIP_OLD:+
+  superseded red runs, not judged:
+${GMG_TIP_OLD%$'\n'}}" ;;
   esac
   case "$GMG_CONTENT_STATE" in
     NONE) GMG_LINE_NOTE+=$'\n'"  content: $(gmg_content_none_note)" ;;
@@ -1170,10 +1181,11 @@ $GMG_TIP_RUNS" ;;
   return 0
 }
 
-# gmg_line_fix <owner> <repo> <base> <tip> : the Fix: text for a RED tip.
+# gmg_line_fix <owner> <repo> <base> <tip> : the Fix: text for a tip whose
+# CONTENT is red (a red run alone never refuses, DND-2061).
 gmg_line_fix() {
-  printf 'land only a red-main fix: a head that contains %s, removes every duplicate named above, and (in a repo that declares an integration gate) carries its own INTEGRATION OK receipt (merge origin/%s into it, fix it, push as Athena, re-gate). Every other PR waits until %s is green again (`~/dev/custom/ai/bin/gh-ci-wait --repo %s/%s --sha <the new %s tip>`)' \
-    "$4" "$3" "$3" "$1" "$2" "$3"
+  printf 'land only a red-main fix: a head that contains %s, removes every duplicate named above, and (in a repo that declares an integration gate) carries its own INTEGRATION OK receipt (merge origin/%s into it, fix it, push as Athena, re-gate). Every other PR waits until that fix lands on %s (read %s/%s %s with `git ls-tree -r origin/%s`)' \
+    "$4" "$3" "$3" "$1" "$2" "$3" "$3"
 }
 
 # gmg_tip_gate <shown> <owner> <repo> <base> <tip> <head|""> : returns 0 when

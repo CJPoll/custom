@@ -659,22 +659,24 @@ ${odd%$'\n'}"; return 2
     0) GMG_TIP_STATE="FIX"; return 0 ;;
     1) return 1 ;;
   esac
+  # DND-2061: from here on containment only names a red-main fix in the note.
+  # A head that does not contain the red tip, or one whose containment cannot
+  # be read, is RED (return 1), which gmg_line_check does not refuse.
   if ! [[ "$head" =~ ^[0-9a-f]{40}$ ]]; then
-    GMG_TIP_STATE="LOOK"; GMG_TIP_WHY="$tip is red, and the head '$head' is not a full SHA, so whether it contains the tip cannot be read"; return 2
+    GMG_TIP_WHY="may not contain it: it is not a full SHA, so whether it does could not be read"; return 1
   fi
   req=(api)
   [ -n "$GLMG_HOST" ] && req+=(--hostname "$GLMG_HOST")
   req+=("projects/$GLMG_PID/repository/merge_base?refs%5B%5D=$tip&refs%5B%5D=$head")
   if ! err="$(mktemp)"; then
-    GMG_TIP_STATE="LOOK"; GMG_TIP_WHY="$tip is red, and mktemp failed, so whether the head $head contains it could not be read"; return 2
+    GMG_TIP_WHY="may not contain it: mktemp failed, so whether it does could not be read"; return 1
   fi
   if mb="$(glab "${req[@]}" 2>"$err")"; then rc=0; else rc=$?; fi
   why="$(tr '\n' ' ' <"$err")"; rm -f "$err"
   mb="$(jq -r '.id // empty' <<<"$mb" 2>/dev/null)" || mb=""
   if [ "$rc" != 0 ] || ! [[ "$mb" =~ ^[0-9a-f]{40}$ ]]; then
-    GMG_TIP_STATE="LOOK"
-    GMG_TIP_WHY="$tip is red (${GMG_TIP_RUNS#    }), and whether the head $head contains it could not be read (\`glab ${req[*]}\` exit $rc: ${why:-no usable merge base})"
-    return 2
+    GMG_TIP_WHY="may not contain it: whether it does could not be read (\`glab ${req[*]}\` exit $rc: ${why:-no usable merge base})"
+    return 1
   fi
   if [ "$mb" = "$tip" ]; then GMG_TIP_STATE="FIX"; return 0; fi
   return 1
@@ -693,7 +695,7 @@ glmg_tip_gate() {
   if gmg_line_check "$owner" "$repo" "$GLMG_BRANCH" "$GLMG_TIP" "$GLMG_HEAD" "$GLMG_TOP" glmg_tip_health; then rc=0; else rc=$?; fi
   case "$rc" in
     0) printf '%s: %s\n' "$GLMG_TOOL" "$GMG_LINE_NOTE" >&2; return 0 ;;
-    1) fix="land only a red-main fix: a head that contains $GLMG_TIP, removes every duplicate named above, and carries its own INTEGRATION OK receipt (merge origin/$GLMG_BRANCH into it, fix it, push as Athena, re-gate with \`$GLMG_IG\`). Every other MR waits until the tip is green again: a red pipeline clears when it is retried and passes (\`~/dev/custom/ai/bin/$GLMG_TOOL api -X POST \"projects/$GLMG_PID/pipelines/<id>/retry\"\`), or when a later push pipeline of the same source passes; a new pipeline of another source (a web run, a schedule) does not clear it. Read the tip's pipelines with \`glab api \"projects/$GLMG_PID/pipelines?ref=$enc&per_page=5\"\`. Then $GLMG_BOARD"
+    1) fix="land only a red-main fix: a head that contains $GLMG_TIP, removes every duplicate named above, and carries its own INTEGRATION OK receipt (merge origin/$GLMG_BRANCH into it, fix it, push as Athena, re-gate with \`$GLMG_IG\`). Every other MR waits until that fix lands on $GLMG_BRANCH. A red pipeline on the tip is not by itself a refusal (DND-2061). Then $GLMG_BOARD"
        glmg_refuse "$shown" "$GMG_LINE_WHY" "$fix" ;;
     *) glmg_refuse "$shown" "$GMG_LINE_WHY" \
          "make the tip readable (network up, the right -R <group>/<project>, glab-athena's token, \`git fetch origin\` in this checkout). A tip with no pipeline needs one: \`~/dev/custom/ai/bin/$GLMG_TOOL api -X POST \"projects/$GLMG_PID/pipeline?ref=$enc\"\`, then wait for it to finish. An undeclared path of a declared product (DND-2034) is fixed by adding that path to the product's paths in ~/dev/custom/ai/config/main-content-checks.json, landed on custom main. A malformed repo key or an unloadable runs judge is a defect in the guard: escalate it to your admiral with this output. Then $GLMG_BOARD" ;;
