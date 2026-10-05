@@ -198,6 +198,12 @@ grep -q 'INTEGRATION OK' <<<"$out" && bad "c2b printed INTEGRATION OK" "$out" ||
 # a bad object store), or an --is-ancestor that fails, is exit 2 with Fix:,
 # the gate does not run, and a stale pass for the head is removed. A PATH
 # stub fails only that one call and execs the real git for every other one.
+# The stub sits in front of a forge-stub-guard directory (DND-1667), so a
+# missing or non-executable stub fails loudly instead of falling through to
+# the real git.
+# shellcheck source=../../../lib/forge-stub-guard.sh
+. "${ROOT}/../../lib/forge-stub-guard.sh"
+fsg_make "${TMP}/c2e-git-guard" git
 C2E_REAL_GIT="$(command -v git)"
 c2e_stub() { # <dir> <the argv word to fail: merge-tree | --is-ancestor>
   mkdir -p "$1"
@@ -224,7 +230,8 @@ for c2e in merge-tree "--is-ancestor"; do
   rf="$(git -C "$R" rev-parse --path-format=absolute --git-common-dir)/integration-receipts/${head_sha}.json"
   mkdir -p "$(dirname "$rf")"; printf '{"schema":"integration-receipt/1","verdict":"pass","head":"%s"}\n' "$head_sha" > "$rf"
   c2e_stub "${TMP}/c2e-bin-${c2e_n}" "$c2e"
-  out="$( cd "$R" && PATH="${TMP}/c2e-bin-${c2e_n}:${PATH}" "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+  fsg_require_stubs "${TMP}/c2e-bin-${c2e_n}" git
+  out="$( cd "$R" && PATH="${TMP}/c2e-bin-${c2e_n}:${FSG_DIR}:${PATH}" "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
   [ "$rc" -eq 2 ] && grep -q 'is unknown' <<<"$out" && grep -q '^Fix:' <<<"$out" \
     && ok "c2e a failed ${c2e} is exit 2, 'unknown' with Fix:, never 'no conflict'" \
     || bad "c2e expected exit 2 'is unknown' for a failed ${c2e}, got $rc" "$out"
@@ -232,6 +239,7 @@ for c2e in merge-tree "--is-ancestor"; do
   [ ! -f "${R}/GATE_RAN" ] && ok "c2e the gate did not run past a failed ${c2e}" || bad "c2e the gate ran past a failed ${c2e}"
   [ ! -e "$rf" ] && ok "c2e a stale pass is removed after a failed ${c2e}" || bad "c2e a stale pass survived a failed ${c2e}"
 done
+fsg_verify && ok "c2e no git call fell through the stub to the guard" || bad "c2e a git call reached the stub guard"
 
 # ---------------------------------------------------------------- case 2c
 # DND-2076: on a head behind the target, the gate-file check blames the branch
