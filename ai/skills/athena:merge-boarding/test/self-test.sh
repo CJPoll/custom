@@ -192,6 +192,55 @@ grep -q 'INTEGRATION OK' <<<"$out" && bad "c2b printed INTEGRATION OK" "$out" ||
 [ "$(git -C "$R" rev-parse HEAD)" = "$before" ] && [ -z "$(git -C "$R" status --porcelain)" ] \
   && ok "c2b the branch and tree are untouched" || bad "c2b the refusal changed the branch or tree"
 
+# ---------------------------------------------------------------- case 2c
+# DND-2076: on a head behind the target, the gate-file check blames the branch
+# only for a gate it edits against its OWN base. A gate the target changed
+# after the branch point is named OLDER THAN the target, never EDITED BY THIS
+# BRANCH; a gate the branch itself edits still is.
+R="${TMP}/c2c"; new_repo "$R"
+( cd "$R" && printf '#!/bin/sh\n# a\n# b\n# c\n# d\nexit 0\n' > check.sh && chmod +x check.sh && git add check.sh && git commit -qm check \
+  && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f \
+  && git checkout -q main && printf '#!/bin/sh\n# a stricter on main\n# b\n# c\n# d\nexit 0\n' > check.sh && git commit -qam stricter \
+  && git checkout -q feature )
+record_pass "$R"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate './check.sh' 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && grep -q '^INTEGRATION OK [0-9a-f]* (GATE: ./check.sh -- caller-supplied; no gate declared on main; OLDER THAN main)' <<<"$out" \
+  && ok "c2c a gate the target changed after the branch point is marked OLDER THAN the target" \
+  || bad "c2c expected INTEGRATION OK marked OLDER THAN main, got $rc" "$out"
+grep -q 'EDITED BY THIS BRANCH' <<<"$out" && bad "c2c blamed the branch for the target's gate change" "$out" || ok "c2c the branch is not blamed for the target's change"
+# (a line apart from main's edit, so the two merge with no conflict)
+( cd "$R" && printf '#!/bin/sh\n# a\n# b\n# c\n# d weakened\nexit 0\n' > check.sh && git commit -qam weaken )
+record_pass "$R"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate './check.sh' 2>&1 )"; rc=$?
+grep -q 'INTEGRATION OK .*EDITED BY THIS BRANCH)' <<<"$out" && ! grep -q 'OLDER THAN' <<<"$out" \
+  && ok "c2c a behind branch that edits the gate itself is still EDITED BY THIS BRANCH" \
+  || bad "c2c a behind branch's own gate edit is not marked as such" "$out"
+
+# ---------------------------------------------------------------- case 2d
+# DND-2076: blast-radius judges a behind head's OWN diff, merge-base..head.
+# Judged from the target (target..head) the target's newer commits read as the
+# branch's: here main added a terraform root after the branch point, and the
+# branch would be held at exit 4 for a change it does not make.
+R="${TMP}/c2d"; new_repo "$R"
+mkdir -p "${R}/.github/workflows"
+printf 'name: post-merge\non:\n  push:\n    branches: [main]\njobs:\n  d:\n    runs-on: ubuntu-latest\n    steps: [{run: terraform apply -auto-approve}]\n' > "${R}/.github/workflows/post-merge.yml"
+( cd "$R" && git add -A && git commit -qm wf \
+  && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f \
+  && git checkout -q main && mkdir -p infra && echo 'resource {}' > infra/kms.tf && git add infra/kms.tf && git commit -qm tf \
+  && git checkout -q feature )
+stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
+record_pass "$R"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && grep -q '^INTEGRATION OK' <<<"$out" \
+  && ok "c2d the target's own HOT change is not charged to a behind head (exit 0)" \
+  || bad "c2d expected exit 0 for a head that changes only f.txt, got $rc" "$out"
+# ...while a behind head that makes the HOT change itself is still held.
+( cd "$R" && mkdir -p infra2 && echo 'resource {}' > infra2/kms.tf && git add infra2/kms.tf && git commit -qm tf2 )
+record_pass "$R"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 4 ] && grep -q 'BLAST-RADIUS HOT' <<<"$out" \
+  && ok "c2d a behind head's own HOT change is still exit 4" || bad "c2d expected exit 4 for the head's own terraform, got $rc" "$out"
+
 # ---------------------------------------------------------------- case 3
 # Branch contains the advanced target and the gate is green: INTEGRATION OK,
 # and it prints the exact head SHA the admiral is told to merge.

@@ -823,7 +823,7 @@ if [ "$IN_SLOT" -eq 0 ]; then
   SLOT_ARGS=( --label "integration-gate $(basename "$ROOT") ${HEAD0:0:8}" --outcome-file "$OUTCOME" --pool cpu )
   [ -n "$SLOT_WAIT" ] && SLOT_ARGS+=( --wait-timeout "$SLOT_WAIT" )
   gate_slot_weight
-  echo "${PROG}: taking a machine test slot first (${SLOT_WEIGHT_NOTE}); the fetch and the containment check run inside it (DND-1064)"
+  echo "${PROG}: taking a machine test slot first (${SLOT_WEIGHT_NOTE}); the fetch and the conflict check run inside it (DND-1064)"
   "$TEST_SLOT" "${SLOT_ARGS[@]}" -- env INTEGRATION_GATE_IN_SLOT=1 INTEGRATION_GATE_FACTS="$IG_FACTS_OUT" bash "$(realpath "${BASH_SOURCE[0]}")" "${ORIG_ARGS[@]}" {IG_WT_FD}>&-
   SLOT_RC=$?
   OUTCOME_LINE="$(cat "$OUTCOME" 2>/dev/null)"
