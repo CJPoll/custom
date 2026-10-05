@@ -96,7 +96,7 @@ suite_env_pids() {
     return 2
   fi
   if ! command -v gawk >/dev/null 2>&1; then
-    echo "suite-reaper: gawk is not on PATH; the process scan needs it (RS=\"\\0\", the filefuncs and time extensions)." >&2
+    echo "suite-reaper: gawk is not on PATH; the process scan needs it (RS=\"\\0\", the filefuncs extension)." >&2
     echo "  Fix: install GNU awk; the scan must not fall back to an unbracketed read." >&2
     return 2
   fi

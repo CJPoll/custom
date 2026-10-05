@@ -1,8 +1,9 @@
 # proc-env-scan.awk -- which processes carry an environment entry, read so
 # that a process caught inside execve is never counted as "does not carry it"
-# (DND-1016). One gawk process scans the whole table; nothing is forked.
+# (DND-1016). One gawk process scans the whole table. A clean scan forks
+# nothing; each settle round (below) forks one sleep(1).
 #
-# Usage (gawk only: it needs the filefuncs and time extensions, and RS="\0"):
+# Usage (gawk only: it needs the filefuncs extension and RS="\0"):
 #
 #   gawk -b -f scripts/lib/proc-env-scan.awk \
 #     -v mode=tag|exact -v needle=<text> -v uid=<uid> -v since=<ticks> \
@@ -25,7 +26,8 @@
 # Output: each matching pid on stdout, one per line. Exit 0 after a clean
 # scan; 4 when some pid still could not be told after settle_s seconds (each
 # is named on stderr as UNKNOWN, and the matches found are still printed); 2
-# on a usage error; 3 when this kernel cannot support the read. A caller must
+# on a usage error; 3 when this kernel cannot support the read, or the settle
+# round's sleep(1) fails. A caller must
 # treat any non-zero exit as "could not look", never as "none found".
 #
 # Why the read is bracketed. /proc/<pid>/environ is NOT stable while the
@@ -94,7 +96,9 @@
 # rule in Ruby.
 
 @load "filefuncs"
-@load "time"
+# Not the time extension (DND-1998): gawk 5.2, Debian 13's, deprecates it and
+# warns on stderr at every load, so no scan there had a clean stderr. Its one
+# use was the settle round's 0.05s pause, which sleep(1) gives instead.
 
 function die(code, msg, fix) {
   printf "proc-env-scan: %s\n  Fix: %s\n", msg, fix > "/dev/stderr"
@@ -224,7 +228,7 @@ BEGIN {
   }
   rounds = int(settle_s / 0.05)
   for (k = 0; nu > 0 && k < rounds; k++) {
-    sleep(0.05)
+    if (system("exec sleep 0.05") != 0) die(3, "the settle pause `sleep 0.05` failed, so the re-reads could not be spaced out.", "put a sleep(1) that takes fractional seconds (coreutils) on PATH.")
     m = 0
     for (j = 1; j <= nu; j++) {
       c = classify(unknown[j])

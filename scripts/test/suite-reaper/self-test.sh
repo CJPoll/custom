@@ -408,6 +408,27 @@ scan_fake() { # scan_fake <pid> -- runs the scan on one fixture pid; sets SO, SE
 }
 ENV1='ATHENA_REAP_TAGS=t0,t1\0HOME=/x\0'   # 31 bytes
 fake_proc 4201 1000 1031 "${ENV1}"
+
+# S15 extensions (DND-1998): the scan needs gawk's filefuncs extension and no
+# other. gawk 5.2 (Debian 13's) deprecates the time extension and warns on
+# every @load of it, so a scan that loaded it never had a clean stderr there,
+# and every empty-stderr case below failed. Run it with AWKLIBPATH holding
+# filefuncs alone: any other @load is fatal.
+FF_SO="$(find /usr/lib /usr/lib64 /usr/local/lib /usr/libexec -name filefuncs.so -path '*awk*' 2>/dev/null | sort | head -n 1)"
+if [ -z "${FF_SO}" ]; then
+  bad "S15 the scan runs with only the filefuncs extension on AWKLIBPATH" "could not find gawk's filefuncs.so under /usr/lib, /usr/lib64, /usr/local/lib or /usr/libexec; this case cannot look"
+else
+  mkdir -p "${TMP}/awklib" && ln -sf "${FF_SO}" "${TMP}/awklib/filefuncs.so"
+  SO="$(AWKLIBPATH="${TMP}/awklib" gawk -b -f "${SCAN}" -v mode=tag -v needle=t1 -v uid="${UID}" -v since=0 -v settle_s=0.2 \
+        -v root="${TMP}/fakeproc" "${TMP}/fakeproc/4201" 2>"${TMP}/scan.err")"; SRC=$?
+  SE="$(cat "${TMP}/scan.err")"
+  if [ "${SRC}" -eq 0 ] && [ "${SO}" = 4201 ] && [ -z "${SE}" ]; then
+    ok "S15 the scan runs with only the filefuncs extension on AWKLIBPATH"
+  else
+    bad "S15 the scan runs with only the filefuncs extension on AWKLIBPATH" "rc=${SRC} out=${SO} err=${SE}"
+  fi
+fi
+
 scan_fake 4201
 if [ "${SRC}" -eq 0 ] && [ "${SO}" = 4201 ] && [ -z "${SE}" ]; then
   ok "S15 settled bounds spanning every byte read: the tag is found"
