@@ -100,3 +100,25 @@ failing case: `ci run --mr=0 -b <sha> is no --mr run, so the sha refuses` ->
 `something ran: api --paginate projects/:id/merge_requests?source_branch=0123…`.
 Green after (`glfp_mr_value`: Go bool spellings, last wins, other values refuse):
 `92 passed, 0 failed`.
+
+## Rebase onto DND-1976 and DND-1936: release argv from the pinned table (2026-10-05)
+
+Change: `glfp_release` read `glab release create` with its own hand-kept flag
+lists. It now reads them from `ai/lib/glab-flag-table.sh`, the pinned table the
+outbound scan reads, and refuses COULD NOT LOOK when the table is missing.
+
+Red before (new cases, unchanged lib): `100 passed, 1 failed`. Failing case:
+`no pinned glab flag table: release create refuses, naming the table` ->
+`exit 0, want 3; out: stub: ran release create v1 -r main -N x`.
+Green after: `101 passed, 0 failed`.
+
+The outbound suite's 5 release reds (`--ref -n -F`, `-r -N --notes-file`,
+`--ref --`, `--ref -F`, plain `--ref main`) came from its stub, which answered
+no branch read: the guard read each ref as glab does and refused it as not a
+branch. The stub now answers branch reads, and all 237 cases run and pass.
+
+The DND-1936 identity map refuses an endpoint that names its project by a
+numeric id, a `..` segment, and `api graphql` (BAD KEY) before this guard runs.
+The suite now keys `example-group` in a fixture map and names the parent
+project by path. The `..` and GraphQL cases are judged on the agent wrapper,
+with one glab-athena case each pinning the BAD KEY precedence.
