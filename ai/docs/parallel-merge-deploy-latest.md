@@ -87,10 +87,11 @@ The lander, per gated head H:
    migration version is a `SEMANTIC CONFLICT` (exit 3, as in `locked-merge`).
 4. Run the red-tip judgment on B, split by repo (*D2*): gen_saas reads
    `gmg_line_check` (the tip's pipelines and content); custom reads the
-   `main-health` marker. Never wire `gmg_line_check` for custom: with no
-   `main` pipeline (*D5*) it reads every custom tip as COULD NOT LOOK and
-   refuses every landing. What counts as a fix while the tip is red is
-   DND-2061's rule (*D7*), never "H contains the red SHA".
+   `main-health` marker. Do not wire `gmg_line_check` for custom: its runs
+   half is a note in every state since DND-2061, so on custom it would only
+   add the content check, which custom does not declare. What counts as a
+   fix while the tip is red is DND-2061's rule (*D7*), never "H contains the
+   red SHA".
 5. When B is an ancestor of H, M is H itself: skip the commit, and the push
    is a fast-forward of the reviewed head. Otherwise make M with `git
    commit-tree <tree> -p B -p H` (which always makes a merge commit, so the
@@ -221,9 +222,9 @@ The workflow rules skip the default branch:
 This goes before the branch-pipeline rule. MR pipelines and branch pipelines
 for branches with no MR are unchanged. `ai/test/gitlab-ci/self-test.sh`
 asserts the rule. With no pipeline on `main`, `glmg_tip_health` reads a
-custom tip as COULD NOT LOOK, so `glab-athena mr merge` refuses on custom.
-That is correct: custom lands by D1's push, and its red-main signal is the
-`main-health` marker.
+custom tip as NONE, a note (DND-2061), so the tip never refuses
+`glab-athena mr merge` on custom. custom still lands by D1's push, and its
+red-main signal is the `main-health` marker.
 
 ### D6. Migration-version collisions stay prevented, in parallel
 
@@ -295,11 +296,10 @@ Every site that forces a branch onto the latest `main`, as of 2026-10-05:
 The laptop session owns gen_saas's `.gitlab-ci.yml`. The harness needs:
 
 1. **No test jobs on `main`** (goal 4). The MR pipeline on H is the test.
-2. **Every push to `main` still makes a pipeline on its SHA** (the deploy).
-   `glmg_tip_health` reads a tip with no pipeline as COULD NOT LOOK and
-   refuses every merge onto it. Rules that skip the deploy for docs-only
-   changes must still create a pipeline, or the tip judge must learn "no
-   pipeline by design", which is a bar change (Q5).
+2. **A push to `main` that should deploy makes a pipeline on its SHA.** The
+   tip judge does not require it: `glmg_tip_health` reads a tip with no
+   pipeline as NONE, a note, never a refusal (DND-2061, which answers Q5).
+   Rules that skip the deploy for docs-only changes are free to create none.
 3. **Deploy latest:** the jobs before the deploy are `interruptible: true`,
    so `auto_cancel_pending_pipelines` cancels a superseded pipeline before it
    deploys. The deploy job itself is never interruptible, so an apply is not
@@ -379,5 +379,15 @@ default, so no ticket waits:
   is caught after it lands rather than prevented. Default: gen_saas lands
   through D1.
 - **Q5.** If gen_saas skips its `main` pipeline for some pushes, may the tip
-  judge read "no pipeline" as clean? Default: no; gen_saas makes a pipeline
-  for every push.
+  judge read "no pipeline" as clean? Answered by DND-2061: yes. No tip
+  pipeline state refuses, an absent or unreadable one included, because the
+  judge runs only after the MR's own pipeline is green at the pinned head and
+  its receipt is sealed.
+
+  **Later (2026-10-05, DND-2061):** Q5's default was "no; gen_saas makes a
+  pipeline for every push", and D2, D5 and gen_saas constraint 2 said a tip
+  with no pipeline was COULD NOT LOOK and refused every merge onto it.
+  Superseded by DND-2061, under the owner's decision (Cody, 2026-10-05): "I
+  don't want a branch to have to be built on latest main to be mergeable.
+  That's the point of parallel merges." Once no tip run state refuses, a run
+  that is absent or unreadable cannot either.

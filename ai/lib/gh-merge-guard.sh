@@ -1122,8 +1122,8 @@ GMG_LOOK_MARK="COULD NOT LOOK:"
 # the whole stop-the-line judgment, the runs and the content
 # (gmg_content_health). Never exits. Returns 0 (GMG_LINE_NOTE says why the
 # merge may proceed: a red, pending, absent or unreadable run on the tip
-# included, DND-2061), 1 RED CONTENT or 2 COULD NOT LOOK at the content
-# (GMG_LINE_WHY says why).
+# included, DND-2061), 1 RED CONTENT or 2 COULD NOT LOOK at the content, or
+# a runs judge that is not defined (GMG_LINE_WHY says why).
 #
 # The runs judge is GitHub's gmg_tip_health unless [runs judge] names another
 # function with its contract: called as `<judge> <owner> <repo> <tip> <head|"">
@@ -1131,14 +1131,16 @@ GMG_LOOK_MARK="COULD NOT LOOK:"
 # 0; RED: return 1; LOOK: return 2), GMG_TIP_RUNS, GMG_TIP_OLD and GMG_TIP_WHY.
 # glab-athena's guard passes glmg_tip_health, which judges the tip's GitLab
 # pipelines (DND-1941); the content half and this composition are the same
-# code on both forges. A judge that is not a defined function is COULD NOT
-# LOOK, never a clean tip.
+# code on both forges. A judge that is not a defined function is a defect in
+# the guard: COULD NOT LOOK and refused, never a note and never a clean tip.
 gmg_line_check() {
   local owner="$1" repo="$2" base="$3" tip="$4" head="$5" gitdir="$6" judge="${7:-gmg_tip_health}" rr cr
   GMG_LINE_NOTE="" GMG_LINE_WHY=""
   if ! declare -F "$judge" >/dev/null; then
-    GMG_TIP_STATE="LOOK" GMG_TIP_RUNS="" GMG_TIP_OLD=""
-    GMG_TIP_WHY="the runs judge '$judge' is not a defined function (a defect in the guard that called gmg_line_check)"; rr=2
+    # A defect in the guard, not a tip state: it refuses (DND-2061 makes
+    # every tip state a note, never a guard that cannot run its judge).
+    GMG_LINE_WHY="${GMG_LOOK_MARK} the runs judge '$judge' is not a defined function (a defect in the guard that called gmg_line_check)"
+    return 2
   elif "$judge" "$owner" "$repo" "$tip" "$head" "$gitdir" "$base"; then rr=0; else rr=$?; fi
   if gmg_content_health "$owner" "$repo" "$tip" "$head" "$gitdir"; then cr=0; else cr=$?; fi
   # DND-2061 (owner, 2026-10-05: "I don't want a branch to have to be built

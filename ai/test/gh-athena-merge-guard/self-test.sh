@@ -1191,6 +1191,13 @@ refused && [[ "${ERR}" == *"COULD NOT LOOK"* ]] && [[ "${ERR}" == *"cjpoll/gen_s
   || bad "C9. undeclared path of a declared product" "$(detail)"
 gfx remote set-url origin git@github.com:athena-ai-harness/gen_saas.git
 
+# DND-2061: every tip run state is a note, but a runs judge the guard cannot
+# call is a defect in the guard, never a note: COULD NOT LOOK, rc 2.
+out="$( . "${AI_DIR}/lib/gh-merge-guard.sh"
+        if gmg_line_check CJPoll gen_saas main "${NOGATE_BASE}" "" "${REPO_FX}" no_such_judge; then echo "rc=0"; else echo "rc=$? ${GMG_LINE_WHY}"; fi )"
+[[ "${out}" == "rc=2 COULD NOT LOOK: the runs judge 'no_such_judge' is not a defined function"* ]] \
+  && ok "C10. an undefined runs judge refuses COULD NOT LOOK (a guard defect), never a note" || bad "C10. undefined judge" "${out}"
+
 TIP_OLD_RED_NEW_PENDING='[{"__typename":"CheckRun","name":"Test","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-10-03T14:00:00Z","checkSuite":{"databaseId":71,"app":{"databaseId":15368,"slug":"github-actions"},"workflowRun":{"event":"push","workflow":{"databaseId":5}}}},{"__typename":"CheckRun","name":"Test","status":"IN_PROGRESS","conclusion":null,"startedAt":"2026-10-03T14:30:00Z","checkSuite":{"databaseId":73,"app":{"databaseId":15368,"slug":"github-actions"},"workflowRun":{"event":"push","workflow":{"databaseId":5}}}}]'
 reset_fx; pr_view "${GREEN}"; base_is "${TIP}"; tip_rollup "${TIP_OLD_RED_NEW_PENDING}"; compare_is diverged 1
 run pr merge 362 --squash --match-head-commit "${HEAD_SHA}"
