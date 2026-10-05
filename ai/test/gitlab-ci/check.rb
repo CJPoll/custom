@@ -101,81 +101,145 @@ all_strings = yaml_strings.call(doc)
 # before_script): a checkout there marks the machine as an inbox tenant.
 errors << "the CI file must not link a checkout at ~/dev/custom (dev/custom); the CI container is not an inbox tenant" if all_strings.any? { |v| v.include?("dev/custom") }
 
-# The sibling containers (DND-2085). A `docker run` anywhere in the file is a
-# container on the `ci` user's rootless daemon; none may widen past what the
-# decision grants (ai/docs/ci-harness-masked-proc.md -> The boundary).
+# The sibling containers (DND-2085). Every `docker` word in the file is a
+# call to the `ci` user's rootless daemon, so the checker reads ALL of them
+# with an allowlist: each must be a whole command of one known shape, and a
+# `docker` word it cannot read as one (behind a wrapper, inside a quoted
+# payload or a substitution, glued to a separator) fails. No container may
+# widen past what the decision grants (ai/docs/ci-harness-masked-proc.md ->
+# The boundary): no flag outside RUN_FLAGS, so no --privileged, host
+# namespace, --cap-add, device, extra mount or socket.
 SECURITY_OPTS = %w[seccomp=unconfined apparmor=unconfined systempaths=unconfined].freeze
 GATE_NAME = "custom-gate-$CI_JOB_ID"
 PROBE_NAME = "custom-probe-$CI_JOB_ID"
+PREP_NAME = "custom-prep-$CI_JOB_ID"
+NAMES = [GATE_NAME, PROBE_NAME, PREP_NAME].freeze
 PROBE_CMD = "dockerfiles/ci-harness/boundary-probe.sh"
 IMAGE_VAR = "$CI_HARNESS_IMAGE"
 IMAGE_DIR = "dockerfiles/ci-harness"
+SECOPTS_FILE = "/tmp/ci-security-options"
+INFO_CMD = ["docker", "info", "--format", "{{.SecurityOptions}}", ">", SECOPTS_FILE].freeze
+BUILD_CMD = ["docker", "build", "--progress=plain", "-t", IMAGE_VAR, IMAGE_DIR].freeze
+RM_TAIL = [">/dev/null", "2>&1"].freeze
+# docker run flags: those with no value, and those taking the next word.
+RUN_BARE = %w[--rm --init].freeze
+RUN_VALUED = %w[--name --user -e --security-opt -v -w].freeze
+SEPARATORS = %w[&& || ; | &].freeze
+# A standalone `docker` word: not part of dockerfiles/, dockerd or docker.sock.
+DOCKER_WORD = %r{(?<![\w/.$-])docker(?![\w/.-])}
 
-# Each shell command line in a string, split on newlines, `&&`, `||` and `;`
-# outside quotes, as word arrays. A line that does not tokenize is reported.
+# Each shell command in a string, as word arrays: backslash-newline
+# continuations joined, then split on newlines and on standalone separators.
+# A line that does not tokenize is reported.
 commands_in = lambda do |text, where|
-  text.to_s.split("\n").flat_map do |line|
+  text.to_s.gsub("\\\n", " ").split("\n").flat_map do |line|
     begin
       words = Shellwords.split(line)
     rescue ArgumentError => e
       errors << "#{where}: a script line does not parse as shell words (#{e.message}): #{line.strip[0, 80]}"
       next []
     end
-    words.slice_when { |a, _b| %w[&& || ; |].include?(a) }.map { |c| c.reject { |w| %w[&& || ; |].include?(w) } }.reject(&:empty?)
+    words.slice_when { |a, _b| SEPARATORS.include?(a) }.map { |c| c.reject { |w| SEPARATORS.include?(w) } }.reject(&:empty?)
   end
 end
 
-docker_runs = all_strings.flat_map { |s| commands_in.call(s, "docker run") }.select { |w| w[0] == "docker" && w[1] == "run" }
-
-# flag_values WORDS NAME: every value given to a long flag, as `--x v` or `--x=v`.
-flag_values = lambda do |words, name|
-  vals = []
-  words.each_with_index do |w, i|
-    if w == name then vals << words[i + 1].to_s
-    elsif w.start_with?("#{name}=") then vals << w.split("=", 2)[1]
+# parse_run WORDS -> [flags, image, command, problems]; flags is a list of
+# [flag, value-or-nil]. Every word before the image must be an allowed flag.
+parse_run = lambda do |w|
+  flags = []
+  problems = []
+  i = 2
+  while i < w.size && w[i].start_with?("-")
+    f = w[i]
+    if RUN_BARE.include?(f)
+      flags << [f, nil]
+      i += 1
+    elsif RUN_VALUED.include?(f)
+      flags << [f, w[i + 1].to_s]
+      i += 2
+    else
+      problems << "flag #{f.inspect} is not allowed (allowed: #{(RUN_BARE + RUN_VALUED).join(' ')}, each spelled as its own word)"
+      i += 1
     end
   end
-  vals
+  [flags, w[i], w[(i + 1)..] || [], problems]
 end
 
-FORBIDDEN = {
-  "--privileged" => ->(w) { w.any? { |x| x == "--privileged" || x.start_with?("--privileged=") } },
-  "--pid=host" => ->(w) { flag_values.call(w, "--pid").include?("host") },
-  "--network=host" => ->(w) { (flag_values.call(w, "--network") + flag_values.call(w, "--net")).include?("host") },
-  "--ipc=host" => ->(w) { flag_values.call(w, "--ipc").include?("host") },
-  "--uts=host" => ->(w) { flag_values.call(w, "--uts").include?("host") },
-  "--userns=host" => ->(w) { flag_values.call(w, "--userns").include?("host") },
-  "--cap-add" => ->(w) { w.any? { |x| x == "--cap-add" || x.start_with?("--cap-add=") } },
-  "--device" => ->(w) { w.any? { |x| x == "--device" || x.start_with?("--device=") } },
-  "--volumes-from" => ->(w) { w.any? { |x| x == "--volumes-from" || x.start_with?("--volumes-from=") } },
-  "a docker.sock bind" => ->(w) { w.any? { |x| x.include?("docker.sock") } },
-}.freeze
-
-errors << "docker run: the harness-gate job must start the gate in a sibling container (`docker run`); none found" if docker_runs.empty?
-docker_runs.each do |w|
-  label = w.include?(GATE_NAME) ? "gate" : (w.include?(PROBE_NAME) ? "probe" : "a")
-  FORBIDDEN.each do |flag, hit|
-    errors << "docker run (#{label} container): #{flag} is not allowed in any sibling container (it reaches past the ci user's namespace; ai/docs/ci-harness-masked-proc.md -> The boundary)" if hit.call(w)
+# The strings a shell may run: every string in the file except image names
+# (`image: <name>` or `image: {name: <name>}`); an image's entrypoint is a
+# command, so it is still read.
+image_values = lambda do |node|
+  case node
+  when Hash
+    node.flat_map do |k, v|
+      if k.to_s == "image" && v.is_a?(String) then [v]
+      elsif k.to_s == "image" && v.is_a?(Hash) then [v["name"].to_s] + image_values.call(v)
+      else image_values.call(v)
+      end
+    end
+  when Array then node.flat_map { |v| image_values.call(v) }
+  else []
   end
-  extra = flag_values.call(w, "--security-opt") - SECURITY_OPTS
-  errors << "docker run (#{label} container): --security-opt #{extra.inspect} is not one of #{SECURITY_OPTS.inspect}" unless extra.empty?
+end
+skip = image_values.call(doc)
+shell_strings = all_strings.reject { |s| skip.include?(s) }
+
+docker_cmds = []
+shell_strings.each do |s|
+  cmds = commands_in.call(s, "docker")
+  readable = cmds.select { |c| c[0] == "docker" }
+  seen = s.gsub("\\\n", " ").scan(DOCKER_WORD).size
+  if seen != readable.size
+    errors << "docker: a `docker` word the checker cannot read as a whole command (behind a wrapper, inside quotes or $(...), or glued to a separator): #{s.strip.lines.first.to_s.strip[0, 100]}"
+  end
+  docker_cmds.concat(readable)
+end
+
+runs = []
+docker_cmds.each do |c|
+  case c[1]
+  when "info"
+    errors << "docker info: must be exactly `#{INFO_CMD.join(' ')}`, got `#{c.join(' ')}`" unless c == INFO_CMD
+  when "build"
+    errors << "docker build: must be exactly `#{BUILD_CMD.join(' ')}`, got `#{c.join(' ')}`" unless c == BUILD_CMD
+  when "rm"
+    names = c[3..].to_a.reject { |x| RM_TAIL.include?(x) }
+    errors << "docker rm: must be `docker rm -f` of the sibling names #{NAMES.inspect} only, got `#{c.join(' ')}`" unless c[2] == "-f" && !names.empty? && (names - NAMES).empty?
+  when "run"
+    flags, image, command, problems = parse_run.call(c)
+    name = flags.select { |f, _| f == "--name" }.map(&:last)
+    label = name.size == 1 && NAMES.include?(name.first) ? name.first : "an unnamed"
+    problems.each { |p| errors << "docker run (#{label} container): #{p}" }
+    runs << { label: label, flags: flags, image: image, command: command }
+  else
+    errors << "docker: only `docker info`, `docker build`, `docker run` and `docker rm` are allowed, each with no global option; got `#{c.join(' ')}`"
+  end
+end
+errors << "docker run: the harness-gate job must start the gate in a sibling container (`docker run`); none found" if runs.empty?
+
+# Per container: a known name, --rm, the built image, the checkout at its own
+# path, a user, and the security options and environment its role allows.
+runs.each do |r|
+  vals = ->(f) { r[:flags].select { |x, _| x == f }.map(&:last) }
+  where = "docker run (#{r[:label]} container)"
+  errors << "#{where}: must be named one of #{NAMES.inspect} (after_script removes them by name)" unless NAMES.include?(r[:label])
+  errors << "#{where}: must be removed on exit (--rm)" unless vals.call("--rm").size == 1
+  errors << "#{where}: must run the built image #{IMAGE_VAR}" unless r[:image] == IMAGE_VAR
+  errors << "#{where}: must bind only the checkout at its own path (-v \"$CI_PROJECT_DIR:$CI_PROJECT_DIR\") and work there (-w \"$CI_PROJECT_DIR\")" unless vals.call("-v") == ["$CI_PROJECT_DIR:$CI_PROJECT_DIR"] && vals.call("-w") == ["$CI_PROJECT_DIR"]
+  errors << "#{where}: --name and --user must each appear exactly once" unless vals.call("--name").size == 1 && vals.call("--user").size == 1
+  opts = vals.call("--security-opt")
+  unmasked = [GATE_NAME, PROBE_NAME].include?(r[:label])
+  if unmasked
+    errors << "#{where}: must carry exactly the three --security-opt values #{SECURITY_OPTS.inspect}, each once, got #{opts.inspect}" unless opts.sort == SECURITY_OPTS.sort
+  elsif !opts.empty?
+    errors << "#{where}: takes no --security-opt (only the gate and the probe run unmasked), got #{opts.inspect}"
+  end
   # Environment: only the gate gets one variable, CI_JOB_TOKEN by name, so its
-  # git can reach origin for the landed bars. No env file, no literal value.
-  envs = flag_values.call(w, "-e") + flag_values.call(w, "--env")
-  env_file = w.any? { |x| x == "--env-file" || x.start_with?("--env-file=") }
-  allowed_env = label == "gate" ? ["CI_JOB_TOKEN"] : []
-  if env_file || !(envs - allowed_env).empty? || envs.size != envs.uniq.size
-    errors << "docker run (#{label} container): -e/--env may name only #{allowed_env.inspect} (by name, no value), and --env-file is not allowed; got #{envs.inspect}#{env_file ? ' and --env-file' : ''}"
-  end
-end
-
-# check_unmasked WORDS LABEL: the gate's three --security-opt values, each once.
-check_unmasked = lambda do |w, label|
-  opts = flag_values.call(w, "--security-opt")
-  errors << "#{label}: must carry exactly the three --security-opt values #{SECURITY_OPTS.inspect}, each once, got #{opts.inspect}" unless opts.sort == SECURITY_OPTS.sort
-  errors << "#{label}: must bind the checkout at its own path (-v \"$CI_PROJECT_DIR:$CI_PROJECT_DIR\") and work there (-w \"$CI_PROJECT_DIR\")" unless flag_values.call(w, "-v") == ["$CI_PROJECT_DIR:$CI_PROJECT_DIR"] && flag_values.call(w, "-w") == ["$CI_PROJECT_DIR"]
-  errors << "#{label}: must run the built image #{IMAGE_VAR}" unless w.include?(IMAGE_VAR)
-  errors << "#{label}: must be removed on exit (--rm)" unless w.include?("--rm")
+  # git can reach origin for the landed bars. No literal value.
+  envs = vals.call("-e")
+  allowed_env = r[:label] == GATE_NAME ? ["CI_JOB_TOKEN"] : []
+  errors << "#{where}: -e may name only #{allowed_env.inspect} (by name, no value), got #{envs.inspect}" unless (envs - allowed_env).empty? && envs.size == envs.uniq.size
+  errors << "#{where}: --init is for the gate only" if !vals.call("--init").empty? && r[:label] != GATE_NAME
 end
 
 gate = jobs["harness-gate"]
@@ -190,53 +254,67 @@ else
 
   # first_i PRED: the script index of the first command matching PRED.
   first_i = ->(pred) { cmds.find { |_i, c| pred.call(c) }&.first }
+  # run_with NAME: the parsed `docker run` named NAME, and its script index.
+  run_i = ->(name) { first_i.call(->(c) { c[0] == "docker" && c[1] == "run" && c.include?(name) }) }
+  run_of = ->(name) { runs.find { |r| r[:label] == name } }
 
-  rootless_i = scripts.index { |s| s.include?("docker info") && s.include?("name=rootless") && s.include?("exit 1") && s.include?("Fix:") }
-  build_i = first_i.call(->(c) { c[0] == "docker" && c[1] == "build" && flag_values.call(c, "-t") == [IMAGE_VAR] && c.last == IMAGE_DIR })
-  tag_i = scripts.index { |s| s.match?(/\ACI_HARNESS_IMAGE="custom-ci-harness:\$\(/) && s.include?("find #{IMAGE_DIR} -type f") && s.include?("sha256sum") }
-  probe_i = first_i.call(->(c) { c[0] == "docker" && c[1] == "run" && c.include?(PROBE_NAME) })
-  fetch_i = first_i.call(->(c) { c[0] == "git" && c[1] == "fetch" && c.any? { |x| x.include?("refs/remotes/origin/main") } })
-  chown_i = first_i.call(->(c) { c[0] == "docker" && c[1] == "run" && c.each_cons(3).any? { |a, b, d| a == "chown" && b == "-R" && d == "ci:ci" } })
-  gate_lines = cmds.select { |_i, c| c[0] == "docker" && c[1] == "run" && c.any? { |x| x.include?("ai/bin/harness-gate") } }
-  gate_i = gate_lines.first&.first
-
-  errors << "harness-gate: script must check the socket reaches a rootless daemon (`docker info` ... name=rootless ... exit 1, with a Fix:)" if rootless_i.nil?
-  errors << "harness-gate: script must set CI_HARNESS_IMAGE to custom-ci-harness:<content hash of #{IMAGE_DIR}> (find #{IMAGE_DIR} -type f ... sha256sum)" if tag_i.nil?
-  errors << "harness-gate: script must build the image (`docker build -t \"#{IMAGE_VAR}\" #{IMAGE_DIR}`)" if build_i.nil?
-  errors << "harness-gate: script must fetch origin/main explicitly (git fetch ... refs/remotes/origin/main)" if fetch_i.nil?
-  errors << "harness-gate: script must hand the tree to ci (`docker run ... chown -R ci:ci ...`): git refuses a tree another user owns" if chown_i.nil?
-
-  if gate_lines.size != 1
-    errors << "harness-gate: script must run `ai/bin/harness-gate` as the command of exactly one `docker run` (the sibling gate container), got #{gate_lines.size}"
-  else
-    w = gate_lines.first.last
-    check_unmasked.call(w, "harness-gate container")
-    errors << "harness-gate container: its command must be exactly ai/bin/harness-gate, right after the image" unless w.last == "ai/bin/harness-gate" && w[-2] == IMAGE_VAR
-    errors << "harness-gate container: must be named #{GATE_NAME} (after_script removes it by name)" unless flag_values.call(w, "--name") == [GATE_NAME]
-    errors << "harness-gate container: must run as the image's non-root user (--user ci)" unless flag_values.call(w, "--user") == ["ci"] && flag_values.call(w, "-u").empty?
+  info_i = first_i.call(->(c) { c == INFO_CMD })
+  # The rootless refusal: exactly this test, then exit 1 with a Fix:.
+  rootless_i = scripts.index do |s|
+    lines = s.strip.lines.map(&:strip)
+    lines.first == "if ! grep -qw 'name=rootless' #{SECOPTS_FILE}; then" && lines.last == "fi" &&
+      lines.any? { |l| l.include?("Fix:") } && lines[-2] == "exit 1"
   end
+  build_i = first_i.call(->(c) { c == BUILD_CMD })
+  tag_i = scripts.index { |s| s.match?(/\ACI_HARNESS_IMAGE="custom-ci-harness:\$\(/) && s.include?("find #{IMAGE_DIR} -type f") && s.include?("sha256sum") }
+  fetch_i = first_i.call(->(c) { c[0] == "git" && c.include?("fetch") && c.any? { |x| x.include?("refs/remotes/origin/main") } })
+  probe_i = run_i.call(PROBE_NAME)
+  prep_i = run_i.call(PREP_NAME)
+  gate_i = run_i.call(GATE_NAME)
 
-  probe_w = cmds.find { |_i, c| c[0] == "docker" && c[1] == "run" && c.include?(PROBE_NAME) }&.last
-  if probe_w.nil?
+  errors << "harness-gate: script must record the daemon's security options (`#{INFO_CMD.join(' ')}`)" if info_i.nil?
+  errors << "harness-gate: script must refuse a daemon that is not rootless (`if ! grep -qw 'name=rootless' #{SECOPTS_FILE}; then` ... with a Fix: ... `exit 1` / `fi`)" if rootless_i.nil?
+  errors << "harness-gate: script must set CI_HARNESS_IMAGE to custom-ci-harness:<content hash of #{IMAGE_DIR}> (find #{IMAGE_DIR} -type f ... sha256sum)" if tag_i.nil?
+  errors << "harness-gate: script must build the image (`#{BUILD_CMD.join(' ')}`)" if build_i.nil?
+  errors << "harness-gate: script must fetch origin/main explicitly (git ... fetch ... refs/remotes/origin/main)" if fetch_i.nil?
+
+  gate_runs = runs.select { |r| r[:command].include?("ai/bin/harness-gate") || r[:command].any? { |x| x.include?("harness-gate") } }
+  gate_r = run_of.call(GATE_NAME)
+  if gate_runs.size != 1 || gate_r.nil? || !gate_runs.include?(gate_r)
+    errors << "harness-gate: script must run `ai/bin/harness-gate` as the command of exactly one `docker run`, the one named #{GATE_NAME}; got #{gate_runs.size}"
+  else
+    errors << "harness-gate container: its command must be exactly ai/bin/harness-gate, right after the image" unless gate_r[:command] == ["ai/bin/harness-gate"]
+    errors << "harness-gate container: must run as the image's non-root user (--user ci)" unless gate_r[:flags].include?(["--user", "ci"])
+  end
+  errors << "harness-gate: script must run `ai/bin/harness-gate` in the sibling, not in the job container" if cmds.any? { |_i, c| c[0] != "docker" && c.any? { |x| x.end_with?("bin/harness-gate") } }
+
+  probe_r = run_of.call(PROBE_NAME)
+  if probe_r.nil?
     errors << "boundary probe: script must run #{PROBE_CMD} in its own container named #{PROBE_NAME}"
   else
-    check_unmasked.call(probe_w, "boundary probe container")
-    errors << "boundary probe container: must run as the image's root (--user 0), where a denial means the daemon is rootless" unless flag_values.call(probe_w, "--user") == ["0"] && flag_values.call(probe_w, "-u").empty?
-    errors << "boundary probe container: its command must be exactly #{PROBE_CMD}, with no arguments" unless probe_w.last == PROBE_CMD && probe_w[-2] == IMAGE_VAR
+    errors << "boundary probe container: must run as the image's root (--user 0), where a denial means the daemon is rootless" unless probe_r[:flags].include?(["--user", "0"])
+    errors << "boundary probe container: its command must be exactly #{PROBE_CMD}, with no arguments" unless probe_r[:command] == [PROBE_CMD]
+  end
+
+  prep_r = run_of.call(PREP_NAME)
+  if prep_r.nil? || prep_r[:command] != ["chown", "-R", "ci:ci", "$CI_PROJECT_DIR"] || !prep_r[:flags].include?(["--user", "0"])
+    errors << "harness-gate: script must hand the tree to ci in a container named #{PREP_NAME} (`--user 0` ... `chown -R ci:ci \"$CI_PROJECT_DIR\"`): git refuses a tree another user owns"
   end
 
   if gate_i
     { "the rootless check" => rootless_i, "the image tag" => tag_i, "the image build" => build_i, "the boundary probe" => probe_i,
-      "the origin/main fetch" => fetch_i, "the chown to ci" => chown_i }.each do |what, i|
+      "the origin/main fetch" => fetch_i, "the chown to ci" => prep_i }.each do |what, i|
       errors << "harness-gate: #{what} must come before the gate container" if i && i > gate_i
     end
   end
+  errors << "harness-gate: the security options must be recorded before the rootless check" if info_i && rootless_i && info_i > rootless_i
+  errors << "harness-gate: the rootless check must come before the first sibling container" if rootless_i && [probe_i, prep_i, gate_i].compact.any? { |i| i < rootless_i }
   errors << "harness-gate: the image tag must be set before the build" if tag_i && build_i && tag_i > build_i
   errors << "harness-gate: the image must be built before the boundary probe" if build_i && probe_i && build_i > probe_i
 
   after = Array(gate["after_script"]).flatten.map(&:to_s)
   rm = after.flat_map { |s| commands_in.call(s, "harness-gate after_script") }.find { |c| c[0] == "docker" && c[1] == "rm" && c.include?("-f") }
-  errors << "harness-gate: after_script must remove the sibling containers by name (`docker rm -f \"#{GATE_NAME}\" \"#{PROBE_NAME}\" ...`), so a cancelled job leaves none" unless rm && rm.include?(GATE_NAME) && rm.include?(PROBE_NAME)
+  errors << "harness-gate: after_script must remove every sibling container by name (`docker rm -f` #{NAMES.map { |n| "\"#{n}\"" }.join(' ')}), so a cancelled job leaves none" unless rm && NAMES.all? { |n| rm.include?(n) }
 
   # The image the gate runs: one FROM, pinned; it runs setup.sh.
   if File.file?(dockerfile)
@@ -283,7 +361,8 @@ if File.file?(setup)
     errors << "setup.sh: gem #{g.inspect} must be pinned as name:exact-version"
   end
   gem_lines = stext.lines.grep(/^\s*gem install\b/)
-  errors << "setup.sh: gems must be installed by exactly `gem install --no-document \"${GEMS[@]}\"` (one line, no extra gem)" unless gem_lines.size == 1 && gem_lines.first.strip == 'gem install --no-document "${GEMS[@]}"'
+  gem_cmd = %q{gem install --no-document --install-dir "$(ruby -e 'print Gem.default_dir')" "${GEMS[@]}"}
+  errors << "setup.sh: gems must be installed by exactly `#{gem_cmd}` (one line, no extra gem, into Ruby's own gem dir)" unless gem_lines.size == 1 && gem_lines.first.strip == gem_cmd
   errors << "setup.sh: GIT_VERSION must be an exact x.y.z release" unless stext.match?(/^GIT_VERSION=\d+\.\d+\.\d+$/)
   errors << "setup.sh: GIT_SHA256 must be the tarball's 64-hex sha256" unless stext.match?(/^GIT_SHA256=[0-9a-f]{64}$/)
   errors << "setup.sh: the git tarball must be checked with sha256sum -c against GIT_SHA256" unless stext.include?('echo "${GIT_SHA256}  ${src}/git.tar.xz" | sha256sum -c')

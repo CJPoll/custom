@@ -6,13 +6,16 @@
 #   - No pipeline runs on the default branch (DND-2067).
 #   - A fork MR never runs: the runner is the owner's own machine, and a fork
 #     MR is arbitrary code from outside the project.
-#   - No credentials: no CI/CD variables, no secrets, no id_tokens.
+#   - No credentials: no CI/CD variables, no secrets, no id_tokens. The gate
+#     container gets only the predefined CI_JOB_TOKEN, by name, which the
+#     gate held in the job container before (DND-2085).
 #   - Every job carries the role tag `ci` (never a per-host tag); the runner
 #     does not take untagged jobs.
 #   - The gate runs in a sibling container on the `ci` user's rootless
 #     daemon, from the pinned image dockerfiles/ci-harness builds (DND-2085).
-#     No sibling gets --privileged, a host namespace, --cap-add, a device or
-#     the docker socket.
+#     Every daemon call is one of four allowlisted shapes, and a sibling gets
+#     only the allowlisted flags: never --privileged, a host namespace,
+#     --cap-add, a device, another mount or the socket.
 #
 # The job is a full, unweakened gate: no allow_failure, no skipped check.
 # The gate needs an unmasked /proc: tool-sandbox runs `bwrap --unshare-all ...
@@ -63,20 +66,24 @@ harness-gate:
   script:
     # The socket must reach a rootless daemon: only there is a sibling's
     # root a subuid on the host. The boundary probe below checks it again.
+    - docker info --format '{{.SecurityOptions}}' > /tmp/ci-security-options
     - |
-      if ! docker info --format '{{.SecurityOptions}}' | grep -q 'name=rootless'; then
-        echo "harness-gate: the job's docker socket does not reach a rootless daemon; refusing to start an unmasked sibling"
+      if ! grep -qw 'name=rootless' /tmp/ci-security-options; then
+        echo "harness-gate: the job's socket does not reach a rootless dockerd; refusing to start an unmasked sibling"
         echo "  Fix: point the runner's ci entry at the ci user's rootless dockerd socket (system-files/gitlab-runner-runbook.md, DND-1973)."
         exit 1
       fi
     # The pinned tool set, built on the ci user's daemon. The tag is the
     # content hash of the build context, so one tag is one content and the
     # layer cache makes an unchanged rebuild free. No registry, no credential.
+    # Plain progress, so a failing setup.sh step prints its Fix: in the log.
     - CI_HARNESS_IMAGE="custom-ci-harness:$(find dockerfiles/ci-harness -type f | sort | xargs sha256sum | sha256sum | cut -c1-16)"
-    - docker build -q -t "$CI_HARNESS_IMAGE" dockerfiles/ci-harness
+    - docker build --progress=plain -t "$CI_HARNESS_IMAGE" dockerfiles/ci-harness
     # The runner's clone may not create origin/main; the landed bars need it.
-    - git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
-    - git rev-parse --verify --quiet refs/remotes/origin/main
+    # The builds dir persists across jobs, and the last job left the tree
+    # owned by `ci`, so this root git names the checkout safe for itself.
+    - git -c safe.directory="$CI_PROJECT_DIR" fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+    - git -c safe.directory="$CI_PROJECT_DIR" rev-parse --verify --quiet refs/remotes/origin/main
     # Every run proves the boundary: as the image's root, with the gate's
     # options, /proc/sys and sysrq writes and a kcore read must be denied.
     - docker run --rm --name "custom-probe-$CI_JOB_ID" --user 0 --security-opt seccomp=unconfined --security-opt apparmor=unconfined --security-opt systempaths=unconfined -v "$CI_PROJECT_DIR:$CI_PROJECT_DIR" -w "$CI_PROJECT_DIR" "$CI_HARNESS_IMAGE" dockerfiles/ci-harness/boundary-probe.sh

@@ -56,7 +56,8 @@ module HarnessTools
     ["dockerfiles/", :out,
      "container image build inputs and the CI job's in-container steps: run as " \
      "root inside a docker build or a GitLab CI sibling container (DND-2085), " \
-     "never from an agent's Bash call on this machine"],
+     "not as agent tools; on this machine only their self-test runs them, " \
+     "against a fixture tree"],
   ].freeze
 
   # tools: in-scope repo-relative paths. out_of_scope: {path => reason}.

@@ -15,8 +15,11 @@
 #   - an open for read of /proc/kcore.
 # Each open writes and reads nothing (an append-mode open of zero bytes, a
 # read open closed at once), so a probe that finds a path allowed has changed
-# no host state. If any is allowed, the daemon behind the job's socket is not
-# the `ci` user's rootless one, and the gate must not run unmasked.
+# no host state. The two write rows tell a rootful daemon from the rootless
+# one: only global root may write them. The kcore row needs CAP_SYS_RAWIO,
+# which Docker drops under either daemon, so it fires only when a capability
+# is added (--cap-add or --privileged, which ai/test/gitlab-ci forbids). If
+# any row is allowed, the gate must not run unmasked.
 #
 # Exit: 0 every path denied; 1 a path allowed; 2 usage; 3 could not measure
 # (a probed path is missing, or the real /proc probed as non-root, where a
@@ -84,7 +87,7 @@ if [ "${#allowed[@]}" -gt 0 ]; then
   for a in "${allowed[@]}"; do
     echo "boundary-probe: FAIL -- ${a} was allowed" >&2
   done
-  echo "  Fix: the docker socket in this job reaches a rootful daemon, or a container root that is global root. Point the runner's \`ci\` entry back at the \`ci\` user's rootless dockerd (system-files/gitlab-runner-runbook.md, DND-1973) before running the gate unmasked." >&2
+  echo "  Fix: the docker socket in this job reaches a rootful daemon, or a container root that is global root, or the probe container was given a capability (it may carry only --user 0 and the gate's three --security-opt values). Point the runner's \`ci\` entry back at the \`ci\` user's rootless dockerd (system-files/gitlab-runner-runbook.md, DND-1973) before running the gate unmasked." >&2
   exit 1
 fi
 echo "boundary-probe: OK -- ${#writes[@]} write(s) and ${#reads[@]} read(s) denied under ${proc}"

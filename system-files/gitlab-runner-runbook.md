@@ -92,6 +92,13 @@ Measured on the live `ci` runner 2026-10-05 (spike pipeline 2913148572): the
 same sibling without `systempaths=unconfined` fails "Can't mount proc on
 /proc", and with it bwrap mounts its own `/proc`.
 
+Residual, named. Each change to `dockerfiles/ci-harness` leaves its
+`custom-ci-harness:<hash>` image on the `ci` user's daemon, and nothing prunes
+it. Remove stale tags as that user with `docker image rm`. The job's
+`after_script` removes its sibling containers when a job is cancelled, which
+relies on the runner running `after_script` for a cancelled job (GitLab 17.0
+and later).
+
 Where AppArmor is not loaded, `apparmor:unconfined` changes nothing; it keeps
 bwrap's and BuildKit's mounts working on a host where AppArmor is loaded. The
 `ci` and `deploy` values match what the live runners were set to by hand on

@@ -18,6 +18,8 @@
 #     sha256 (GIT_SHA256). trixie ships git 2.47, which has no `git hook list`;
 #     check-hooks-registered, agent-stash-guard and gh-athena need it.
 #   - gems beyond Ruby's defaults are installed at exact versions (GEMS).
+#     rubygems.org never republishes a version, but nothing here checks a gem
+#     checksum, and a yanked version fails the build.
 #   - nothing is read from CI variables; no credential is used or needed.
 #
 # To bump: change SNAPSHOT, re-resolve each version with
@@ -157,18 +159,26 @@ ln -sf "$(command -v ruby)" /usr/bin/ruby
 # Gems newer than Ruby's bundled defaults, each at an exact version. Ruby
 # 3.4.10 bundles json 2.9.1, which has no allow_duplicate_key; forge_wire
 # needs it (DND-2025). The owner's machine runs json 2.19.4. The build needs
-# make and gcc from PACKAGES (json has a C extension).
+# make and gcc from PACKAGES (json has a C extension). They go into Ruby's own
+# gem dir, not the image's GEM_HOME, so a caller that clears the environment
+# (tool-sandbox's --clearenv, `env -i` suites) loads the same version.
 GEMS=(
   json:2.19.4
 )
-gem install --no-document "${GEMS[@]}"
+gem install --no-document --install-dir "$(ruby -e 'print Gem.default_dir')" "${GEMS[@]}"
 json_want="$(printf '%s\n' "${GEMS[@]}" | sed -n 's/^json://p')"
-json_version="$(ruby -rjson -e 'print JSON::VERSION')"
-[ -n "${json_want}" ] && [ "${json_version}" = "${json_want}" ] || {
-  echo "setup.sh: require \"json\" loads json ${json_version}, not the pinned ${json_want:-<none in GEMS>}" >&2
-  echo "  Fix: keep json pinned in GEMS; a default gem shadowing it means the gem install did not take." >&2
-  exit 1
-}
+for json_env in "with the image env" "with a cleared env"; do
+  if [ "${json_env}" = "with the image env" ]; then
+    json_version="$(ruby -rjson -e 'print JSON::VERSION')"
+  else
+    json_version="$(env -i /usr/bin/ruby -rjson -e 'print JSON::VERSION')"
+  fi
+  [ -n "${json_want}" ] && [ "${json_version}" = "${json_want}" ] || {
+    echo "setup.sh: require \"json\" ${json_env} loads json ${json_version}, not the pinned ${json_want:-<none in GEMS>}" >&2
+    echo "  Fix: keep json pinned in GEMS and installed into Gem.default_dir; a default gem shadowing it means the gem install did not take." >&2
+    exit 1
+  }
+done
 
 # The non-root user the gate runs as.
 id ci >/dev/null 2>&1 || useradd --create-home --shell /bin/bash ci

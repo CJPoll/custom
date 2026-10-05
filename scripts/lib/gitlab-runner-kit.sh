@@ -134,8 +134,9 @@ grk_role_gets_db_tmpfs() { [ "${1-}" = "ci" ]; }
 #               tool-sandbox runs bwrap --unshare-all ... in ci jobs: Docker's
 #               default seccomp refuses the user namespace. /proc stays masked
 #               in the job container; the gate runs in a sibling container with
-#               an unmasked /proc instead (DND-2085, .gitlab-ci.yml). Every value must be API-valid: systempaths=unconfined
-#               is a docker CLI flag the Engine API rejects ("invalid
+#               an unmasked /proc instead (DND-2085, .gitlab-ci.yml). Every
+#               value must be API-valid: systempaths=unconfined is a docker
+#               CLI flag the Engine API rejects ("invalid
 #               --security-opt 2"), and it stopped every ci job (DND-2039).
 #               Residual: seccomp:unconfined lifts Docker's whole
 #               default filter for ci job code (user namespaces and /proc
