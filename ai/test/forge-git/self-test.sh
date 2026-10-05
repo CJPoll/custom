@@ -451,7 +451,6 @@ cat > "${ALLOW}" <<'EOF'
 ai/bin/harness-gate	git.call("-C", root, "fetch", "-q", "origin")	self-test fixture: fetches a local bare origin it built
 ai/bin/harness-gate	git.call("-C", fixture, "fetch", "-q", "origin")	self-test fixture: fetches a local bare origin it built
 ai/bin/tool-propose	["git", "-C", "/repo", "fetch"]	a deny-list test vector; never run
-ai/bin/forge-push	ls-remote --get-url	--get-url only expands the URL by config (insteadOf) and reaches no remote
 scripts/athena-shipwright-run.sh	timeout 120 git -C "${dir}" fetch --quiet origin main ;;	the local-path branch of athena_fetch_origin_main; forge URLs route above it (scripts/test/runner-fetch-route)
 scripts/athena-leadtime-run.sh	timeout 120 git -C "${dir}" fetch --quiet origin main ;;	the local-path branch of athena_fetch_origin_main; forge URLs route above it (scripts/test/runner-fetch-route)
 scripts/mr-review	git fetch origin || {	the owner's interactive review tool; no agent runs it
