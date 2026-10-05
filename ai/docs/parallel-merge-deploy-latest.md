@@ -89,7 +89,8 @@ The lander, per gated head H:
    `gmg_line_check` (the tip's pipelines and content); custom reads the
    `main-health` marker. Never wire `gmg_line_check` for custom: with no
    `main` pipeline (*D5*) it reads every custom tip as COULD NOT LOOK and
-   refuses every landing.
+   refuses every landing. What counts as a fix while the tip is red is
+   DND-2061's rule (*D7*), never "H contains the red SHA".
 5. Make M with `git commit-tree <tree> -p B -p H`. When B is an ancestor of
    H, M is H itself and the push is a fast-forward of the reviewed head.
 6. Push `M:main` through `glab-athena git push`, never forced.
@@ -235,6 +236,41 @@ This holds only if gen_saas lands through D1. A gen_saas merge through
 is when GitLab runs it. A collision could then land and be caught only after
 it landed, which is weaker than `locked-merge`'s prevention. Q4.
 
+A collision is the one non-textual refusal this design keeps. Fixing it means
+renumbering the branch's migration, a new commit and a new pipeline. That is
+a change to the branch's own content, never a requirement to build on the
+current `main`.
+
+### D7. A branch is mergeable on the base it was built on
+
+Owner, Cody, coordinator terminal, 2026-10-05 ~08:27Z and ~08:28Z (relayed
+verbatim by the admiral): "I do NOT want to require a rebase on each merge;
+that's the point of the parallel merges. Running CI repeatedly just for that
+reason is a big time slowdown." "Specifically, I don't want a branch to have
+to be built on latest main to be mergeable. That's the point of parallel
+merges."
+
+So a head H on any earlier `main`, with a green pipeline on H, a critic PASS
+and integration-gate's receipt, lands as it stands, on custom and gen_saas.
+Nothing requires H to equal, contain, or be rebased onto the current tip, or
+to contain a red SHA. The only refusals are a textual conflict and the
+migration collision (*D6*). D1 already lands this way: M = merge(B, H) is
+built at landing time, and H is never rewritten, so its pipeline never
+re-runs.
+
+Every site that forces a branch onto the latest `main`, as of 2026-10-05:
+
+| Site | What it forces | Replaced by |
+|---|---|---|
+| `integration-gate` (`--help`: "Asserts that HEAD contains the current target ref"; exit 2 "branch behind target") | H must contain `origin/main` to be gated | T11: gate H as it stands. Record the receipt base as `merge-base(H, origin/main)`, an ancestor of the tip, which every receipt reader accepts (DND-1463). Refuse only a textual conflict, read by `git merge-tree` of H into the target. |
+| `integration-gate --rebase`, prescribed in `athena:dispatch-captain`, `athena:shipwright-lane`, `athena:lead-time-improve`, `ai/bin/leadtime-product` and `~/dev/custom/CLAUDE.md` | the branch is rewritten onto the tip, so its MR pipeline must re-run | T11 makes the flag unnecessary; T9 sweeps those briefs to the plain call. The flag stays for a deliberate rebase only. |
+| `athena:merge-boarding` → *The merge bar* → the no-CI landing, steps 2-4 (rebase H onto `origin/main`, ff push) | custom lands only a head rebased onto the tip | *D1*: push M = merge(B, H). A merge commit, never a rebase. |
+| `athena:merge-boarding` → *Merge one at a time* ("merge `origin/<base>` into a published PR branch … and re-gate") | a forward-merge after any conflict | Kept only for a textual conflict and the migration collision. A moved `main` alone needs nothing. |
+| `locked-merge` exit 11, the `gh-athena` and `glab-athena` merge guards' red-tip judgment, and its "red-main fix" exception (the head must contain the red tip) | while `main` is red, only a head containing the red SHA lands | DND-2061 (dispatched 2026-10-05) changes `glmg_tip_gate` and its gh twin. This design takes that rule as given and does not restate it. |
+| `forge-git-passthrough.sh` → *Red-main refusal* (custom's `main-health` marker: a push to `main` while red needs a head that contains the red SHA and a receipt on exactly the pushed commit) | the same, on the push path D1 uses | T12: apply DND-2061's rule to the push path, unless DND-2061 already covers it. Under D1, M always contains B, so containment of the red SHA no longer says anything about H. |
+| `locked-merge` and the readers in `ai/lib/integration-receipt.sh` | a receipt base that is an ancestor of the tip, contained in H | No change: that is H's own base, not the tip. |
+| `scripts/wt-preflight` (a new branch descends from `origin/main`) | only at creation | No change: it is not a merge requirement. |
+
 ### gen_saas: constraints on its pipeline
 
 The laptop session owns gen_saas's `.gitlab-ci.yml`. The harness needs:
@@ -299,6 +335,8 @@ gates the branch on top of the current `main`.
 | T8 | GitLab: `only_allow_merge_if_pipeline_succeeds` true on custom and gen_saas | Ops | MEDIUM | none (project settings) | Only Cody can run: `glab api -X PUT projects/athena-ai-harness%2Fcustom -f only_allow_merge_if_pipeline_succeeds=true`, the same for gen_saas. Verify by reading the field back. Developer push to `main` stays allowed (D1 needs it). |
 | T9 | Doctrine sweep: lock-free landing, deploy latest (lands after the 2026-10-05 owner-hold narrowing, which also edits `athena:merge-boarding`) | Docs | MEDIUM | `athena:merge-boarding` (*The merge bar* no-CI landing, *Merge one at a time*, *Landing onto a moving main*, *GitLab path (no merge train)*), `~/dev/custom/CLAUDE.md` (*An admiral merges that PR*, *Two fleets in one repo*), `athena:gitlab`, `athena:shipwright-lane` (cron push: push the branch, wait for its pipeline, then land), `ai/docs/lead-time-improver.md`, `ai/telemetry/events.json` (`merge.lock_wait`) | `grep` for `custom-merge.lock`, `locked-merge --mr`, `one at a time` and `Hold the lock` returns only `Later` labels and GitHub-scoped text. The epic's open ticket bodies (DND-1947 included) are swept too, with an inline pointer where a captain acts (*A supersession sweeps the tickets*). Lands with or right after T5. |
 | T10 | Retire `locked-merge --mr` | Refactor | LOW | `scripts/locked-merge`, its GitLab suite | `--mr` exits 2 with `Fix:` naming `land-merge`. After T5 has landed live at least once on each GitLab project. |
+| T11 | integration-gate gates a head on its own base (*D7*) | Feature | HIGH | `ai/skills/athena:merge-boarding/scripts/integration-gate`, `ai/lib/integration-receipt.sh`, `ai/skills/athena:merge-boarding/test/` | A head behind `origin/main` with no conflict: gated, receipt base = `merge-base`, `INTEGRATION OK` (exit 2 before the change). A head that conflicts textually with the tip: refused, naming the paths. Every receipt reader (`locked-merge`, both merge guards, the push guard) accepts that receipt. Ship it before T5 so the lander has receipts to land. |
+| T12 | Red-main push refusal follows DND-2061's rule | Bug | HIGH | `ai/lib/forge-git-passthrough.sh` (*Red-main refusal*), `ai/lib/main-health.sh`, `ai/test/gh-athena/` | Only if DND-2061 does not cover the push path. While the marker reads RED, a push of M = merge(B, H) is judged by DND-2061's rule, not by M containing the red SHA. Cases per that rule. Depends on DND-2061. |
 
 The gen_saas pipeline changes (*gen_saas: constraints on its pipeline*) are
 the laptop session's tickets, not this list's.
