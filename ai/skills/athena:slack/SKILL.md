@@ -29,6 +29,11 @@ scripts.** The plugin also has `search.messages`, which a bot token can never
 call — Slack restricts search to user tokens — so keyword search across the
 workspace stays a plugin job.
 
+`ai/hooks/slack-plugin-write-guard.sh` enforces this (DND-2043). It denies
+every plugin tool that is not a read (send, schedule, draft, react, canvas,
+list, conversation, upload) to every subagent and every session with no
+person at it. Only an attended top-level session may still write as Cody.
+
 `bin/whoami` settles which identity a token actually is. Run it first when
 anything is confusing.
 

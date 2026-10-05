@@ -1166,3 +1166,30 @@ The canary reads usage under LC_ALL=C. After: `RESULT: 429 passed, 0 failed`.
 | S-1898-18 | no walk across a substitution in a value or operand slot | WO50 |
 | S-1898-19 | the malformed-table fault does not name the table | F17 |
 | S-1898-20 | wwalk does not take `SB` (an empty global; the critic's finding) | WO50c |
+
+## 2026-10-05 — DND-2043, slack-plugin-write-guard: the Slack plugin's write tools
+
+- **Domain:** the PreToolUse guard that denies the Slack plugin's write tools
+  (the owner's OAuth user token) to every subagent and unattended session.
+- **Code under test:** `ai/hooks/slack-plugin-write-guard.sh`,
+  `ai/lib/slack_plugin_write.rb`, `ai/lib/slack_plugin_write_io.rb`, and the
+  guard's row in `ai/hooks/registry.json`.
+- **Suite run:** `ai/hooks/slack-plugin-write-guard.self-test.sh`, each
+  mutation applied to a scratch copy of `ai/` passed as `SPW_SRC` (never the
+  worktree).
+- **Regression evidence:** the same suite with `SPW_SRC` set to `ai/` from
+  origin/main `58631601`: exit 1, 1 passed, 54 failed, first line
+  `FAIL - registry: a PreToolUse row denies a subagent's
+  mcp__plugin_slack_slack__slack_send_message: no registered PreToolUse hook
+  denied it (deniers: ''); the write is ALLOWED`. With the fix: 58 passed,
+  0 failed.
+
+| id | Mutation | Observed failure |
+|---|---|---|
+| S-2043-1 | attended test `&&` becomes `\|\|` (top level alone allows) | every "subagent (attended parent): <write> denied" case, headless, half and no-mode cases |
+| S-2043-2 | `slack_send_message` added to READ_TOOLS | registry case, "subagent: slack_send_message denied", the headless, half and no-mode send cases |
+| S-2043-3 | unparseable stdin parsed as `nil` instead of a fault | survives (equivalent: `decide` denies a payload that is not a Hash, with Fix:) |
+| S-2043-4 | the shell prints nothing when the checker exits non-zero | "checker exits before deciding" |
+| S-2043-5 | the guard's registry row deleted | "registry: a PreToolUse row denies ...", "registry: the guard has a PreToolUse row" |
+| S-2043-6 | scope narrowed to `mcp__plugin_slack_slack__` only | "the same Slack server through another plugin", "a claude.ai Slack connector write" |
+| S-2043-7 | the deny reason loses its Fix: | every deny case (a deny without Fix: fails `has_fix`) |

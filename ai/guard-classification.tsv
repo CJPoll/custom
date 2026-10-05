@@ -380,6 +380,9 @@ ai/lib/machine_secrets.rb	library	pure rules required by ai/bin/check-machine-se
 ai/lib/machine_secrets_host.rb	library	env, filesystem, /proc and git adapter required by ai/bin/check-machine-secrets and ai/bin/with-secret (DND-845); returns states and reasons, and the callers print the Fix:
 ai/lib/merge_role.rb	library	pure merge-class and role rules required by ai/lib/merge_role_io.rb for ai/hooks/merge-role-guard.sh (DND-726); no I/O; its deny_reason text carries the Fix: the hook prints
 ai/lib/merge_role_io.rb	library	the git-fact, deny-log and payload side of ai/hooks/merge-role-guard.sh and its manager (DND-726), run by that hook; it prints the deny whose reason carries Fix:, and fails open (prints nothing) on input it cannot evaluate
+ai/hooks/slack-plugin-write-guard.sh	guard
+ai/lib/slack_plugin_write.rb	library	pure tool-scope, read-list and caller rules required by ai/lib/slack_plugin_write_io.rb for ai/hooks/slack-plugin-write-guard.sh (DND-2043); no I/O; its deny and fault reasons carry the Fix: the hook prints
+ai/lib/slack_plugin_write_io.rb	library	the payload, session-mode and deny-log side of ai/hooks/slack-plugin-write-guard.sh and its manager (DND-2043), run by that hook; every outcome but an allow prints a deny whose reason carries Fix: (fail closed)
 ai/lib/outbound_scan.rb	guard
 ai/lib/outbound_scan_sources.rb	library	git/overlay/file adapter required by ai/bin/outbound-scan (DND-699); raises OutboundScan::Unmeasurable naming the reason, and the bin prints the exit-3 COULD NOT MEASURE line that carries Fix:
 ai/lib/gh-outbound-scan.sh	guard

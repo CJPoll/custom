@@ -186,6 +186,10 @@ STATIC_CHECKS = [
   # merges or lands. Fixture repos under a fake HOME; reads command text and
   # git state only, merges and pushes nothing.
   ["merge-role-guard self-test", %w[ai/hooks/merge-role-guard.self-test.sh]],
+  # slack-plugin-write-guard (DND-2043): the PreToolUse guard that keeps agent
+  # sessions off the Slack plugin's write tools (the owner's user token).
+  # Payload text only; calls no Slack tool.
+  ["slack-plugin-write-guard self-test", %w[ai/hooks/slack-plugin-write-guard.self-test.sh]],
   # secret-env-warn (DND-845): the SessionStart per-machine-secrets warning. Only
   # its SELF-TEST is gated here; the check it runs (check-machine-secrets) and
   # its registry row join at the migration's final step (contract -> Rollout).
