@@ -81,7 +81,9 @@ module OwnerMessage
   # Matched against ASCII-folded text, never with Regexp /i (which folds
   # non-ASCII letters too).
   HOLD_WORD_RE = /\A[ \t]*(?:hold|reject|deny|decline|block|stop|cancel|wait|no|nope|dont|don't|do not|revoke|undo|abort|pause)\b/.freeze
-  ANY_PR_RE = %r{#[0-9]|/pull/[0-9]|/-/merge_requests/[0-9]}.freeze
+  # Every form mentions_pr? reads as naming a PR: #<n>, !<n> (a GitLab MR),
+  # pull/<n> and merge_requests/<n>, with or without a slug in front.
+  ANY_PR_RE = %r{[#!][0-9]|(?<![a-z0-9_])(?:pull|merge_requests)/[0-9]}.freeze
   CHANNEL = "slack"
   DM_CHANNEL_RE = /\AD[A-Z0-9]+\z/.freeze
   CLICK_KIND = "slack.interaction"
@@ -140,16 +142,19 @@ module OwnerMessage
   end
 
   # PURE. The text mentions PR ref[:pr] of ref[:slug], ASCII case-insensitive:
-  # <slug>#<pr>, <slug>/pull/<pr>, <slug>/-/merge_requests/<pr>, a bare
-  # #<pr>, each not followed by a digit, or a 7-to-40-hex prefix of the head
-  # standing as its own word. Deliberately broad: wider only fails closed.
+  # <slug>#<pr>, a bare #<pr> or !<pr> (a GitLab MR), pull/<pr> or
+  # merge_requests/<pr> with or without a slug or URL in front, each not
+  # followed by a digit, or a 7-to-40-hex prefix of the head standing as its
+  # own word. Every form any_pr? counts is read here too, so a hold naming
+  # this PR never falls between R2 and R3. Deliberately broad: wider only
+  # fails closed.
   def mentions_pr?(text, ref)
     t = fold(text)
     slug = Regexp.escape(fold(ref[:slug]))
     pr = Integer(ref[:pr])
     return true if Regexp.new("(?<![a-z0-9_./-])#{slug}##{pr}(?![0-9])").match?(t)
-    return true if Regexp.new("#{slug}/(?:pull|-/merge_requests)/#{pr}(?![0-9])").match?(t)
-    return true if Regexp.new("##{pr}(?![0-9])").match?(t)
+    return true if Regexp.new("(?<![a-z0-9_])(?:pull|merge_requests)/#{pr}(?![0-9])").match?(t)
+    return true if Regexp.new("[#!]#{pr}(?![0-9])").match?(t)
 
     sha = ref[:sha].to_s
     t.scan(/(?<![0-9a-z_])[0-9a-f]{7,40}(?![0-9a-z_])/).any? { |hex| sha.start_with?(hex) }
@@ -160,9 +165,10 @@ module OwnerMessage
     ANY_PR_RE.match?(fold(text))
   end
 
-  # PURE. The text starts with a hold word.
+  # PURE. The text starts with a hold word. Slack's own clients may turn
+  # don't into don\u2019t, so a curly apostrophe reads as a straight one.
   def hold_word?(text)
-    HOLD_WORD_RE.match?(fold(text))
+    HOLD_WORD_RE.match?(fold(text).tr("\u2018\u2019", "''"))
   end
 
   def click?(line)
