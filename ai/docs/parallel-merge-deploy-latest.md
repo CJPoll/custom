@@ -28,7 +28,7 @@ Scope: the harness side in `~/dev/custom`, GitLab only. gen_saas's own
 `.gitlab-ci.yml` is the laptop session's. This document lists only the
 constraints the harness puts on it (*gen_saas: constraints on its pipeline*).
 
-## What serializes merges today
+## What serializes merges (as of 2026-10-05)
 
 | # | Mechanism | Where | Effect |
 |---|---|---|---|
@@ -47,7 +47,7 @@ check-then-merge safe, because neither forge call takes a precondition on the
 target's current SHA. `glab mr merge` and the merge API merge onto whatever
 `main` is when GitLab runs them.
 
-## What runs after a merge today
+## What runs after a merge (as of 2026-10-05)
 
 - **custom's `.gitlab-ci.yml` re-runs the full gate on `main`.** Its workflow
   rules run a branch pipeline for every branch with no open MR, "main
@@ -64,7 +64,7 @@ target's current SHA. `glab mr merge` and the merge API merge onto whatever
   `only_allow_merge_if_pipeline_succeeds` false, no merge trains,
   `auto_cancel_pending_pipelines` enabled, `ci_forward_deployment_enabled`
   true, visibility private. The pipeline list was empty at that time.
-- **custom's MR pipeline is not green yet.** DND-1946's header says so (13 of
+- **custom's MR pipeline was not green on 2026-10-05.** DND-1946's header says so (13 of
   194 checks failed in the image), DND-1998 is reopened, and DND-2039 fixed
   the runner kit on 2026-10-05. Goal 1 cannot bind custom's landings until
   that pipeline passes on a healthy head (T1).
@@ -82,21 +82,25 @@ The lander, per gated head H:
 
 1. Fetch. B = `origin/main`.
 2. Compute the tree `git merge-tree --write-tree B H`. A textual conflict is
-   refused (exit 3, as today).
+   refused (exit 3, as in `locked-merge`).
 3. Read that tree against `ai/config/main-content-checks.json`. A duplicated
-   migration version is a `SEMANTIC CONFLICT` (exit 3, as today).
-4. Run the red-tip judgment on B (`gmg_line_check`, *D2*).
+   migration version is a `SEMANTIC CONFLICT` (exit 3, as in `locked-merge`).
+4. Run the red-tip judgment on B, split by repo (*D2*): gen_saas reads
+   `gmg_line_check` (the tip's pipelines and content); custom reads the
+   `main-health` marker. Never wire `gmg_line_check` for custom: with no
+   `main` pipeline (*D5*) it reads every custom tip as COULD NOT LOOK and
+   refuses every landing.
 5. Make M with `git commit-tree <tree> -p B -p H`. When B is an ancestor of
    H, M is H itself and the push is a fast-forward of the reviewed head.
 6. Push `M:main` through `glab-athena git push`, never forced.
 7. A rejected non-fast-forward means another landing won. Go back to step 1:
    fetch, recompute, re-check, retry. Bounded: 5 attempts, then exit 6 with a
    `Fix:`. A clean recompute needs no re-gate (DND-1463 stands). A conflict
-   on the recompute is exit 3, as today.
+   on the recompute is exit 3, as in `locked-merge`.
 8. `confirm-merged --mr <iid>`. GitLab marks an MR merged when its head
    reaches the target, and H is a parent of M.
 
-What this keeps, against `locked-merge` today:
+What this keeps, against `locked-merge` as of 2026-10-05:
 
 | Guarantee | `locked-merge` | CAS lander |
 |---|---|---|
@@ -111,7 +115,7 @@ Exit 7, `LANDED UNGATED`, cannot happen on this path. Cross-machine landings
 are covered too, which the flock never covered (*Landing onto a moving main*
 → *Across machines*).
 
-**Why a merge commit, not a rebase.** custom lands today by a clean rebase
+**Why a merge commit, not a rebase.** Before T5, custom lands by a clean rebase
 and a fast-forward push. A rebase makes new SHAs. No pipeline ever ran on
 them, and the MR never reads merged. A merge commit keeps H in `main`'s
 history, so:
@@ -144,7 +148,7 @@ carries:
    and refused. The reader is the one `glmg_check_head` uses;
 3. the red-tip judgment on B passes: `gmg_line_check` (the tip's pipelines
    and content) for gen_saas, and the `main-health` marker for custom, as
-   today.
+   the push guard reads them as of 2026-10-05.
 
 Set `only_allow_merge_if_pipeline_succeeds` true on both projects, so a merge
 through GitLab's own UI or API also needs a green pipeline. That tightens a
@@ -223,7 +227,7 @@ serializes. The guarantee is the same as `locked-merge`'s, without the lock.
 This holds only if gen_saas lands through D1. A gen_saas merge through
 `glab-athena mr merge` with no lock would check B and land on whatever `main`
 is when GitLab runs it. A collision could then land and be caught only after
-it landed, which is weaker than today. Q4.
+it landed, which is weaker than `locked-merge`'s prevention. Q4.
 
 ### gen_saas: constraints on its pipeline
 
@@ -259,7 +263,7 @@ The laptop session owns gen_saas's `.gitlab-ci.yml`. The harness needs:
   push, roles only on gitlab.com Free), and
   `only_allow_merge_if_pipeline_succeeds` for UI and API merges.
 - **Forks:** a pipeline from another project never counts. A fork MR is
-  refused, as `locked-merge --mr` refuses it today.
+  refused, as `locked-merge --mr` refuses it.
 - **The new tools are held surfaces.** The lander decides a merge, so it
   belongs in `ai/blast-radius/surfaces.json`'s owner-approval-policy hold
   with the merge and push guards (`athena:merge-boarding` → *The receipt
@@ -279,12 +283,12 @@ gates the branch on top of the current `main`.
 | # | Title | Kind | Severity | Files | What proves it |
 |---|---|---|---|---|---|
 | T1 | custom's MR pipeline passes in the CI image (DND-1998, reopened) | Bug | HIGH | `.gitlab-ci.yml`, the runner kit | A pipeline on a healthy custom head reads `success`, 199/199. Prerequisite for T3 on custom. |
-| T2 | custom CI: no pipeline on `main` (goal 4) | Ops | MEDIUM | `.gitlab-ci.yml`, `ai/test/gitlab-ci/self-test.sh`, `ai/test/gitlab-ci/check.rb` | Self-test case: the default-branch rule exists and comes before the branch rule (fails on today's file). Live: after a landing, `pipelines?sha=<tip>&ref=main` lists none. `.gitlab-ci.yml` is in `deploy-automation`, so integration-gate exits 4. Land it before the flip (DND-1947), so no custom landing is ever measured on a `main` pipeline. |
+| T2 | custom CI: no pipeline on `main` (goal 4) | Ops | MEDIUM | `.gitlab-ci.yml`, `ai/test/gitlab-ci/self-test.sh`, `ai/test/gitlab-ci/check.rb` | Self-test case: the default-branch rule exists and comes before the branch rule (fails on the file as of 2026-10-05). Live: after a landing, `pipelines?sha=<tip>&ref=main` lists none. `.gitlab-ci.yml` is in `deploy-automation`, so integration-gate exits 4. Land it before the flip (DND-1947), so no custom landing is ever measured on a `main` pipeline. |
 | T3 | Push guard: a push to `main` on GitLab needs a `success` pipeline on the gated head H | Feature (merge-bar control) | HIGH | `ai/lib/forge-git-passthrough.sh`, `ai/lib/glab-merge-guard.sh` (shared pipeline reader), `ai/test/glab-athena-*` | Cases: H with no pipeline, `running`, `failed`, a fork's pipeline, an unreadable read: each refused with `Fix:`. `success` on H: passes. M = merge(B, H): H read as M's second parent. Sabotage record in the suite's `SABOTAGE_RECORDS.md`. Depends on T1. |
 | T4 | Audit readers of a linear `main` before merge commits land | Refactor | MEDIUM | `scripts/lib/lane-own-commits.sh`, `ai/bin/lead-time` (patch-id landing match), `ai/bin/confirm-merged --sha`, `ai/bin/landing-installers` | Each reader gets a fixture with a merge commit M(B, H) and keeps its verdict. A reader that cannot is fixed in this ticket. |
 | T5 | CAS lander: `scripts/land-merge` in `athena:merge-boarding`, no lock | Feature | HIGH | new `ai/skills/athena:merge-boarding/scripts/land-merge`, its `test/`, `ai/lib/merge_role.rb`, `ai/blast-radius/surfaces.json` | Self-test on a local bare origin. A race injected through a test seam between compute and push: the loser retries and lands. A race that brings in a duplicate migration version: refused `SEMANTIC CONFLICT` on retry. Textual conflict: exit 3. Retries exhausted: exit 6 with `Fix:`. Tree and parent of what landed equal what was checked. merge-role-guard denies a non-admiral. No load, no wall-clock thresholds (DND-1222). Depends on T3, T4. |
 | T6 | `deploy-latest`: coalescing post-landing deploy for custom | Feature | MEDIUM | new `ai/bin/deploy-latest`, `ai/bin/landing-installers`, `ai/guard-classification.tsv` | Two landings, one run: installs the union range once and writes the marker. A second caller while the lock is held exits 0 and names the holder. The holder loops when the tip moves (seam). A missing marker is an error with `Fix:`. |
-| T7 | Lead time under deploy latest and lock-free landing | Bug | MEDIUM | `ai/bin/lead-time`, `ai/lib/lead_time_phases.rb`, `ai/config/lead-time-series-breaks.json` | A ticket whose own deploy was superseded ends at the first successful deploy whose SHA contains its landing commit (today a canceled or failed deploy ends nothing, so a coalesced ticket never ends). A series-break row at the first lock-free landing (`athena:lead-time-improve` → *Declaring a series break*). |
+| T7 | Lead time under deploy latest and lock-free landing | Bug | MEDIUM | `ai/bin/lead-time`, `ai/lib/lead_time_phases.rb`, `ai/config/lead-time-series-breaks.json` | A ticket whose own deploy was superseded ends at the first successful deploy whose SHA contains its landing commit (as of 2026-10-05 a canceled or failed deploy ends nothing, so a coalesced ticket never ends). A series-break row at the first lock-free landing (`athena:lead-time-improve` → *Declaring a series break*). |
 | T8 | GitLab: `only_allow_merge_if_pipeline_succeeds` true on custom and gen_saas | Ops | MEDIUM | none (project settings) | Only Cody can run: `glab api -X PUT projects/athena-ai-harness%2Fcustom -f only_allow_merge_if_pipeline_succeeds=true`, the same for gen_saas. Verify by reading the field back. Developer push to `main` stays allowed (D1 needs it). |
 | T9 | Doctrine sweep: lock-free landing, deploy latest | Docs | MEDIUM | `athena:merge-boarding` (*The merge bar* no-CI landing, *Merge one at a time*, *Landing onto a moving main*, *GitLab path (no merge train)*), `~/dev/custom/CLAUDE.md` (*An admiral merges that PR*, *Two fleets in one repo*), `athena:gitlab`, `athena:shipwright-lane` (cron push: push the branch, wait for its pipeline, then land), `ai/docs/lead-time-improver.md`, `ai/telemetry/events.json` (`merge.lock_wait`) | `grep` for `custom-merge.lock`, `locked-merge --mr`, `one at a time` and `Hold the lock` returns only `Later` labels and GitHub-scoped text. The epic's open ticket bodies (DND-1947 included) are swept too, with an inline pointer where a captain acts (*A supersession sweeps the tickets*). Lands with or right after T5. |
 | T10 | Retire `locked-merge --mr` | Refactor | LOW | `scripts/locked-merge`, its GitLab suite | `--mr` exits 2 with `Fix:` naming `land-merge`. After T5 has landed live at least once on each GitLab project. |
