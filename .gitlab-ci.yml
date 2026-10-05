@@ -86,7 +86,10 @@ harness-gate:
     # tenant, and the CI container is not one (check-inbox-registry; DND-1998).
     - docker run --rm --name "custom-prep-$CI_JOB_ID" --user 0 -v "$CI_PROJECT_DIR:$CI_PROJECT_DIR" -w "$CI_PROJECT_DIR" "$CI_HARNESS_IMAGE" chown -R ci:ci "$CI_PROJECT_DIR"
     # The gate. It never gets the socket. --init reaps the orphans suites leave.
-    - docker run --rm --init --name "custom-gate-$CI_JOB_ID" --user ci --security-opt seccomp=unconfined --security-opt apparmor=unconfined --security-opt systempaths=unconfined -v "$CI_PROJECT_DIR:$CI_PROJECT_DIR" -w "$CI_PROJECT_DIR" "$CI_HARNESS_IMAGE" ai/bin/harness-gate
+    # Its one variable is CI_JOB_TOKEN, passed by name: the runner's git
+    # credential helper reads it, and the landed-bar checks read origin (the
+    # gate held it in the job container before, too).
+    - docker run --rm --init --name "custom-gate-$CI_JOB_ID" --user ci -e CI_JOB_TOKEN --security-opt seccomp=unconfined --security-opt apparmor=unconfined --security-opt systempaths=unconfined -v "$CI_PROJECT_DIR:$CI_PROJECT_DIR" -w "$CI_PROJECT_DIR" "$CI_HARNESS_IMAGE" ai/bin/harness-gate
   after_script:
     # A cancelled job leaves no sibling behind.
     - docker rm -f "custom-probe-$CI_JOB_ID" "custom-prep-$CI_JOB_ID" "custom-gate-$CI_JOB_ID" >/dev/null 2>&1 || true

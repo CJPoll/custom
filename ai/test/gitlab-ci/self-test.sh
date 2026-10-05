@@ -112,7 +112,11 @@ mutate "gate renamed fails"                    "custom-gate"       "${GATE}"'s/c
 mutate "gate not --rm fails"                   "--rm"              "${GATE}"'s/--rm --init/--init/'
 mutate "gate other image fails"                "built image"       "${GATE}"'s/"\$CI_HARNESS_IMAGE" ai/ruby:3 ai/'
 mutate "gate checkout not bound fails"         "-v"                "${GATE}"'s#-v "$CI_PROJECT_DIR:$CI_PROJECT_DIR"#-v "$CI_PROJECT_DIR:/src"#'
-mutate "prep --privileged fails"               "--privileged"      '/custom-prep/s/--user 0/--user 0 --privileged/'
+mutate "gate gets the whole job env fails"     "-e"                "${GATE}"'s/--rm --init/--rm --env-file \/tmp\/env --init/'
+mutate "gate gets another variable fails"      "-e"                "${GATE}"'s/-e CI_JOB_TOKEN/-e CI_JOB_TOKEN -e CI_REGISTRY_PASSWORD/'
+mutate "gate token given a literal value fails" "-e"               "${GATE}"'s/-e CI_JOB_TOKEN/-e CI_JOB_TOKEN=x/'
+mutate "probe gets the token fails"            "-e"                "${PROBE}"'s/--user 0/--user 0 -e CI_JOB_TOKEN/'
+mutate "prep --privileged fails"              "--privileged"      '/custom-prep/s/--user 0/--user 0 --privileged/'
 mutate "probe --pid=host fails"                "--pid=host"        "${PROBE}"'s/--user 0/--user 0 --pid=host/'
 mutate "probe removed fails"                   "boundary probe"    "${PROBE}d"
 mutate "probe as ci fails"                     "--user 0"          "${PROBE}"'s/--user 0/--user ci/'
@@ -146,6 +150,10 @@ mutate_in setup "extra unpinned package fails"   "exactly"             's/"\${PA
 mutate_in setup "glob version fails"             "name=exact-version"  's/^  jq=.*/  jq=1.7*/'
 mutate_in setup "snapshot reassigned fails"      "exactly once"        's/^\(SNAPSHOT=.*\)$/\1\nSNAPSHOT=latest/'
 mutate_in setup "checksum reassigned fails"      "exactly once"        's/^\(GIT_SHA256=.*\)$/\1\nGIT_SHA256=$(curl -s x)/'
+mutate_in setup "unpinned gem fails"             "name:exact-version"  's/^  json:.*/  json/'
+mutate_in setup "gems reassigned fails"          "exactly once"        's/^\(GEMS=(\)$/GEMS=()\n\1/'
+mutate_in setup "extra unpinned gem fails"       "\"\${GEMS[@]}\""     's/"\${GEMS\[@\]}"$/"${GEMS[@]}" rake/'
+mutate_in setup "gem install dropped fails"      "\"\${GEMS[@]}\""     's/^gem install .*/true/'
 
 # A missing image file is an error, not a pass.
 out="$(/usr/bin/ruby "${CHECK}" "${CI_FILE}" "${TMP}/absent.Dockerfile" "${SETUP}" 2>&1)"

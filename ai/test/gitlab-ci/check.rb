@@ -159,6 +159,14 @@ docker_runs.each do |w|
   end
   extra = flag_values.call(w, "--security-opt") - SECURITY_OPTS
   errors << "docker run (#{label} container): --security-opt #{extra.inspect} is not one of #{SECURITY_OPTS.inspect}" unless extra.empty?
+  # Environment: only the gate gets one variable, CI_JOB_TOKEN by name, so its
+  # git can reach origin for the landed bars. No env file, no literal value.
+  envs = flag_values.call(w, "-e") + flag_values.call(w, "--env")
+  env_file = w.any? { |x| x == "--env-file" || x.start_with?("--env-file=") }
+  allowed_env = label == "gate" ? ["CI_JOB_TOKEN"] : []
+  if env_file || !(envs - allowed_env).empty? || envs.size != envs.uniq.size
+    errors << "docker run (#{label} container): -e/--env may name only #{allowed_env.inspect} (by name, no value), and --env-file is not allowed; got #{envs.inspect}#{env_file ? ' and --env-file' : ''}"
+  end
 end
 
 # check_unmasked WORDS LABEL: the gate's three --security-opt values, each once.
@@ -247,7 +255,7 @@ end
 if File.file?(setup)
   stext = File.read(setup)
   # Each pin is assigned exactly once: a later reassignment would win.
-  %w[SNAPSHOT GIT_VERSION GIT_SHA256 PACKAGES].each do |var|
+  %w[SNAPSHOT GIT_VERSION GIT_SHA256 PACKAGES GEMS].each do |var|
     n = stext.scan(/^\s*#{var}=/).size
     errors << "setup.sh: #{var} must be assigned exactly once, got #{n}" unless n == 1
   end
@@ -268,6 +276,14 @@ if File.file?(setup)
   pkgs.reject { |p| p.match?(/\A[a-z0-9][a-z0-9.+-]*=[0-9][0-9A-Za-z.+~:-]*\z/) }.each do |p|
     errors << "setup.sh: package #{p.inspect} must be pinned as name=exact-version"
   end
+  # Gems beyond Ruby's own: each pinned, installed by exactly that list.
+  gems = stext[/^GEMS=\(\n(.*?)^\)/m, 1].to_s.lines.map(&:strip).reject { |l| l.empty? || l.start_with?("#") }
+  errors << "setup.sh: GEMS is empty" if gems.empty?
+  gems.reject { |g| g.match?(/\A[a-z0-9][a-z0-9_.-]*:\d+(\.\d+)+\z/) }.each do |g|
+    errors << "setup.sh: gem #{g.inspect} must be pinned as name:exact-version"
+  end
+  gem_lines = stext.lines.grep(/^\s*gem install\b/)
+  errors << "setup.sh: gems must be installed by exactly `gem install --no-document \"${GEMS[@]}\"` (one line, no extra gem)" unless gem_lines.size == 1 && gem_lines.first.strip == 'gem install --no-document "${GEMS[@]}"'
   errors << "setup.sh: GIT_VERSION must be an exact x.y.z release" unless stext.match?(/^GIT_VERSION=\d+\.\d+\.\d+$/)
   errors << "setup.sh: GIT_SHA256 must be the tarball's 64-hex sha256" unless stext.match?(/^GIT_SHA256=[0-9a-f]{64}$/)
   errors << "setup.sh: the git tarball must be checked with sha256sum -c against GIT_SHA256" unless stext.include?('echo "${GIT_SHA256}  ${src}/git.tar.xz" | sha256sum -c')

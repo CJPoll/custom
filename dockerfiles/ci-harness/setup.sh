@@ -17,6 +17,7 @@
 #   - git is built from the kernel.org release tarball, checked against its
 #     sha256 (GIT_SHA256). trixie ships git 2.47, which has no `git hook list`;
 #     check-hooks-registered, agent-stash-guard and gh-athena need it.
+#   - gems beyond Ruby's defaults are installed at exact versions (GEMS).
 #   - nothing is read from CI variables; no credential is used or needed.
 #
 # To bump: change SNAPSHOT, re-resolve each version with
@@ -152,6 +153,22 @@ hook_usage="$(git hook -h 2>&1 || true)"
 
 # Harness Ruby executables carry the absolute #!/usr/bin/ruby shebang.
 ln -sf "$(command -v ruby)" /usr/bin/ruby
+
+# Gems newer than Ruby's bundled defaults, each at an exact version. Ruby
+# 3.4.10 bundles json 2.9.1, which has no allow_duplicate_key; forge_wire
+# needs it (DND-2025). The owner's machine runs json 2.19.4. The build needs
+# make and gcc from PACKAGES (json has a C extension).
+GEMS=(
+  json:2.19.4
+)
+gem install --no-document "${GEMS[@]}"
+json_want="$(printf '%s\n' "${GEMS[@]}" | sed -n 's/^json://p')"
+json_version="$(ruby -rjson -e 'print JSON::VERSION')"
+[ -n "${json_want}" ] && [ "${json_version}" = "${json_want}" ] || {
+  echo "setup.sh: require \"json\" loads json ${json_version}, not the pinned ${json_want:-<none in GEMS>}" >&2
+  echo "  Fix: keep json pinned in GEMS; a default gem shadowing it means the gem install did not take." >&2
+  exit 1
+}
 
 # The non-root user the gate runs as.
 id ci >/dev/null 2>&1 || useradd --create-home --shell /bin/bash ci
