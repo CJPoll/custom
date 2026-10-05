@@ -1328,8 +1328,10 @@ fg_refuse_non_https() {
 # after a push that exits 0 the wrapper can tell whether the remote's default
 # branch moved, and record that as one `merge.landed` event (via=push, before,
 # after). A push to another forge never gets here: each wrapper pins
-# FG_ROUTE_ONLY=1, which refuses it before git runs (DND-2000), so no landing
-# probe ever reaches the other forge (agent-forge-identity R3/R3b). That is
+# FG_ROUTE_ONLY=1, which refuses it before git runs (DND-2000;
+# agent-forge-identity R3/R3b). A push URL that passes that refusal but that
+# git config rewrites again for the probe is not probed (hprobe; glab-athena
+# L7). So no landing probe reaches another forge. That is
 # how ~/dev/custom lands (athena:merge-boarding, the no-CI ff push). The event
 # is timed (DND-1501): at = when this push began, duration_s = its wall
 # through the AFTER read. The lead-time ledger reads its start as the landing
@@ -1397,27 +1399,38 @@ fg_push_and_record() {
   # not run and says why; the push still runs, with no landing record.
   # The remote name pinned is the URL itself: `ls-remote <url>` makes an
   # anonymous remote named after it, so remote.<url>.proxy is what git reads.
+  # Every probe, not only the forge's, is checked for a second rewrite: the
+  # push URL is already rewritten (pushInsteadOf), and `ls-remote <url>`
+  # applies insteadOf again, so a local push URL could send the probe to
+  # another host over ssh with the owner's key (DND-1939, glab-athena L7). A
+  # probe that is not the forge's own gets no header and may use only its
+  # own URL's protocol (file for a local repo, https otherwise).
   hprobe() (
+    local pin_lib gu
+    skip() {
+      printf '%s: the push'"'"'s ls-remote probe of %s did not run, so this push records no landing: %s\n  Fix: %s\n' \
+        "$FG_TOOL" "$purl" "$1" "$2" >&2
+      exit 1
+    }
     case "$purl" in "https://$FG_HOST/"*)
-      local pin_lib gu
       pin_lib="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/forge-http-pin.sh"
-      skip() {
-        printf '%s: the push'"'"'s ls-remote probe of %s did not run, so this push records no landing: %s\n  Fix: %s\n' \
-          "$FG_TOOL" "$purl" "$1" "$2" >&2
-        exit 1
-      }
       # shellcheck source=forge-http-pin.sh
       . "$pin_lib" 2>/dev/null || skip "its network-settings library ($pin_lib) did not load." \
         "check that ai/lib/forge-http-pin.sh exists in this checkout."
       fg_http_pin_args "$purl" "$purl"
-      probe+=( "${FG_HTTP_ARGS[@]}" )
-      gu="$(fg_probe "${probe[@]}" ls-remote --get-url "$purl")"
-      [ "$gu" = "$purl" ] || skip "git config rewrites it to '${gu}' (a url.<base>.insteadOf rule), which the pinned TLS and proxy settings do not cover." \
-        "drop the url.<base>.insteadOf rule that matches $purl from the command's -c options and from git config."
-      fg_http_check "$purl" "$purl" "${probe[@]}" || skip "$FG_HTTP_WHY." \
-        "drop that setting (http.sslVerify, http.proxy, http.<url>.*, remote.<name>.proxy, http.sslCAInfo, http.sslCAPath, http.sslBackend) from the command's -c options and from git config."
-      export "GIT_CONFIG_KEY_$n=$hk" "GIT_CONFIG_VALUE_$n=$FG_HEADER" GIT_CONFIG_COUNT="$((n + 1))" \
-        GIT_ALLOW_PROTOCOL=https ;;
+      probe+=( "${FG_HTTP_ARGS[@]}" ) ;;
+    esac
+    gu="$(fg_probe "${probe[@]}" ls-remote --get-url "$purl")"
+    [ "$gu" = "$purl" ] || skip "git config rewrites it to '${gu}' (a url.<base>.insteadOf rule), so the probe would read another URL than the one pushed to." \
+      "drop the url.<base>.insteadOf rule that matches $purl from the command's -c options and from git config."
+    case "$purl" in
+      "https://$FG_HOST/"*)
+        fg_http_check "$purl" "$purl" "${probe[@]}" || skip "$FG_HTTP_WHY." \
+          "drop that setting (http.sslVerify, http.proxy, http.<url>.*, remote.<name>.proxy, http.sslCAInfo, http.sslCAPath, http.sslBackend) from the command's -c options and from git config."
+        export "GIT_CONFIG_KEY_$n=$hk" "GIT_CONFIG_VALUE_$n=$FG_HEADER" GIT_CONFIG_COUNT="$((n + 1))" \
+          GIT_ALLOW_PROTOCOL=https ;;
+      https://*) export GIT_ALLOW_PROTOCOL=https ;;
+      *) export GIT_ALLOW_PROTOCOL=file ;;
     esac
     fg_probe "${probe[@]}" "$@"
   )

@@ -9,10 +9,10 @@
 # event: a point event at confirmation. What it feeds in the lead-time phase
 # ledger (ai/lib/lead_time_phases.rb): the landing's merge.landed (unit and
 # head evidence, so a landing worked here reads "local"). It is NOT a landing
-# start: land_start takes a merge.lock_wait or a timed via=push event only, so
-# the `queue` and `merge` phases of an MR landing on GitLab stay n/a until
-# locked-merge's GitLab path (DND-1943) writes its merge.lock_wait. The
-# landing time itself comes from the forge (ai/bin/lead-time; DND-1952).
+# start: land_start takes a merge.lock_wait or a timed via=push event only,
+# and a GitLab MR's merge phase starts from the merge.lock_wait that
+# locked-merge's GitLab path writes (DND-1943). The landing time itself comes
+# from the forge (ai/bin/lead-time; DND-1952).
 #
 # What: after glab ran an `mr merge` / `mr accept` that the merge guard let
 # through (glmg_mr_merge sets GLMG_LAND_*; nothing else does), ask
@@ -29,8 +29,9 @@
 # one point event at confirmation, run from the checkout the guard matched to
 # the MR's project (its repo key):
 #   via=mr, mr=<iid>, before=<the target tip the guard read before the merge>,
-#   after=<merge_commit_sha, else squash_commit_sha, else the head (a
-#   fast-forward)>, head=<the MR head>, unit from the MR's source branch.
+#   after=<merge_commit_sha, else squash_commit_sha, else the head only when
+#   the project's merge_method is ff; otherwise a miss>, head=<the MR head>,
+#   unit from the MR's source branch.
 #
 # Every outcome but a recorded landing and a clean "not merged" after a
 # failed glab call is said on stderr: a miss (not confirmed, could not look,
@@ -51,9 +52,14 @@
 #     a branch that moved in between is not seen (for a merge commit, after^1
 #     is exact).
 #   * One event per merge glab-athena ran. A caller that wraps glab-athena's
-#     merge (locked-merge's GitLab path, DND-1943) gets this event and must
-#     not write a second merge.landed for the same merge. Nothing enforces
-#     that here; the obligation is routed to DND-1943.
+#     merge gets this event and must not write a second merge.landed for the
+#     same merge. locked-merge's GitLab path (DND-1943) writes only
+#     merge.lock_wait (its telemetry section), and its GitLab suite asserts
+#     it writes no merge.landed. Nothing here enforces it for other callers.
+#   * Cost: the record runs inside the caller's wait, so under locked-merge
+#     it runs while the merge lock is held. Worst case, a slow forge adds
+#     GLL_TRIES reads of up to GLL_READ_S seconds each plus the sleeps
+#     between them, about 4 minutes, before locked-merge's own confirm.
 
 GLL_TRIES=6
 GLL_SLEEP=10
@@ -67,7 +73,7 @@ gll_read() { timeout -k 2 "$GLL_READ_S" "$@" </dev/null; }
 gll_miss() {
   local src="${2:-<the MR source branch>}" before=""
   [[ "$GLMG_LAND_BEFORE" =~ ^[0-9a-f]{40}$ ]] && before=" --attr before=$GLMG_LAND_BEFORE"
-  printf '%s: no merge.landed recorded for !%s: %s.\n  Fix: once `~/dev/custom/ai/bin/confirm-merged --mr %s --repo %s` exits 0, record it from that checkout: `~/dev/custom/ai/bin/telemetry-emit --event merge.landed --attr via=mr --attr mr=%s --attr after=<the landed commit: merge_commit_sha, else squash_commit_sha, else sha>%s --head %s --unit-branch %s`; until then the ledger has no merge.landed for this landing.\n' \
+  printf '%s: no merge.landed recorded for !%s: %s.\n  Fix: once `~/dev/custom/ai/bin/confirm-merged --mr %s --repo %s` exits 0, record it from that checkout: `~/dev/custom/ai/bin/telemetry-emit --event merge.landed --attr via=mr --attr mr=%s --attr after=<the landed commit: merge_commit_sha, else squash_commit_sha, else sha on a fast-forward project>%s --head %s --unit-branch %s`; until then the ledger has no merge.landed for this landing.\n' \
     "${GLMG_TOOL:-glab-athena}" "$GLMG_LAND_IID" "$1" "$GLMG_LAND_IID" "$GLMG_LAND_TOP" "$GLMG_LAND_IID" "$before" \
     "${GLMG_LAND_HEAD:-<the MR head>}" "$src" >&2
   return 0
@@ -77,7 +83,7 @@ gll_miss() {
 # fails, never changes the caller's exit code or stdout.
 gll_record_mr_landing() {
   local rc="$1" iid="$GLMG_LAND_IID" top="$GLMG_LAND_TOP" head="$GLMG_LAND_HEAD" before="$GLMG_LAND_BEFORE"
-  local cm tries i crc=0 cwhy="" json="" proj="" state after src="" target def at here
+  local cm tries i crc=0 cwhy="" json="" proj="" state after method="" src="" target def at here
   [ -n "$iid" ] && [ -n "$top" ] || return 0
   if ! [[ "$head" =~ ^[0-9a-f]{40}$ ]] || ! [[ "$GLMG_LAND_PID" =~ ^[0-9]+$ ]] || ! [[ "$iid" =~ ^[0-9]+$ ]]; then
     gll_miss "the guard's read of the MR gave no usable head, project id or iid"
@@ -111,16 +117,28 @@ gll_record_mr_landing() {
     return 0
   fi
   src="$(jq -r '.source_branch // empty' <<<"$json" 2>/dev/null)" || src=""
-  after="$(jq -r '.merge_commit_sha // .squash_commit_sha // .sha // empty' <<<"$json" 2>/dev/null)" || after=""
-  if ! [[ "$after" =~ ^[0-9a-f]{40}$ ]]; then
-    gll_miss "the merged MR names no landed commit (merge_commit_sha, squash_commit_sha and sha are all unusable: '${after}')" "$src"
-    return 0
-  fi
   target="$(jq -r '.target_branch // empty' <<<"$json" 2>/dev/null)" || target=""
   proj="$(gll_read glab "${read[@]}" "projects/$GLMG_LAND_PID" 2>/dev/null)" || proj=""
   def="$(jq -r '.default_branch // empty' <<<"$proj" 2>/dev/null)" || def=""
   if [ -z "$def" ] || [ -z "$target" ]; then
     gll_miss "COULD NOT LOOK: the project's default branch ('${def}') or the MR's target branch ('${target}') could not be read (\`glab ${read[*]} projects/$GLMG_LAND_PID\`), so whether this merge landed on the default branch is unknown" "$src"
+    return 0
+  fi
+  # The landed commit: the merge commit, else the squash commit. The MR head
+  # itself landed only on a fast-forward project; on any other merge method a
+  # missing commit is a miss, never the head.
+  after="$(jq -r '.merge_commit_sha // .squash_commit_sha // empty' <<<"$json" 2>/dev/null)" || after=""
+  if [ -z "$after" ]; then
+    method="$(jq -r '.merge_method // empty' <<<"$proj" 2>/dev/null)" || method=""
+    if [ "$method" = ff ]; then
+      after="$(jq -r '.sha // empty' <<<"$json" 2>/dev/null)" || after=""
+    else
+      gll_miss "the merged MR names no merge_commit_sha or squash_commit_sha, and the project's merge_method '${method:-unreadable}' is not ff, so its head is not the landed commit" "$src"
+      return 0
+    fi
+  fi
+  if ! [[ "$after" =~ ^[0-9a-f]{40}$ ]]; then
+    gll_miss "the merged MR names no usable landed commit ('${after}')" "$src"
     return 0
   fi
   if [ "$target" != "$def" ]; then

@@ -1224,8 +1224,8 @@ of the project (`--repo`): the receipt is in its git common dir.
 - **`--require-idle-workflow` is GitHub-only** and refused with `--mr`. The
   GitLab idle-pipeline check is not built.
 - **Telemetry:** it writes `merge.lock_wait` and never `merge.landed`.
-  The MR's `merge.landed` (`via=mr`) is glab-athena's to record (DND-1939);
-  until DND-1939 lands, a GitLab MR landing records no `merge.landed`.
+  The MR's `merge.landed` (`via=mr`) is glab-athena's to record (DND-1939,
+  `ai/lib/glab-landing.sh`), inside the merge call, so while the lock is held.
 
 ## Ride a boarded train to landed (do not end your turn on it)
 

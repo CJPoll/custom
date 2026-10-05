@@ -1047,8 +1047,9 @@ merged_fx() {
       '.state = "merged" | .merged_at = "2026-10-03T12:00:00Z" | .merge_commit_sha = $m | .squash_commit_sha = $q | .source_branch = "dnd-1-synthetic-unit"' \
       "${FX}/${f}.out" > "${FX}/${f}.after.out"
   done
-  # The project, for its default branch (read only once the MR is merged).
-  printf '{"id":7000001,"default_branch":"%s","visibility":"private"}\n' "${3:-main}" > "${FX}/project.out"
+  # The project, for its default branch and merge method (read only once the
+  # MR is merged).
+  printf '{"id":7000001,"default_branch":"%s","merge_method":"%s","visibility":"private"}\n' "${3:-main}" "${4:-merge}" > "${FX}/project.out"
 }
 # land_run <store> <args…> : the wrapper with its own telemetry store.
 land_run() { local s="$1"; shift; OUT="$(ATHENA_TELEMETRY_DIR="${s}" "${WRAPPER}" "$@" 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"; }
@@ -1071,11 +1072,20 @@ land_run "${S}" "${MERGE_ARGS[@]}"
   && ok "ML2. a squash with no merge commit (fast-forward method): after = the squash commit" \
   || bad "ML2. squash commit as after" "$(detail) ev='$(landed "${S}")'"
 
-reset_fx; green_fx; merged_fx; S="${TMP}/m3-store"
+reset_fx; green_fx; merged_fx null null main ff; S="${TMP}/m3-store"
 land_run "${S}" "${MERGE_ARGS[@]}"
 [ "${RC}" = 0 ] && [ "$(landed_n "${S}")" = 1 ] && [ "$(landed "${S}" | jq -r .attrs.after)" = "${HEAD_SHA}" ] \
   && ok "ML3. a fast-forward merge (no merge or squash commit): after = the MR head itself" \
   || bad "ML3. ff merge after" "$(detail) ev='$(landed "${S}")'"
+
+# ML15. No merge or squash commit on a project that is NOT fast-forward: the
+# head is not what landed, so the missing commit is a miss, never the head.
+reset_fx; green_fx; merged_fx null null main merge; S="${TMP}/m15-store"
+land_run "${S}" "${MERGE_ARGS[@]}"
+[ "${RC}" = 0 ] && [ "$(landed_n "${S}")" = 0 ] && [[ "${ERR}" == *"no merge.landed recorded for !4242:"*"merge_method 'merge'"* ]] \
+  && [[ "${ERR}" == *"Fix:"* ]] \
+  && ok "ML15. no merge or squash commit on a merge-commit project: no event (the head is not the landed commit), the miss is said with a Fix:" \
+  || bad "ML15. null merge commit on a non-ff project" "$(detail) ev='$(landed "${S}")'"
 
 # open_fx : the forge's answer after the merge ran: the MR still open.
 open_fx() { jq -c '.state = "opened" | .merged_at = null' "${FX}/mrview.out" > "${FX}/mrview.after.out"; }

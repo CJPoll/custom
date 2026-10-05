@@ -128,7 +128,7 @@ steps follow, with these differences:
      fast-forward project);
   8. teardown-stack --mr <iid> --repo DIR.
 It writes merge.lock_wait and never merge.landed: an MR's landing is
-glab-athena's to record (DND-1939); until DND-1939 lands, none is recorded.
+glab-athena's to record (DND-1939, ai/lib/glab-landing.sh).
 
 Exit (every non-zero prints a Fix: line):
   0 merged, confirmed, tree matches          (landed)
@@ -321,9 +321,9 @@ fi
 # the landing by unit or head.
 # On GitLab (DND-1943) only merge.lock_wait is written: the MR's merge.landed
 # (via=mr) is glab-athena's to record (DND-1939), and a second one would count
-# the landing twice. Until DND-1939 lands a GitLab MR landing records no
-# merge.landed. lead-time-phases starts a GitLab MR's merge phase from this
-# lock_wait.
+# the landing twice. glab-athena's record runs inside the merge call, so
+# while the merge lock is held (ai/lib/glab-landing.sh, its cost residual).
+# lead-time-phases starts a GitLab MR's merge phase from this lock_wait.
 LM_TEL_LIB="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../../lib/telemetry-emit.sh"
 # shellcheck source=../../../lib/telemetry-emit.sh
 if ! . "${LM_TEL_LIB}" 2>/dev/null; then

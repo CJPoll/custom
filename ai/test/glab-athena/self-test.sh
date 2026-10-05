@@ -707,6 +707,21 @@ if [ "$(landed_n "${TMP}/telemetry")" = 1 ] && [ "$(landed "${TMP}/telemetry" | 
   ok "L6. a routed push to gitlab.com main: its probes carry the bot's oauth2 header, one merge.landed recorded"
 else bad "L6. routed gitlab landing probes" "events='$(landed "${TMP}/telemetry")' log='$(cat "${X_LOG}" 2>/dev/null)'"; fi
 
+# L7. A local push URL that git config rewrites a SECOND time, for the probe:
+# pushInsteadOf keeps the push local, but the probe's own `ls-remote <url>`
+# applies insteadOf and would reach github.com over ssh with the owner's key.
+# The probe must not run (said, no landing recorded); the push still lands.
+# ssh is allowed here, to a recording stub, as a caller's environment may.
+origin_with_main l7; S="${TMP}/l7-store"; SSHLOG="${TMP}/l7-ssh.log"; : > "${SSHLOG}"
+printf '#!/bin/sh\necho "ssh $*" >> %s\nexit 255\n' "${SSHLOG}" > "${TMP}/l7-ssh"; chmod +x "${TMP}/l7-ssh"
+OUT="$(cd "${W}" && GIT_ALLOW_PROTOCOL=file:ssh GIT_SSH_COMMAND="${TMP}/l7-ssh" ATHENA_TELEMETRY_DIR="${S}" "${WRAPPER}" git \
+  -c "url.git@github.com:synthetic-owner/other.git.insteadOf=${O}" -c "url.${O}.pushInsteadOf=${O}" \
+  push -q "${O}" HEAD:main 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"
+if [ "${RC}" = 0 ] && [ "$(git --git-dir="${O}" rev-parse main)" = "${AFTER}" ] && [ ! -s "${SSHLOG}" ] \
+  && [ "$(landed_n "${S}")" = 0 ] && [[ "${ERR}" == *"probe of ${O} did not run"* ]] && [[ "${ERR}" == *"Fix:"* ]]; then
+  ok "L7. a local push URL that insteadOf rewrites for the probe: no probe reaches the other host, the skip is said, the push lands"
+else bad "L7. probe second rewrite" "rc=${RC} ssh='$(cat "${SSHLOG}")' events='$(landed "${S}")' err='${ERR}'"; fi
+
 # DND-1647: no gh/glab call may have fallen through past its stub.
 if fsg_verify; then ok "no gh/glab call fell through past its stub (DND-1647)"
 else bad "no gh/glab call fell through past its stub (DND-1647)" "see the forge-stub-guard FAIL above"; fi
