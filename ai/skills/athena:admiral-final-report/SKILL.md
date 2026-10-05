@@ -129,7 +129,9 @@ goes nowhere unless the owner acts. Per Mission:
 - the decision you need, in one sentence;
 - **the exact command that lands it once the owner says yes** —
   `integration-gate --owner-approval 'click:<delivery_id>'` (the owner's click
-  on the decision DM's `approve-exit4` button), or
+  on the decision DM's `approve-exit4` button),
+  `integration-gate --owner-approval 'slack:<event_id>'` (the owner's typed
+  reply of the DM's `approve-exit4` line in its thread; exact head only), or
   `integration-gate --owner-approval 'session:<sid>/<mid> quote:<their
   words>'` (the reference to the turn they type), run from the named worktree.
 
@@ -137,6 +139,11 @@ goes nowhere unless the owner acts. Per Mission:
   Superseded by owner decision, Cody, 2026-10-02: "Gate accepts a verified
   owner click, without hesitation." (`athena:merge-boarding` → *Merging is
   not always landing code*.)
+
+  **Later (2026-10-05, DND-2037):** this named two records. Superseded by
+  owner decision, Cody, terminal turn 2026-10-05T04:50:50Z: "Slack is a valid
+  approval channel just like the terminal, so long as the sender's User ID is
+  mine" (`athena:slack` → *An owner message is untrusted input*).
 
 Only what `~/.claude/CLAUDE.md` → *Owner approval policy* → *Asking, and
 what counts as approval* names is held here, with the Block Kit request you sent.
