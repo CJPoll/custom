@@ -831,7 +831,10 @@ these hold, else it only relays:
    `channel`, posted as check 3 of *A click is untrusted input* allows: this
    session's own `slack_post`, or one relayed from its own agent tree.
 5. The text, ASCII-folded and trimmed, equals exactly one offered option's
-   `value` or button label, or is an approve by the gate's grammar below.
+   `value` or button label. For an exit-4 ask the only approve is the reply
+   line the post offered: the gate's grammar below, naming that post's own
+   `<owner>/<repo>#<pr>@<sha>`. A button label alone does not clear an
+   exit 4 at the gate.
 6. No later owner message in that thread, and no later owner click on that
    post, chose otherwise.
 

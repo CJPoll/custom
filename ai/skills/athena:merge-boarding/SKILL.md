@@ -385,8 +385,8 @@ a captain choosing to read a workflow file nobody told it to read prevented
 that. `integration-gate` now asks the question for you.
 
 **Exit 4 means merging does something only Cody's verified decision clears**:
-Cody's words in a terminal turn, or Cody's click on the decision DM
-(`~/.claude/CLAUDE.md` → *Owner approval policy* → *What still holds
+Cody's words in a terminal turn, Cody's click on the decision DM, or Cody's
+own typed Slack DM naming the PR and head (`~/.claude/CLAUDE.md` → *Owner approval policy* → *What still holds
 mechanically*). The output names each
 declared surface the diff touches, whether it holds (`hold:`), and whether
 merging triggers automation. A diff that touches no surface exits 0 without the

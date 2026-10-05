@@ -1604,8 +1604,8 @@ FIX
 # `--grant-eligible merge.pr_only_workflow` answers a DIFFERENT question from
 # the HOT verdict: may an owner's Slack click (an owner approval grant,
 # ai/contracts/athena-events.md -> Owner approval grants) stand in for the
-# owner's verified decision (--owner-approval, a terminal turn or a click
-# record, DND-1784) on this exit-4 head? Only when merging is reversible: every
+# owner's verified decision (--owner-approval, a terminal turn, a click
+# record, DND-1784, or an owner-message record, DND-2037) on this exit-4 head? Only when merging is reversible: every
 # hit is a GitHub workflow that runs solely on `pull_request`, at base and at
 # head, and no other workflow calls it. GitHub has then already run the
 # branch's own version before the merge, and merging starts no new run with
@@ -3763,7 +3763,7 @@ def self_test
                  "approve", "approve example/widgets#42@#{chd}.",
                  "approve example/widgets#42@#{chd} example/widgets#42@#{chd}",
                  "approve example/widgets#42@#{chd[0, 7]}", "approve example/widgets#42@#{chd.upcase}",
-                 "approve\nexample/widgets#42@#{chd}", "apprоve example/widgets#42@#{chd}"]
+                 "approve\nexample/widgets#42@#{chd}", "appr\u043Eve example/widgets#42@#{chd}"]
     msg_base = [
       good.call(1), good.call(2, text: "Approve `example/widgets#42@#{chd}`"),
       msg_line.call(3, user: "UFAKE00002"),
@@ -3771,6 +3771,7 @@ def self_test
       msg_line.call(5, direct: :absent),
       msg_line.call(6, kind: "mpim", channel: "GFAKE00001"),
       msg_line.call(7, kind: "thread_reply", channel: "CFAKE00001", thread_ts: "1700000400.000001"),
+      msg_line.call(12, channel: "CFAKE00002"),
       msg_line.call(9, text: ap.call(chd, 42, "example/other")),
       msg_line.call(10, text: ap.call(cb)),
       # 21: two lines share one channel and ts and disagree on the text.
@@ -3800,7 +3801,7 @@ def self_test
                  out.include?("HOT-OWNER-APPROVED #{chd[0, 7]} (OWNER-APPROVED: slack:#{eid.call(1)} author:owner " \
                               "approve example/widgets#42@#{chd}) (GATE: ai/bin/harness-gate)") &&
                  out.include?("owner-message (verified)") && out.include?("proj-slack.jsonl") &&
-                 !out.include?("UFAKE00001") && !out.include?("DFAKE00001") && !out.include?(ap.call),
+                 !out.include?("UFAKE00001") && !out.include?("DFAKE00001") && !out.include?(OwnerClick::ASK_VERB),
                "exit=#{code} out=#{out} err=#{err}")
     out, err, code = msg_br.call("slack:#{eid.call(2)}", msg_env)
     check.call("an owner message with a capital verb and a backticked ref is an approve (exit 0)",
@@ -3810,6 +3811,7 @@ def self_test
      ["a line from a server that predates direct_author_id", 5, "predates direct_author_id"],
      ["a group DM (mpim)", 6, "not in a 1:1 DM"],
      ["a channel thread reply", 7, "not in a 1:1 DM"],
+     ["kind im on a channel that is not a D channel", 12, "not in a 1:1 DM"],
      ["a message only on the session channel", 8, "not in the session's project slack channel"],
      ["a PR in another repo", 9, "another repo"],
      ["a different head (no carry)", 10, "approves a different head"],
@@ -3858,7 +3860,18 @@ def self_test
      ["an owner hold with the approve's own ts (a tie counts as later)", "tie",
       [msg_line.call(66, text: "hold #42", ts: t1, channel: "DFAKE00002")], [], "held by a later owner", "mentioning"],
      ["an owner message mentioning the PR whose ts cannot be ordered", "undated",
-      [msg_line.call(67, text: "hold #42", ts: "x", channel: "DFAKE00002")], [], "cannot be verified", "cannot be ordered"]
+      [msg_line.call(67, text: "hold #42", ts: "x", channel: "DFAKE00002")], [], "cannot be verified", "cannot be ordered"],
+     ["a later owner \"Don\u2019t merge yet\" (a smart apostrophe) naming no PR (R3)", "smart",
+      [later.call(75, text: "Don\u2019t merge yet", channel: "DFAKE00002")], [], "cannot be verified", "names no PR"],
+     ["a later owner 'hold pull/42' with no slug (R2)", "bare-pull",
+      [later.call(76, text: "hold pull/42", channel: "DFAKE00002")], [], "held by a later owner", "mentioning"],
+     ["a later owner 'please do not merge !42' (R2)", "bang",
+      [later.call(77, text: "please do not merge !42", channel: "DFAKE00002")], [], "held by a later owner", "mentioning"],
+     ["a later owner Hold click that names no PR (R5)", "r5", [],
+      [click_line.call(78, value: "hold", extra: { "action_ts" => "1700000950.000078" })], "cannot be verified", "names no PR"],
+     ["an owner click naming the PR whose action_ts cannot be ordered", "undated-click", [],
+      [click_line.call(79, value: "hold-exit4 example/widgets#42@#{chd}", extra: { "action_ts" => "soon" })],
+      "cannot be verified", "cannot be ordered"]
     ].each do |label, name, slack, session, want, why|
       out, err, code = msg_br.call("slack:#{eid.call(1)}", msg_root.call(name, slack: slack, session: session))
       check.call("--owner-approval slack refuses an approve held by #{label} (exit 2, Fix:)",
@@ -3900,6 +3913,12 @@ def self_test
     out, err, code = msg_br.call("slack:#{eid.call(1)}", msg_root.call("bad-slack", entry: bad_slack))
     check.call("--owner-approval slack refuses a slack channel that is not a Slack-producer log",
                code == 2 && err.include?("not a Slack-producer") && err.include?("Fix:"), "exit=#{code} err=#{err}")
+    bad_session = no_slack.merge("channels" => {
+      "slack" => { "kind" => "log", "path" => "proj-slack.jsonl", "producer" => "slack" },
+      "session" => { "kind" => "log", "path" => "proj-session.jsonl", "producer" => "slack" } })
+    out, err, code = msg_br.call("slack:#{eid.call(1)}", msg_root.call("bad-session", entry: bad_session))
+    check.call("--owner-approval slack refuses a declared session channel that is not a platform log (its clicks unread)",
+               code == 2 && err.include?("not a platform-producer") && err.include?("Fix:"), "exit=#{code} err=#{err}")
     mc = File.join(tmp, "msg-cold")
     mcb, mch = mkrepo.call(mc, config: origin_cfg) { |r| File.write(File.join(r, "app.rb"), "x\n") }
     out, err, code = msg_br.call("slack:#{eid.call(81)}", msg_root.call("cold", slack: [good.call(81, text: ap.call(mch))]),
@@ -3915,15 +3934,17 @@ def self_test
      ["approve? CJPoll/custom#12@#{sha40}", false], ["approve CJPoll/custom#12@#{sha40} but wait", false],
      ["approve CJPoll/custom#12@#{sha40}.", false], ["lgtm", false], ["ship it", false], ["no", false],
      ["don't approve CJPoll/custom#12@#{sha40}", false], ["approve CJPoll/custom#012@#{sha40}", false],
-     ["approves CJPoll/custom#12@#{sha40}", false], ["approve “CJPoll/custom#12@#{sha40}”", false],
-     ["approve CJPoll/custom#12@#{sha40}\n", false], ["Kapprove CJPoll/custom#12@#{sha40}", false]].each do |text, want|
+     ["approves CJPoll/custom#12@#{sha40}", false], ["approve \u201CCJPoll/custom#12@#{sha40}\u201D", false],
+     ["approve CJPoll/custom#12@#{sha40}\n", false], ["\u212Aapprove CJPoll/custom#12@#{sha40}", false]].each do |text, want|
       got = !OwnerMessage.parse_approve_text(text).nil?
       check.call("OwnerMessage.parse_approve_text(#{text[0, 44].inspect}) -> #{want}", got == want, got.inspect)
     end
     mref = { slug: "example/widgets", pr: 42, sha: "0123456789abcdef0123456789abcdef01234567" }
     [["see example/widgets#42", true], ["see example/widgets#420", false], ["Example/Widgets/pull/42 is it", true],
      ["example/widgets/-/merge_requests/42", true], ["about #42", true], ["about #421", false],
-     ["head 0123456 there", true], ["head 012345 there", false], ["sub/example/widgets#7", false]].each do |text, want|
+     ["head 0123456 there", true], ["head 012345 there", false], ["sub/example/widgets#7", false],
+     ["hold pull/42", true], ["hold pull/420", false], ["see /-/merge_requests/42", true], ["not !42 yet", true],
+     ["not !420 yet", false]].each do |text, want|
       got = OwnerMessage.mentions_pr?(text, mref)
       check.call("OwnerMessage.mentions_pr?(#{text.inspect}) -> #{want}", got == want, got.inspect)
     end

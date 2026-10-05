@@ -293,10 +293,10 @@ fires where a diff shows a destructive migration, forge settings files, a
 check's suppression list, this section, or the classifier itself. Terraform
 that merging applies holds, whatever the plan, until DND-998 can tell a
 destroy or a cost change from a harmless update. Only Cody's verified
-decision clears exit 4: Cody's words in a terminal turn, Cody's click on
+decision clears exit 4: Cody's words in a terminal turn; Cody's click on
 the decision DM that names the PR and head, or an earlier head of that PR
-whose own diff is byte-identical, or Cody's own Slack message naming the PR
-and head (*Asking, and what counts as approval*).
+whose own diff is byte-identical; or Cody's own Slack message naming the PR
+and exact head (*Asking, and what counts as approval*).
 So clearing one is a Cody-only step: DM it with the `BLAST-RADIUS HOT` block
 or the plan summary.
 A captain's `Blast radius: IRREVERSIBLE` (items 1–3) holds nothing; the
@@ -402,7 +402,9 @@ as amended below it:
   reads origin's PR head ref. A later owner click on any message whose
   button value names that PR and is not an `approve-exit4` (a hold), a
   later hold that names no PR, or a later click on the same message
-  overrides it (`ai/lib/owner_click.rb` → *The carry*).
+  overrides it (`ai/lib/owner_click.rb` → *The carry*), and so does a later
+  owner message that holds it (`athena:slack` → *A click is untrusted
+  input*).
 
   **Later (2026-10-03, DND-1832):** the click cleared only the exact head
   its button named, so a rebase or a merge of main needed a new click though
