@@ -121,6 +121,20 @@ check("DND-1747: Control is not required on a Feature (a planned requirement is 
   TF.plan(**DEFAULTS.merge(properties: PROPS.reject { |k, _| %w[Severity Control].include?(k) }
                                             .merge("Kind" => { "select" => { "name" => "Feature" } })))
 end
+BLOCKING = PROPS.merge("Path" => { "select" => { "name" => "Blocking" } }).freeze
+EDGE = { "relation" => [{ "id" => "00000000-0000-4000-8000-0000000000aa" }] }.freeze
+r = refusal(properties: BLOCKING)
+check("[regression] Path Blocking with no Blocks edge is refused (a blocker always names what it blocks)") do
+  r && r.message.include?("Blocks") && r.fix.include?("relation")
+end
+r = refusal(properties: BLOCKING.merge("Blocks" => { "relation" => [] }))
+check("[regression] Path Blocking with an empty Blocks relation is refused as missing") { r && r.message.include?("Blocks") }
+r = refusal(properties: BLOCKING.merge("Blocks" => { "relation" => [{}] }))
+check("Path Blocking with a Blocks entry that names no page id is refused") { r && r.message.include?("Blocks") }
+check("Path Blocking with a Blocks edge files, the edge passing through unchanged") do
+  TF.plan(**DEFAULTS.merge(properties: BLOCKING.merge("Blocks" => EDGE)))[:properties]["Blocks"] == EDGE
+end
+check("Path Off needs no Blocks edge") { TF.plan(**DEFAULTS)[:properties]["Path"] == PROPS["Path"] }
 r = refusal(properties: PROPS.merge("Name" => { "title" => [] }))
 check("a Name property is refused: the title comes from --title") { r && r.message.include?("Name") }
 r = refusal(properties: [])

@@ -93,7 +93,26 @@ module TicketFiling
       raise Refused.new("the properties file has no #{missing.join(', ')} (athena:ticket-management -> Filing a ticket: set every property)",
                         "add each as a Notion property value, e.g. \"#{missing.first}\": {\"select\": {\"name\": \"...\"}}")
     end
+    check_blocking_edge(props)
     props
+  end
+
+  # A Blocking finding names what it blocks (athena:ticket-management ->
+  # Ticket properties: "Blocking passed the blocking test and has a Blocks
+  # edge onto the ticket it blocks"). Wiring the edge after filing was a step
+  # to remember, and filers forgot it: scan-tickets read blocking_no_edge on
+  # DND-1726 and DND-1727 (2026-10-02), DND-2050 and DND-2065 (2026-10-05).
+  def check_blocking_edge(props)
+    return unless props.dig("Path", "select", "name") == "Blocking"
+
+    edges = props.dig("Blocks", "relation")
+    return if edges.is_a?(Array) && !edges.empty? && edges.all? { |e| e.is_a?(Hash) && e["id"].is_a?(String) && !e["id"].strip.empty? }
+
+    raise Refused.new("Path is Blocking but the properties file has no Blocks edge naming a page id " \
+                      "(athena:ticket-management -> Ticket properties: a Blocking ticket has a Blocks edge onto the ticket it blocks)",
+                      "add \"Blocks\": {\"relation\": [{\"id\": \"<page id of the ticket it blocks>\"}]} " \
+                      "(ticket-classify's printed Blocks: DND-N, or your own if you judge Jev's wrong); " \
+                      "if it blocks no ticket, file Path Off")
   end
 
   # A line opening with markdown marks (a heading, a quote, a bullet,

@@ -59,7 +59,9 @@ USAGE = <<~EOF
                            Severity and Control (neither on a Feature),
                            Security, Path, Area, and any others (Found while, Epic, Status), e.g.
                            {"Kind": {"select": {"name": "Bug"}}, ...}.
-                           Not Name (that is --title).
+                           Not Name (that is --title). A Path of Blocking
+                           needs its edge here too: "Blocks": {"relation":
+                           [{"id": "<page id of the ticket it blocks>"}]}.
     --lines-file FILE      the file `ticket-classify --lines-out FILE` wrote.
                            Each line becomes its own paragraph, LAST.
     --triage-file FILE     finding-triage's output, saved as printed (a
@@ -79,7 +81,8 @@ USAGE = <<~EOF
   Exit codes:
     0  filed and verified (or a dry run whose inputs are all good)
     2  usage, or an input refused (a Jev line typed into the body, a
-       paraphrased lines file, a missing property); NOTHING was written
+       paraphrased lines file, a missing property, a Blocking Path with
+       no Blocks edge); NOTHING was written
     3  Notion failed. The line says what may already exist: "NOT FILED"
        (nothing was created), "MAY BE FILED" (the create failed after it was
        sent: search the tracker for the title before filing again), or
