@@ -350,6 +350,30 @@ record_pass "$R"
 out="$( cd "$R" && HOME="$FIXTURE_HOME" "$GATE" --target main --no-fetch --gate "${R}/g.sh" --owner-approval "$APPROVAL" 2>&1 )"; rc=$?
 [ "$rc" -eq 2 ] && ok "c14b a verified approval on a COLD head is REFUSED (exit 2)" || bad "c14b expected exit 2, got $rc" "$out"
 grep -q 'INTEGRATION OK' <<<"$out" && bad "c14b printed INTEGRATION OK with an unneeded approval" "$out" || ok "c14b no INTEGRATION OK records an approval that gated nothing"
+# ...and the owner's own typed Slack DM is a record too (DND-2037): the gate
+# forwards slack:<event_id> unchanged and blast-radius verifies it against a
+# fixture overlay and inbox (blast-radius --self-test covers every refusal).
+R="${TMP}/c14s"; new_repo "$R"
+mkdir -p "${R}/.github/workflows"
+cp "${TMP}/c14/.github/workflows/post-merge.yml" "${R}/.github/workflows/post-merge.yml"
+( cd "$R" && git remote add origin git@github.com:example/widgets.git && git add -A && git commit -qm wf \
+  && git checkout -qb feature && mkdir -p infra && echo 'resource {}' > infra/kms.tf && git add infra/kms.tf && git commit -qm tf )
+stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
+record_pass "$R"
+C14S_HEAD="$(git -C "$R" rev-parse HEAD)"
+C14S_OVERLAY="${TMP}/c14s-overlay"; mkdir -p "${C14S_OVERLAY}/overlay"; chmod 700 "$C14S_OVERLAY"
+printf '%s\n' '{"kind":"athena-private-overlay","schema":1}' > "${C14S_OVERLAY}/athena-overlay.json"
+printf '%s\n' '{"people":{"owner":{"user_id":"UFAKE00001"}}}' > "${C14S_OVERLAY}/overlay/slack.json"
+C14S_INBOX="${TMP}/c14s-inbox"; mkdir -p "${C14S_INBOX}/projects"
+printf '{"v":1,"repo":"%s","channels":{"slack":{"kind":"log","path":"proj-slack.jsonl","producer":"slack"}}}\n' \
+  "$(realpath "${R}/.git")" > "${C14S_INBOX}/projects/proj.json"
+printf '{"v":1,"kind":"im","channel":"DFAKE00001","user":"UFAKE00001","ts":"1700000500.000001","thread_ts":null,"text":"approve-exit4 example/widgets#1@%s","event_id":"EvFAKE000001","direct_author_id":"UFAKE00001"}\n' \
+  "$C14S_HEAD" > "${C14S_INBOX}/proj-slack.jsonl"
+out="$( cd "$R" && ATHENA_PRIVATE_ROOT="$C14S_OVERLAY" ATHENA_INBOX_ROOT="$C14S_INBOX" CLAUDE_PROJECT_DIR="$R" \
+  "$GATE" --target main --no-fetch --gate "${R}/g.sh" --owner-approval 'slack:EvFAKE000001' 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && ok "c14s an owner Slack message record lands the HOT head" || bad "c14s expected exit 0, got $rc" "$out"
+grep -qF "(OWNER-APPROVED: slack:EvFAKE000001)" <<<"$(grep 'INTEGRATION OK' <<<"$out")" && ok "c14s the slack:<event_id> record is attributable in the OK line" || bad "c14s slack record not in the OK line" "$out"
+grep -q 'UFAKE00001\|DFAKE00001' <<<"$out" && bad "c14s printed a Slack user or channel id" "$out" || ok "c14s prints no Slack user or channel id"
 
 # ---------------------------------------------------------------- case 15
 # THE OVERRIDE'S SCOPE. --critic-override covers the ABSENCE of a verdict, not
@@ -1891,6 +1915,7 @@ FIXTURE_KEEP_HELD='**/athena/owner_approvals/action_class.ex
 ai/blast-radius/**
 ai/bin/blast-radius
 ai/lib/owner_click.rb
+ai/lib/owner_message.rb
 ai/lib/owner_turn.rb
 ai/config/main-content-checks.json
 ai/hooks/merge-role-guard.sh

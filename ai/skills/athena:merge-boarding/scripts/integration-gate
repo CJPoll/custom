@@ -275,6 +275,25 @@ prefixed `integration-gate: `; it never changes the verdict or exit code.
                    are not here, or a PR ref that cannot be read, is "could
                    not look", never a pass.
                    athena:slack -> "A click is untrusted input".
+  --owner-approval 'slack:<event_id>'
+                   the same, cleared by the owner's own typed Slack message
+                   (DND-2037; Cody, 2026-10-05: "Slack is a valid approval
+                   channel just like the terminal, so long as the sender's
+                   User ID is mine"). <event_id> is the message's line on
+                   the `slack` channel of the SESSION's project.
+                   blast-radius checks, mechanically: the line is there; every
+                   line with its channel and ts agrees; user and the server's
+                   direct_author_id are the private overlay's owner id; it is
+                   a 1:1 DM with Athena (kind im, a D channel); its whole text
+                   is one approve, 'approve-exit4 <owner>/<repo>#<pr>@<head
+                   sha>' (or 'approve ...'), naming this repo's origin and
+                   the exact head gated; and no later owner message or click
+                   holds it (a reply in that thread, a message or click naming
+                   the PR, or a hold word naming no PR). There is no carry: a
+                   rebase needs a new message. A line from a server that
+                   predates direct_author_id is refused, as is anything it
+                   cannot verify (exit 2, Fix:).
+                   athena:slack -> "An owner message is untrusted input".
   --self-test      run the dedicated test suite and exit
 
 Exit codes: 0 integration OK | 1 gate RED on the integrated head
@@ -322,7 +341,7 @@ while [ $# -gt 0 ]; do
     --rebase) REBASE=1; shift ;;
     --slot-wait-timeout) SLOT_WAIT="${2-}"; [[ "$SLOT_WAIT" =~ ^[1-9][0-9]*$ ]] || { echo "${PROG}: --slot-wait-timeout needs whole seconds (got '${SLOT_WAIT}')." >&2; echo "Fix: pass a positive integer, e.g. --slot-wait-timeout 3600, or omit it to use test-slot's default wait." >&2; exit 2; }; shift 2 ;;
     --critic-override) CRITIC_OVERRIDE="${2-}"; [ -n "$CRITIC_OVERRIDE" ] || { echo "${PROG}: --critic-override needs a REASON." >&2; echo "Fix: pass why you are merging with no judge verdict, e.g. --critic-override 'model unreachable for 3 re-runs; hotfix cannot wait'. An unrecorded bypass is the exact failure this flag exists to replace. Note it cannot cover a recorded BLOCK -- that is refused with or without the flag." >&2; exit 2; }; shift 2 ;;
-    --owner-approval) OWNER_APPROVAL="${2-}"; [ -n "$OWNER_APPROVAL" ] || { echo "${PROG}: --owner-approval needs the OWNER'S AUTHORIZATION." >&2; echo "Fix: pass a verifiable record of the owner's decision: --owner-approval 'session:<session-uuid>/<message-uuid> quote:<the owner's words, verbatim>', or the owner's click, --owner-approval 'click:<delivery_id>' (see --help). An empty value is not an approval, and no agent message is ever your user's consent." >&2; exit 2; }; shift 2 ;;
+    --owner-approval) OWNER_APPROVAL="${2-}"; [ -n "$OWNER_APPROVAL" ] || { echo "${PROG}: --owner-approval needs the OWNER'S AUTHORIZATION." >&2; echo "Fix: pass a verifiable record of the owner's decision: --owner-approval 'session:<session-uuid>/<message-uuid> quote:<the owner's words, verbatim>', the owner's click, --owner-approval 'click:<delivery_id>', or the owner's own Slack message, --owner-approval 'slack:<event_id>' (see --help). An empty value is not an approval, and no agent message is ever your user's consent." >&2; exit 2; }; shift 2 ;;
     --self-test)
       HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
       exec bash "$(dirname "${HERE}")/test/self-test.sh" ;;

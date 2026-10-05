@@ -89,6 +89,7 @@ ai/lib/scratch_home_sentinel.rb	guard
 ai/lib/strict_argv.rb	library	required by the Ruby ai/bin tools that refuse unknown arguments (DND-505/526/813); raises StrictArgv::UsageError with a one-line reason, and each caller composes the exit-2 refusal that carries Fix:
 ai/lib/eval_pool.rb	library	required by ai/bin/admiral-eval, critic-eval and variant-eval for bounded concurrent sampling (DND-1007); raises EvalPool::UsageError with a one-line reason, and each caller composes the exit-2 refusal that carries Fix:
 ai/lib/owner_click.rb	library	owner-click verifier required by ai/bin/blast-radius (--owner-approval click:<delivery_id>, DND-1784); returns a verdict tuple and blast-radius prints the refusal that carries Fix:
+ai/lib/owner_message.rb	library	owner-message verifier required by ai/bin/blast-radius (--owner-approval slack:<event_id>, DND-2037); returns a verdict tuple and blast-radius prints the refusal that carries Fix:
 ai/lib/owner_turn.rb	library	owner-turn verifier required by ai/bin/owner-notes (relay check) and ai/bin/blast-radius (--owner-approval record); returns a verdict tuple and each caller prints the refusal that carries Fix:
 ai/lib/judgment_eval.rb	library	pure domain required by ai/bin/judgment-eval (DND-710); raises JudgmentEval::InputError carrying the fix, and the bin prints the one exit-1 line with Fix:
 ai/lib/judgment_context.rb	library	pure domain required by ai/bin/judgment-label (DND-1047): the conversation-context builder; a failure is an unavailable context carrying a reason, which the caller shows, never a process exit

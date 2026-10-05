@@ -242,7 +242,8 @@ module OwnerClick
     end
 
     info = { delivery_id: delivery_id, action_id: line["action_id"], value: line["value"],
-             slug: ask[:slug], pr: ask[:pr], sha: ask[:sha], where: where, at: at }
+             slug: ask[:slug], pr: ask[:pr], sha: ask[:sha], where: where, at: at,
+             channel: line["channel"], ts: line["ts"] }
     # Another head: only the carry (check 6) can clear it, and the caller
     # gathers its facts from git.
     return [:carry, info] unless ask[:sha] == head
@@ -385,35 +386,74 @@ module OwnerClick
   # [:refused, kind, reason, fix] (a refusal with its own Fix:). `base` is the
   # gate's target (origin/main); without it no click carries to another head.
   def check(record, head:, repo:, base: nil, env: ENV)
+    # Required here, not at the top: owner_message.rb builds its grammar from
+    # this module's constants, so it loads after OwnerClick is defined.
+    require_relative "owner_message"
     did = parse_record(record)
     return [:refused, :unverifiable, "#{record.to_s[0, 80].inspect} is not click:<delivery_id uuid>"] unless did
 
-    owner = PrivateOverlay::Resolver.get("slack", OWNER_KEY, env: env)
-    unless owner.state == :found
-      return [:refused, :unverifiable,
-              "the owner id cannot be resolved, so no click can be checked against it: " +
-              PrivateOverlay.failure_line(owner, "slack#{OWNER_KEY}")]
-    end
-    unless OWNER_ID_RE.match?(owner.value.to_s)
-      return [:refused, :unverifiable,
-              "the overlay's slack#{OWNER_KEY} is not a Slack user id, so no click can be checked against it"]
-    end
+    owner, why = owner_id(env, "click")
+    return [:refused, :unverifiable, why] unless owner
 
     slug = origin_slug(repo)
     return [:refused, :unverifiable, "cannot tell which repo #{repo} is: no parseable `origin` remote"] unless slug
 
-    files, why = session_files(env)
+    proj, why = project(env)
+    return [:refused, :unverifiable, why] unless proj
+
+    files, why = session_files_of(proj)
     return [:refused, :unverifiable, why] unless files
 
+    # Check 5's message half (DND-2037): a later owner hold message on the
+    # project's slack channel. A project that declares no slack channel has
+    # none to read, and the where text says so.
+    state, slack = channel_files(proj, OwnerMessage::CHANNEL, platform: false)
+    return [:refused, :unverifiable, slack] if state == :malformed
+
+    slack = [] unless state == :ok
     lines, clicks, scanned, unparsed = read_lines(files, did)
-    where = "#{files.join(' + ')} (#{scanned} lines, #{clicks.size} clicks, #{unparsed} unparsable read)"
-    verdict = judge(lines, delivery_id: did, owner_id: owner.value, head: head, slug: slug, where: where,
+    messages, m_scanned, m_unparsed = read_messages(slack)
+    where = "#{files.join(' + ')} (#{scanned} lines, #{clicks.size} clicks, #{unparsed} unparsable read); " +
+            slack_where(state, slack, messages, owner, m_scanned, m_unparsed)
+    verdict = judge(lines, delivery_id: did, owner_id: owner, head: head, slug: slug, where: where,
                     clicks: clicks)
+    return verdict unless %i[verified carry].include?(verdict.first)
+
+    info = verdict[1]
+    hold = OwnerMessage.later_message_hold(
+      ref: { slug: info[:slug], pr: info[:pr], sha: info[:sha] }, channel: info[:channel], root: info[:ts],
+      at: info[:at], messages: messages, owner_id: owner, what: "click #{did}"
+    )
+    return hold + [verdict.first == :carry ? new_click_fix(info, head) : FIX] if hold
     return verdict unless verdict.first == :carry
 
-    carry(verdict[1], head: head, base: base, repo: repo, clicks: clicks, owner_id: owner.value)
+    carry(info, head: head, base: base, repo: repo, clicks: clicks, owner_id: owner)
   rescue SystemCallError => e
     [:refused, :unverifiable, "cannot read the inbox: #{e.message}"]
+  end
+
+  def slack_where(state, files, messages, owner, scanned, unparsed)
+    unless state == :ok
+      return "slack channel: #{state == :not_declared ? 'not declared' : 'never delivered to'}, 0 messages read"
+    end
+
+    owners = messages.count { |m| OwnerMessage.owner_message?(m, owner) }
+    "slack channel: #{files.join(' + ')} (#{scanned} lines, #{owners} owner messages, #{unparsed} unparsable read)"
+  end
+
+  # EFFECTS. The owner's Slack user id from the private overlay.
+  # -> [id, nil] or [nil, reason]. A failed lookup never reads as a match.
+  def owner_id(env, noun)
+    owner = PrivateOverlay::Resolver.get("slack", OWNER_KEY, env: env)
+    unless owner.state == :found
+      return [nil, "the owner id cannot be resolved, so no #{noun} can be checked against it: " +
+                   PrivateOverlay.failure_line(owner, "slack#{OWNER_KEY}")]
+    end
+    unless OWNER_ID_RE.match?(owner.value.to_s)
+      return [nil, "the overlay's slack#{OWNER_KEY} is not a Slack user id, so no #{noun} can be checked against it"]
+    end
+
+    [owner.value, nil]
   end
 
   # EFFECTS. Check 6: decide whether a click for head A clears head B.
@@ -525,9 +565,28 @@ module OwnerClick
   # -> [[file, ...], nil] (the generation first, then the live file), or
   # [nil, reason].
   def session_files(env)
+    proj, why = project(env)
+    return [nil, why] unless proj
+
+    session_files_of(proj)
+  end
+
+  def session_files_of(proj)
+    state, files = channel_files(proj, CHANNEL, platform: true)
+    return [files, nil] if state == :ok
+    return [nil, files] if state == :never_delivered
+
+    [nil, "the registry entry for #{proj[:key]} declares no platform-producer `log` channel " \
+          "named #{CHANNEL} with a plain file name"]
+  end
+
+  # EFFECTS. The session's project: its repo key, inbox root and the ONE
+  # registry entry claiming it. -> [{key:, root:, entry:}, nil] or
+  # [nil, reason].
+  def project(env)
     key, why = repo_key(env)
     return [nil, why] if why
-    return [nil, "the session's project is in no git repository, so it has no session channel"] unless key
+    return [nil, "the session's project is in no git repository, so it has no inbox channels"] unless key
 
     root = inbox_root(env)
     return [nil, "the inbox root cannot be computed (ATHENA_INBOX_ROOT and HOME are unset)"] unless root
@@ -547,18 +606,35 @@ module OwnerClick
                    "exactly one must"]
     end
 
-    chan = entries.first.dig("channels", CHANNEL)
-    unless chan.is_a?(Hash) && chan["kind"] == "log" && chan["producer"] == "platform" &&
-           CHANNEL_PATH_RE.match?(chan["path"].to_s)
-      return [nil, "the registry entry for #{key} declares no platform-producer `log` channel " \
-                   "named #{CHANNEL} with a plain file name"]
+    [{ key: key, root: root, entry: entries.first }, nil]
+  end
+
+  # EFFECTS. The files of channel `name` in the project's entry: a `log`
+  # channel with a plain file name, whose producer is "platform" when
+  # `platform`, else absent or "slack" (a Slack-producer channel).
+  # -> [:ok, [file, ...]] (the generation first, then the live file) |
+  #    [:not_declared, reason] | [:malformed, reason] |
+  #    [:never_delivered, reason].
+  def channel_files(proj, name, platform:)
+    chans = proj[:entry]["channels"]
+    unless chans.is_a?(Hash) && chans.key?(name)
+      return [:not_declared, "the registry entry for #{proj[:key]} declares no `#{name}` channel"]
     end
 
-    live = File.join(root, chan["path"])
-    files = [live + GENERATION, live].select { |f| File.file?(f) }
-    return [nil, "the session channel file #{live} has never been delivered to"] if files.empty?
+    chan = chans[name]
+    producer_ok = chan.is_a?(Hash) &&
+                  (platform ? chan["producer"] == "platform" : [nil, "slack"].include?(chan["producer"]))
+    unless producer_ok && chan["kind"] == "log" && CHANNEL_PATH_RE.match?(chan["path"].to_s)
+      want = platform ? "platform-producer" : "Slack-producer"
+      return [:malformed, "the registry entry for #{proj[:key]} declares a `#{name}` channel that is not a " \
+                          "#{want} `log` channel with a plain file name"]
+    end
 
-    [files, nil]
+    live = File.join(proj[:root], chan["path"])
+    files = [live + GENERATION, live].select { |f| File.file?(f) }
+    return [:never_delivered, "the #{name} channel file #{live} has never been delivered to"] if files.empty?
+
+    [:ok, files]
   end
 
   # A registry `repo` MAY be written ~/...; expand it against the HOME the
@@ -598,25 +674,53 @@ module OwnerClick
     scanned = 0
     unparsed = 0
     files.each do |f|
-      File.foreach(f, mode: "rb") do |bytes|
-        raw = bytes.force_encoding(Encoding::UTF_8).scrub
-        next if raw.strip.empty?
-
-        scanned += 1
-        j = begin
-          JSON.parse(raw)
-        rescue JSON::ParserError, EncodingError
-          nil
-        end
-        unless j.is_a?(Hash)
-          unparsed += 1
-          next
-        end
-
+      s, u = each_json(f) do |j|
         clicks << j if j["kind"] == "slack.interaction"
         hits << j if j["delivery_id"].is_a?(String) && j["delivery_id"].downcase == did
       end
+      scanned += s
+      unparsed += u
     end
     [hits, clicks, scanned, unparsed]
   end
+
+  # -> [every non-click line of the slack channel files, lines scanned,
+  # lines that are not a JSON object].
+  def read_messages(files)
+    messages = []
+    scanned = 0
+    unparsed = 0
+    files.each do |f|
+      s, u = each_json(f) { |j| messages << j unless j["kind"] == "slack.interaction" }
+      scanned += s
+      unparsed += u
+    end
+    [messages, scanned, unparsed]
+  end
+
+  # Yields each JSON object line of `file`. -> [lines scanned, lines that are
+  # not a JSON object]. A line of invalid bytes is counted, never fatal: one
+  # bad line must not block every approval.
+  def each_json(file)
+    scanned = 0
+    unparsed = 0
+    File.foreach(file, mode: "rb") do |bytes|
+      raw = bytes.force_encoding(Encoding::UTF_8).scrub
+      next if raw.strip.empty?
+
+      scanned += 1
+      j = begin
+        JSON.parse(raw)
+      rescue JSON::ParserError, EncodingError
+        nil
+      end
+      if j.is_a?(Hash)
+        yield j
+      else
+        unparsed += 1
+      end
+    end
+    [scanned, unparsed]
+  end
 end
+
