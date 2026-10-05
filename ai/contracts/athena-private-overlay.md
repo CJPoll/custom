@@ -358,8 +358,11 @@ repository's pre-push hook is the outbound hook, the route's transport
 `ai/lib/forge-push-scan`, which reads the ref updates git asks the transport to
 send and runs the main checkout's `ai/git-hooks/outbound-pre-push.sh` on them
 before anything reaches the forge (DND-2023). Same script, same scanner, same
-pattern bar and waiver as the hook. A push it cannot read, and any scan exit
-but 0, is refused. Which hook locations count, the remote-helper forms it
+pattern bar and waiver as the hook: those load from the main checkout. The
+transport and `forge-push-scan` load beside the wrapper invoked, as the rest
+of the route does, so `~/dev/custom/ai/bin/gh-athena` runs the landed copies
+and a worktree's wrapper runs that branch's. A push it cannot read, and any
+scan exit but 0, is refused. Which hook locations count, the remote-helper forms it
 reads, and its residuals are in that program's header.
 
 **The forge path.** `ai/bin/gh-athena` scans every text field and text file
@@ -467,7 +470,10 @@ PUBLIC or read as private.
   read-free refusals, so the api scan had been left out.
 - gh-athena and glab-athena run the scanner beside them, so a worktree's
   wrapper runs that branch's scanner. Only the pre-push hook and the
-  transport's push-range scan pin the landed scanner.
+  transport's push-range scan pin the landed scanner. The push-range scan
+  pins only the hook script and scanner it runs: a worktree's wrapper runs
+  that branch's transport and `forge-push-scan`, which decide whether the
+  scan runs.
 - No scan catches a value it has no pattern for.
 
 Each bypass raises the cost or leaves a trace; none is impossible.

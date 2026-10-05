@@ -67,10 +67,13 @@ refuse() {
 # outbound hook (DND-2023), so the transport scans what it pushes; 1 when it
 # is not; 2 when that could not be read (scanned, as if marked: a failed
 # lookup never reads as "not marked"). Sets FG_OUTBOUND_COMMON to the
-# repository's common git dir. Every place the hook may be installed is read,
-# so no hook-skip setting hides it: <common>/hooks/pre-push itself, the path
-# git resolves in this environment, and the path it resolves from config
-# files alone (a caller's -c and GIT_CONFIG_COUNT cannot move it).
+# repository's common git dir. Three places the hook may be installed are
+# read, so -c, GIT_CONFIG_PARAMETERS and GIT_CONFIG_COUNT cannot hide it:
+# <common>/hooks/pre-push itself, the path git resolves in this environment,
+# and the path it resolves without those settings. A path that exists but is
+# not a readable regular file counts as unreadable (2). The residual (a hook
+# installed only under a core.hooksPath that the caller's GIT_CONFIG_GLOBAL
+# or GIT_CONFIG_SYSTEM replaces) is in ai/lib/forge-push-scan's header.
 fg_outbound_marked() {
   local common hook rc=1
   FG_OUTBOUND_COMMON=""
@@ -82,7 +85,7 @@ fg_outbound_marked() {
               "$(env -u GIT_CONFIG_PARAMETERS -u GIT_CONFIG_COUNT git rev-parse --path-format=absolute --git-path hooks/pre-push 2>/dev/null)"; do
     [ -n "${hook}" ] || { rc=2; continue; }
     [ -e "${hook}" ] || continue
-    [ -r "${hook}" ] || { rc=2; continue; }
+    { [ -f "${hook}" ] && [ -r "${hook}" ]; } || { rc=2; continue; }
     grep -q -e outbound-scan -e outbound-pre-push "${hook}" 2>/dev/null && return 0
   done
   return "${rc}"
@@ -177,4 +180,4 @@ done
 export GIT_CONFIG_PARAMETERS
 unset GIT_ASKPASS SSH_ASKPASS
 [ "${mark}" = 1 ] && exec "${rh}" "$@"
-exec "${scan_proxy}" --header-index "${hidx}" --common "${FG_OUTBOUND_COMMON:-/nonexistent/.git}" -- "${rh}" "$@"
+exec "${scan_proxy}" --header-index "${hidx}" --common "${FG_OUTBOUND_COMMON:--}" -- "${rh}" "$@"

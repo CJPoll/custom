@@ -31,11 +31,14 @@ module ForgePushScan
 
   module_function
 
-  # "push [+]<src>:<dst>" (the command word already removed) -> Spec.
+  # "push [+]<src>:<dst>" (the command word already removed) -> Spec. Split
+  # at the LAST colon, as git's refspec parser and send-pack do: a <src> may
+  # hold one (":/<text>" names a commit by its message, "<rev>:<path>" a blob),
+  # and <dst> is a ref name, which cannot.
   def parse_spec(text)
     force = text.start_with?("+")
     body = force ? text[1..] : text
-    src, sep, dst = body.partition(":")
+    src, sep, dst = body.rpartition(":")
     raise Unreadable, "a push spec with no ':' (#{body.length} bytes)" if sep.empty?
     raise Unreadable, "a push spec with no destination ref" if dst.empty?
 
@@ -63,7 +66,10 @@ module ForgePushScan
     else
       raise Unreadable, "the local object for #{spec.dst} is not an object id" unless OID.match?(local_oid.to_s)
 
-      Update.new(local_ref: spec.src, local_oid: local_oid, remote_ref: spec.dst, remote_oid: remote_refs.fetch(spec.dst, zero))
+      # The hook's stdin is space-separated; a <src> such as ":/<text>" may
+      # hold spaces, so it is stated by its object id there.
+      local_ref = spec.src.match?(/\s/) ? local_oid : spec.src
+      Update.new(local_ref: local_ref, local_oid: local_oid, remote_ref: spec.dst, remote_oid: remote_refs.fetch(spec.dst, zero))
     end
   end
 

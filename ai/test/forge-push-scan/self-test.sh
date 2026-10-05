@@ -16,7 +16,9 @@
 # with --exec-path=<a copy of git's exec-path> whose git-remote-https is a
 # FIXTURE: it maps https://github.com/<o>/<r> to a local bare repository and
 # speaks either the remote-helper `push` capability (as git's real
-# git-remote-https does) or `connect` (FX_MODE=connect). The App token is a
+# git-remote-https does) or `connect` (FX_MODE=connect). FX_MODE=die and
+# connect-die make it exit 128 mid-protocol, as git-remote-https does on an
+# auth or network failure. The App token is a
 # fixture cache (no mint); the overlay is a fixture under mktemp -d with
 # synthetic values only (SYNTH-TOKEN-1). A guard sits behind the git shim
 # (ai/lib/forge-stub-guard.sh, DND-1647/1667).
@@ -81,11 +83,12 @@ cat > "${FX_EXEC}/git-remote-https" <<'EOF'
 url="${2:-$1}"
 repo="${FX_FORGE}/${url#https://*/}"
 printf 'start mode=%s url=%s\n' "${FX_MODE:-push}" "${url}" >> "${FX_LOG}"
-if [ "${FX_MODE:-push}" = connect ]; then
+if [ "${FX_MODE:-push}" = connect ] || [ "${FX_MODE:-push}" = connect-die ]; then
   while IFS= read -r line; do
     case "${line}" in
       capabilities) printf 'connect\n\n' ;;
-      "connect "*) printf '\n'; exec env -u GIT_DIR git "${line#connect git-}" "${repo}" ;;
+      "connect "*) printf '\n'; [ "${FX_MODE}" = connect-die ] && exit 128
+        exec env -u GIT_DIR git "${line#connect git-}" "${repo}" ;;
       '') exit 0 ;;
       *) exit 1 ;;
     esac
@@ -97,7 +100,7 @@ while IFS= read -r line; do
   case "${line}" in
     capabilities) printf 'push\noption\n\n' ;;
     "option "*) printf 'unsupported\n' ;;
-    "list for-push") git --git-dir="${repo}" for-each-ref --format='%(objectname) %(refname)'; printf '\n' ;;
+    "list for-push") [ "${FX_MODE:-push}" = die ] && exit 128; git --git-dir="${repo}" for-each-ref --format='%(objectname) %(refname)'; printf '\n' ;;
     "push "*) specs+=( "${line#push }" ) ;;
     '')
       [ "${#specs[@]}" = 0 ] && exit 0
@@ -182,6 +185,47 @@ skip "S4. core.hooksPath through GIT_CONFIG_COUNT/KEY/VALUE: refused, nothing la
   GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath "GIT_CONFIG_VALUE_0=${TMP}/nohooks" -- push origin HEAD:refs/heads/s4
 skip "S5. --no-verify over the connect capability: refused, nothing landed" s5 FX_MODE=connect -- push --no-verify origin HEAD:refs/heads/s5
 skip "S6. --no-verify, the push naming a URL: refused, nothing landed" s6 -- push --no-verify git@github.com:o/r1.git HEAD:refs/heads/s6
+skip "S7. --no-verify, the source named by message (:/<text>, whose spec has two colons): refused, nothing landed" s7 \
+  -- push --no-verify origin ":/add notes.md:refs/heads/s7"
+skip "S8. --no-verify, a :/<text> source with no space (:/add): refused, nothing landed" s8 \
+  -- push --no-verify origin ":/add:refs/heads/s8"
+
+# reap_tmp : kill, by pid, every process whose argv names this suite's TMP
+# (a hung case's git, transport and helper). /proc is read in this shell, so
+# no matching process of its own is started.
+reap_tmp() {
+  local d a
+  for d in /proc/[0-9]*; do
+    [ "${d#/proc/}" = "$$" ] && continue
+    a="$(tr '\0' ' ' 2>/dev/null < "${d}/cmdline")" || continue
+    [[ "${a}" == *"${TMP}/"* ]] && kill "${d#/proc/}" 2>/dev/null
+  done
+  return 0
+}
+
+echo "--- a helper that dies mid-protocol: git is told, never left waiting ---"
+# bg_route <dir> <env...> -- <git args...> : gh-athena git in the background;
+# XPID is its pid, so `wait` returns ITS exit status.
+bg_route() {
+  local d="$1"; shift
+  local -a envs=()
+  while [ "$#" -gt 0 ] && [ "$1" != -- ]; do envs+=( "$1" ); shift; done
+  shift
+  ( cd "${d}" && exec env PATH="${XPATH}" "${envs[@]}" "${WRAPPER}" git "$@" >"${TMP}/bg.out" 2>&1 ) &
+  XPID=$!
+}
+bg_route "${R}" FX_MODE=die -- -c "core.hooksPath=${TMP}/nohooks" push origin HEAD:refs/heads/x1
+timeout 60 tail --pid="${XPID}" -f /dev/null; TRC=$?
+if [ "${TRC}" = 0 ]; then wait "${XPID}"; XRC=$?; else kill "${XPID}" 2>/dev/null; reap_tmp; XRC=hung; fi
+if [ "${TRC}" = 0 ] && [ "${XRC}" != 0 ] && [ -z "$(landed r1 refs/heads/x1)" ]; then
+  ok "X1. the helper exits on list for-push: the push fails and returns"
+else bad "X1. dead helper on list for-push" "tail=${TRC} rc=${XRC}"; fi
+bg_route "${R}" FX_MODE=connect-die -- fetch -q origin
+timeout 60 tail --pid="${XPID}" -f /dev/null; TRC=$?
+if [ "${TRC}" = 0 ]; then wait "${XPID}"; XRC=$?; else kill "${XPID}" 2>/dev/null; reap_tmp; XRC=hung; fi
+if [ "${TRC}" = 0 ] && [ "${XRC}" != 0 ]; then
+  ok "X2. the helper exits right after a connect ack: the fetch fails and returns"
+else bad "X2. dead helper mid-connect" "tail=${TRC} rc=${XRC}"; fi
 
 echo "--- a clean range passes the transport's scan and lands ---"
 git -C "${R}" reset -q --hard origin/main; clean_commit "${R}" c1.md
@@ -263,6 +307,23 @@ route "${R6}" -- -c "core.hooksPath=${TMP}/nohooks" push --no-verify origin HEAD
 if [ "${RC}" != 0 ] && [ -z "$(landed r6 refs/heads/m2)" ] && [[ "${OUT}" == *"outbound-scan: HITS"* ]]; then
   ok "M2. hook installed under the repository's core.hooksPath, overridden by -c: still found, refused"
 else bad "M2. config-installed hook found" "rc=${RC} out=${OUT}"; fi
+
+# A pre-push path that is not a readable regular file counts as unreadable: scanned.
+R7="$(mk_repo r7)"; mkdir -p "${R7}/.git/hooks/pre-push"; plant "${R7}" n.md
+route "${R7}" -- push --no-verify origin HEAD:refs/heads/m3
+if [ "${RC}" != 0 ] && [ -z "$(landed r7 refs/heads/m3)" ] && [[ "${OUT}" == *"outbound-scan: HITS"* ]]; then
+  ok "M3. a pre-push path that is a directory cannot be read as a hook: scanned as marked, refused"
+else bad "M3. unreadable hook path scanned" "rc=${RC} out=${OUT}"; fi
+
+# The transport could not resolve the common dir (--common -): a push is
+# refused as COULD NOT LOOK, not as a missing hook.
+OUT="$(cd "${R}" && printf 'capabilities\nlist for-push\npush HEAD:refs/heads/u4\n\n' \
+  | env PATH="${XPATH}" GIT_DIR="${R}/.git" "${AI_DIR}/lib/forge-push-scan" --header-index 0 --common - -- \
+    "${FX_EXEC}/git-remote-https" origin https://github.com/o/r1.git 2>&1)"; RC=$?
+if [[ "${OUT}" == *"error refs/heads/u4 refused by the outbound scan"* ]] && [[ "${OUT}" == *"COULD NOT LOOK"* ]] \
+   && [[ "${OUT}" == *"Fix:"* ]] && [[ "${OUT}" != *"/nonexistent"* ]] && [ -z "$(landed r1 refs/heads/u4)" ]; then
+  ok "U4. common dir unresolved: the push is refused as COULD NOT LOOK, nothing landed"
+else bad "U4. unresolved common dir" "rc=${RC} out=${OUT}"; fi
 
 echo "--- glab-athena shares the transport ---"
 printf 'glpat-SELFTESTFAKETOKEN0000\n' > "${TMP}/glab-token"; chmod 600 "${TMP}/glab-token"

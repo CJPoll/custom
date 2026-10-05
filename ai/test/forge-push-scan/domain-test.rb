@@ -23,6 +23,8 @@ b = "b" * 40
 s = P.parse_spec("+refs/heads/x:refs/heads/y")
 t("spec: force, src, dst", s.force && s.src == "refs/heads/x" && s.dst == "refs/heads/y")
 t("spec: delete has an empty src", P.parse_spec(":refs/heads/y").src.empty?)
+m = P.parse_spec(":/secret commit:refs/tags/x")
+t("spec: a :/<text> source splits at the last colon", m.src == ":/secret commit" && m.dst == "refs/tags/x")
 t("spec: no colon is unreadable", raises { P.parse_spec("refs/heads/x") })
 t("spec: no destination is unreadable", raises { P.parse_spec("refs/heads/x:") })
 refs = P.parse_list([":object-format sha1\n", "@refs/heads/main HEAD\n", "#{a} refs/heads/main\n", "? refs/heads/q\n"])

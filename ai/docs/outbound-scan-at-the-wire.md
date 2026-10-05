@@ -328,14 +328,18 @@ or mutation nobody listed.
 - **git content.** Pushes go over the git transport. The pre-push hook scans
   them, and git can be told to skip it, so the transport
   (`git-remote-athena-forge`) runs the landed scan on the pushed range itself
-  through `ai/lib/forge-push-scan` (DND-2023). Its residuals are in that
+  through `ai/lib/forge-push-scan` (DND-2023). The hook script, scanner and
+  patterns it runs are the main checkout's; the transport and
+  `forge-push-scan` themselves load beside the wrapper invoked, so a
+  worktree's wrapper runs that branch's copies. Its residuals are in that
   program's header.
 
   **Later (2026-10-05, DND-2023):** this bullet said `gh-athena git push
   --no-verify` skipped the scan and named the transport scan as its own
   ticket. The regression test (`ai/test/forge-push-scan/self-test.sh`)
   reproduced the skip for `--no-verify` and three `core.hooksPath` routes;
-  the transport scan closes them.
+  the transport scan refuses each of them through the main checkout's
+  wrapper.
 - **Server-generated text.** `--generate-notes`, `--notes-from-tag`: GitHub
   composes it. Its sources (PR titles, tag messages) were scanned when written.
 - **Partial writes.** A multi-request command refused part-way leaves its
@@ -390,7 +394,7 @@ hang.
 4. `gh-athena` the same, after PR #392 (DND-2007) lands.
 5. The operation table and merge grants in both wrappers; the merge guards
    become granters.
-6. The git transport scans the pushed range itself.
+6. The git transport scans the pushed range itself (built: DND-2023).
 7. Retiring the argv scan, on the owner's decision.
 
 ## Where things live
@@ -398,7 +402,9 @@ hang.
 Once built: the proxy's `--help` (`ai/bin/forge-wire`) and the module headers
 under `ai/lib/forge_wire/`; the outcome rules stay in
 `ai/lib/outbound-text-scan.sh` and the contract's *The forge path* and *The
-GitLab forge path*, which the wrapper tickets amend.
+GitLab forge path*, which the wrapper tickets amend. The git half: the
+header of `ai/lib/forge-push-scan` and the contract's *The transport's
+push-range scan*.
 
 ## Evidence
 

@@ -18,8 +18,10 @@
 # it reads the ref updates git asks for, states them as the pre-push hook's
 # stdin, and runs the MAIN checkout's ai/git-hooks/outbound-pre-push.sh with
 # them: the same script, scanner and pattern bar the hook runs, so a branch
-# cannot weaken the scan that judges its own push. Only a clean scan (exit 0)
-# lets the push through. Fetches, clones and ls-remote are relayed unread.
+# cannot weaken the scanner or the patterns that judge its own push. Only a
+# scan that exits 0 lets the push through: CLEAN, or WAIVED - NOT SCANNED
+# under ATHENA_OUTBOUND_WAIVE=<reason>, which the scan inherits and logs
+# exactly as the hook's does (the hook's stated waiver residual). Fetches, clones and ls-remote are relayed unread.
 #
 # Refused, with a Fix: line on stderr (git then reports the refs rejected, or
 # the remote end hung up), and nothing reaches the forge:
@@ -28,7 +30,9 @@
 #     receive-pack command, a signed push (push-cert);
 #   * a push form this program does not read: stateless-connect to
 #     git-receive-pack, or a remote-helper command it does not know;
-#   * the main checkout's outbound-pre-push.sh is missing or not executable.
+#   * the main checkout's outbound-pre-push.sh is missing or not executable;
+#   * the transport could not resolve the repository's common git dir
+#     (--common -), so there is no main checkout to run the scan from.
 #
 # The scan runs without the bot header: the transport names the environment
 # config index that carries it (--header-index), and the scan's environment
@@ -40,7 +44,11 @@
 # GIT_CONFIG_COUNT settings removed. Any of them holding the outbound hook,
 # or one that cannot be read, sends the connection here.
 #
-# Residuals, stated: a repository with no outbound hook (it never had the
+# Residuals, stated: this program and the transport load beside the wrapper
+# invoked (FG_TRANSPORT_DIR), so a worktree's gh-athena or glab-athena runs
+# that branch's copies, which decide whether the scan runs at all; agents
+# push with the main checkout's ~/dev/custom/ai/bin/gh-athena. A repository
+# with no outbound hook (it never had the
 # hook's scan either; deleting the hook unmarks it); a hook installed only
 # under a core.hooksPath that the caller's GIT_CONFIG_GLOBAL or
 # GIT_CONFIG_SYSTEM replaces; a local ref moved by another process between
@@ -100,6 +108,7 @@ unless header_index&.match?(/\A\d+\z/) && common && !common.empty? && HELPER.len
 end
 REMOTE = HELPER[1]
 URL = HELPER[2] || HELPER[1]
+COMMON_UNKNOWN = common == "-"
 HOOK = File.join(File.dirname(common), "ai", "git-hooks", "outbound-pre-push.sh")
 # The scan's environment: everything this process has, without the bot header.
 SCAN_ENV = {
@@ -113,7 +122,12 @@ $stdout.binmode
 $stdout.sync = true
 
 # ---- the child helper ---------------------------------------------------------
-child_in, child_out, child_wait = Open3.popen2(*HELPER)
+begin
+  child_in, child_out, child_wait = Open3.popen2(*HELPER)
+rescue SystemCallError => e
+  die("git's git-remote-https (#{HELPER[0]}) could not be started (#{e.class.name.split('::').last})",
+      "check that `git --exec-path` names git's own exec directory and that it holds an executable git-remote-https, then retry.")
+end
 child_in.binmode
 child_out.binmode
 child_in.sync = true
@@ -125,6 +139,31 @@ def finish(code = nil)
   CHILD_IN.close unless CHILD_IN.closed?
   st = CHILD_WAIT.value
   exit(code || st.exitstatus || 1)
+end
+
+# hang_up_on_git : end git's read side now. Ruby's close of $stdout keeps fd 1
+# open, so fd 1 is replaced with /dev/null instead, which closes the pipe.
+def hang_up_on_git
+  $stdout.flush unless $stdout.closed?
+  $stdout.reopen(File::NULL, "w")
+rescue IOError, SystemCallError
+  nil
+end
+
+# child_gone! : the helper hung up (it exits on an auth, network or server
+# error, having said why on stderr). Hang up on git too, so git reports the
+# failure instead of waiting for an answer, and exit non-zero.
+def child_gone!
+  hang_up_on_git
+  CHILD_IN.close unless CHILD_IN.closed?
+  st = CHILD_WAIT.value
+  exit(st.success? ? 1 : (st.exitstatus || 1))
+end
+
+def to_child(bytes)
+  CHILD_IN.write(bytes)
+rescue Errno::EPIPE, IOError
+  child_gone!
 end
 
 def refuse(msg, fix)
@@ -146,7 +185,9 @@ end
 # relay_until_blank : child lines to git, through the first blank line; returns them.
 def relay_until_blank
   lines = []
-  while (l = CHILD_OUT.gets)
+  loop do
+    l = CHILD_OUT.gets
+    child_gone! if l.nil?
     $stdout.write(l)
     break if l == "\n"
 
@@ -157,7 +198,8 @@ end
 
 def relay_line
   l = CHILD_OUT.gets
-  $stdout.write(l) if l
+  child_gone! if l.nil?
+  $stdout.write(l)
   l
 end
 
@@ -166,6 +208,11 @@ end
 # its output and the refusal, and returns false.
 def scan(updates)
   return true if updates.empty?
+  if COMMON_UNKNOWN
+    refuse("the transport could not resolve this repository's common git dir (git rev-parse --git-common-dir failed), so it cannot find the main checkout whose outbound scan judges this push (COULD NOT LOOK)",
+           "push from inside the repository's work tree, with GIT_DIR and GIT_COMMON_DIR unset or naming this repository, then retry; report the git error if `git rev-parse --git-common-dir` fails there.")
+    return false
+  end
   unless File.file?(HOOK) && File.executable?(HOOK)
     refuse("the main checkout's outbound hook #{HOOK} is missing or not executable, so the range cannot be scanned (COULD NOT MEASURE)",
            "fast-forward the main checkout (git -C #{File.dirname(File.dirname(File.dirname(HOOK)))} merge --ff-only origin/main) so the landed hook exists, then push again.")
@@ -193,15 +240,15 @@ UNREADABLE_FIX = "push a plain branch or tag through the route (gh-athena git pu
 
 # ---- the push capability --------------------------------------------------------
 def push_batch(specs_lines, remote_refs)
-  updates = specs_lines.map do |line|
-    spec = ForgePushScan.parse_spec(line.chomp.delete_prefix("push "))
+  specs = specs_lines.map { |line| ForgePushScan.parse_spec(line.chomp.delete_prefix("push ")) }
+  updates = specs.map do |spec|
     ForgePushScan.update_for_spec(spec, spec.src.empty? ? nil : resolve(spec.src), remote_refs)
   end
   if scan(updates)
-    CHILD_IN.write(specs_lines.join + "\n")
+    to_child(specs_lines.join + "\n")
     relay_until_blank
   else
-    specs_lines.each { |l| $stdout.write("error #{l.chomp.split(':', 2).last} refused by the outbound scan\n") }
+    specs.each { |spec| $stdout.write("error #{spec.dst} refused by the outbound scan\n") }
     $stdout.write("\n")
   end
 rescue ForgePushScan::Unreadable => e
@@ -217,8 +264,23 @@ rescue EOFError, IOError, Errno::EPIPE
   nil
 end
 
+# The helper's side. When the helper's output ends, the connection is over
+# (it has answered, or it died), so this program exits with the helper's
+# status. Closing fd 1 alone is not enough: git runs a helper through a `git
+# remote-<name>` process that holds the same pipe until this one exits, so
+# git sees EOF only then (measured: a fetch hung until its timeout).
+def relay_from_child
+  Thread.new do
+    relay_raw(CHILD_OUT, $stdout)
+    hang_up_on_git
+    CHILD_IN.close unless CHILD_IN.closed?
+    st = CHILD_WAIT.value
+    Process.exit!(st.exitstatus || 1)
+  end
+end
+
 def raw_mode
-  t = Thread.new { relay_raw(CHILD_OUT, $stdout) }
+  t = relay_from_child
   relay_raw($stdin, CHILD_IN)
   CHILD_IN.close unless CHILD_IN.closed?
   t.join
@@ -233,7 +295,7 @@ def read_exact(io, n)
 end
 
 def receive_pack_mode
-  t = Thread.new { relay_raw(CHILD_OUT, $stdout) }
+  t = relay_from_child
   held = +""
   updates = []
   loop do
@@ -254,7 +316,7 @@ def receive_pack_mode
     t.kill
     abort_push("the outbound scan did not pass", "see the scan output and Fix: above.")
   end
-  CHILD_IN.write(held)
+  to_child(held)
   relay_raw($stdin, CHILD_IN)
   CHILD_IN.close unless CHILD_IN.closed?
   t.join
@@ -282,23 +344,23 @@ while (line = $stdin.gets)
       push_batch(batch, remote_refs)
       batch = []
     elsif !fetch_batch.empty?
-      CHILD_IN.write(fetch_batch.join + "\n")
+      to_child(fetch_batch.join + "\n")
       fetch_batch = []
       relay_until_blank
     else
-      CHILD_IN.write(line)
+      to_child(line)
     end
   when "capabilities\n"
-    CHILD_IN.write(line)
+    to_child(line)
     relay_until_blank
   when /\Aoption /
-    CHILD_IN.write(line)
+    to_child(line)
     relay_line
   when "list for-push\n"
-    CHILD_IN.write(line)
+    to_child(line)
     remote_refs = ForgePushScan.parse_list(relay_until_blank)
   when /\Alist( |\n)/, /\Aget /
-    CHILD_IN.write(line)
+    to_child(line)
     relay_until_blank
   when /\A(stateless-connect|connect) (\S+)\n\z/
     verb = Regexp.last_match(1)
@@ -307,7 +369,7 @@ while (line = $stdin.gets)
       abort_push("a stateless-connect push to git-receive-pack, whose commands this transport does not read",
                  "push with git's own git-remote-https (the route's default); report the git version if it pushed this way.")
     end
-    CHILD_IN.write(line)
+    to_child(line)
     ack = relay_line
     next unless ack == "\n" # "fallback" or an error: the line protocol goes on
 
