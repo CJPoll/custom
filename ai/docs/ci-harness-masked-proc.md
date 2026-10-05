@@ -144,7 +144,7 @@ socket. This catches the one change that would make the decision unsafe: the
 
 The gate container never gets the socket. `ai/test/gitlab-ci/check.rb`
 asserts the `docker run` line carries exactly the three `--security-opt`
-values above and none of `--privileged`, `--pid=host`, `--network=host`,
+values in the decision's `docker run` and none of `--privileged`, `--pid=host`, `--network=host`,
 `--cap-add` or a `docker.sock` bind.
 
 ## Tickets
