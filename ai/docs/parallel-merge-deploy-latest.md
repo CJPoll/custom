@@ -91,8 +91,10 @@ The lander, per gated head H:
    `main` pipeline (*D5*) it reads every custom tip as COULD NOT LOOK and
    refuses every landing. What counts as a fix while the tip is red is
    DND-2061's rule (*D7*), never "H contains the red SHA".
-5. Make M with `git commit-tree <tree> -p B -p H`. When B is an ancestor of
-   H, M is H itself and the push is a fast-forward of the reviewed head.
+5. When B is an ancestor of H, M is H itself: skip the commit, and the push
+   is a fast-forward of the reviewed head. Otherwise make M with `git
+   commit-tree <tree> -p B -p H` (which always makes a merge commit, so the
+   fast-forward case is special-cased, never left to it).
 6. Push `M:main` through `glab-athena git push`, never forced.
 7. A rejected non-fast-forward means another landing won. Go back to step 1:
    fetch, recompute, re-check, retry. Bounded: 5 attempts, then exit 6 with a
@@ -258,6 +260,23 @@ migration collision (*D6*). D1 already lands this way: M = merge(B, H) is
 built at landing time, and H is never rewritten, so its pipeline never
 re-runs.
 
+**T11 lowers a bar, and says so.** `integration-gate`'s "branch behind
+target" refusal makes the local gate test a tree that contains the tip at
+gate time. After T11 it tests H on its own base, while the tree that lands is
+merge(B, H). That narrows what the gate catches, so T11 is item 5
+(*Owner approval policy* → *What stays with Cody*), not a speed-up under
+`ai/blocks/ops/safety-checks.md`. Two facts bound the loss. First, DND-1463
+already lands a clean merge onto a moved `main` with no re-gate, so the
+integrated tree was already ungated whenever `main` moved after the gate.
+Second, the textual-conflict and migration-collision checks still read the
+exact landed tree (*D1*), and `main-health` still gates it after the landing.
+The authority is Cody's terminal turn of 2026-10-05 ~08:27Z and ~08:28Z
+(session `0cc59a5e-6c65-495e-a216-83c6a0bf2d56`), quoted above. This
+document has it only as the admiral's relay, which approves nothing. So T11's
+PR carries Cody's verified record (`integration-gate --owner-approval`, or
+Cody's own verified Slack message naming the PR and head), or Cody lands the
+new bar himself.
+
 Every site that forces a branch onto the latest `main`, as of 2026-10-05:
 
 | Site | What it forces | Replaced by |
@@ -317,15 +336,16 @@ The laptop session owns gen_saas's `.gitlab-ci.yml`. The harness needs:
 
 *Green-alone is not green-merged* stands (DND-1463). Two heads with disjoint
 files can each pass and fail together, and no gate runs on that tree before it
-lands. As of 2026-10-05, `main-health` finds it after the landing. If Q1 drops that local
-run, the next `integration-gate --rebase` on any branch finds it, because it
-gates the branch on top of the current `main`.
+lands. `main-health` finds it after the landing. Under D7 it is the only
+detector left: T11 gates each head on its own base, and T9 drops `--rebase`
+from the briefs, so no routine gate runs on the current `main` tree. Q1
+therefore cannot drop `main-health` without leaving this risk undetected.
 
 ## Tickets, in order
 
 | # | Title | Kind | Severity | Files | What proves it |
 |---|---|---|---|---|---|
-| T1 | custom's MR pipeline passes in the CI image (DND-1998, reopened) | Bug | HIGH | `.gitlab-ci.yml`, the runner kit | A pipeline on a healthy custom head reads `success`, 199/199. Prerequisite for T3 on custom. |
+| T1 | custom's MR pipeline passes in the CI image (DND-1998, reopened) | Bug | HIGH | `.gitlab-ci.yml`, the runner kit | A pipeline on a healthy custom head reads `success`, every gate check passing. Prerequisite for T3 on custom. |
 | T2 | custom CI: no pipeline on `main` (goal 4) | Ops | MEDIUM | `.gitlab-ci.yml`, `ai/test/gitlab-ci/self-test.sh`, `ai/test/gitlab-ci/check.rb` | Self-test case: the default-branch rule exists and comes before the branch rule (fails on the file as of 2026-10-05). Live: after a landing, `pipelines?sha=<tip>&ref=main` lists none. If `blast-radius` still holds `.gitlab-ci.yml` when T2 lands, the gate exits 4 and the admiral routes it per *Owner approval policy*. Land it before the flip (DND-1947), so no custom landing is ever measured on a `main` pipeline. |
 | T3 | Push guard: a push to `main` on GitLab needs a `success` pipeline on the gated head H | Feature (merge-bar control) | HIGH | `ai/lib/forge-git-passthrough.sh`, `ai/lib/glab-merge-guard.sh` (shared pipeline reader), `ai/test/glab-athena-*` | Cases: H with no pipeline, `running`, `failed`, a fork's pipeline, an unreadable read: each refused with `Fix:`. `success` on H: passes. M = merge(B, H): H read as M's second parent. Sabotage record in the suite's `SABOTAGE_RECORDS.md`. Depends on T1. |
 | T4 | Audit readers of a linear `main` before merge commits land | Refactor | MEDIUM | `scripts/lib/lane-own-commits.sh`, `ai/bin/lead-time` (patch-id landing match), `ai/bin/confirm-merged --sha`, `ai/bin/landing-installers` | Each reader gets a fixture with a merge commit M(B, H) and keeps its verdict. A reader that cannot is fixed in this ticket. |
@@ -335,7 +355,7 @@ gates the branch on top of the current `main`.
 | T8 | GitLab: `only_allow_merge_if_pipeline_succeeds` true on custom and gen_saas | Ops | MEDIUM | none (project settings) | Only Cody can run: `glab api -X PUT projects/athena-ai-harness%2Fcustom -f only_allow_merge_if_pipeline_succeeds=true`, the same for gen_saas. Verify by reading the field back. Developer push to `main` stays allowed (D1 needs it). |
 | T9 | Doctrine sweep: lock-free landing, deploy latest (lands after the 2026-10-05 owner-hold narrowing, which also edits `athena:merge-boarding`) | Docs | MEDIUM | `athena:merge-boarding` (*The merge bar* no-CI landing, *Merge one at a time*, *Landing onto a moving main*, *GitLab path (no merge train)*), `~/dev/custom/CLAUDE.md` (*An admiral merges that PR*, *Two fleets in one repo*), `athena:gitlab`, `athena:shipwright-lane` (cron push: push the branch, wait for its pipeline, then land), `ai/docs/lead-time-improver.md`, `ai/telemetry/events.json` (`merge.lock_wait`) | `grep` for `custom-merge.lock`, `locked-merge --mr`, `one at a time` and `Hold the lock` returns only `Later` labels and GitHub-scoped text. The epic's open ticket bodies (DND-1947 included) are swept too, with an inline pointer where a captain acts (*A supersession sweeps the tickets*). Lands with or right after T5. |
 | T10 | Retire `locked-merge --mr` | Refactor | LOW | `scripts/locked-merge`, its GitLab suite | `--mr` exits 2 with `Fix:` naming `land-merge`. After T5 has landed live at least once on each GitLab project. |
-| T11 | integration-gate gates a head on its own base (*D7*) | Feature | HIGH | `ai/skills/athena:merge-boarding/scripts/integration-gate`, `ai/lib/integration-receipt.sh`, `ai/skills/athena:merge-boarding/test/` | A head behind `origin/main` with no conflict: gated, receipt base = `merge-base`, `INTEGRATION OK` (exit 2 before the change). A head that conflicts textually with the tip: refused, naming the paths. Every receipt reader (`locked-merge`, both merge guards, the push guard) accepts that receipt. Ship it before T5 so the lander has receipts to land. |
+| T11 | integration-gate gates a head on its own base (*D7*) | Feature | HIGH | `ai/skills/athena:merge-boarding/scripts/integration-gate`, `ai/lib/integration-receipt.sh`, `ai/skills/athena:merge-boarding/test/` | A head behind `origin/main` with no conflict: gated, receipt base = `merge-base`, `INTEGRATION OK` (exit 2 before the change). A head that conflicts textually with the tip: refused, naming the paths. Every receipt reader (`locked-merge`, both merge guards, the push guard) accepts that receipt. Ship it before T5 so the lander has receipts to land. Item 5 (*D7*): the PR needs Cody's verified record on its head. |
 | T12 | Red-main push refusal follows DND-2061's rule | Bug | HIGH | `ai/lib/forge-git-passthrough.sh` (*Red-main refusal*), `ai/lib/main-health.sh`, `ai/test/gh-athena/` | Only if DND-2061 does not cover the push path. While the marker reads RED, a push of M = merge(B, H) is judged by DND-2061's rule, not by M containing the red SHA. Cases per that rule. Depends on DND-2061. |
 
 The gen_saas pipeline changes (*gen_saas: constraints on its pipeline*) are
