@@ -462,6 +462,16 @@ if [ "${RC}" = 1 ] && [[ "${OUT}" == *"SCANNED commits=2 "* ]] && [[ "${OUT}" !=
 else
   bad "N10 forge URL through forge-git" "rc=${RC} log=$(cat "${TMP}/gh-athena-stub.log" 2>/dev/null) ${OUT}"
 fi
+# A scanner copy with no forge-git beside it: a named COULD NOT LOOK, never an
+# anonymous failure or an empty destination.
+NOFG="${TMP}/nofg"; mkdir -p "${NOFG}/ai/bin" "${NOFG}/ai/lib"
+cp "${ROOT}/ai/bin/outbound-scan" "${NOFG}/ai/bin/"; cp "${ROOT}"/ai/lib/*.rb "${NOFG}/ai/lib/"
+OUT="$(cd "${NB}" && printf 'refs/heads/x %s refs/heads/x 0000000000000000000000000000000000000000\n' "${NBH}" | "${NOFG}/ai/bin/outbound-scan" --pre-push --remote r --url "${DEST}" 2>&1)"; RC=$?
+if [ "${RC}" = 3 ] && [[ "${OUT}" == *"forge-git could not be run"*"COULD NOT LOOK"* ]] && [[ "${OUT}" == *"Fix:"* ]]; then
+  ok "N11 no ai/bin/forge-git beside the scanner: COULD NOT LOOK, naming it"
+else
+  bad "N11 missing forge-git" "rc=${RC} ${OUT}"
+fi
 
 echo "--- merges: only what differs from every parent is new ---"
 MG="$(mk_public merges)"
