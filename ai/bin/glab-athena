@@ -95,11 +95,18 @@ ga_refuse_identity() {
 # creates it once per machine; nothing here creates, guesses or replaces it.
 ga_refuse_missing_token_file() {
 	[ -e "$3" ] && return 0
-	# A parent this user cannot search hides an existing file from -e too:
-	# that is "could not look", left to the unreadable-token refusal.
-	local parent
-	parent="$(dirname -- "$3")"
-	[ -e "$parent" ] && ! { [ -d "$parent" ] && [ -x "$parent" ]; } && return 0
+	# A directory this user cannot search, anywhere on the path, hides an
+	# existing file from -e too. Walk up to the deepest ancestor that is
+	# visible: if it is a directory it cannot search, that is COULD NOT LOOK,
+	# named; otherwise the next component really is missing.
+	local d
+	d="$(dirname -- "$3")"
+	while [ "$d" != / ] && [ "$d" != . ] && [ ! -e "$d" ]; do d="$(dirname -- "$d")"; done
+	if [ -d "$d" ] && [ ! -x "$d" ]; then
+		echo "glab-athena: REFUSING $2: COULD NOT LOOK: the directory $d cannot be searched by this user, so whether the $FID_BOT token file $3 (for $FID_HOST/$FID_NS) exists is unknown." >&2
+		echo "  Fix: the owner makes $d searchable for this user (or moves the token file to a path it can reach) and keeps $3 at mode 600; agents do not change it. $FID_ESCALATE" >&2
+		exit "$1"
+	fi
 	echo "glab-athena: REFUSING $2: the $FID_BOT token file $3 (for $FID_HOST/$FID_NS) does not exist on this machine, so nothing can run as $FID_BOT." >&2
 	echo "  Fix: the owner creates $3 on this machine (mode 600, one line: $FID_BOT's token; ai/secrets/registry.json says how). Agents never create it and never run \`glab-athena refresh\` or \`glab auth\`. $FID_ESCALATE" >&2
 	exit "$1"

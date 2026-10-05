@@ -480,7 +480,9 @@ if read_was "api --hostname gİtlab.com projects/synth-group%2Fpriv"; then ok "(
 gla api -X POST --hostname GitLab.COM projects/synth-group%2Fpriv/issues/3/notes -f "body=x${TOKEN}"
 if [ "${RC}" = 0 ] && sent && [ "$(head -n1 <<<"${CALLS}")" = "api projects/synth-group%2Fpriv" ]; then ok "DND-2009: --hostname GitLab.COM is gitlab.com"; else bad "DND-2009: --hostname GitLab.COM" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 gla mr note "https://gİtlab.com/synth-group/pub/-/merge_requests/1" -m "x${TOKEN}"
-if refused_hit && read_was "api --hostname gİtlab.com projects/synth-group%2Fpub"; then ok "DND-2009: an MR URL's non-ASCII host is read on that host"; else bad "DND-2009: gİtlab.com MR URL" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
+if id_refused && [[ "${OUT}" == *"not ASCII"* ]]; then ok "an MR URL's non-ASCII host is refused by the identity map (DND-1936)"; else bad "identity: DND-2009: gİtlab.com MR URL" "rc=${RC} ${OUT}"; fi
+lib_guard mr note "https://gİtlab.com/synth-group/pub/-/merge_requests/1" -m "x${TOKEN}"
+if refused_hit && read_was "api --hostname gİtlab.com projects/synth-group%2Fpub"; then ok "(library) DND-2009: an MR URL's non-ASCII host is read on that host"; else bad "(library) DND-2009: gİtlab.com MR URL" "rc=${RC} calls=[${CALLS}] ${OUT}"; fi
 gla api -X POST "https://public.example/api/v4/projects/synth-group%2Fpriv/merge_requests" -f target_project_id=4242 -f "description=x${TOKEN}"
 if id_refused; then ok "an absolute or unusable key is refused by the identity map: DND-2009: target_project_id other host"; else bad "identity: DND-2009: target_project_id other host" "rc=${RC} ${OUT}"; fi
 lib_guard api -X POST "https://public.example/api/v4/projects/synth-group%2Fpriv/merge_requests" -f target_project_id=4242 -f "description=x${TOKEN}"

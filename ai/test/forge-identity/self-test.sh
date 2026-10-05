@@ -297,6 +297,21 @@ R="$(fid_in "${PERS}" fid_resolve_glab_args mr note "${MRU}" -m x)"
 expect P1 "a positional work MR URL from a personal checkout -> BAD KEY, never the personal bot" 2 "BAD KEY" "" "names namespace '${W_NS}'"
 R="$(fid_in "${WORK}" fid_resolve_glab_args mr note https://gitlab.com/cjpoll/custom/-/merge_requests/3 -m x)"
 expect P2 "the reverse: a personal MR URL from a work checkout -> BAD KEY" 2 "BAD KEY" "" "names namespace 'cjpoll'"
+# A host is folded as ASCII only, and a non-ASCII host is malformed. In a
+# UTF-8 locale bash's ${x,,} folds U+0130 to `i`, so gİtlab.com compared equal
+# to gitlab.com, while glab sends it to another (IDNA) host. The locale is set
+# explicitly: the fold only happens in a UTF-8 one.
+NONASCII_HOST="g$(printf '\xc4\xb0')tlab.com"
+R="$(LC_ALL=C.UTF-8 fid_in "${PERS}" fid_resolve_glab_args mr note "https://${NONASCII_HOST}/cjpoll/custom/-/merge_requests/1" -m x)"
+expect P2u "an MR URL on a non-ASCII host spelled like gitlab.com, keyed namespace, UTF-8 locale -> BAD KEY, never the bot" 2 "BAD KEY" "" "not ASCII"
+R="$(LC_ALL=C.UTF-8 fid_in "${PERS}" fid_resolve_glab_args mr note 3 -R "https://${NONASCII_HOST}/cjpoll/custom" -m x)"
+expect P2v "-R as a URL on that host -> BAD KEY" 2 "BAD KEY" "" "not ASCII"
+R="$(LC_ALL=C.UTF-8 fid_in "${PERS}" fid_resolve_glab_args mr note 3 --hostname "${NONASCII_HOST}" -R cjpoll/custom -m x)"
+expect P2w "--hostname on that host -> BAD KEY" 2 "BAD KEY" "" "not ASCII"
+R="$(LC_ALL=C.UTF-8 fid fid_resolve_url "https://${NONASCII_HOST}/cjpoll/custom.git")"
+expect P2x "a remote on that host -> BAD KEY" 2 "BAD KEY" "" "not ASCII"
+R="$(LC_ALL=C.UTF-8 fid_in "${PERS}" fid_resolve_glab_args mr note https://GitLab.COM/cjpoll/custom/-/merge_requests/1 -m x)"
+expect P2y "an ASCII upper-case host still folds: GitLab.COM is gitlab.com" 0 FOUND "${P_BOT}" -
 R="$(fid_in "${WORK}" fid_resolve_glab_args mr note "${MRU}" -m x)"
 expect P3 "an MR URL of the keyed namespace -> that bot" 0 FOUND "${W_BOT}" -
 R="$(fid_in "${PERS}" fid_resolve_glab_args mr note -R "${W_NS}/app" "${MRU}" -m x)"

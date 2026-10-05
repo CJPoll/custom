@@ -584,10 +584,20 @@ jq '.identities += [{host:"gitlab.com", namespace:"sealed-ns", bot:"synthetic-se
   --arg t "${TMP}" "${ATHENA_FORGE_IDENTITIES_FILE}" > "${TMP}/fid-sealed.json"
 OUT="$(cd "${SR}" && env -u GITLAB_ATHENA_TOKEN_FILE ATHENA_FORGE_IDENTITIES_FILE="${TMP}/fid-sealed.json" PATH="${IDBIN}:${PATH}" "${WRAPPER}" mr list 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"
 chmod 700 "${TMP}/sealed"
-if [ "${RC}" = 1 ] && [[ "${ERR}" == *"REFUSING"* ]] && [[ "${ERR}" == *"missing, unreadable or empty"* ]] \
-  && [[ "${ERR}" != *"does not exist"* ]] && [[ "${OUT}" != *STUB-ID* ]]; then
-  ok "N15c. a token file behind an unsearchable directory -> the unreadable-token refusal, not \"does not exist\""
+if [ "${RC}" = 1 ] && [[ "${ERR}" == *"REFUSING"* ]] && [[ "${ERR}" == *"COULD NOT LOOK"* ]] && [[ "${ERR}" == *"${TMP}/sealed cannot be searched"* ]] \
+  && [[ "${ERR}" == *"Fix:"* ]] && [[ "${ERR}" != *"does not exist"* ]] && [[ "${OUT}" != *STUB-ID* ]]; then
+  ok "N15c. a token file behind an unsearchable parent -> COULD NOT LOOK naming that directory, not \"does not exist\""
 else bad "N15c. unsearchable parent" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+# The same when the unsearchable directory is higher up the tree.
+mkdir -p "${TMP}/sealed2/deep"; printf '%s\n' "glpat-SELFTESTSEALED00002" > "${TMP}/sealed2/deep/token"; chmod 000 "${TMP}/sealed2"
+jq '(.identities[] | select(.namespace == "sealed-ns") | .token_file) = ($t + "/sealed2/deep/token")' --arg t "${TMP}" \
+  "${TMP}/fid-sealed.json" > "${TMP}/fid-sealed2.json"
+OUT="$(cd "${SR}" && env -u GITLAB_ATHENA_TOKEN_FILE ATHENA_FORGE_IDENTITIES_FILE="${TMP}/fid-sealed2.json" PATH="${IDBIN}:${PATH}" "${WRAPPER}" mr list 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"
+chmod 700 "${TMP}/sealed2"
+if [ "${RC}" = 1 ] && [[ "${ERR}" == *"COULD NOT LOOK"* ]] && [[ "${ERR}" == *"${TMP}/sealed2 cannot be searched"* ]] \
+  && [[ "${ERR}" != *"does not exist"* ]] && [[ "${OUT}" != *STUB-ID* ]]; then
+  ok "N15d. an unsearchable directory two levels up -> COULD NOT LOOK naming it, not \"does not exist\""
+else bad "N15d. unsearchable ancestor" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
 
 # refresh, a PUBLIC group service account (athena-ai-harness-bot's shape): its
 # group is the entry's own namespace; the overlay's work .group is not read.

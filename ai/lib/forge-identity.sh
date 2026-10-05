@@ -59,6 +59,16 @@ fid_fail() {
 
 # ---- keys (pure) ------------------------------------------------------------
 
+# fid_lower <s> : ASCII-only lower case, the one fold this file uses for a host
+# or an endpoint. bash's lower-case expansion and a locale-aware tr fold non-ASCII letters too:
+# in a UTF-8 locale it turns gİtlab.com (U+0130) into gitlab.com, while glab
+# sends it to another (IDNA) host (DND-2009 measured it; glos_lower in
+# ai/lib/glab-outbound-scan.sh is the same rule).
+fid_lower() { printf '%s' "$1" | LC_ALL=C tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz'; }
+
+# fid_non_ascii <s> : 0 when <s> holds a byte outside ASCII.
+fid_non_ascii() { [ -n "$(printf '%s' "$1" | LC_ALL=C tr -d '\000-\177')" ]; }
+
 FID_HOST_RE='^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$'
 FID_NS_RE='^[A-Za-z0-9_][A-Za-z0-9_.-]*$'
 
@@ -70,6 +80,11 @@ fid_check_key() {
   if [ -z "$h" ]; then
     fid_fail 2 "BAD KEY" "the host is empty (namespace '$n')" \
       "resolve the project from an https://<host>/<namespace>/<project>.git remote or -R <namespace>/<project>. $FID_ESCALATE"
+    return
+  fi
+  if fid_non_ascii "$h"; then
+    fid_fail 2 "BAD KEY" "the host '$h' (namespace '$n') is not ASCII; glab sends a non-ASCII host to its IDNA form, another host than the one it looks like" \
+      "spell the host in plain ASCII, e.g. gitlab.com. $FID_ESCALATE"
     return
   fi
   if ! [[ "$h" =~ $FID_HOST_RE ]]; then
@@ -136,7 +151,7 @@ fid_parse_remote() {
       fid_fail 2 "BAD KEY" "the remote '$url' is neither a URL nor a [user@]host:path form" \
         "use https://<host>/<namespace>/<project>.git. $FID_ESCALATE"; return ;;
   esac
-  FID_KEY_HOST="$(printf '%s' "$FID_KEY_HOST" | tr '[:upper:]' '[:lower:]')"
+  FID_KEY_HOST="$(fid_lower "$FID_KEY_HOST")"
   fid_split_path "$path" "$url"
 }
 
@@ -330,10 +345,10 @@ fid_endpoint_key() {
         "spell the endpoint plainly (projects/<namespace>%2F<project>/...). $FID_ESCALATE"; return ;;
     esac
   done
-  case "$(printf '%s' "${segs[0]:-}/${segs[1]:-}" | tr '[:upper:]' '[:lower:]')" in
+  case "$(fid_lower "${segs[0]:-}/${segs[1]:-}")" in
     api/v4) ep="${ep#*/}"; ep="${ep#*/}" ;;
   esac
-  case "$(printf '%s' "$ep" | tr '[:upper:]' '[:lower:]')" in
+  case "$(fid_lower "$ep")" in
     graphql|api/graphql) FID_EP_KIND=graphql; return 0 ;;
     projects/*) kind=project ;;
     groups/*) kind=group ;;
@@ -442,7 +457,7 @@ fid_resolve_glab_args() {
       -R?*) v="${a#-R}"; repos+=("${v#=}"); prev="$a" ;;
       --hostname|--hostname=*)
         if [ "$a" = --hostname ]; then i=$((i + 1)); v="${args[$i]:-}"; prev="$v"; else v="${a#--hostname=}"; prev="$a"; fi
-        v="$(printf '%s' "$v" | tr '[:upper:]' '[:lower:]')"
+        v="$(fid_lower "$v")"
         if [ -n "$hn" ] && [ "$hn" != "$v" ]; then
           fid_fail 2 "BAD KEY" "--hostname is given twice ($hn, $v)" "pass --hostname once. $FID_ESCALATE"; return
         fi
@@ -629,7 +644,10 @@ fid_check_one_project_word() {
       # A bare OWNER/REPO takes the keyed host, as glab does with --hostname.
       [[ "$v" == *://* || "$v" == *@*:* ]] || h="$kh" ;;
   esac
-  if [ "${h,,}" != "${kh,,}" ] || [ "$ns" != "$kn" ]; then
+  # The word's host is a key like any other: malformed (non-ASCII included)
+  # is BAD KEY before it is compared, and the compare folds ASCII only.
+  fid_check_key "$h" "$ns" || { FID_WHY="$FID_WHY (the $what ${shown})"; return 2; }
+  if [ "$(fid_lower "$h")" != "$(fid_lower "$kh")" ] || [ "$ns" != "$kn" ]; then
     fid_fail 2 "BAD KEY" "the $what '${shown}' names namespace '$ns' on $h, but the bot is keyed on $kh/$kn (from $src); glab would act there as that bot" \
       "act on one namespace per call: pass -R <namespace>/<project> for the project the call acts on, and no word naming another. $FID_ESCALATE"
     return
