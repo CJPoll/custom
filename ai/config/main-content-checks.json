@@ -1,9 +1,13 @@
 {
-  "schema": "main-content-checks/1",
-  "about": "DND-1902: what a repo's base tip must not CONTAIN for a merge onto it (ai/lib/gh-merge-guard.sh -> gmg_content_health, run by gh-athena on GitHub and, since DND-1941, by glab-athena on GitLab). Keyed by the lower-case project path: <owner>/<repo> on GitHub, the full <namespace>/<project> on GitLab (a nested group is part of the key), so github.com/CJPoll/gen_saas and gitlab.com/cjpoll/gen_saas read the same entry. A malformed key is an error, never 'no check'. unique_migration_dirs is an ERE matched against each directory path in the tip's tree; in every matching directory, no two files named <digits>_*.exs may share the digits (an Ecto migration version). A repo not listed declares no content check, and the merge says which key it looked up. The bar lives here, in custom, never in the repo whose merge it judges.",
+  "schema": "main-content-checks/2",
+  "about": "DND-1902: what a repo's base tip must not CONTAIN for a merge onto it (ai/lib/gh-merge-guard.sh -> gmg_content_health, run by gh-athena on GitHub and, since DND-1941, by glab-athena on GitLab). Each entry is one product, named by its project name. `paths` lists every lower-case project path it is reached by on any forge: <owner>/<repo> on GitHub, the full <namespace>/<project> on GitLab (a nested group is part of the path). A project path matches at most one entry; a malformed key or declaration is an error, never 'no check'. DND-2034: a project whose path is not listed but whose name is a declared product's name (its entry name, or the last segment of one of its paths) is COULD NOT LOOK, never 'no check declared': a project moved to another namespace, or reached by a stale path, must not drop its check silently, so a move adds the new path here first. The rule reads the last path segment, so it does not catch a rename of the project itself: land a renamed project's new path here before its first merge. unique_migration_dirs is optional. It is an ERE matched against each directory path in the tip's tree; in every matching directory, no two files named <digits>_*.exs may share the digits (an Ecto migration version). An entry without it declares the product and no content check. A project matching no entry and no declared name declares no content check, and the merge says which key it looked up. The bar lives here, in custom, never in the repo whose merge it judges.",
   "repos": {
-    "cjpoll/gen_saas": {
+    "gen_saas": {
+      "paths": ["athena-ai-harness/gen_saas"],
       "unique_migration_dirs": "^apps/[^/]+/priv/repo/migrations$"
+    },
+    "custom": {
+      "paths": ["athena-ai-harness/custom"]
     }
   }
 }

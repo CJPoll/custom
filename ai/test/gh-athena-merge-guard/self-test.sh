@@ -129,9 +129,9 @@ OTHER_SHA="0e134e88662690fe8edde401fa79bf44aa688eec"
 REPO_FX="${TMP}/gen_saas"
 git init -q -b main "${REPO_FX}"
 gfx() { git -C "${REPO_FX}" -c user.name=t -c user.email=t@t -c commit.gpgsign=false "$@"; }
-gfx remote add origin git@github.com:CJPoll/gen_saas.git
+gfx remote add origin git@github.com:athena-ai-harness/gen_saas.git
 echo readme > "${REPO_FX}/README"
-# DND-1902: CJPoll/gen_saas declares a content check on its migration
+# DND-1902: athena-ai-harness/gen_saas declares a content check on its migration
 # directories (ai/config/main-content-checks.json), and a declared check that
 # matches no directory is COULD NOT LOOK, so every base carries one.
 mkdir -p "${REPO_FX}/apps/athena/priv/repo/migrations"; : > "${REPO_FX}/apps/athena/priv/repo/migrations/20250101000000_init.exs"
@@ -164,7 +164,7 @@ reset_fx() {
 # copy of the wrapper that read `pr view` sees the same runs (old-vs-new
 # evidence).
 pr_view() {
-  printf '{"number":362,"url":"https://github.com/CJPoll/gen_saas/pull/362","baseRefName":"main","headRefOid":"%s","statusCheckRollup":%s}\n' \
+  printf '{"number":362,"url":"https://github.com/athena-ai-harness/gen_saas/pull/362","baseRefName":"main","headRefOid":"%s","statusCheckRollup":%s}\n' \
     "${2:-${HEAD_SHA}}" "$1" > "${FX}/prview.out"
   rollup_fx "$1"
 }
@@ -248,8 +248,8 @@ run pr merge 362 --squash --auto=true
 refused && ok "7. --auto=true -> refused" || bad "7. --auto=true refused" "$(detail)"
 
 reset_fx; pr_view "${QUEUED}"; gate_unreadable
-run -R CJPoll/gen_saas pr merge 362 --auto
-refused && grep -q -- '-R CJPoll/gen_saas' "${STUB_LOG}" \
+run -R athena-ai-harness/gen_saas pr merge 362 --auto
+refused && grep -q -- '-R athena-ai-harness/gen_saas' "${STUB_LOG}" \
   && ok "8. -R <repo> before the subcommand -> refused, and the PR is read in that repo" \
   || bad "8. -R form refused" "$(detail)"
 
@@ -526,7 +526,7 @@ refused && [[ "${ERR}" == *"Mystery"* ]] \
 
 reset_fx; pr_view "${GREEN}"
 merge_pinned
-if [ "${RC}" = 0 ] && grep -q "^api graphql .*statusCheckRollup.* -f owner=CJPoll -f repo=gen_saas -f oid=${HEAD_SHA}\$" "${STUB_LOG}"; then
+if [ "${RC}" = 0 ] && grep -q "^api graphql .*statusCheckRollup.* -f owner=athena-ai-harness -f repo=gen_saas -f oid=${HEAD_SHA}\$" "${STUB_LOG}"; then
   ok "L10. the contexts are read for the PINNED head commit (oid=<sha>)"
 else bad "L10. rollup read pins the head" "$(detail)"; fi
 
@@ -602,7 +602,7 @@ echo "--- DND-728: a \`gh api\` call that merges is REFUSED before gh runs ---"
 # stub logged it and answered "passthrough"). Each is now refused with exit 3
 # and a Fix: naming the guarded path, and gh is never called at all: the stub
 # log stays EMPTY (`api` is a gh builtin, so not even `alias list` runs).
-PR_PATH="repos/CJPoll/gen_saas/pulls/388/merge"
+PR_PATH="repos/athena-ai-harness/gen_saas/pulls/388/merge"
 MUT_MERGE='mutation { mergePullRequest(input: {pullRequestId: "PR_x", mergeMethod: SQUASH}) { clientMutationId } }'
 printf '%s\n' "${MUT_MERGE}" > "${TMP}/merge.graphql"
 jq -cn --arg q "${MUT_MERGE}" '{query: $q}' > "${TMP}/merge-body.json"
@@ -645,17 +645,17 @@ api_refused "A7. REST: lowercase method (-X put)" "merge" api -X put "${PR_PATH}
 api_refused "A8. REST: no -X but a field (gh defaults to POST)" "merge" api "${PR_PATH}" -f sha="${HEAD_SHA}"
 api_refused "A9. REST: --input body (gh defaults to POST)" "merge" api "${PR_PATH}" --input "${TMP}/merge-body.json"
 api_refused "A10. REST: trailing slash" "merge" api -X PUT "${PR_PATH}/"
-api_refused "A11. REST: dot segments (pulls/388/x/../merge, ./)" "merge" api -X PUT "repos/CJPoll/gen_saas/pulls/388/x/.././merge"
-api_refused "A12. REST: percent-encoded (%6Derge, %2F)" "merge" api -X PUT "repos/CJPoll/gen_saas/pulls%2F388/%6Derge"
-api_refused "A13. REST: upper case path" "merge" api -X PUT "REPOS/CJPoll/gen_saas/PULLS/388/MERGE"
+api_refused "A11. REST: dot segments (pulls/388/x/../merge, ./)" "merge" api -X PUT "repos/athena-ai-harness/gen_saas/pulls/388/x/.././merge"
+api_refused "A12. REST: percent-encoded (%6Derge, %2F)" "merge" api -X PUT "repos/athena-ai-harness/gen_saas/pulls%2F388/%6Derge"
+api_refused "A13. REST: upper case path" "merge" api -X PUT "REPOS/athena-ai-harness/gen_saas/PULLS/388/MERGE"
 api_refused "A14. REST: query string and double slash" "merge" api -X PUT "repos/CJPoll//gen_saas/pulls/388/merge?x=1"
 api_refused "A15. REST: GHES host prefix api/v3" "merge" api -X PUT "https://ghe.example.com/api/v3/${PR_PATH}"
 api_refused "A16. REST: repositories/<id> route" "merge" api -X PUT "repositories/123456/pulls/388/merge"
 api_refused "A17. REST: GET + X-HTTP-Method-Override: PUT" "method" api -H 'X-HTTP-Method-Override: PUT' "${PR_PATH}"
-api_refused "A18. REST: POST repos/<o>/<r>/merges (branch merge, no PR)" "merges" api -X POST repos/CJPoll/gen_saas/merges -f base=main -f head=feat
-api_refused "A19. REST: POST repos/<o>/<r>/merge-upstream" "merge-upstream" api -X POST repos/CJPoll/gen_saas/merge-upstream -f branch=main
+api_refused "A18. REST: POST repos/<o>/<r>/merges (branch merge, no PR)" "merges" api -X POST repos/athena-ai-harness/gen_saas/merges -f base=main -f head=feat
+api_refused "A19. REST: POST repos/<o>/<r>/merge-upstream" "merge-upstream" api -X POST repos/athena-ai-harness/gen_saas/merge-upstream -f branch=main
 api_refused "A20. REST: endpoint after --" "merge" api -X PUT -- "${PR_PATH}"
-api_refused "A21. REST: a flag the guard does not know -> refused (gh would reject it too)" "--frobnicate" api --frobnicate -X PUT repos/CJPoll/gen_saas/issues/5/labels
+api_refused "A21. REST: a flag the guard does not know -> refused (gh would reject it too)" "--frobnicate" api --frobnicate -X PUT repos/athena-ai-harness/gen_saas/issues/5/labels
 
 api_refused "G1. GraphQL: mergePullRequest via -f query=" "mergePullRequest" api graphql -f query="${MUT_MERGE}"
 api_refused "G2. GraphQL: enablePullRequestAutoMerge" "enablePullRequestAutoMerge" api graphql -f query='mutation { enablePullRequestAutoMerge(input: {pullRequestId: "PR_x"}) { clientMutationId } }'
@@ -723,14 +723,14 @@ echo
 echo "--- DND-728 NEGATIVE: api calls that do not merge pass through unchanged ---"
 api_passes "N1. GET of the merge endpoint (is it merged?)" api "${PR_PATH}"
 api_passes "N2. -X HEAD of the merge endpoint" api -X HEAD "${PR_PATH}"
-api_passes "N3. POST to another pulls endpoint (requested_reviewers)" api -X POST repos/CJPoll/gen_saas/pulls/388/requested_reviewers -f 'reviewers[]=x'
-api_passes "N4. PUT to labels with a field" api -X PUT repos/CJPoll/gen_saas/issues/5/labels -f 'labels[]=bug'
-api_passes "N5. GET a ref whose branch is named merge-x (not a merge endpoint)" api repos/CJPoll/gen_saas/git/refs/heads/merge-x
+api_passes "N3. POST to another pulls endpoint (requested_reviewers)" api -X POST repos/athena-ai-harness/gen_saas/pulls/388/requested_reviewers -f 'reviewers[]=x'
+api_passes "N4. PUT to labels with a field" api -X PUT repos/athena-ai-harness/gen_saas/issues/5/labels -f 'labels[]=bug'
+api_passes "N5. GET a ref whose branch is named merge-x (not a merge endpoint)" api repos/athena-ai-harness/gen_saas/git/refs/heads/merge-x
 api_passes "N6. GraphQL read" api graphql -f query='{ viewer { login } }'
 api_passes "N7. GraphQL disablePullRequestAutoMerge (merges nothing)" api graphql -f query='mutation { disablePullRequestAutoMerge(input: {pullRequestId: "PR_x"}) { clientMutationId } }'
 api_passes "N8. GraphQL with jq and paginate flags" api graphql --paginate -q '.data' -f query='{ viewer { login } }'
-api_passes "N9. REST read with -H accept header and --jq" api -H 'Accept: application/vnd.github+json' repos/CJPoll/gen_saas/pulls/388 --jq .merged
-api_passes "N10. a REST read whose ref names contain mergePullRequest text is not scanned" api repos/CJPoll/gen_saas/contents/mergePullRequest.md
+api_passes "N9. REST read with -H accept header and --jq" api -H 'Accept: application/vnd.github+json' repos/athena-ai-harness/gen_saas/pulls/388 --jq .merged
+api_passes "N10. a REST read whose ref names contain mergePullRequest text is not scanned" api repos/athena-ai-harness/gen_saas/contents/mergePullRequest.md
 api_passes "N11. GraphQL: an inline -F value that only CONTAINS =@ is not a file read" api graphql -F note='a=@b' -f query='{ viewer { login } }'
 api_passes "N12. -X get (lower case) of the merge endpoint is still a read" api -X get "${PR_PATH}"
 api_passes "N13. a benign %-escaped path is decoded, not refused" api -X PUT 'repos/CJPoll/gen%5Fsaas/issues/5/labels' -f 'labels[]=x'
@@ -744,8 +744,8 @@ echo "--- DND-741: a \`gh api\` write that moves or creates a ref is REFUSED bef
 # ai/lib/gh-merge-guard.sh): branches move only by `gh-athena git push`, and the
 # default branch only by the guarded `pr merge`. Each refusal names both paths,
 # and gh is never called (the stub log stays EMPTY).
-REF_MAIN="repos/CJPoll/gen_saas/git/refs/heads/main"
-MUT_COMMIT='mutation { createCommitOnBranch(input: {branch: {repositoryNameWithOwner: "CJPoll/gen_saas", branchName: "main"}, expectedHeadOid: "abc", message: {headline: "x"}, fileChanges: {additions: []}}) { commit { oid } } }'
+REF_MAIN="repos/athena-ai-harness/gen_saas/git/refs/heads/main"
+MUT_COMMIT='mutation { createCommitOnBranch(input: {branch: {repositoryNameWithOwner: "athena-ai-harness/gen_saas", branchName: "main"}, expectedHeadOid: "abc", message: {headline: "x"}, fileChanges: {additions: []}}) { commit { oid } } }'
 printf '%s\n' "${MUT_COMMIT}" > "${TMP}/commit.graphql"
 printf '{"query":"mutation { \\u0075pdateRef(input: {refId: \\"REF_x\\", oid: \\"abc\\", force: true}) { clientMutationId } }"}\n' > "${TMP}/ref-body-escaped.json"
 jq -cn '{sha: "abc", force: true}' > "${TMP}/ref-patch.json"
@@ -764,22 +764,22 @@ ref_refused() {
 }
 
 ref_refused "R1. REST: PATCH git/refs/heads/main (move the default branch)" "git/refs/heads/main" api -X PATCH "${REF_MAIN}" -f sha="${HEAD_SHA}" -F force=true
-ref_refused "R2. REST: PATCH git/refs/heads/<feature> (any branch; the scope is every ref)" "git/refs/heads/feat" api -X PATCH repos/CJPoll/gen_saas/git/refs/heads/feat -f sha="${HEAD_SHA}"
-ref_refused "R3. REST: POST git/refs (create a ref)" "git/refs" api -X POST repos/CJPoll/gen_saas/git/refs -f ref=refs/heads/x -f sha="${HEAD_SHA}"
-ref_refused "R4. REST: git/refs with fields and no -X (gh defaults to POST)" "git/refs" api repos/CJPoll/gen_saas/git/refs -f ref=refs/tags/v1 -f sha="${HEAD_SHA}"
+ref_refused "R2. REST: PATCH git/refs/heads/<feature> (any branch; the scope is every ref)" "git/refs/heads/feat" api -X PATCH repos/athena-ai-harness/gen_saas/git/refs/heads/feat -f sha="${HEAD_SHA}"
+ref_refused "R3. REST: POST git/refs (create a ref)" "git/refs" api -X POST repos/athena-ai-harness/gen_saas/git/refs -f ref=refs/heads/x -f sha="${HEAD_SHA}"
+ref_refused "R4. REST: git/refs with fields and no -X (gh defaults to POST)" "git/refs" api repos/athena-ai-harness/gen_saas/git/refs -f ref=refs/tags/v1 -f sha="${HEAD_SHA}"
 ref_refused "R5. REST: -XPATCH with an --input body" "git/refs" api -XPATCH "${REF_MAIN}" --input "${TMP}/ref-patch.json"
-ref_refused "R6. REST: %-encoded route (git%2Frefs%2Fheads%2Fmain)" "git/refs" api -X PATCH 'repos/CJPoll/gen_saas/git%2Frefs%2Fheads%2Fmain' -f sha=x
-ref_refused "R7. REST: upper case GIT/REFS, lower case method" "git/refs" api -X patch 'REPOS/CJPoll/gen_saas/GIT/REFS/HEADS/MAIN' -f sha=x
+ref_refused "R6. REST: %-encoded route (git%2Frefs%2Fheads%2Fmain)" "git/refs" api -X PATCH 'repos/athena-ai-harness/gen_saas/git%2Frefs%2Fheads%2Fmain' -f sha=x
+ref_refused "R7. REST: upper case GIT/REFS, lower case method" "git/refs" api -X patch 'REPOS/athena-ai-harness/gen_saas/GIT/REFS/HEADS/MAIN' -f sha=x
 ref_refused "R8. REST: repositories/<id> route on a full URL" "git/refs" api -X PATCH https://api.github.com/repositories/123456/git/refs/heads/main -f sha=x
 ref_refused "R9. REST: GET + X-HTTP-Method-Override: PATCH" "method-override" api -H 'X-HTTP-Method-Override: PATCH' "${REF_MAIN}"
 ref_refused "R10. REST: DELETE + a method-override header is not a plain DELETE" "method-override" api -X DELETE -H 'X-HTTP-Method-Override: PATCH' "${REF_MAIN}"
-ref_refused "R11. REST: git/ref (singular) written to" "git/ref" api -X PATCH repos/CJPoll/gen_saas/git/ref/heads/main -f sha=x
-ref_refused "R12. REST: a .json suffix on git/refs" "git/refs" api -X POST repos/CJPoll/gen_saas/git/refs.json -f ref=refs/heads/x -f sha=x
+ref_refused "R11. REST: git/ref (singular) written to" "git/ref" api -X PATCH repos/athena-ai-harness/gen_saas/git/ref/heads/main -f sha=x
+ref_refused "R12. REST: a .json suffix on git/refs" "git/refs" api -X POST repos/athena-ai-harness/gen_saas/git/refs.json -f ref=refs/heads/x -f sha=x
 ref_refused "R13. REST: {owner}/{repo} placeholders, dot segments" "git/refs" api -X PATCH 'repos/{owner}/{repo}/git/x/../refs/heads/main' -f sha=x
-ref_refused "R14. REST: PUT contents/<path> (a commit on a branch)" "contents" api -X PUT repos/CJPoll/gen_saas/contents/lib/a.ex -f message=x -f content=eA== -f branch=main
-ref_refused "R15. REST: DELETE contents/<path> (a commit on a branch)" "contents" api -X DELETE repos/CJPoll/gen_saas/contents/lib/a.ex -f message=x -f sha=abc
-ref_refused "R16. REST: POST branches/<b>/rename" "rename" api -X POST repos/CJPoll/gen_saas/branches/feat/x/rename -f new_name=main
-ref_refused "R17. REST: PUT pulls/<n>/update-branch (merges the base into the PR's head branch)" "update-branch" api -X PUT repos/CJPoll/gen_saas/pulls/388/update-branch
+ref_refused "R14. REST: PUT contents/<path> (a commit on a branch)" "contents" api -X PUT repos/athena-ai-harness/gen_saas/contents/lib/a.ex -f message=x -f content=eA== -f branch=main
+ref_refused "R15. REST: DELETE contents/<path> (a commit on a branch)" "contents" api -X DELETE repos/athena-ai-harness/gen_saas/contents/lib/a.ex -f message=x -f sha=abc
+ref_refused "R16. REST: POST branches/<b>/rename" "rename" api -X POST repos/athena-ai-harness/gen_saas/branches/feat/x/rename -f new_name=main
+ref_refused "R17. REST: PUT pulls/<n>/update-branch (merges the base into the PR's head branch)" "update-branch" api -X PUT repos/athena-ai-harness/gen_saas/pulls/388/update-branch
 ref_refused "R18. REST: an endpoint after --" "git/refs" api -X PATCH -- "${REF_MAIN}" -f sha=x
 
 ref_refused "RG1. GraphQL: createCommitOnBranch via -f query=" "createCommitOnBranch" api graphql -f query="${MUT_COMMIT}"
@@ -814,15 +814,15 @@ else bad "RG11. mixed ref+merge query refused" "$(detail)"; fi
 echo
 echo "--- DND-741 NEGATIVE: api calls that move no ref pass through unchanged ---"
 api_passes "NR1. GET git/refs/heads/main (read the branch head)" api "${REF_MAIN}"
-api_passes "NR2. GET git/matching-refs with --jq" api repos/CJPoll/gen_saas/git/matching-refs/heads/dnd- --jq '.[].ref'
-api_passes "NR3. -X GET contents with a ref field (fields become the query string)" api -X GET repos/CJPoll/gen_saas/contents/README.md -f ref=main
-api_passes "NR4. -X DELETE git/refs/heads/<feature> (a branch delete moves nothing onto it)" api -X DELETE repos/CJPoll/gen_saas/git/refs/heads/dnd-1-done
-api_passes "NR5. POST git/commits (an object only; no ref moves)" api -X POST repos/CJPoll/gen_saas/git/commits -f message=x -f tree=abc
-api_passes "NR6. GET branches/<b>" api repos/CJPoll/gen_saas/branches/main
+api_passes "NR2. GET git/matching-refs with --jq" api repos/athena-ai-harness/gen_saas/git/matching-refs/heads/dnd- --jq '.[].ref'
+api_passes "NR3. -X GET contents with a ref field (fields become the query string)" api -X GET repos/athena-ai-harness/gen_saas/contents/README.md -f ref=main
+api_passes "NR4. -X DELETE git/refs/heads/<feature> (a branch delete moves nothing onto it)" api -X DELETE repos/athena-ai-harness/gen_saas/git/refs/heads/dnd-1-done
+api_passes "NR5. POST git/commits (an object only; no ref moves)" api -X POST repos/athena-ai-harness/gen_saas/git/commits -f message=x -f tree=abc
+api_passes "NR6. GET branches/<b>" api repos/athena-ai-harness/gen_saas/branches/main
 api_passes "NR7. GraphQL deleteRef (moves nothing onto a ref)" api graphql -f query='mutation { deleteRef(input: {refId: "REF_x"}) { clientMutationId } }'
 api_passes "NR8. GraphQL read of a ref's target" api graphql -f query='{ repository(owner: "CJPoll", name: "gen_saas") { ref(qualifiedName: "main") { target { oid } } } }'
-api_passes "NR9. a REST write whose field VALUE names a ref mutation is not scanned" api -X POST repos/CJPoll/gen_saas/issues/5/comments -f body='why not updateRef or createCommitOnBranch?'
-api_passes "NR10. a REST read of a file under a contents/ path" api repos/CJPoll/gen_saas/contents/git/refs/heads/main
+api_passes "NR9. a REST write whose field VALUE names a ref mutation is not scanned" api -X POST repos/athena-ai-harness/gen_saas/issues/5/comments -f body='why not updateRef or createCommitOnBranch?'
+api_passes "NR10. a REST read of a file under a contents/ path" api repos/athena-ai-harness/gen_saas/contents/git/refs/heads/main
 api_passes "NR11. a word that only CONTAINS a mutation name (createRefund)" api graphql -f query='mutation { createRefund(input: {}) { id } }'
 
 echo
@@ -993,7 +993,7 @@ echo "--- DND-1902: a merge onto a RED base tip is REFUSED (stop the line) ---"
 # CONTAINS that tip (a red-main fix). Unreadable is COULD NOT LOOK; a pending
 # run is not red. NOGATE_BASE is the tip throughout, so no receipt is needed.
 TIP="${NOGATE_BASE}"
-TIP_RED='[{"__typename":"CheckRun","name":"Test","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-10-03T14:00:00Z","detailsUrl":"https://github.com/CJPoll/gen_saas/actions/runs/9001/job/1","checkSuite":{"databaseId":71,"app":{"databaseId":15368,"slug":"github-actions"},"workflowRun":{"event":"push","workflow":{"databaseId":5}}}},{"__typename":"CheckRun","name":"Build","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-10-03T14:00:00Z","checkSuite":{"databaseId":71,"app":{"databaseId":15368,"slug":"github-actions"},"workflowRun":{"event":"push","workflow":{"databaseId":5}}}}]'
+TIP_RED='[{"__typename":"CheckRun","name":"Test","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-10-03T14:00:00Z","detailsUrl":"https://github.com/athena-ai-harness/gen_saas/actions/runs/9001/job/1","checkSuite":{"databaseId":71,"app":{"databaseId":15368,"slug":"github-actions"},"workflowRun":{"event":"push","workflow":{"databaseId":5}}}},{"__typename":"CheckRun","name":"Build","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-10-03T14:00:00Z","checkSuite":{"databaseId":71,"app":{"databaseId":15368,"slug":"github-actions"},"workflowRun":{"event":"push","workflow":{"databaseId":5}}}}]'
 TIP_PENDING='[{"__typename":"CheckRun","name":"Deploy","status":"IN_PROGRESS","conclusion":null,"startedAt":"2026-10-03T14:00:00Z","checkSuite":{"databaseId":72,"app":{"databaseId":15368,"slug":"github-actions"},"workflowRun":{"event":"push","workflow":{"databaseId":6}}}},{"__typename":"CheckRun","name":"Build","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-10-03T14:00:00Z","checkSuite":{"databaseId":71,"app":{"databaseId":15368,"slug":"github-actions"},"workflowRun":{"event":"push","workflow":{"databaseId":5}}}}]'
 # The red Test run, then a newer suite's SUCCESS run of the same check.
 TIP_RERUN_GREEN='[{"__typename":"CheckRun","name":"Test","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-10-03T14:00:00Z","checkSuite":{"databaseId":71,"app":{"databaseId":15368,"slug":"github-actions"},"workflowRun":{"event":"push","workflow":{"databaseId":5}}}},{"__typename":"CheckRun","name":"Test","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-10-03T14:30:00Z","checkSuite":{"databaseId":73,"app":{"databaseId":15368,"slug":"github-actions"},"workflowRun":{"event":"push","workflow":{"databaseId":5}}}}]'
@@ -1074,7 +1074,7 @@ echo "--- DND-1902: a merge onto a tip whose CONTENT is red (a duplicated migrat
 # The incident's real shape: gen_saas main runs only its deploy, and the
 # deploy reported SUCCESS ("Migrations already up") while two athena
 # migrations shared version 20261003120000. Green runs, red content. The
-# fixture's origin is CJPoll/gen_saas, which ai/config/main-content-checks.json
+# fixture's origin is athena-ai-harness/gen_saas, which ai/config/main-content-checks.json
 # declares; its tips declare no integration gate, so no receipt is needed.
 MIG=apps/athena/priv/repo/migrations
 gfx checkout -q -b dup "${NOGATE_BASE}"
@@ -1140,14 +1140,44 @@ refused && [[ "${ERR}" == *"COULD NOT LOOK"* ]] && [[ "${ERR}" == *"matches no d
 
 # C8: the declaration itself unreadable or malformed. The path is fixed when
 # the lib is sourced (no env var moves it), so this drives the lib directly.
-for bad_cfg in missing '{"schema":"other","repos":{}}' '{"schema":"main-content-checks/1","repos":{"cjpoll/gen_saas":{"unique_migration_dirs":""}}}' \
-               '{"schema":"main-content-checks/1","repos":{"cjpoll/gen_saas":{"unique_migration_dirs":"(["}}}' 'not json'; do
+# DND-2034 (schema 2): every entry is validated, not only the one looked up,
+# and a path two entries claim is an error.
+G2='{"schema":"main-content-checks/2","repos":'
+for bad_cfg in missing '{"schema":"other","repos":{}}' \
+               '{"schema":"main-content-checks/1","repos":{"cjpoll/gen_saas":{"unique_migration_dirs":"^apps$"}}}' \
+               "${G2}"'{"gen_saas":{"paths":["cjpoll/gen_saas"],"unique_migration_dirs":""}}}' \
+               "${G2}"'{"gen_saas":{"paths":["cjpoll/gen_saas"],"unique_migration_dirs":"(["}}}' \
+               "${G2}"'{"gen_saas":{"unique_migration_dirs":"^apps$"}}}' \
+               "${G2}"'{"gen_saas":{"paths":[],"unique_migration_dirs":"^apps$"}}}' \
+               "${G2}"'{"gen_saas":{"paths":["athena-ai-harness/gen_saas"],"unique_migration_dirs":"^apps$"}}}' \
+               "${G2}"'{"gen_saas":{"paths":["gen_saas"],"unique_migration_dirs":"^apps$"}}}' \
+               "${G2}"'{"gen_saas":{"paths":["cjpoll/gen_saas"],"unique_migration_dirs":"^apps$","extra":1}}}' \
+               "${G2}"'{"gen_saas":{"paths":["cjpoll/gen_saas"]},"other":{"paths":["x/other"]},"bad":7}}' \
+               "${G2}"'{"gen_saas":{"paths":["cjpoll/gen_saas"]},"dup":{"paths":["cjpoll/gen_saas"]}}}' \
+               "${G2}"'{"gen_saas\n":{"paths":["athena-ai-harness/gen_saas"],"unique_migration_dirs":"^apps$"}}}' \
+               "${G2}"'{"":{"paths":["x/other"]}}}' \
+               "${G2}"'{"Gen_Saas":{"paths":["x/other"]}}}' \
+               "${G2}"'{}}'"${G2}"'{"gen_saas":{"paths":["athena-ai-harness/gen_saas"],"unique_migration_dirs":"^apps$"}}}' \
+               'not json'; do
   cfg="${TMP}/cfg.json"; rm -f "${cfg}"; [ "${bad_cfg}" = missing ] || printf '%s' "${bad_cfg}" > "${cfg}"
   out="$( . "${AI_DIR}/lib/gh-merge-guard.sh"; GMG_CONTENT_CONFIG="${cfg}"
-          if gmg_content_health CJPoll gen_saas "${NOGATE_BASE}" "" "${REPO_FX}"; then echo "rc=0"; else echo "rc=$? ${GMG_CONTENT_STATE} ${GMG_CONTENT_WHY}"; fi )"
+          if gmg_content_health athena-ai-harness gen_saas "${NOGATE_BASE}" "" "${REPO_FX}"; then echo "rc=0"; else echo "rc=$? ${GMG_CONTENT_STATE} ${GMG_CONTENT_WHY}"; fi )"
   [[ "${out}" == "rc=2 LOOK "* ]] && ok "C8. declaration '${bad_cfg:0:40}' -> LOOK (rc 2), never NONE or CLEAN" \
     || bad "C8. bad declaration '${bad_cfg}'" "${out}"
 done
+
+# C9 DND-2034: a declared product reached by a path the declaration does not
+# list (gen_saas's pre-move CJPoll/gen_saas) -> COULD NOT LOOK by name, and the
+# Fix names the declaration, never "no check declared".
+gfx remote set-url origin git@github.com:CJPoll/gen_saas.git
+reset_fx; pr_view "${GREEN}" "${STRAY_HEAD}"; base_is "${CROSS_BASE}"
+sed -i 's#athena-ai-harness/gen_saas#CJPoll/gen_saas#' "${FX}/prview.out"
+run pr merge 362 --squash --match-head-commit "${STRAY_HEAD}"
+refused && [[ "${ERR}" == *"COULD NOT LOOK"* ]] && [[ "${ERR}" == *"cjpoll/gen_saas is not declared"* ]] && [[ "${ERR}" != *"no check declared"* ]] \
+  && [[ "$(grep -m1 'Fix:' <<<"${ERR}")" == *"main-content-checks.json"* ]] \
+  && ok "C9. a declared product's undeclared path -> COULD NOT LOOK naming it, the Fix names the declaration" \
+  || bad "C9. undeclared path of a declared product" "$(detail)"
+gfx remote set-url origin git@github.com:athena-ai-harness/gen_saas.git
 
 TIP_OLD_RED_NEW_PENDING='[{"__typename":"CheckRun","name":"Test","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-10-03T14:00:00Z","checkSuite":{"databaseId":71,"app":{"databaseId":15368,"slug":"github-actions"},"workflowRun":{"event":"push","workflow":{"databaseId":5}}}},{"__typename":"CheckRun","name":"Test","status":"IN_PROGRESS","conclusion":null,"startedAt":"2026-10-03T14:30:00Z","checkSuite":{"databaseId":73,"app":{"databaseId":15368,"slug":"github-actions"},"workflowRun":{"event":"push","workflow":{"databaseId":5}}}}]'
 reset_fx; pr_view "${GREEN}"; base_is "${TIP}"; tip_rollup "${TIP_OLD_RED_NEW_PENDING}"; compare_is diverged 1

@@ -500,10 +500,10 @@ run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/b4.lock"; expect b4 0; na
 fixture b5; commit_on_main m.txt m
 run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/b5.lock"; expect b5 0; names b5 "no check has reported"
 # b6/b7 the incident's real shape: every run green, but main holds two
-# migrations with one version. The origin is CJPoll/gen_saas, which
-# ai/config/main-content-checks.json declares.
-gs_fixture() { # <name> -- a fixture whose origin is CJPoll/gen_saas
-  fixture "$1"; local GS="https://github.com/CJPoll/gen_saas.git"
+# migrations with one version. The origin is athena-ai-harness/gen_saas,
+# which ai/config/main-content-checks.json declares.
+gs_fixture() { # <name> -- a fixture whose origin is athena-ai-harness/gen_saas
+  fixture "$1"; local GS="https://github.com/athena-ai-harness/gen_saas.git"
   git -C "${WT}" config remote.origin.url "${GS}"; git -C "${WT}" config --unset-all "url.${BARE}.insteadOf"
   git -C "${WT}" config "url.${BARE}.insteadOf" "${GS}"
 }

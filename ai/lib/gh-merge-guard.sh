@@ -962,37 +962,95 @@ gmg_mig_dups() {
   return 0
 }
 
+# GMG_CONTENT_LOOKUP: the jq program gmg_content_re runs over the declaration
+# (main-content-checks/2), with -n so it reads every document itself. It
+# validates the WHOLE file (exactly one document, every entry's name, paths
+# and ERE, no path claimed twice), not only the entry it finds, then prints
+# three lines: HIT, the entry's name and its ERE ("" when
+# it declares no content check); NEAR, the declared names whose project name
+# is the key's, and their paths; or NONE.
+GMG_CONTENT_LOOKUP='
+  def one_doc: [inputs] as $docs
+    | if ($docs | length) != 1 then error("the file holds \($docs | length) JSON documents, not one") else $docs[0] end;
+  # \A and \z, never ^ and $: in jq (Oniguruma) $ also matches before a
+  # trailing newline, so "gen_saas\n" would pass a ^...$ test.
+  def path_ok: type == "string" and test("\\A[a-z0-9._-]+(/[a-z0-9._-]+)+\\z");
+  def entry_ok: type == "object" and (keys - ["paths", "unique_migration_dirs"]) == [] and has("paths")
+    and (.paths | type) == "array" and (.paths | length) > 0 and (.paths | map(path_ok) | all)
+    and ((has("unique_migration_dirs") | not)
+         or ((.unique_migration_dirs | type) == "string" and .unique_migration_dirs != "" and (.unique_migration_dirs | test("\n") | not)));
+  one_doc
+  | if .schema != "main-content-checks/2" then error("schema is not main-content-checks/2")
+  elif (.repos | type) != "object" then error("repos is not an object")
+  else (.repos | to_entries) as $e
+    | ($e | map(select((.key | test("\\A[a-z0-9._-]+\\z") | not) or (.value | entry_ok | not)) | .key)) as $bad
+    | if ($bad | length) > 0 then error("the entry \($bad | map(tojson) | join(", ")) is not a lower-case project name holding {\"paths\": [\"<lower-case project path>\", ...], \"unique_migration_dirs\"?: \"<ERE>\"}")
+      elif ([$e[].value.paths[]] | group_by(.) | map(select(length > 1)[0]) | length) > 0
+        then error("project path(s) \([$e[].value.paths[]] | group_by(.) | map(select(length > 1)[0]) | join(", ")) are declared by more than one entry or twice")
+      else ($k | split("/") | last) as $name
+        | [$e[] | select(.value.paths | index($k))] as $hit
+        | if ($hit | length) == 1 then "HIT", $hit[0].key, ($hit[0].value.unique_migration_dirs // "")
+          else [$e[] | select(.key == $name or (.value.paths | map(split("/") | last) | index($name)))] as $near
+            | if ($near | length) > 0 then "NEAR", ($near | map(.key) | join(", ")), ([$near[].value.paths[]] | join(", "))
+              else "NONE", "", "" end
+          end
+      end
+  end'
+
 # gmg_content_re <owner> <repo> : sets GMG_CONTENT_KEY to the key it looks up
-# (lower-case <owner>/<repo>) and GMG_CONTENT_RE to that key's declared
+# (lower-case <owner>/<repo>), GMG_CONTENT_ENTRY to the declared product whose
+# paths list it ("" when none does), and GMG_CONTENT_RE to that entry's
 # unique_migration_dirs ERE, or "" when it declares none. Returns 2 with
-# GMG_CONTENT_WHY when the declaration cannot be read or is malformed, or when
-# the key itself is malformed. Both forges share it (DND-1941): on GitHub
-# <owner> is the account; on GitLab it is the project's namespace path, which
-# may hold more than one segment (a nested group), so the key is the full
-# project path, and gitlab.com/cjpoll/gen_saas reads the same entry as
-# github.com/CJPoll/gen_saas. An empty segment or whitespace is an error, never
-# "no check declared": a wrongly computed key would otherwise match nothing and
-# read as a repo with no checks.
+# GMG_CONTENT_WHY when the declaration cannot be read or is malformed, when the
+# key itself is malformed, or when the key is an undeclared path of a declared
+# product (DND-2034). Both forges share it (DND-1941): on GitHub <owner> is the
+# account; on GitLab it is the project's namespace path, which may hold more
+# than one segment (a nested group), so the key is the full project path.
+# An empty segment or whitespace is an error, never "no check declared": a
+# wrongly computed key would otherwise match nothing and read as a repo with
+# no checks. So is a declared product's name under a path its entry does not
+# list: gen_saas moved from cjpoll/ to athena-ai-harness/ (one GitLab
+# project), the declaration listed only the old path, and every merge on the
+# new one skipped the migration check with exit 0. The rule matches on the
+# last path segment, so it catches a namespace move or a stale path, not a
+# rename of the project itself: a renamed project's new path is landed in the
+# declaration before its first merge, and nothing detects a rename.
 gmg_content_re() {
-  local key="${1,,}/${2,,}" re
-  GMG_CONTENT_RE="" GMG_CONTENT_KEY="$key"
+  local key="${1,,}/${2,,}" out kind="" name="" re="" declared
+  GMG_CONTENT_RE="" GMG_CONTENT_KEY="$key" GMG_CONTENT_ENTRY=""
   if ! [[ "$key" =~ ^[^/[:space:]]+(/[^/[:space:]]+)+$ ]]; then
     GMG_CONTENT_WHY="the repo key '$key' (owner '$1', repo '$2') is malformed (an empty segment or whitespace), so which content checks it declares cannot be looked up"; return 2
   fi
-  if ! re="$(jq -er --arg k "$key" 'if .schema != "main-content-checks/1" then error("schema is not main-content-checks/1")
-             elif (.repos | type) != "object" then error("repos is not an object")
-             elif .repos[$k] == null then ""
-             elif (.repos[$k] | type) != "object" or (.repos[$k] | keys) != ["unique_migration_dirs"]
-                  or (.repos[$k].unique_migration_dirs | type) != "string" or .repos[$k].unique_migration_dirs == ""
-               then error("the entry for \($k) is not {\"unique_migration_dirs\": \"<ERE>\"}")
-             else .repos[$k].unique_migration_dirs end' "$GMG_CONTENT_CONFIG" 2>&1)"; then
-    GMG_CONTENT_WHY="the content declaration $GMG_CONTENT_CONFIG cannot be read: $(tr '\n' ' ' <<<"$re")"; return 2
+  if ! out="$(jq -n -r --arg k "$key" "$GMG_CONTENT_LOOKUP" "$GMG_CONTENT_CONFIG" 2>&1)"; then
+    GMG_CONTENT_WHY="the content declaration $GMG_CONTENT_CONFIG cannot be read: $(tr '\n' ' ' <<<"$out")"; return 2
   fi
+  # $(...) strips trailing empty lines, so a short read is normal: || : keeps
+  # it from tripping a caller's set -e.
+  { IFS= read -r kind; IFS= read -r name; IFS= read -r re; } <<<"$out" || :
+  case "$kind" in
+    HIT) GMG_CONTENT_ENTRY="$name" ;;
+    NONE) return 0 ;;
+    NEAR)
+      declared="$re"
+      GMG_CONTENT_WHY="the project $key is not declared in $GMG_CONTENT_CONFIG, but its name '${key##*/}' is the declared product '$name' (declared paths: $declared), so its content check would be skipped silently (a project moved to another namespace, or a stale path, DND-2034). If $key is that product, add it to that entry's paths (a change that lands on custom main). If it is another project of the same name, declare it as its own entry with its own paths"
+      return 2 ;;
+    *) GMG_CONTENT_WHY="the content lookup over $GMG_CONTENT_CONFIG printed '$kind', not HIT, NEAR or NONE (a defect in ai/lib/gh-merge-guard.sh)"; return 2 ;;
+  esac
   if [ -n "$re" ] && { [[ "" =~ $re ]]; [ $? = 2 ]; }; then
-    GMG_CONTENT_WHY="the unique_migration_dirs pattern for $key in $GMG_CONTENT_CONFIG is not a valid ERE ('$re')"; return 2
+    GMG_CONTENT_WHY="the unique_migration_dirs pattern for $name ($key) in $GMG_CONTENT_CONFIG is not a valid ERE ('$re')"; return 2
   fi
   GMG_CONTENT_RE="$re"
   return 0
+}
+
+# gmg_content_none_note : what a NONE content state says. A declared product
+# with no check is told apart from a key no entry lists (DND-2034).
+gmg_content_none_note() {
+  if [ -n "${GMG_CONTENT_ENTRY:-}" ]; then
+    printf 'the declared product %s (%s) declares no content check' "$GMG_CONTENT_ENTRY" "$GMG_CONTENT_KEY"
+  else
+    printf 'no check declared for %s (no entry lists it, and no declared product has its name)' "$GMG_CONTENT_KEY"
+  fi
 }
 
 # gmg_dups_why <rc> <what> : GMG_CONTENT_WHY for a gmg_mig_dups failure.
@@ -1104,7 +1162,7 @@ $GMG_TIP_RUNS" ;;
 $GMG_TIP_RUNS" ;;
   esac
   case "$GMG_CONTENT_STATE" in
-    NONE) GMG_LINE_NOTE+=$'\n'"  content: no check declared for $GMG_CONTENT_KEY" ;;
+    NONE) GMG_LINE_NOTE+=$'\n'"  content: $(gmg_content_none_note)" ;;
     CLEAN) GMG_LINE_NOTE+=$'\n'"  content: no duplicated migration version ($GMG_CONTENT_COUNTS)" ;;
     FIX) GMG_LINE_NOTE+=$'\n'"  content: RED-MAIN FIX: the tip holds a duplicated migration version and the head removes it:"$'\n'"$GMG_CONTENT_DUPS" ;;
   esac
@@ -1128,7 +1186,7 @@ gmg_tip_gate() {
     0) printf '%s: %s\n' "$GMG_TOOL" "$GMG_LINE_NOTE" >&2; return 0 ;;
     1) gmg_refuse "$shown" "$GMG_LINE_WHY" "$(gmg_line_fix "$owner" "$repo" "$base" "$tip"). Then $GMG_LAND" ;;
     *) gmg_refuse "$shown" "$GMG_LINE_WHY" \
-         "make the tip readable (network up, the right -R <owner>/<repo>, gh auth, \`git fetch origin\` in this checkout), then $GMG_LAND" ;;
+         "make the tip readable (network up, the right -R <owner>/<repo>, gh auth, \`git fetch origin\` in this checkout; an undeclared path of a declared product is added to that product's paths in ~/dev/custom/ai/config/main-content-checks.json, landed on custom main, DND-2034), then $GMG_LAND" ;;
   esac
 }
 

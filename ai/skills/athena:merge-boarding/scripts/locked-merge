@@ -549,14 +549,16 @@ if [ "${FORGE}" = github ]; then
   esac
 else
   # GitLab (DND-1943): the tip's CONTENT is forge-free (git and
-  # ai/config/main-content-checks.json, keyed <namespace>/<project>), so the
+  # ai/config/main-content-checks.json, looked up by <namespace>/<project> in
+  # each product's paths; an undeclared path of a declared product is COULD
+  # NOT LOOK, DND-2034), so the
   # same shared judge reads it here. The tip's PIPELINES are judged inside the
   # merge call by glab-athena's guard (DND-1941); its refusal is classified
   # below, after the call, exactly as gh-athena's is.
   if gmg_content_health "${GL_PROJECT%/*}" "${GL_PROJECT##*/}" "${B}" "${HEAD_SHA}" "${REPO}"; then tip_rc=0; else tip_rc=$?; fi
   case "${tip_rc}" in
     0) case "${GMG_CONTENT_STATE}" in
-         NONE) echo "BASE-TIP origin/${base} ${B} content: no check declared for ${GL_PROJECT}; its pipelines are judged by the merge guard (DND-1941)" ;;
+         NONE) echo "BASE-TIP origin/${base} ${B} content: $(gmg_content_none_note); its pipelines are judged by the merge guard (DND-1941)" ;;
          CLEAN) echo "BASE-TIP origin/${base} ${B} content: no duplicated migration version (${GMG_CONTENT_COUNTS}); its pipelines are judged by the merge guard (DND-1941)" ;;
          FIX) echo "BASE-TIP origin/${base} ${B} content: RED-MAIN FIX: the tip holds a duplicated migration version and the head removes it:
 ${GMG_CONTENT_DUPS}" ;;
@@ -567,7 +569,7 @@ ${GMG_CONTENT_DUPS}
   The head ${HEAD_SHA} is not a red-main fix: it must contain ${B} and remove every duplicate." \
          "land only a red-main fix: a head that contains ${B}, removes every duplicate named above, and carries its own INTEGRATION OK receipt (merge origin/${base} into it, fix it, push as Athena, re-gate), then re-run locked-merge. Every other MR waits until ${base} is green again. Nothing was merged." ;;
     *) die 2 "${GMG_LOOK_MARK} whether the origin/${base} tip ${B} is red cannot be told: ${GMG_CONTENT_WHY}" \
-         "make the tip readable (git fetch origin; fix the declaration if the message names it), then re-run locked-merge. Could-not-read is never green; nothing was merged." ;;
+         "make the tip readable (git fetch origin; fix the declaration if the message names it: an undeclared path of a declared product is added to that entry's paths in ~/dev/custom/ai/config/main-content-checks.json, landed on custom main), then re-run locked-merge. Could-not-read is never green; nothing was merged." ;;
   esac
 fi
 

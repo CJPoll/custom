@@ -231,9 +231,9 @@ fixture g6; echo guardother > "${ST}/merge_mode"; echo 1 > "${ST}/confirm_rc"
 lm; expect g6 4; no_teardown g6; names g6 "glab-athena mr merge 7 refused or failed"
 
 # g7 a red tip by CONTENT (a duplicated migration version on the tip), read
-# here before the call, as on GitHub. The origin is CJPoll/gen_saas, which
-# ai/config/main-content-checks.json declares.
-GS="https://gitlab.com/CJPoll/gen_saas.git"; GSM=apps/athena/priv/repo/migrations
+# here before the call, as on GitHub. The origin is athena-ai-harness/gen_saas,
+# which ai/config/main-content-checks.json declares.
+GS="https://gitlab.com/athena-ai-harness/gen_saas.git"; GSM=apps/athena/priv/repo/migrations
 on_main() { ( cd "${WT}" && git checkout -q main && for f in "$@"; do mkdir -p "$(dirname "${f}")"; : > "${f}"; done \
   && git add -A && git commit -qm "main: $*" && git push -q origin main && git checkout -q feature ); }
 fixture g7 "${GS}"; on_main "${GSM}/20261003120000_cap.exs" "${GSM}/20261003120000_strip.exs"
@@ -249,6 +249,19 @@ fixture g7c "${GS}"; old_main="$(git --git-dir="${BARE}" rev-parse main)"; on_ma
 ( cd "${WT}" && mkdir -p "${GSM}" && : > "${GSM}/20261003120000_strip.exs" && git add -A && git commit -qm strip && git push -q origin feature )
 H="$(git -C "${WT}" rev-parse HEAD)"; set_mr ".sha=\"${H}\""; plant_receipt "${H}" "${old_main}"
 lm; expect g7c 3; no_merge g7c; names g7c "SEMANTIC CONFLICT"
+# g7 above is DND-2034's regression: gen_saas moved to
+# athena-ai-harness/gen_saas (the same project), the declaration was keyed on
+# cjpoll/gen_saas alone, and the merge onto a duplicated tip on the new path
+# ran (exit 0, the merge called).
+# g7m/g7n the class: a declared product's name under a path the declaration
+# does not list (the stale pre-move path, the next move) is COULD NOT LOOK by
+# name, never "no check declared".
+for c in "g7m cjpoll" "g7n example-moved"; do
+  set -- ${c}
+  fixture "$1" "https://gitlab.com/$2/gen_saas.git"; on_main "${GSM}/20261003120000_cap.exs" "${GSM}/20261003120000_strip.exs"
+  lm; expect "$1" 2; no_merge "$1"; names "$1" "$2/gen_saas is not declared"; names "$1" "main-content-checks.json"
+  grep -qF "no check declared" <<<"${out}" && bad "$1 read as no check declared" "${out}" || ok "$1 never 'no check declared'"
+done
 
 # g8 THE LOCK: another merge holds the lock. The tool waits at it (its flock
 # child is alive and nothing merged), then merges once the lock is released.

@@ -160,7 +160,11 @@ The landing, as Cody confirmed it (2026-10-01):
    the `gh-athena pr merge` guard refuse a merge while a judged run on the
    base tip itself (CI or a post-merge deploy) is red, or while the tip's
    tree breaks what `ai/config/main-content-checks.json` declares for the
-   repo (gen_saas: a duplicated migration version in one app). The one
+   repo (gen_saas: a duplicated migration version in one app). The
+   declaration lists each product's project paths on every forge; a path it
+   does not list whose project name is a declared product's is COULD NOT
+   LOOK, never "no check" (DND-2034). So a project move adds the new path to
+   that entry first. The one
    exception is a red-main fix: a head that contains the red tip, removes
    every duplicate, and carries its own `INTEGRATION OK` receipt. What cannot
    be read is COULD NOT LOOK and refused; a pending run is not red and does
@@ -1179,8 +1183,8 @@ the direct call is refused in a gated repo, and the section names
 ## GitLab path (no merge train)
 
 A GitLab project with no merge train (gitlab.com Free has none; gen_saas on
-`gitlab.com/cjpoll/gen_saas`) lands through the same critical section as
-GitHub (*Landing onto a moving main*), DND-1943. Once the MR's head pipeline
+`gitlab.com/athena-ai-harness/gen_saas`) lands through the same critical
+section as GitHub (*Landing onto a moving main*), DND-1943. Once the MR's head pipeline
 passed on the exact head, run `integration-gate` from a checkout of the
 project, then:
 
@@ -1201,12 +1205,22 @@ of the project (`--repo`): the receipt is in its git common dir.
   `~/.local/state/athena/<repo>-merge.lock`, the one the GitHub path takes for
   that repo. Under it: the MR must be `opened` with `sha` == `--head`; the
   receipt; the expected squash tree and its conflict refusal; the tip's
-  content (`ai/config/main-content-checks.json`, keyed
-  `<namespace>/<project>`) and the expected tree's `SEMANTIC CONFLICT`; then
+  content (`ai/config/main-content-checks.json`, looked up by
+  `<namespace>/<project>` in each product's `paths`) and the expected tree's
+  `SEMANTIC CONFLICT`; then
   the merge, `confirm-merged --mr <iid>`, the landed-tree assertion (the MR's
   `merge_commit_sha`, or `squash_commit_sha` on a fast-forward project), and
   `teardown-stack --mr <iid>` after the lock is released. Exit codes are the
   GitHub path's (`--help`).
+- **A moved project keeps its content check (DND-2034).** The declaration
+  lists each product's live paths: gen_saas `athena-ai-harness/gen_saas`, and
+  custom `athena-ai-harness/custom` (custom declares no content check). A
+  path no entry lists, whose project name is a declared product's, is COULD
+  NOT LOOK (exit 2) and names the path, never "no check declared". So the
+  pre-move `cjpoll/` paths are refused, not redirected. Before merging on a
+  moved project's new path, land that path in the entry's `paths` on custom
+  main. The rule reads the last path segment, so a rename of the project
+  itself is not caught: land the renamed path first.
 - **The merge call** is `glab-athena mr merge <iid> -R <project> --squash
   --sha <head> --auto-merge=false --yes`. glab turns auto-merge on by default,
   and a merge GitLab defers until a pipeline ends would land outside the lock.
