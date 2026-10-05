@@ -1,0 +1,10 @@
+POST /api/v4/projects/synth-group%2Fpub/repository/branches HTTP/1.1
+Host: gitlab.com
+User-Agent: glab/v1.92.1 (linux, amd64)
+Content-Length: 48
+Accept: application/json
+Content-Type: application/json
+Private-Token: fixture-token-not-a-credential
+Accept-Encoding: gzip
+
+{"branch":"SYNTH-WORK-4242-branch","ref":"main"}

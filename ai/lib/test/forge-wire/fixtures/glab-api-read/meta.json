@@ -1,0 +1,12 @@
+{
+  "cli": "glab",
+  "version": "glab 1.92.1",
+  "argv": [
+    "api",
+    "projects/synth-group%2Fpub"
+  ],
+  "env": {},
+  "repo": null,
+  "exit": 0,
+  "note": "a plain REST read"
+}

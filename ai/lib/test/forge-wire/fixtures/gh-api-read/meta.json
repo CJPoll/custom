@@ -1,0 +1,12 @@
+{
+  "cli": "gh",
+  "version": "gh version 2.96.0",
+  "argv": [
+    "api",
+    "repos/synth-owner/pub"
+  ],
+  "env": {},
+  "repo": null,
+  "exit": 0,
+  "note": "a plain REST read"
+}

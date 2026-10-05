@@ -1,0 +1,32 @@
+{
+  "cli": "glab",
+  "version": "glab 1.92.1",
+  "argv": [
+    "mr",
+    "create",
+    "-R",
+    "synth-group/pub",
+    "--related-issue",
+    "7",
+    "-t",
+    "",
+    "-d",
+    "mr body",
+    "-s",
+    "feature",
+    "-b",
+    "main",
+    "--yes"
+  ],
+  "env": {},
+  "repo": {
+    "remote": "https://gitlab.com/synth-group/pub.git",
+    "branch": "feature",
+    "pushed": true,
+    "commits": [
+      "work"
+    ]
+  },
+  "exit": 0,
+  "note": "DND-2014: the MR title is copied from an issue title glab fetches"
+}

@@ -171,7 +171,8 @@ unaffected.
 | Domain | `ai/lib/forge_wire/request.rb` | An HTTP/1.1 request as data: method, host, path, query, headers, body. Framing rules (Content-Length, chunked, refusal of anything else). |
 | Domain | `ai/lib/forge_wire/target.rb` | The target of a request: GitHub `/repos/{o}/{r}/…`, `uploads.github.com/repos/{o}/{r}/…`, `/repositories/{id}/…`, GraphQL node ids; GitLab `/api/v4/projects/{id or path}/…`, `/groups/…`, GraphQL. |
 | Domain | `ai/lib/forge_wire/fields.rb` | The text of a write: decoded path segments, query keys and values, and the body by content type. |
-| Domain | `ai/lib/forge_wire/operations.rb` | The operation table and grant matching. |
+| Domain | `ai/lib/forge_wire/graphql.rb` | A GraphQL document's selected operation: type, name, top-level fields, string literals. |
+| Domain | `ai/lib/forge_wire/operations.rb` | The operation table (data: `ai/lib/forge_wire/operations.tsv`) and grant matching. |
 | Domain | `ai/lib/forge_wire/verdict.rb` | Forward or refuse, with the reason and exit code. Calls `OutboundScan.scan_line` (`ai/lib/outbound_scan.rb`, already pure). |
 | Side Effects | `ai/lib/forge_wire/listener.rb` | Loopback listener, CONNECT, TLS termination with per-host leaf certificates, ALPN `http/1.1` only. |
 | Side Effects | `ai/lib/forge_wire/upstream.rb` | Forwards to the real host with the system trust store, no proxy, TLS verification on (the `ai/lib/forge-http-pin.sh` rules). Reads visibility with the request's own credential header. |
@@ -233,11 +234,24 @@ For a write, **the text** is:
 
 - GitHub REST: `repos/{o}/{r}` (api and uploads hosts); `repositories/{id}`
   resolved by id; any other path is unknown.
-- GitHub GraphQL: each `ID` value in `variables` is resolved with one `node`
-  query to its repository. A mutation whose document holds a string literal,
-  or an id that does not resolve, has an unknown target.
+- GitHub GraphQL: every value under a `variables` key named `id`, `*Id` or
+  `*Ids` is resolved with one `node` query to its repository. A mutation whose
+  document holds a string literal, an id that is not a non-empty string, a
+  mutation with no id, or an id that does not resolve, has an unknown target.
+
+  **Later (2026-10-04, DND-2025):** this read "each `ID` value in
+  `variables`". The judge has no schema, and gh sends its ids inside input
+  objects (`input.repositoryId`, `input.subjectId`), whose GraphQL type is
+  the input type, so a type-driven reading finds none. The key name is what
+  the wire carries; a missed id can only add an unknown (public) target.
 - GitLab REST: `api/v4/projects/{id or encoded path}` and `api/v4/groups/…`;
-  any other path is unknown.
+  any other path is unknown. A body `target_project_id` is a second target:
+  `mr create -H <head>` posts the MR to the head project's route with the
+  target project in the body (the DND-2018 fixture).
+- A path segment not spelled plainly (a percent-escape in a GitHub owner or
+  repo, a dot or empty segment, a GitLab project whose decoded path is not
+  plain) makes the target unknown: two readers of one unplain path can name
+  two repositories.
 - GitLab GraphQL: unknown (*Residuals*).
 
 Visibility is read upstream with the request's own credential header, once per
@@ -368,10 +382,18 @@ instead.
 Functional only (DND-1222): no load, no timing verdicts. A timeout only caps a
 hang.
 
-- **Fixtures are real bytes.** A capture mode of the proxy runs the pinned gh
-  2.96.0 and glab 1.92.1 against a local fake upstream with synthetic tokens
-  and synthetic repositories, for each harness command shape, and records each
-  request. Nothing reaches a forge.
+- **Fixtures are real bytes.** `ai/lib/test/forge-wire/capture/capture` runs
+  the pinned gh 2.96.0 and glab 1.92.1 against a local fake upstream with
+  synthetic tokens and synthetic repositories, for each harness command shape
+  and each earlier leak, and records each request under
+  `ai/lib/test/forge-wire/fixtures/`. Nothing reaches a forge: the fake is a
+  CONNECT proxy with no upstream socket, and the CLI's trust store holds only
+  its CA.
+
+  **Later (2026-10-04, DND-2025):** this named "a capture mode of the proxy".
+  The judge (build step 1) lands before the proxy (step 2), so the capture is
+  a test tool of its own; it never forwards, so it shares nothing with the
+  proxy's forwarding path.
 - **Domain tests** feed the fixtures to `request`, `target`, `fields`,
   `operations` and `verdict`, plus hand-built malformed requests for every row
   of *Fail-closed behaviour*.

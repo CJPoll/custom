@@ -1,0 +1,13 @@
+POST /graphql HTTP/1.1
+Host: api.github.com
+User-Agent: GitHub CLI v2.96.0
+Content-Length: 301
+Accept: application/vnd.github.merge-info-preview+json, application/vnd.github.nebula-preview
+Authorization: token fixture-token-not-a-credential
+Content-Type: application/json
+Graphql-Features: merge_queue
+Time-Zone: UTC
+X-Github-Api-Version: 2022-11-28
+Accept-Encoding: gzip
+
+{"query":"mutation CreateLinkedBranch($input:CreateLinkedBranchInput!){createLinkedBranch(input: $input){linkedBranch{id,ref{name}}}}","variables":{"input":{"issueId":"I_kwDOSynthPub3","oid":"0123456789abcdef0123456789abcdef01234567","name":"SYNTH-WORK-4242-branch","repositoryId":"R_kgDOSynthPub"}}}

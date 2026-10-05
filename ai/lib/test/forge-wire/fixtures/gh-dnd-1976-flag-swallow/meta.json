@@ -1,0 +1,24 @@
+{
+  "cli": "gh",
+  "version": "gh version 2.96.0",
+  "argv": [
+    "pr",
+    "create",
+    "-R",
+    "synth-owner/pub",
+    "--title",
+    "pr title",
+    "-l",
+    "-t",
+    "-b",
+    "body SYNTH-WORK-4242",
+    "--head",
+    "feature",
+    "--base",
+    "main"
+  ],
+  "env": {},
+  "repo": null,
+  "exit": 0,
+  "note": "DND-1976: -l takes -t as its value, so the body followed an unknown flag"
+}

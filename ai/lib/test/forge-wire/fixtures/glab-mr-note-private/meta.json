@@ -1,0 +1,17 @@
+{
+  "cli": "glab",
+  "version": "glab 1.92.1",
+  "argv": [
+    "mr",
+    "note",
+    "1",
+    "-R",
+    "synth-group/priv",
+    "-m",
+    "note SYNTH-WORK-4242"
+  ],
+  "env": {},
+  "repo": null,
+  "exit": 0,
+  "note": "a note on a private project: forwarded unscanned"
+}

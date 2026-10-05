@@ -1,0 +1,22 @@
+{
+  "cli": "glab",
+  "version": "glab 1.92.1",
+  "argv": [
+    "api",
+    "-X",
+    "POST",
+    "projects/:fullpath/issues",
+    "-F",
+    "title=:branch"
+  ],
+  "env": {},
+  "repo": {
+    "remote": "https://gitlab.com/synth-group/pub.git",
+    "branch": "SYNTH-WORK-4242-topic",
+    "commits": [
+      "topic"
+    ]
+  },
+  "exit": 0,
+  "note": "DND-2009: glab fills :branch after the argv scan read it"
+}

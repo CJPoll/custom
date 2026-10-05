@@ -1,0 +1,22 @@
+{
+  "cli": "gh",
+  "version": "gh version 2.96.0",
+  "argv": [
+    "api",
+    "-X",
+    "POST",
+    "repos/{owner}/{repo}/issues",
+    "-F",
+    "title={branch}"
+  ],
+  "env": {},
+  "repo": {
+    "remote": "https://github.com/synth-owner/pub.git",
+    "branch": "SYNTH-WORK-4242-topic",
+    "commits": [
+      "topic"
+    ]
+  },
+  "exit": 0,
+  "note": "DND-2007: gh fills {owner}, {repo} and {branch} after the argv scan read them"
+}

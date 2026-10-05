@@ -1,0 +1,13 @@
+POST /graphql HTTP/1.1
+Host: api.github.com
+User-Agent: GitHub CLI v2.96.0
+Content-Length: 270
+Accept: application/vnd.github.merge-info-preview+json, application/vnd.github.nebula-preview
+Authorization: token fixture-token-not-a-credential
+Content-Type: application/json; charset=utf-8
+Graphql-Features: merge_queue
+Time-Zone: UTC
+X-Github-Api-Version: 2022-11-28
+Accept-Encoding: gzip
+
+{"query":"\n\tquery PullRequestByNumber($owner: String!, $repo: String!, $pr_number: Int!) {\n\t\trepository(owner: $owner, name: $repo) {\n\t\t\tpullRequest(number: $pr_number) {id,url,number}\n\t\t}\n\t}","variables":{"owner":"synth-owner","pr_number":1,"repo":"pub"}}

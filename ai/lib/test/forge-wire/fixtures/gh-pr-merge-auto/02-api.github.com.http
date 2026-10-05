@@ -1,0 +1,14 @@
+POST /graphql HTTP/1.1
+Host: api.github.com
+User-Agent: GitHub CLI v2.96.0
+Content-Length: 121
+Accept: application/vnd.github.merge-info-preview+json, application/vnd.github.nebula-preview
+Authorization: token fixture-token-not-a-credential
+Content-Type: application/json
+Graphql-Features: merge_queue
+Time-Zone: UTC
+X-Gh-Cache-Ttl: 24h0m0s
+X-Github-Api-Version: 2022-11-28
+Accept-Encoding: gzip
+
+{"query":"query PullRequest_fields2{WorkflowRun: __type(name: \"WorkflowRun\"){fields(includeDeprecated: true){name}}}"}

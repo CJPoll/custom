@@ -1,0 +1,18 @@
+{
+  "cli": "gh",
+  "version": "gh version 2.96.0",
+  "argv": [
+    "api",
+    "-X",
+    "POST",
+    "repos/synth-owner/pub/issues",
+    "-f",
+    "title=SYNTH-WORK-4242 title",
+    "-f",
+    "body=b"
+  ],
+  "env": {},
+  "repo": null,
+  "exit": 0,
+  "note": "DND-2007: gh api writes to a public repo were not scanned"
+}

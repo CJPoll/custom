@@ -1,0 +1,29 @@
+# The forge-wire operation table (DND-2025). Format and classes:
+# ai/lib/forge_wire/operations.rb. A write the table does not name is refused.
+#
+# Rows come from the captured fixtures (ai/lib/test/forge-wire/fixtures/, one
+# scenario per harness command shape and per earlier argv-scan leak) and the
+# design's example rows (ai/docs/outbound-scan-at-the-wire.md -> The operation
+# table). Add a row only with a fixture that shows the CLI making it.
+#
+# forge	method	route	class
+github	POST	/repos/{o}/{r}/issues	text
+github	POST	/repos/{o}/{r}/issues/{n}/comments	text
+github	PUT	/repos/{o}/{r}/pulls/{n}/merge	ref
+github	POST	/repos/{o}/{r}/actions/runs/{id}/rerun	plain
+github	graphql	addComment	text
+github	graphql	createPullRequest	text
+github	graphql	updatePullRequest	text
+github	graphql	closePullRequest	plain
+github	graphql	reopenPullRequest	plain
+github	graphql	createRepository	text
+github	graphql	mergePullRequest	ref
+github	graphql	enablePullRequestAutoMerge	ref
+github	graphql	createLinkedBranch	ref
+gitlab	POST	/api/v4/projects/{p}/issues	text
+gitlab	POST	/api/v4/projects/{p}/merge_requests	text
+gitlab	POST	/api/v4/projects/{p}/merge_requests/{iid}/notes	text
+gitlab	POST	/api/v4/projects/{p}/releases	text
+gitlab	PUT	/api/v4/projects/{p}/merge_requests/{iid}/merge	ref
+gitlab	POST	/api/v4/projects/{p}/merge_trains/merge_requests/{iid}	ref
+gitlab	POST	/api/v4/projects/{p}/repository/branches	ref

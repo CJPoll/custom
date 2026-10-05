@@ -1,0 +1,10 @@
+POST /api/v4/projects/synth-group%2Fpriv/merge_requests/1/notes HTTP/1.1
+Host: gitlab.com
+User-Agent: glab/v1.92.1 (linux, amd64)
+Content-Length: 31
+Accept: application/json
+Content-Type: application/json
+Private-Token: fixture-token-not-a-credential
+Accept-Encoding: gzip
+
+{"body":"note SYNTH-WORK-4242"}

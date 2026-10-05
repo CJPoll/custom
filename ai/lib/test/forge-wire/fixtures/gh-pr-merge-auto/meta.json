@@ -1,0 +1,17 @@
+{
+  "cli": "gh",
+  "version": "gh version 2.96.0",
+  "argv": [
+    "pr",
+    "merge",
+    "1",
+    "-R",
+    "synth-owner/pub",
+    "--squash",
+    "--auto"
+  ],
+  "env": {},
+  "repo": null,
+  "exit": 0,
+  "note": "auto-merge: a ref operation, refused without a grant"
+}

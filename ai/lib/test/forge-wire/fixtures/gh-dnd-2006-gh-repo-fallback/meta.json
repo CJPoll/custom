@@ -1,0 +1,21 @@
+{
+  "cli": "gh",
+  "version": "gh version 2.96.0",
+  "argv": [
+    "pr",
+    "comment",
+    "1",
+    "-R",
+    "",
+    "-b",
+    "comment SYNTH-WORK-4242"
+  ],
+  "env": {
+    "GH_REPO": "synth-owner/pub"
+  },
+  "repo": {
+    "remote": "https://github.com/synth-owner/priv.git"
+  },
+  "exit": 0,
+  "note": "DND-2006: -R '' falls back to GH_REPO, not the private checkout"
+}

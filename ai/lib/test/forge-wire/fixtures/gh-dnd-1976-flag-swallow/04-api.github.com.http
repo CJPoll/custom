@@ -1,0 +1,13 @@
+POST /graphql HTTP/1.1
+Host: api.github.com
+User-Agent: GitHub CLI v2.96.0
+Content-Length: 389
+Accept: application/vnd.github.merge-info-preview+json, application/vnd.github.nebula-preview
+Authorization: token fixture-token-not-a-credential
+Content-Type: application/json; charset=utf-8
+Graphql-Features: merge_queue
+Time-Zone: UTC
+X-Github-Api-Version: 2022-11-28
+Accept-Encoding: gzip
+
+{"query":"\n\t\tmutation PullRequestCreate($input: CreatePullRequestInput!) {\n\t\t\tcreatePullRequest(input: $input) {\n\t\t\t\tpullRequest {\n\t\t\t\t\tid\n\t\t\t\t\turl\n\t\t\t\t}\n\t\t\t}\n\t}","variables":{"input":{"baseRefName":"main","body":"body SYNTH-WORK-4242","draft":false,"headRefName":"feature","maintainerCanModify":true,"repositoryId":"R_kgDOSynthPub","title":"pr title"}}}

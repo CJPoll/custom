@@ -1,0 +1,204 @@
+#!/usr/bin/ruby
+# frozen_string_literal: true
+
+# capture -- record the forge-wire fixtures from the real CLIs (DND-2025).
+#
+# For each scenario in scenarios.rb it starts fake-upstream.rb (a local
+# CONNECT proxy that answers from canned responses and never dials out), runs
+# the real gh or glab through it with a synthetic token, empty config dirs and
+# a trust store holding only the fake's CA, and writes the requests the CLI
+# sent to ../fixtures/<scenario>/. Nothing reaches a forge: a CLI that skips
+# the proxy fails TLS on the CA-only trust store.
+#
+# Not run by the gate: it needs the pinned CLIs installed (gh 2.96.0 at
+# /usr/bin/gh, glab 1.92.1 at ~/.local/bin/glab or FW_GLAB). The committed
+# fixtures are its output; the Domain suites read those.
+
+require "json"
+require "fileutils"
+require "tmpdir"
+require_relative "scenarios"
+
+HERE = __dir__
+FIXTURES = File.expand_path("../fixtures", HERE)
+HELP = <<~HELP
+  capture -- record forge-wire fixtures from the real gh and glab (DND-2025)
+
+  Usage:
+    capture [--only NAME]... [--explore]
+    capture --list
+    capture --help
+
+  Runs each scenario in scenarios.rb against fake-upstream.rb (a local proxy
+  that never connects anywhere) and writes the CLI's requests to
+  ai/lib/test/forge-wire/fixtures/<scenario>/NN-<host>.http, plus meta.json.
+  --explore prints each request line and the CLI's output, and writes nothing
+  under fixtures/. CLIs: /usr/bin/gh (2.96.0) and FW_GLAB or ~/.local/bin/glab
+  (1.92.1); a different version is refused.
+
+  Exit: 0 every scenario captured; 1 a scenario failed (named, with Fix:);
+  2 usage.
+HELP
+
+GH = "/usr/bin/gh"
+GLAB = ENV.fetch("FW_GLAB", File.join(Dir.home, ".local/bin/glab"))
+VERSIONS = { "gh" => [GH, "gh version 2.96.0"], "glab" => [GLAB, "glab 1.92.1"] }.freeze
+
+def fail!(msg)
+  warn "capture: #{msg}"
+  exit 1
+end
+
+def check_versions
+  VERSIONS.each do |cli, (bin, want)|
+    got = IO.popen([bin, "--version"], err: %i[child out], &:read).to_s
+    fail!("#{bin} is not #{want} (got #{got.lines.first.to_s.strip.inspect}). Fix: install the pinned CLI, or set FW_GLAB.") unless got.include?(want)
+  rescue SystemCallError
+    fail!("#{cli} not found at #{bin}. Fix: install it, or set FW_GLAB for glab.")
+  end
+end
+
+def git(dir, *args)
+  ok = system({ "GIT_CONFIG_GLOBAL" => "/dev/null", "GIT_CONFIG_NOSYSTEM" => "1" },
+              "/usr/bin/git", "-C", dir, *args, out: File::NULL, err: File::NULL)
+  fail!("git #{args.join(' ')} failed. Fix: check the scenario's repo setup.") unless ok
+end
+
+# A synthetic checkout: remote origin at `remote`, branch `base` with one
+# commit, then `branch` with the scenario's commits.
+def make_repo(dir, repo)
+  FileUtils.mkdir_p(dir)
+  git(dir, "init", "-q", "-b", repo.fetch(:base, "main"))
+  git(dir, "config", "user.name", "Synthetic Author")
+  git(dir, "config", "user.email", "author@example.test")
+  git(dir, "remote", "add", "origin", repo.fetch(:remote))
+  (repo[:remotes] || {}).each { |name, url| git(dir, "remote", "add", name, url) }
+  File.write(File.join(dir, "README"), "base\n")
+  git(dir, "add", "README")
+  git(dir, "commit", "-q", "-m", "base commit")
+  git(dir, "update-ref", "refs/remotes/origin/#{repo.fetch(:base, 'main')}", "HEAD")
+  return unless repo[:branch]
+
+  git(dir, "checkout", "-q", "-b", repo[:branch])
+  Array(repo[:commits]).each_with_index do |msg, i|
+    File.write(File.join(dir, "f#{i}"), "#{i}\n")
+    git(dir, "add", "f#{i}")
+    git(dir, "commit", "-q", "-m", msg)
+  end
+  return unless repo[:pushed]
+
+  (["origin"] + (repo[:remotes] || {}).keys).each do |remote|
+    git(dir, "update-ref", "refs/remotes/#{remote}/#{repo[:branch]}", "HEAD")
+  end
+end
+
+def cli_env(cli, work, port)
+  base = {
+    "PATH" => "/usr/bin:/bin", "HOME" => work, "TMPDIR" => work, "TZ" => "UTC", "LANG" => "C.UTF-8",
+    "NO_COLOR" => "1", "GIT_CONFIG_GLOBAL" => "/dev/null", "GIT_CONFIG_NOSYSTEM" => "1",
+    "HTTPS_PROXY" => "http://127.0.0.1:#{port}", "HTTP_PROXY" => "http://127.0.0.1:#{port}",
+    "SSL_CERT_FILE" => File.join(work, "ca.pem"), "SSL_CERT_DIR" => File.join(work, "emptycerts")
+  }
+  if cli == "gh"
+    base.merge("GH_CONFIG_DIR" => File.join(work, "ghcfg"), "GH_TOKEN" => SYNTH_TOKEN, "GH_HOST" => "github.com",
+               "GH_PROMPT_DISABLED" => "1", "GH_NO_UPDATE_NOTIFIER" => "1", "GH_SPINNER_DISABLED" => "1")
+  else
+    base.merge("GLAB_CONFIG_DIR" => File.join(work, "glabcfg"), "GITLAB_TOKEN" => SYNTH_TOKEN,
+               "GITLAB_HOST" => "gitlab.com", "GLAB_NO_PROMPT" => "1", "GLAB_CHECK_UPDATE" => "false",
+               "GLAB_SEND_TELEMETRY" => "false")
+  end
+end
+
+# Bounded wait for a file the child writes; the child's exit is checked too.
+def wait_ready(path, pid)
+  200.times do
+    return true if File.size?(path)
+    return false if Process.waitpid(pid, Process::WNOHANG)
+
+    sleep 0.05
+  end
+  false
+end
+
+def run_scenario(sc, explore)
+  Dir.mktmpdir("forge-wire-capture-") do |work|
+    %w[emptycerts ghcfg glabcfg out].each { |d| FileUtils.mkdir_p(File.join(work, d)) }
+    File.write(File.join(work, "responses.json"), JSON.generate(sc[:responses] || []))
+    cwd = work
+    if sc[:repo]
+      cwd = File.join(work, "checkout")
+      make_repo(cwd, sc[:repo])
+    end
+    (sc[:files] || {}).each { |name, text| File.write(File.join(cwd, name), text) }
+    proxy = Process.spawn("/usr/bin/ruby", File.join(HERE, "fake-upstream.rb"), work,
+                          File.join(work, "responses.json"), File.join(work, "out"),
+                          err: File.join(work, "proxy.err"))
+    begin
+      fail!("#{sc[:name]}: the fake upstream never wrote its port. Fix: read #{work}/proxy.err.") unless wait_ready(File.join(work, "port"), proxy)
+      port = File.read(File.join(work, "port")).strip
+      bin = VERSIONS.fetch(sc[:cli]).first
+      env = cli_env(sc[:cli], work, port).merge(sc[:env] || {})
+      r, w = IO.pipe
+      pid = Process.spawn(env, "/usr/bin/timeout", "60", bin, *sc[:argv], chdir: cwd, unsetenv_others: true,
+                          in: sc[:stdin] ? :close : File::NULL, out: w, err: w)
+      w.close
+      output = r.read
+      _, status = Process.wait2(pid)
+      files = Dir.children(File.join(work, "out")).sort
+      if explore
+        puts "== #{sc[:name]} rc=#{status.exitstatus}"
+        puts output.lines.first(12).map { |l| "   | #{l}" }
+        files.each do |f|
+          bytes = File.binread(File.join(work, "out", f))
+          puts "   #{f}: #{bytes.lines.first.strip}"
+          body = bytes.split("\r\n\r\n", 2)[1].to_s
+          puts "      #{body[0, 600]}" unless body.empty?
+        end
+        next
+      end
+      fail!("#{sc[:name]}: the CLI sent no request (rc=#{status.exitstatus}). Fix: run with --explore --only #{sc[:name]}.") if files.empty?
+      dest = File.join(FIXTURES, sc[:name])
+      FileUtils.rm_rf(dest)
+      FileUtils.mkdir_p(dest)
+      files.each { |f| FileUtils.cp(File.join(work, "out", f), dest) }
+      meta = { cli: sc[:cli], version: VERSIONS.fetch(sc[:cli]).last, argv: sc[:argv], env: sc[:env] || {},
+               repo: sc[:repo], exit: status.exitstatus, note: sc[:note] }
+      File.write(File.join(dest, "meta.json"), JSON.pretty_generate(meta) + "\n")
+      puts "captured #{sc[:name]}: #{files.size} request(s), CLI exit #{status.exitstatus}"
+    ensure
+      Process.kill("TERM", proxy) rescue nil
+      Process.wait(proxy) rescue nil
+    end
+  end
+end
+
+if ARGV.include?("--help") || ARGV.include?("-h")
+  puts HELP
+  exit 0
+end
+if ARGV.include?("--list")
+  SCENARIOS.each { |s| puts "#{s[:name]}\t#{s[:cli]} #{s[:argv].join(' ')}" }
+  exit 0
+end
+
+only = []
+explore = false
+args = ARGV.dup
+until args.empty?
+  a = args.shift
+  case a
+  when "--only" then only << (args.shift or (warn "capture: --only needs a NAME. Fix: see --help."; exit 2))
+  when "--explore" then explore = true
+  else
+    warn "capture: unknown argument #{a.inspect}. Fix: see --help."
+    exit 2
+  end
+end
+unknown = only - SCENARIOS.map { |s| s[:name] }
+unless unknown.empty?
+  warn "capture: no scenario #{unknown.join(', ')}. Fix: run --list."
+  exit 2
+end
+
+check_versions
+SCENARIOS.each { |sc| run_scenario(sc, explore) if only.empty? || only.include?(sc[:name]) }

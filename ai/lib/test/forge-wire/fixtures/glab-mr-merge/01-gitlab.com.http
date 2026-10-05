@@ -1,0 +1,7 @@
+GET /api/v4/projects/synth-group%2Fpub/merge_requests/1 HTTP/1.1
+Host: gitlab.com
+User-Agent: glab/v1.92.1 (linux, amd64)
+Accept: application/json
+Private-Token: fixture-token-not-a-credential
+Accept-Encoding: gzip
+

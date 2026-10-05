@@ -1,0 +1,27 @@
+{
+  "cli": "gh",
+  "version": "gh version 2.96.0",
+  "argv": [
+    "pr",
+    "create",
+    "-R",
+    "synth-owner/pub",
+    "--fill",
+    "--head",
+    "feature",
+    "--base",
+    "main"
+  ],
+  "env": {},
+  "repo": {
+    "remote": "https://github.com/synth-owner/pub.git",
+    "branch": "feature",
+    "pushed": true,
+    "commits": [
+      "fix: SYNTH-WORK-4242 in the parser",
+      "second line of work"
+    ]
+  },
+  "exit": 0,
+  "note": "DND-2019: --fill sends text gh builds from commit messages"
+}

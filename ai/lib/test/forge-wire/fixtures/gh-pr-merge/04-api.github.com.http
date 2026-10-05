@@ -1,0 +1,13 @@
+POST /graphql HTTP/1.1
+Host: api.github.com
+User-Agent: GitHub CLI v2.96.0
+Content-Length: 263
+Accept: application/vnd.github.merge-info-preview+json, application/vnd.github.nebula-preview
+Authorization: token fixture-token-not-a-credential
+Content-Type: application/json
+Graphql-Features: merge_queue
+Time-Zone: UTC
+X-Github-Api-Version: 2022-11-28
+Accept-Encoding: gzip
+
+{"query":"mutation PullRequestMerge($input:MergePullRequestInput!){mergePullRequest(input: $input){clientMutationId}}","variables":{"input":{"pullRequestId":"PR_kwDOSynthPub1","expectedHeadOid":"0123456789abcdef0123456789abcdef01234567","mergeMethod":"SQUASH"}}}

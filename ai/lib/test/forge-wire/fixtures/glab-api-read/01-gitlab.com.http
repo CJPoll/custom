@@ -1,0 +1,6 @@
+GET /api/v4/projects/synth-group%2Fpub HTTP/1.1
+Host: gitlab.com
+User-Agent: glab/v1.92.1 (linux, amd64)
+Private-Token: fixture-token-not-a-credential
+Accept-Encoding: gzip
+

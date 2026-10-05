@@ -1,0 +1,19 @@
+{
+  "cli": "glab",
+  "version": "glab 1.92.1",
+  "argv": [
+    "mr",
+    "merge",
+    "1",
+    "-R",
+    "synth-group/pub",
+    "--squash",
+    "--sha",
+    "0123456789abcdef0123456789abcdef01234567",
+    "--yes"
+  ],
+  "env": {},
+  "repo": null,
+  "exit": 0,
+  "note": "a merge: a ref operation, refused without a grant"
+}

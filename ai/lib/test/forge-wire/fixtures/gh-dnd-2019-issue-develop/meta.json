@@ -1,0 +1,19 @@
+{
+  "cli": "gh",
+  "version": "gh version 2.96.0",
+  "argv": [
+    "issue",
+    "develop",
+    "3",
+    "-R",
+    "synth-owner/pub",
+    "--name",
+    "SYNTH-WORK-4242-branch",
+    "--base",
+    "main"
+  ],
+  "env": {},
+  "repo": null,
+  "exit": 1,
+  "note": "DND-2019: issue develop creates a branch through the API"
+}

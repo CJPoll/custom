@@ -1,0 +1,10 @@
+POST /api/v4/projects/synth-group%2Fpub/merge_requests HTTP/1.1
+Host: gitlab.com
+User-Agent: glab/v1.92.1 (linux, amd64)
+Content-Length: 144
+Accept: application/json
+Content-Type: application/json
+Private-Token: fixture-token-not-a-credential
+Accept-Encoding: gzip
+
+{"title":"mr title","description":"mr body","source_branch":"SYNTH-WORK-4242-branch","target_branch":"main","labels":"","target_project_id":102}

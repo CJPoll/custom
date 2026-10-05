@@ -1,0 +1,10 @@
+POST /api/v4/projects/synth-group%2Fpub/releases HTTP/1.1
+Host: gitlab.com
+User-Agent: glab/v1.92.1 (linux, amd64)
+Content-Length: 98
+Accept: application/json
+Content-Type: application/json
+Private-Token: fixture-token-not-a-credential
+Accept-Encoding: gzip
+
+{"name":"v1.0.0","tag_name":"v1.0.0","description":"release notes SYNTH-WORK-4242\n","ref":"main"}

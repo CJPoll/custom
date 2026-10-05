@@ -1,0 +1,19 @@
+{
+  "cli": "glab",
+  "version": "glab 1.92.1",
+  "argv": [
+    "release",
+    "create",
+    "v1.0.0",
+    "-R",
+    "synth-group/pub",
+    "--ref",
+    "main",
+    "--experimental-notes-text-or-file",
+    "notes.md"
+  ],
+  "env": {},
+  "repo": null,
+  "exit": 0,
+  "note": "DND-2017: a hidden flag sends a file as release notes"
+}

@@ -1,0 +1,30 @@
+{
+  "cli": "glab",
+  "version": "glab 1.92.1",
+  "argv": [
+    "mr",
+    "create",
+    "-R",
+    "synth-group/pub",
+    "-s",
+    "feature",
+    "-b",
+    "main",
+    "-t",
+    "mr title SYNTH-WORK-4242",
+    "-d",
+    "mr body",
+    "--yes"
+  ],
+  "env": {},
+  "repo": {
+    "remote": "https://gitlab.com/synth-group/pub.git",
+    "branch": "feature",
+    "pushed": true,
+    "commits": [
+      "work"
+    ]
+  },
+  "exit": 0,
+  "note": "a harness command shape: an MR with text on a public project"
+}

@@ -1,0 +1,17 @@
+{
+  "cli": "glab",
+  "version": "glab 1.92.1",
+  "argv": [
+    "mr",
+    "note",
+    "//gitlab.com/synth-group/pub/-/merge_requests/1",
+    "-m",
+    "note SYNTH-WORK-4242"
+  ],
+  "env": {},
+  "repo": {
+    "remote": "https://gitlab.com/synth-group/priv.git"
+  },
+  "exit": 0,
+  "note": "DND-2012: a scheme-less MR URL names the public project, not the private cwd"
+}

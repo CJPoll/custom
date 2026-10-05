@@ -1,0 +1,17 @@
+{
+  "cli": "gh",
+  "version": "gh version 2.96.0",
+  "argv": [
+    "pr",
+    "edit",
+    "1",
+    "-R",
+    "synth-owner/pub",
+    "--base",
+    "develop"
+  ],
+  "env": {},
+  "repo": null,
+  "exit": 0,
+  "note": "a harness command shape (retarget)"
+}

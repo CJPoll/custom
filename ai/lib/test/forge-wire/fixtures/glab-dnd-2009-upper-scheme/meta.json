@@ -1,0 +1,16 @@
+{
+  "cli": "glab",
+  "version": "glab 1.92.1",
+  "argv": [
+    "api",
+    "-X",
+    "POST",
+    "HTTPS://gitlab.com/api/v4/projects/synth-group%2Fpub/issues",
+    "-f",
+    "title=SYNTH-WORK-4242"
+  ],
+  "env": {},
+  "repo": null,
+  "exit": 0,
+  "note": "DND-2009: an upper-case scheme skipped the host check"
+}

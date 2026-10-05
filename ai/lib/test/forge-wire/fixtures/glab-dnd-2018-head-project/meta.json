@@ -1,0 +1,36 @@
+{
+  "cli": "glab",
+  "version": "glab 1.92.1",
+  "argv": [
+    "mr",
+    "create",
+    "-R",
+    "synth-group/priv",
+    "-H",
+    "synth-group/pub",
+    "--create-source-branch",
+    "-s",
+    "SYNTH-WORK-4242-branch",
+    "-b",
+    "main",
+    "-t",
+    "mr title",
+    "-d",
+    "mr body",
+    "--yes"
+  ],
+  "env": {},
+  "repo": {
+    "remote": "https://gitlab.com/synth-group/priv.git",
+    "branch": "feature",
+    "pushed": true,
+    "commits": [
+      "work"
+    ],
+    "remotes": {
+      "head": "https://gitlab.com/synth-group/pub.git"
+    }
+  },
+  "exit": 0,
+  "note": "DND-2018: --create-source-branch creates a branch on the head project"
+}
