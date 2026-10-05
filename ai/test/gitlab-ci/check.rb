@@ -123,7 +123,11 @@ BUILD_CMD = ["docker", "build", "--progress=plain", "-t", IMAGE_VAR, IMAGE_DIR].
 RM_TAIL = [">/dev/null", "2>&1"].freeze
 # docker run flags: those with no value, and those taking the next word.
 RUN_BARE = %w[--rm --init].freeze
-RUN_VALUED = %w[--name --user -e --security-opt -v -w].freeze
+RUN_VALUED = %w[--name --user --security-opt -v -w].freeze
+CHECKOUT_BIND = "$CI_PROJECT_DIR:$CI_PROJECT_DIR"
+# The runner keeps the job token in a git include beside the checkout
+# (url.<token>.insteadOf); .git/config names it by this absolute path.
+RUNNER_GIT_CONF_BIND = "$CI_PROJECT_DIR.tmp/.gitlab-runner.ext.conf:$CI_PROJECT_DIR.tmp/.gitlab-runner.ext.conf:ro"
 SEPARATORS = %w[&& || ; | &].freeze
 # A standalone `docker` word: not part of dockerfiles/, dockerd or docker.sock.
 DOCKER_WORD = %r{(?<![\w/.$-])docker(?![\w/.-])}
@@ -225,7 +229,10 @@ runs.each do |r|
   errors << "#{where}: must be named one of #{NAMES.inspect} (after_script removes them by name)" unless NAMES.include?(r[:label])
   errors << "#{where}: must be removed on exit (--rm)" unless vals.call("--rm").size == 1
   errors << "#{where}: must run the built image #{IMAGE_VAR}" unless r[:image] == IMAGE_VAR
-  errors << "#{where}: must bind only the checkout at its own path (-v \"$CI_PROJECT_DIR:$CI_PROJECT_DIR\") and work there (-w \"$CI_PROJECT_DIR\")" unless vals.call("-v") == ["$CI_PROJECT_DIR:$CI_PROJECT_DIR"] && vals.call("-w") == ["$CI_PROJECT_DIR"]
+  # Mounts: the checkout at its own path; the gate also reads the runner's
+  # git credential include, read-only, at the path .git/config names.
+  binds = r[:label] == GATE_NAME ? [CHECKOUT_BIND, RUNNER_GIT_CONF_BIND] : [CHECKOUT_BIND]
+  errors << "#{where}: must bind exactly #{binds.map { |b| "-v \"#{b}\"" }.join(' ')} and work in the checkout (-w \"$CI_PROJECT_DIR\"), got -v #{vals.call('-v').inspect}" unless vals.call("-v") == binds && vals.call("-w") == ["$CI_PROJECT_DIR"]
   errors << "#{where}: --name and --user must each appear exactly once" unless vals.call("--name").size == 1 && vals.call("--user").size == 1
   opts = vals.call("--security-opt")
   unmasked = [GATE_NAME, PROBE_NAME].include?(r[:label])
@@ -234,11 +241,6 @@ runs.each do |r|
   elsif !opts.empty?
     errors << "#{where}: takes no --security-opt (only the gate and the probe run unmasked), got #{opts.inspect}"
   end
-  # Environment: only the gate gets one variable, CI_JOB_TOKEN by name, so its
-  # git can reach origin for the landed bars. No literal value.
-  envs = vals.call("-e")
-  allowed_env = r[:label] == GATE_NAME ? ["CI_JOB_TOKEN"] : []
-  errors << "#{where}: -e may name only #{allowed_env.inspect} (by name, no value), got #{envs.inspect}" unless (envs - allowed_env).empty? && envs.size == envs.uniq.size
   errors << "#{where}: --init is for the gate only" if !vals.call("--init").empty? && r[:label] != GATE_NAME
 end
 

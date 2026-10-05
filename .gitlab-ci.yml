@@ -7,8 +7,9 @@
 #   - A fork MR never runs: the runner is the owner's own machine, and a fork
 #     MR is arbitrary code from outside the project.
 #   - No credentials: no CI/CD variables, no secrets, no id_tokens. The gate
-#     container gets only the predefined CI_JOB_TOKEN, by name, which the
-#     gate held in the job container before (DND-2085).
+#     container reads the job token only where the runner put it for git
+#     (its include beside the checkout, read-only), as the gate did in the
+#     job container before (DND-2085).
 #   - Every job carries the role tag `ci` (never a per-host tag); the runner
 #     does not take untagged jobs.
 #   - The gate runs in a sibling container on the `ci` user's rootless
@@ -93,10 +94,10 @@ harness-gate:
     # tenant, and the CI container is not one (check-inbox-registry; DND-1998).
     - docker run --rm --name "custom-prep-$CI_JOB_ID" --user 0 -v "$CI_PROJECT_DIR:$CI_PROJECT_DIR" -w "$CI_PROJECT_DIR" "$CI_HARNESS_IMAGE" chown -R ci:ci "$CI_PROJECT_DIR"
     # The gate. It never gets the socket. --init reaps the orphans suites leave.
-    # Its one variable is CI_JOB_TOKEN, passed by name: the runner's git
-    # credential helper reads it, and the landed-bar checks read origin (the
-    # gate held it in the job container before, too).
-    - docker run --rm --init --name "custom-gate-$CI_JOB_ID" --user ci -e CI_JOB_TOKEN --security-opt seccomp=unconfined --security-opt apparmor=unconfined --security-opt systempaths=unconfined -v "$CI_PROJECT_DIR:$CI_PROJECT_DIR" -w "$CI_PROJECT_DIR" "$CI_HARNESS_IMAGE" ai/bin/harness-gate
+    # The landed-bar checks read origin, and the runner authenticates git
+    # through an include beside the checkout ($CI_PROJECT_DIR.tmp, named by
+    # .git/config). The gate gets that one file, read-only.
+    - docker run --rm --init --name "custom-gate-$CI_JOB_ID" --user ci --security-opt seccomp=unconfined --security-opt apparmor=unconfined --security-opt systempaths=unconfined -v "$CI_PROJECT_DIR:$CI_PROJECT_DIR" -v "$CI_PROJECT_DIR.tmp/.gitlab-runner.ext.conf:$CI_PROJECT_DIR.tmp/.gitlab-runner.ext.conf:ro" -w "$CI_PROJECT_DIR" "$CI_HARNESS_IMAGE" ai/bin/harness-gate
   after_script:
     # A cancelled job leaves no sibling behind.
     - docker rm -f "custom-probe-$CI_JOB_ID" "custom-prep-$CI_JOB_ID" "custom-gate-$CI_JOB_ID" >/dev/null 2>&1 || true
