@@ -178,8 +178,8 @@ EOF
 # resolves must be a local path (or file://) or on the route's host (a
 # subdomain counts, as for fg_reaches_forge_insecurely). Any other host is
 # REFUSED, exit 3, with a Fix: naming the matching wrapper, and
-# ai/bin/forge-push for when DND-1995 lands (it is not on main at DND-2000,
-# so the Fix: says to use the wrapper until then). A URL git cannot resolve
+# ai/bin/forge-push, which picks the wrapper for a push by the remote's host
+# (DND-1995). A URL git cannot resolve
 # is COULD NOT LOOK, also exit 3, never read as "no URL" or as the literal
 # word.
 #
@@ -245,9 +245,9 @@ fg_refuse_foreign_host() {
   if [ "$route" = "$FG_TOOL" ]; then
     fix="this is $FG_HOST spelled in a form the route does not trust (a trailing dot, or # ? \\ space % in the host part). Spell the remote plainly: https://$FG_HOST/<owner>/<repo>.git or git@$FG_HOST:<owner>/<repo>.git."
   elif [ -n "$route" ]; then
-    fix="run it through that forge's own wrapper, \`~/dev/custom/ai/bin/$route git $1 …\`. Once DND-1995 lands, \`~/dev/custom/ai/bin/forge-push\` picks the wrapper from the remote's host for a push; until then it does not exist, so use the wrapper."
+    fix="run it through that forge's own wrapper, \`~/dev/custom/ai/bin/$route git $1 …\`. For a push, \`~/dev/custom/ai/bin/forge-push -C <dir> <push args>\` picks the wrapper from the remote's host."
   else
-    fix="no Athena route serves $host. If this is a local repository, name it by its path. If it is meant to be $FG_HOST, point the remote at https://$FG_HOST/<owner>/<repo>.git or git@$FG_HOST:<owner>/<repo>.git; for the other forge use its own wrapper (\`~/dev/custom/ai/bin/gh-athena git …\` / \`~/dev/custom/ai/bin/glab-athena git …\`), or, once DND-1995 lands, \`~/dev/custom/ai/bin/forge-push\`."
+    fix="no Athena route serves $host. If this is a local repository, name it by its path. If it is meant to be $FG_HOST, point the remote at https://$FG_HOST/<owner>/<repo>.git or git@$FG_HOST:<owner>/<repo>.git; for the other forge use its own wrapper (\`~/dev/custom/ai/bin/gh-athena git …\` / \`~/dev/custom/ai/bin/glab-athena git …\`), or, for a push, \`~/dev/custom/ai/bin/forge-push -C <dir> <push args>\`."
   fi
   local how="with no Athena identity"
   case "${sh%% *}" in

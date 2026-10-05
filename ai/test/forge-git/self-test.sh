@@ -47,9 +47,9 @@ trap 'rm -rf -- "${TMP}"' EXIT
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid
 export ATHENA_SECRETS_ROOT="${TMP}/secrets"
-# The gitlab.com fixtures use a synthetic namespace, keyed in a fixture
-# identity map (DND-1936), so no fixture names a real namespace and a
-# wrapper that resolved the bot would find one.
+# The push fixtures (Part F and Part D's push loop) use a synthetic gitlab.com
+# namespace, keyed in a fixture identity map (DND-1936), so a wrapper that
+# resolved the bot would find one. Parts A-C's read fixtures are DND-1977's.
 export ATHENA_FORGE_IDENTITIES_FILE="${TMP}/forge-identities.json"
 printf '{"kind":"athena-forge-identities","schema":1,"identities":[{"host":"gitlab.com","namespace":"synth-group","bot":"synthetic-agent-bot","token_file":"%s/glab-token","refresh":"group_service_account"}]}\n' "${TMP}" > "${ATHENA_FORGE_IDENTITIES_FILE}"
 

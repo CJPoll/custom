@@ -126,7 +126,7 @@ push` (for a subtree, `git subtree split` first). It also refuses a
 and a subcommand git does not know, because `help.autocorrect` would run
 another one (DND-1867). It refuses a URL on any host but github.com (exit 3,
 DND-2000): a gitlab.com remote goes through `glab-athena git` (or
-`ai/bin/forge-push`, once DND-1995 lands), and an `~/.ssh/config` Host alias
+`ai/bin/forge-push` for a push), and an `~/.ssh/config` Host alias
 reads as another host unless it is named exactly github.com.
 It does **not** see a command git runs from config or a hook, `clone
 --recurse-submodules`, or git-lfs transfers inside a push; the
