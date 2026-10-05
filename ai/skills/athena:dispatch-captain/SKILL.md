@@ -225,22 +225,33 @@ Give the captain, in the brief:
   to add `--gate` themselves.
 - **The don't-chase-main rule.** Every brief carries this line, unless the
   branch is published (*The published-branch variant* below): *"Your gate bar
-  is ONE green gate on a head that contained `origin/main` when the gate
-  started. If main moves after that, do not rebase and re-gate to catch it:
-  report the gated SHA and the main it contained. I land it on the moved main
-  and re-gate only on a conflict. The final check's `--rebase` absorbs a main
+  is ONE green gate on your head with no textual conflict with `origin/main`
+  when the gate started; a head behind main is gated on its own base. If main
+  moves after that, do not rebase and re-gate to catch it: report the gated
+  SHA and the base its receipt records. I land it on the moved main and
+  re-gate only on a conflict. The final check's `--rebase` absorbs a main
   that moved while you queued. If it refuses with REBASE CONFLICT, rebase onto
   `origin/main` yourself, resolve the named paths, commit, and run it once
   more; if it refuses again, stop and report. Rebase earlier only on a real
   conflict or when I ask."* This is the
   captain half of `athena:merge-boarding` → *Landing onto a moving main*.
-  The admiral lands a head whose gated main is an ancestor of the current one
-  without a re-gate; only a conflict, textual or semantic, sends it back
+  The admiral lands a head whose gated base is an ancestor of the current
+  main without a re-gate; only a conflict, textual or semantic, sends it back
   (`athena:merge-boarding` → *Merge one at a time*). Measured 2026-09-26/27
   (harness-epics-ab): DND-838 re-gated three times ("Main moved under each of
   them"), DND-785 ran `integration-gate` three times and never got a clean
   run, and DND-887 hit the same cycle. Two admirals then issued this rule by
   hand, mid-run (15:23Z to DND-497, 02:32Z to DND-785).
+
+  **Later (2026-10-05, DND-2076):** both brief lines said the bar was a green
+  gate "on a head that contained `origin/main` when the gate started", and
+  told the captain to report "the main it contained". Superseded by owner
+  decision (Cody, 2026-10-05T08:26:29Z, session
+  `0cc59a5e-6c65-495e-a216-83c6a0bf2d56`, message
+  `2b344496-478d-4b7f-a4cf-635a2273ab94`): "I do NOT want to require a rebase
+  on each merge; that's the point of the parallel merges." `integration-gate`
+  gates a head behind main on its own base and refuses only a textual
+  conflict (`athena:merge-boarding` → *Landing onto a moving main*).
 
   **Later (2026-10-01, DND-1463):** the brief line said "I forward and
   re-gate the integrated head when it lands", and this paragraph said "you
@@ -270,13 +281,14 @@ Give the captain, in the brief:
   ~/dev/custom/ai/bin/integration-gate --with-critic` (no `--rebase`). Quote
   its INTEGRATION OK line. On a RED gate or a BLOCK, fix every finding from
   both in one round, commit, and run it again. Your gate bar is ONE green gate
-  on a head that contained `origin/main` when the gate started. If it refuses
-  because main moved while you queued, merge `origin/main` once more and run
-  it once more; if it refuses again, stop and report. If main moves after a
-  green gate, do not chase it: report the gated SHA and the main it contained.
-  Merge main in earlier only on a real conflict or when I ask."* The bar is
-  unchanged: a green gate and a critic PASS on a head that contains
-  `origin/main` when the gate started. Merging forward is the move
+  on your head with no textual conflict with `origin/main` when the gate
+  started; a head behind main is gated on its own base. If it refuses with a
+  CONFLICT, merge `origin/main` once more, resolve the named paths and run it
+  once more; if it refuses again, stop and report. If main moves after a
+  green gate, do not chase it: report the gated SHA and the base its receipt
+  records. Merge main in earlier only on a real conflict or when I ask."* The
+  bar: a green gate and a critic PASS on the head, which merges into
+  `origin/main` with no textual conflict when the gate started. Merging forward is the move
   `locked-merge` names on a CONFLICT with a moved base (DND-1463; a clean
   moved base merges as is), and the one *No replay churn* assumes
   ([[athena:merge-boarding]]).
