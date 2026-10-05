@@ -908,15 +908,21 @@ ids a session passes to `slack_read_file`. A line from a server that predates
 still lists them.
 
 **`direct_author_id` says whether a person typed the message (DND-2037).**
-It is the server's typed-by-a-person fact (gen_saas
-`Athena.SlackEvents.DirectAuthor`): the sender's user id for a plain human
-message, and `null` for anything else: a message with a subtype, a `bot_id`
-or `app_id`, an attachment or a file, or no `client_msg_id` (Slack's own
-clients set it; an API post, including one made with a person's user token,
-is expected not to). It follows `files` and precedes `topic`, which stays the
-last key. It is Slack-producer only and never on a `slack.interaction` line.
+This section is its normative home. The key is `direct_author_id`, and only
+the server stamps it, from the stored row (gen_saas
+`Athena.SlackEvents.DirectAuthor`, `slack_events.direct_author_id`); no
+client or session writes it. Its value is the sender's user id for a plain
+human message, and `null` when the message was not typed by a person, or
+when that is unknown: a session posting with Cody's OAuth (user) token
+through the Slack API, a bot, an app, a message with a subtype, an
+attachment or a file, or no `client_msg_id` (Slack's own clients set it; an
+API post is expected not to). It follows `files` and precedes `topic`, which
+stays the last key. It is Slack-producer only and never on a
+`slack.interaction` line.
 
-- **Absent** means the server that wrote the line predates the field.
+- **A missing key reads as `null`.** A line written by a server that
+  predates the field has no key, and a reader treats it exactly as `null`:
+  not typed by a person. So old lines and old servers fail closed.
 - **Not a dedupe key.** Slack identity stays `event_id` / `channel:ts`.
 - A reader tolerates absence, `null` and an unknown value, and never fails on
   them.
