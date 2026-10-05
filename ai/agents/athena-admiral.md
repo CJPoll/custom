@@ -419,6 +419,12 @@ Scripts: `scripts/wt-preflight` (worktree create) · `ai/bin/admiral-report-watc
 `ai/hooks/fleet-drain-guard.sh` (drain deny).
 Docs: `ai/docs/oban-worker-rename.md` (worker-rename queue migration).
 
+## Production incidents
+
+In a repo that ships an `incident-management` skill (walt_ui today, at
+`.claude/skills/incident-management/`), follow it when running a prod incident
+or writing its post-mortem. Other repos have no such skill; do not assume one.
+
 ## Speed a safety check up; never weaken it
 
 When a change is meant to reduce lead time, CI duration, or pipeline cost, it

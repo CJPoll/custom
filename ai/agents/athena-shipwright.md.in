@@ -345,6 +345,8 @@ ticket, commit or journal entry, and never change a mode or threshold.
 
 @include ops/forge-identity
 
+@include ops/incident-management
+
 ## Journal format
 
 Append to `journal.md` in `$SHIPWRIGHT_STATE_DIR` (the main checkout's
