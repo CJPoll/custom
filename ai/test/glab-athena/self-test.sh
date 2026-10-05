@@ -736,8 +736,12 @@ echo "--- DND-1983: \`git seed-mirror\` seeds an empty GitLab main with the GitH
 # laptop's DND-1953 cutover. The source and target reads go to local bare
 # repos through the dry-run-only seams; every host check reads the checkout's
 # real config (origin = https://github.com/...).
-printf '%s\n' "glpat-SELFTESTPERSONAL0001" > "${TMP}/personal-token"; chmod 600 "${TMP}/personal-token"
-SM_TO="https://gitlab.com/cjpoll/seed.git"
+# The target namespace is a synthetic keyed entry of its own (DND-1936), so
+# the cases never depend on a live namespace's entry (cjpoll/ is PENDING).
+jq --arg t "${TMP}" '.identities += [{host:"gitlab.com", namespace:"seed-ns", bot:"synthetic-seed-bot", token_file:($t + "/seed-token"), refresh:"group_service_account"}]' \
+  "${ATHENA_FORGE_IDENTITIES_FILE}" > "${TMP}/m.tmp" && mv "${TMP}/m.tmp" "${ATHENA_FORGE_IDENTITIES_FILE}"
+printf '%s\n' "glpat-SELFTESTSEEDTOKEN0001" > "${TMP}/seed-token"; chmod 600 "${TMP}/seed-token"
+SM_TO="https://gitlab.com/seed-ns/seed.git"
 # sm_setup <name> : GH (bare, the GitHub origin's stand-in) with main at S, an
 # empty GL (bare, the GitLab project's stand-in), and a clone SW whose origin
 # URL is the GitHub project. Sets GH, GL, SW, S.
@@ -749,7 +753,7 @@ sm_setup() {
   git -C "${SW}" add -A && git -C "${SW}" commit -q -m base
   git -C "${SW}" commit -q --allow-empty -m "squash merge #1" && git -C "${SW}" push -q origin main
   git -C "${SW}" fetch -q origin
-  git -C "${SW}" remote set-url origin "https://github.com/CJPoll/seed.git"
+  git -C "${SW}" remote set-url origin "https://github.com/example-owner/seed.git"
   S="$(git -C "${SW}" rev-parse HEAD)"
 }
 # sm <dir> <seed-mirror args...> : dry-run seed-mirror with both seams.
@@ -867,18 +871,18 @@ sm "${SW}" --to "${SM_TO}"
 sm_refused POST-FLIP \
   && ok "S6. origin is the GitLab project (after the flip): refused (POST-FLIP)" \
   || bad "S6. post-flip refused" "rc=${RC} out='${OUT}' err='${ERR}'"
-git -C "${SW}" remote set-url origin "https://github.com/CJPoll/seed.git"
-git -C "${SW}" remote set-url --push origin "git@gitlab.com:cjpoll/seed.git"
+git -C "${SW}" remote set-url origin "https://github.com/example-owner/seed.git"
+git -C "${SW}" remote set-url --push origin "git@gitlab.com:seed-ns/seed.git"
 sm "${SW}" --to "${SM_TO}"
 sm_refused POST-FLIP \
   && ok "S6b. origin's push URL reaches gitlab.com: refused (POST-FLIP)" \
   || bad "S6b. gitlab pushurl refused" "rc=${RC} out='${OUT}' err='${ERR}'"
 git -C "${SW}" config --unset remote.origin.pushurl
-git -C "${SW}" remote set-url origin "https://example.org/CJPoll/seed.git"
+git -C "${SW}" remote set-url origin "https://example.org/example-owner/seed.git"
 sm "${SW}" --to "${SM_TO}"
 sm_refused SOURCE && ok "S7. origin is not on github.com: refused (SOURCE)" \
   || bad "S7. non-GitHub source refused" "rc=${RC} out='${OUT}' err='${ERR}'"
-git -C "${SW}" remote set-url origin "https://github.com/CJPoll/seed.git"
+git -C "${SW}" remote set-url origin "https://github.com/example-owner/seed.git"
 sm "${SW}" --from upstream --to "${SM_TO}"
 sm_refused SOURCE && ok "S7b. --from a remote other than origin: refused (SOURCE)" \
   || bad "S7b. --from upstream refused" "rc=${RC} out='${OUT}' err='${ERR}'"
@@ -888,21 +892,21 @@ sm "${SW}" --to "https://gitlab.com/nobody-here/seed.git"
 sm_refused TARGET && [[ "${ERR}" == *"NO ENTRY"* ]] \
   && ok "S8. a target namespace the identity map does not resolve: refused (TARGET, NO ENTRY)" \
   || bad "S8. unmapped target" "rc=${RC} out='${OUT}' err='${ERR}'"
-sm "${SW}" --to "git@gitlab.com:cjpoll/seed.git"
+sm "${SW}" --to "git@gitlab.com:seed-ns/seed.git"
 sm_refused TARGET && ok "S8b. a non-https target: refused (TARGET)" \
   || bad "S8b. ssh target refused" "rc=${RC} out='${OUT}' err='${ERR}'"
-sm "${SW}" --to "https://github.com/CJPoll/seed.git"
+sm "${SW}" --to "https://github.com/example-owner/seed.git"
 sm_refused TARGET && ok "S8c. a target off gitlab.com: refused (TARGET)" \
   || bad "S8c. github target refused" "rc=${RC} out='${OUT}' err='${ERR}'"
 sm "${SW}"
 sm_refused USAGE && ok "S8d. no --to: refused (USAGE)" \
   || bad "S8d. missing --to" "rc=${RC} out='${OUT}' err='${ERR}'"
 
-sm "${SW}" --to "https://gitlab.com/cjpoll/../cjpoll/seed.git"
+sm "${SW}" --to "https://gitlab.com/seed-ns/../seed-ns/seed.git"
 sm_refused TARGET && [[ "${ERR}" == *"path segment"* ]] \
   && ok "S8e. a target with a '..' path segment: refused (TARGET)" \
   || bad "S8e. dot-segment target refused" "rc=${RC} out='${OUT}' err='${ERR}'"
-sm "${SW}" --to "https://gitlab.com/cjpoll/other.git"
+sm "${SW}" --to "https://gitlab.com/seed-ns/other.git"
 sm_refused TARGET && [[ "${ERR}" == *"not origin's repository 'seed'"* ]] \
   && ok "S8f. a target project that is not origin's repository: refused (TARGET)" \
   || bad "S8f. other project refused" "rc=${RC} out='${OUT}' err='${ERR}'"
@@ -922,26 +926,26 @@ done
 # core.sshCommand and took its answer as GitHub main.
 sm_setup s10
 FORGED="${TMP}/s10-forged.git"; git clone -q --bare "${GH}" "${FORGED}"
-git -C "${SW}" remote set-url origin "git@github.com:CJPoll/seed.git"
+git -C "${SW}" remote set-url origin "git@github.com:example-owner/seed.git"
 printf '#!/bin/sh\ntouch "%s/s10-ssh-ran"\nexec git-upload-pack "%s"\n' "${TMP}" "${FORGED}" > "${TMP}/s10-ssh"; chmod +x "${TMP}/s10-ssh"
 git -C "${SW}" config core.sshCommand "${TMP}/s10-ssh"
 # ssh is allowed for this one call (its "ssh" is the local script), so the
 # repository's ssh command WOULD answer a read that went through it.
 OUT="$(cd "${SW}" && env -u GIT_SSH_COMMAND GIT_ALLOW_PROTOCOL=file:ssh GLAB_ATHENA_SEED_TARGET_READ="${GL}" GLAB_ATHENA_GIT_DRY_RUN=1 "${WRAPPER}" git seed-mirror --to "${SM_TO}" 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"
-sm_refused "COULD NOT LOOK" && [ ! -e "${TMP}/s10-ssh-ran" ] && [[ "${ERR}" == *"gh-athena git ls-remote https://github.com/CJPoll/seed.git"* ]] \
+sm_refused "COULD NOT LOOK" && [ ! -e "${TMP}/s10-ssh-ran" ] && [[ "${ERR}" == *"gh-athena git ls-remote https://github.com/example-owner/seed.git"* ]] \
   && ok "S10. an ssh origin with a caller core.sshCommand: the read goes to https://github.com through gh-athena, the ssh command never runs (no network here: COULD NOT LOOK)" \
   || bad "S10. source read not shaped by the checkout" "rc=${RC} ssh-ran=$([ -e "${TMP}/s10-ssh-ran" ] && echo yes || echo no) out='${OUT}' err='${ERR}'"
 git -C "${SW}" remote set-url origin "${FORGED}"
 sm "${SW}" --to "${SM_TO}"
 sm_refused SOURCE && ok "S10b. a local-path origin: refused (SOURCE), with Fix:" \
   || bad "S10b. local origin refused" "rc=${RC} out='${OUT}' err='${ERR}'"
-git -C "${SW}" remote set-url origin "https://github.com/CJPoll/seed.git"
+git -C "${SW}" remote set-url origin "https://github.com/example-owner/seed.git"
 git -C "${SW}" config core.sshCommand false
 
 # The sanction is bound to the URL: a caller rewrite of the target's push URL
 # leaves the seed SHA uncovered, and nothing runs.
 sm_setup s11
-git -C "${SW}" config "url.https://gitlab.com/cjpoll/elsewhere.git.pushInsteadOf" "${SM_TO}"
+git -C "${SW}" config "url.https://gitlab.com/seed-ns/elsewhere.git.pushInsteadOf" "${SM_TO}"
 sm "${SW}" --to "${SM_TO}"
 [ "${RC}" = 3 ] && [[ "${OUT}" != *"dry-run: exec git"* ]] && [[ "${ERR}" != *"seeds ${SM_TO} main as a mirror"* ]] \
   && ok "S11. a pushInsteadOf that moves the target: the sanction does not apply, refused, nothing runs" \
