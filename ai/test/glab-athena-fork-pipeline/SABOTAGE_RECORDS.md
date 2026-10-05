@@ -122,3 +122,21 @@ numeric id, a `..` segment, and `api graphql` (BAD KEY) before this guard runs.
 The suite now keys `example-group` in a fixture map and names the parent
 project by path. The `..` and GraphQL cases are judged on the agent wrapper,
 with one glab-athena case each pinning the BAD KEY precedence.
+
+## A help invocation passes unread (DND-2078)
+
+Change: a judged command whose argv asks for help (`-h`, `--help`,
+`--help=true`) passes before any ref, MR or branch is read. Help is the
+outbound scan's rule, `ots_help_asked` in `ai/lib/outbound-text-scan.sh`, over
+a strict `ots_pflag_parse` with the command's flag table. `glos_switch_on`
+moved there as `ots_switch_on`, so both read a switch one way.
+
+Red before (new cases, unchanged libs at ec6e00c4): `110 passed, 19 failed`.
+Every help case failed, on both fronts. The incident shape, the first case
+(cli-flag-table's own probe): `exit 3, want 0; out: glab (agent wrapper):
+REFUSING` the release create, `COULD NOT LOOK: the ref '' is empty or could
+not be URL-encoded (jq failed), so it cannot be read (DND-1942)`. Every
+not-help case (`--ref --help`, `-b --help`, `-H --help`, `--help=false`,
+`--help --help=false`, an unknown flag beside `--help`, `-- --help`, and an
+empty ref with no help) was already green and stays green.
+Green after: `129 passed, 0 failed`.

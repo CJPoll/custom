@@ -79,6 +79,18 @@
 # in a route word, a `.`/`..` segment, an unencoded project path) is COULD NOT
 # LOOK. A `.json`/`;x` suffix on the last segment is Grape's and is ignored.
 #
+# HELP (DND-2078). A call that asks for help sends nothing: cobra prints the
+# help and runs nothing, and pflag reads every flag first, so a flag left with
+# no value fails and runs nothing either. So a judged command whose argv asks
+# for help passes UNREAD, before any ref, MR or branch is read. Help is the
+# outbound scan's rule, ots_help_asked (ai/lib/outbound-text-scan.sh), over a
+# strict ots_pflag_parse with the command's flag table: GLFP_T_* for ci,
+# schedule and api, the pinned table for release create. A word that is a
+# flag's value (`--ref --help`, `-H --help`), a later `--help=false`, a flag
+# the table lacks, or `--help` after `--` is not help, and the call is judged
+# as before. ai/bin/cli-flag-table probes `<cmd> --help --<flag>` through
+# whatever glab is on PATH, which in an agent session is this guard's front.
+#
 # RESIDUAL (NOT checked; each still runs):
 #   * Cody clicking "Run pipeline" (or retry/play) on a fork MR in the web UI.
 #     The rule is never; it is written into athena:gitlab.
@@ -125,6 +137,14 @@
   exit 3
 }
 
+# The help rule and the pflag parse it reads (DND-2078), the outbound scan's.
+# shellcheck source=outbound-text-scan.sh
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/outbound-text-scan.sh" || {
+  echo "${GLFP_TOOL:-glab}: REFUSING: cannot load ai/lib/outbound-text-scan.sh, so whether this call asks for help is unknown." >&2
+  echo "  Fix: run it from a full ~/dev/custom checkout (ai/bin, ai/lib and ai/agent-bin side by side)." >&2
+  exit 3
+}
+
 # The pinned glab flag table (DND-1976), the one the outbound scan reads. A
 # table that is missing or does not define LFT_FLAGS refuses every command it
 # would be read for (glfp_table), never a guess at the flags.
@@ -140,11 +160,18 @@ GLFP_MUTATIONS="pipelineCreate|pipelineRetry|pipelineSchedulePlay|pipelineSchedu
 GLFP_NEVER="never run a fork MR's pipeline in the parent project: by GitLab default it runs in the fork, without our runners or variables, and that is where it belongs (athena:gitlab -> Fork MR pipelines). Do not retry it another way (plain glab, curl, the web UI, another ref); if the contribution must be tested here, report it to your admiral with the MR, and leave the decision to Cody"
 GLFP_LOOKFIX="make the object readable (right project, right id, network up) and re-run; never run the call another way while this cannot be checked"
 
-# `glab api` flags (glab 1.92 and 1.112 agree on these).
-GLFP_API_VALUED=" --method --field --raw-field --header --input --form --hostname --output "
-GLFP_API_BOOL=" --include --paginate --silent --help "
-GLFP_API_SVALUED="XFfH"
-GLFP_API_SBOOL="ih"
+# The flags of each command judged here outside the pinned table, in its
+# <kind>:<short>:<long> form (v takes a value, b is a switch), read from glab
+# 1.92.1's --help. The parse (glfp_cli_parse, fas_parse_api) and the help rule
+# (glfp_help) both read these.
+GLFP_T_CI_RUN=' v:b:branch v:i:input v:R:repo v::variables v::variables-env v::variables-file v:f:variables-from b::mr b:w:web b:h:help '
+GLFP_T_CI_RUNTRIG=' v:b:branch v:i:input v:R:repo v:t:token v::variables b:h:help '
+GLFP_T_CI_RETRY=' v:b:branch v:p:pipeline-id v:R:repo b:h:help '
+GLFP_T_SCHED_RUN=' v:R:repo b:h:help '
+GLFP_T_SCHED_CREATE=' v::ref v::cron v::cronTimeZone v::description v:R:repo v::variable b::active b:h:help '
+GLFP_T_SCHED_UPDATE=' v::ref v::cron v::cronTimeZone v::description v:R:repo v::create-variable v::update-variable v::delete-variable b::active b:h:help '
+# `glab api` (glab 1.92 and 1.112 agree on these).
+GLFP_T_API=' v:X:method v:F:field v:f:raw-field v:H:header v::input v::form v::hostname v::output b:i:include b::paginate b::silent b:h:help '
 
 glfp_refuse() {
   # $1 what was refused, $2 why, $3 the Fix: text
@@ -294,8 +321,10 @@ glfp_api_ref() {
 glfp_api() {
   local ep path lower last method write=1 sc raw seg d p host
   local -a segs rest
-  FAS_API_VALUED="$GLFP_API_VALUED" FAS_API_BOOL="$GLFP_API_BOOL"
-  FAS_API_SVALUED="$GLFP_API_SVALUED" FAS_API_SBOOL="$GLFP_API_SBOOL"
+  glfp_help "$GLFP_T_API" "$@" && return 0
+  glfp_lists "$GLFP_T_API"
+  FAS_API_VALUED="$GLFP_TLV" FAS_API_BOOL="$GLFP_TLB"
+  FAS_API_SVALUED="$GLFP_TSV" FAS_API_SBOOL="$GLFP_TSB"
   if ! fas_parse_api "$@"; then
     glfp_refuse "glab api" "'$FAS_UNKNOWN' is not a \`glab api\` flag this knows, so it cannot tell how the call parses or whether it runs a fork MR's pipeline" "drop the flag (glab rejects an unknown flag anyway)"
   fi
@@ -494,19 +523,17 @@ glfp_cli_opt() {
 
 # glfp_ci <verb> <args...> : `glab ci|pipe|pipeline <verb> …`.
 glfp_ci() {
-  local verb="$1" mrs n
+  local verb="$1" mrs n t
   shift
   case "$verb" in
-    run|create)
-      verb=run
-      glfp_cli_parse " --branch --input --repo --variables --variables-env --variables-file --variables-from " \
-        " --mr --web --help " "biRf" "wh" "$@" ;;
-    run-trig)
-      glfp_cli_parse " --branch --input --repo --token --variables " " --help " "biRt" "h" "$@" ;;
-    retry|trigger)
-      glfp_cli_parse " --branch --pipeline-id --repo " " --help " "bpR" "h" "$@" ;;
+    run|create) verb=run; t="$GLFP_T_CI_RUN" ;;
+    run-trig) t="$GLFP_T_CI_RUNTRIG" ;;
+    retry|trigger) t="$GLFP_T_CI_RETRY" ;;
     *) return 0 ;;
   esac
+  glfp_help "$t" "$@" && return 0
+  glfp_lists "$t"
+  glfp_cli_parse "$GLFP_TLV" "$GLFP_TLB" "$GLFP_TSV" "$GLFP_TSB" "$@"
   glfp_repo "$GLFP_REPO"
   if [ "$GLFP_BR_N" -gt 1 ]; then
     glfp_refuse "$GLFP_SHOWN" "COULD NOT LOOK: -b/--branch is given $GLFP_BR_N times" "pass -b once"
@@ -561,22 +588,25 @@ glfp_ci() {
 
 # glfp_schedule <verb> <args...> : `glab schedule|sched|skd <verb> …`.
 glfp_schedule() {
-  local verb="$1"
+  local verb="$1" t
   shift
   case "$verb" in
+    run) t="$GLFP_T_SCHED_RUN" ;;
+    create) t="$GLFP_T_SCHED_CREATE" ;;
+    update) t="$GLFP_T_SCHED_UPDATE" ;;
+    *) return 0 ;;
+  esac
+  glfp_help "$t" "$@" && return 0
+  glfp_lists "$t"
+  glfp_cli_parse "$GLFP_TLV" "$GLFP_TLB" "$GLFP_TSV" "$GLFP_TSB" "$@"
+  case "$verb" in
     run)
-      glfp_cli_parse " --repo " " --help " "R" "h" "$@"
       glfp_repo "$GLFP_REPO"
       if ! [[ "${GLFP_POS[0]:-}" =~ ^[0-9]+$ ]]; then
         glfp_refuse "$GLFP_SHOWN" "COULD NOT LOOK: no numeric schedule id" "pass the schedule id: \`glab schedule run <id>\`"
       fi
       glfp_check_obj "pipeline schedule ${GLFP_POS[0]}" "$GLFP_P" "projects/$GLFP_P/pipeline_schedules/${GLFP_POS[0]}" "$GLFP_HOST" ;;
     create|update)
-      if [ "$verb" = create ]; then
-        glfp_cli_parse " --ref --cron --cronTimeZone --description --repo --variable " " --active --help " "R" "h" "$@"
-      else
-        glfp_cli_parse " --ref --cron --cronTimeZone --description --repo --create-variable --update-variable --delete-variable " " --active --help " "R" "h" "$@"
-      fi
       glfp_repo "$GLFP_REPO"
       if [ "$GLFP_REF_N" -gt 1 ]; then glfp_refuse "$GLFP_SHOWN" "COULD NOT LOOK: --ref is given $GLFP_REF_N times" "pass --ref once"; fi
       [ "$GLFP_REF_N" = 1 ] && glfp_check_ref "$GLFP_P" "$GLFP_REFOPT" "$GLFP_HOST" given ;;
@@ -589,12 +619,18 @@ glfp_schedule() {
 # pinned table's entry for <command>; refuses when the table or the entry is
 # missing.
 glfp_table() {
-  local e kind short long
   if [ -z "$GLFP_TABLE_OK" ] || [ -z "${LFT_FLAGS[$1]+x}" ]; then
     glfp_refuse "$GLFP_SHOWN" "COULD NOT LOOK: the pinned glab flag table (ai/lib/glab-flag-table.sh) is missing, does not define LFT_FLAGS, or has no \`$1\`, so this argv cannot be read the way glab reads it" "run it from a full ~/dev/custom checkout; if the file is damaged, regenerate it with \`ai/bin/cli-flag-table --cli glab --write\`"
   fi
+  glfp_lists "${LFT_FLAGS[$1]}"
+}
+
+# glfp_lists <table> : sets GLFP_TLV, GLFP_TLB, GLFP_TSV, GLFP_TSB (see
+# glfp_table) from a <kind>:<short>:<long> table.
+glfp_lists() {
+  local e kind short long
   GLFP_TLV=" " GLFP_TLB=" " GLFP_TSV="" GLFP_TSB=""
-  for e in ${LFT_FLAGS[$1]}; do
+  for e in $1; do
     IFS=: read -r kind short long <<<"$e"
     case "$kind" in
       v) GLFP_TLV+="--$long "; GLFP_TSV+="$short" ;;
@@ -604,10 +640,21 @@ glfp_table() {
   return 0
 }
 
+# glfp_help <table> <args...> : 0 when the argv asks for help, by the outbound
+# scan's rule (ots_help_asked) over a strict pflag parse with <table>. An argv
+# the parse cannot read (a flag the table lacks) is not help: it is judged.
+glfp_help() {
+  local t="$1"
+  shift
+  ots_pflag_parse strict "$t" 0 "$@" || return 1
+  ots_help_asked
+}
+
 # glfp_release <args...> : `glab release create <tag> [files] --ref <r>`, its
 # flags read from the pinned table.
 glfp_release() {
   glfp_table "release create"
+  glfp_help "${LFT_FLAGS[release create]}" "$@" && return 0
   glfp_cli_parse "$GLFP_TLV" "$GLFP_TLB" "$GLFP_TSV" "$GLFP_TSB" "$@"
   glfp_repo "$GLFP_REPO"
   if [ "$GLFP_REF_N" -gt 1 ]; then glfp_refuse "$GLFP_SHOWN" "COULD NOT LOOK: --ref is given $GLFP_REF_N times" "pass --ref once"; fi

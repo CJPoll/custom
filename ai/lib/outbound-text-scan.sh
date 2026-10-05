@@ -295,6 +295,33 @@ ots_pflag_parse() {
   return 0
 }
 
+# ots_switch_on <long> : true when the last occurrence of the switch --<long>
+# in the argv ots_pflag_parse just read reads as on. pflag's ParseBool takes
+# 1 t T TRUE true True as on and 0 f F FALSE false False as off; any other
+# value is an error and the CLI runs nothing, so it reads as on here (the
+# stricter reading for a guard; for help, either way nothing is sent).
+ots_switch_on() {
+  local k v="" seen=""
+  for k in "${!OTS_BN[@]}"; do
+    if [ "${OTS_BN[$k]}" = "$1" ]; then v="${OTS_BV[$k]}" seen=1; fi
+  done
+  [ -n "$seen" ] || return 1
+  case "$v" in 0 | f | F | false | FALSE | False) return 1 ;; esac
+  return 0
+}
+
+# ots_help_asked : true when the argv ots_pflag_parse just read (returning 0)
+# asks for help: an undefined -h (OTS_HELP), or the help switch on by
+# ots_switch_on (`-h`, `--help`, `--help=true`; a later `--help=false` turns it
+# off). cobra then prints the help and runs nothing; pflag reads every flag
+# first, so a flag left without its value fails and runs nothing either. A
+# word that is a flag's value (`--ref --help`) is that value, never help. The
+# one help rule for every guard that lets help through unjudged (the fork MR
+# pipeline guard, DND-2078); the outbound scans stop at OTS_HELP.
+ots_help_asked() {
+  [ -n "$OTS_HELP" ] || ots_switch_on help
+}
+
 ots_pflag_rec() { OTS_FN+=("$1"); OTS_FV+=("$2"); OTS_FI+=("$3"); OTS_FP+=("$4"); OTS_FS+=("$5"); }
 
 # ots_flag_letters <table> <" long long "> : sets OTS_LETTERS to the short

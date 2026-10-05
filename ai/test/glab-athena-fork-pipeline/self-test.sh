@@ -413,6 +413,66 @@ refused "no pinned glab flag table: release create refuses, naming the table" "g
 reset_fx; run_ab release create v1 -r main -N x
 allowed "agent glab: release create -r on a branch runs (the table present)"
 
+echo "== a help invocation sends nothing, so it passes unread (DND-2078)"
+# cobra answers -h/--help with the help and runs nothing, and pflag reads
+# every flag first: `release create --help --ref` fails "flag needs an
+# argument" and sends nothing either. ai/bin/cli-flag-table probes exactly
+# that shape through whatever glab is on PATH, and in an agent session (and
+# under harness-gate) that is this wrapper. Help is decided by the outbound
+# scan's own rule (ots_help_asked, ai/lib/outbound-text-scan.sh) over a strict
+# pflag parse with the command's flag table, so a word that is a flag's VALUE
+# (`--ref --help`, `-H --help`), a later `--help=false`, or a flag the table
+# lacks is never read as help.
+helped() {
+  if [ "${RC}" != 0 ]; then bad "$1" "exit ${RC}, want 0; out: ${OUT}"; return; fi
+  if [ "$(nexec)" != 1 ]; then bad "$1" "want exactly one exec, got: $(cat "${STUB_EXECS}")"; return; fi
+  if [ -s "${STUB_READS}" ]; then bad "$1" "a help call read the API: $(cat "${STUB_READS}")"; return; fi
+  ok "$1"
+}
+MRREF=refs/merge-requests/11/head
+for front in run_ab run_ga; do
+  reset_fx; "${front}" release create --help --ref
+  helped "${front}: release create --help --ref (cli-flag-table's probe) passes to glab"
+  reset_fx; "${front}" release create v1 --ref "${MRREF}" -h
+  helped "${front}: release create on a fork MR ref with -h passes (help)"
+  reset_fx; "${front}" ci run -b "${MRREF}" --help
+  helped "${front}: ci run on a fork MR ref with --help passes"
+  reset_fx; "${front}" ci retry --help
+  helped "${front}: ci retry --help (no job id) passes"
+  reset_fx; "${front}" pipe trigger -h
+  helped "${front}: pipe trigger -h passes"
+  reset_fx; "${front}" ci run-trig --help -t x -b "${MRREF}"
+  helped "${front}: ci run-trig --help passes"
+  reset_fx; "${front}" schedule run --help
+  helped "${front}: schedule run --help (no id) passes"
+  reset_fx; "${front}" schedule create --help --ref "${MRREF}"
+  helped "${front}: schedule create --help on a fork MR ref passes"
+  reset_fx; "${front}" ci run -b "${MRREF}" --help=true
+  helped "${front}: --help=true is help"
+done
+reset_fx; run_ab api -X POST "projects/${PROJ}/merge_requests/11/pipelines" --help
+helped "run_ab: api POST to a fork MR's pipelines with --help passes"
+
+# Not help: each is still judged.
+reset_fx; run_ab release create v1 --ref
+refused "release create v1 --ref (an empty ref, no help) still refuses" "${LOOK}"
+reset_fx; nf --help; run_ab release create v1 --ref --help
+refused "release create --ref --help: '--help' is the ref, not help" "the ref '--help'"
+reset_fx; run_ab ci run -b "${MRREF}" --help=false
+refused "ci run --help=false on a fork MR ref is refused" "${FORKMSG}"
+reset_fx; run_ab ci run -b "${MRREF}" --help --help=false
+refused "ci run --help --help=false: the last value wins, refused" "${FORKMSG}"
+reset_fx; nf --help; run_ab ci run -b --help
+refused "ci run -b --help: '--help' is the branch, not help" "${LOOK}"
+reset_fx; run_ab ci run -b "${MRREF}" --bogus --help
+refused "an unknown flag beside --help is not read as help" "--bogus"
+reset_fx; run_ab ci retry -- --help
+refused "ci retry -- --help: after -- it is a job name, not help" "${LOOK}"
+reset_fx; run_ab api -X POST "projects/${PROJ}/merge_requests/11/pipelines" -H --help
+refused "api -H --help: '--help' is the header, the fork MR is refused" "${FORKMSG}"
+reset_fx; run_ab api -X POST "projects/${PROJ}/merge_requests/11/pipelines" --help=false
+refused "api --help=false: the fork MR is refused" "${FORKMSG}"
+
 fsg_verify || bad "forge-stub-guard" "a call fell through the stub to the guard (DND-1647)"
 
 echo

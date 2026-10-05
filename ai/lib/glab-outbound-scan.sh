@@ -259,20 +259,6 @@ glos_positional() {
   return 0
 }
 
-# glos_switch_on <long> : true when the last occurrence of the switch --<long>
-# reads as on. pflag's ParseBool takes 1 t T TRUE true True as on and 0 f F
-# FALSE false False as off; any other value is an error and glab sends
-# nothing, so it reads as on here (the stricter reading).
-glos_switch_on() {
-  local k v="" seen=""
-  for k in "${!OTS_BN[@]}"; do
-    if [ "${OTS_BN[$k]}" = "$1" ]; then v="${OTS_BV[$k]}" seen=1; fi
-  done
-  [ -n "$seen" ] || return 1
-  case "$v" in 0 | f | F | false | FALSE | False) return 1 ;; esac
-  return 0
-}
-
 # glos_value <long> : the value of the last occurrence of --<long> (pflag keeps
 # the last), or "" when it is not given. glab treats an empty value as absent.
 glos_value() {
@@ -307,14 +293,14 @@ glos_authored() {
         glos_authored_add "--related-issue without a non-empty --title and --source-branch" "the related issue's title, fetched from the server (in the MR title, and in a branch glab creates on the target)"
       fi
       for f in copy-issue-labels fill fill-commit-body recover signoff; do
-        if glos_switch_on "$f"; then glos_authored_add "--$f" "$(glos_authored_text "$f")"; fi
+        if ots_switch_on "$f"; then glos_authored_add "--$f" "$(glos_authored_text "$f")"; fi
       done ;;
     "mr update")
       for f in fill fill-commit-body; do
-        if glos_switch_on "$f"; then glos_authored_add "--$f" "$(glos_authored_text "$f")"; fi
+        if ots_switch_on "$f"; then glos_authored_add "--$f" "$(glos_authored_text "$f")"; fi
       done ;;
     "issue create")
-      if glos_switch_on recover; then glos_authored_add --recover "$(glos_authored_text recover)"; fi ;;
+      if ots_switch_on recover; then glos_authored_add --recover "$(glos_authored_text recover)"; fi ;;
   esac
   return 0
 }
