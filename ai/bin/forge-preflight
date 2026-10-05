@@ -154,7 +154,7 @@ case "$host" in
     # that SOME user authenticated.
     #
     # Which bot (DND-1936): gitlab.com hosts a work group and the personal
-    # cjpoll/ namespace, each with its own bot, so the expected username comes
+    # athena-ai-harness group, each with its own bot, so the expected username comes
     # from origin's (host, top-level namespace) through the identity map glab-athena
     # itself reads (ai/lib/forge-identity.sh). A key that resolves to no bot
     # (no entry, a malformed or aliased host, a bot not named yet, an

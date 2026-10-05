@@ -2,13 +2,14 @@
 # forge-identity.sh — which Athena bot acts on a GitLab project (DND-1936).
 #
 # gitlab.com hosts two namespaces with two different bots: a work group's bot
-# and the personal bot for cjpoll/ projects. The identity follows the
+# and the personal group service account athena-ai-harness-bot for
+# athena-ai-harness/ projects. The identity follows the
 # project's (host, top-level namespace), never a default. Sourced by
 # ai/bin/glab-athena (the normal path, `git` and `refresh`), ai/bin/forge-preflight
 # and ai/bin/push-actor-check, so all of them read one map.
 #
 # The map has two halves, one entry shape:
-#   * public  ai/config/forge-identities.json            the personal entry
+#   * public  ai/config/forge-identities.json            the personal entries
 #   * private overlay/gitlab.json .identities (the private overlay,
 #             read through ai/bin/private-overlay)       work entries
 # A work value never lands in this public repo (ai/contracts/athena-private-overlay.md).
@@ -271,7 +272,7 @@ fid_lookup() {
   FID_SOURCE="$f5" FID_REFRESH="$f4" FID_PENDING="$f6"
   if [ -z "$f2" ]; then
     fid_fail 4 "PENDING" "the Athena bot for $h/$n ($FID_SOURCE map) has no username yet: $f6" \
-      "the owner sets \`bot\` for $h/$n (then removes \`pending\`); until then nothing runs as a bot in $h/$n. $FID_ESCALATE"
+      "the reason above says what has to happen first; the owner then names a bot that can write in $h/$n (sets \`bot\`, removes \`pending\`) or removes the entry. Until then nothing runs as a bot in $h/$n. $FID_ESCALATE"
     return
   fi
   FID_BOT="$f2" FID_TOKEN_FILE_RAW="$f3"

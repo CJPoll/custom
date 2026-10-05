@@ -156,8 +156,15 @@ write_map null
 R="$(fid fid_resolve_url https://gitlab.com/cjpoll/custom.git)"
 expect M10 "an entry with bot null -> PENDING with its reason, no bot" 4 PENDING "" "synthetic pending reason"; neither_bot M10b "no bot handed out"
 write_map
+# The tracked map (owner decision, 2026-10-05): the personal bot is the
+# athena-ai-harness group's service account, and cjpoll/ has no bot, because
+# that bot is a member of the group only.
+R="$(ATHENA_FORGE_IDENTITIES_FILE= fid fid_resolve_url https://gitlab.com/athena-ai-harness/gen_saas.git)"
+expect M11 "the tracked map: athena-ai-harness/ -> athena-ai-harness-bot, its token file under HOME" 0 FOUND athena-ai-harness-bot "${HOME}/.claude/gitlab-personal-athena-token"
 R="$(ATHENA_FORGE_IDENTITIES_FILE= fid fid_resolve_url https://gitlab.com/cjpoll/custom.git)"
-expect M11 "the tracked map: cjpoll is PENDING until the owner names the bot (DND-1944)" 4 PENDING "" "DND-1944"
+expect M11b "the tracked map: cjpoll/ is PENDING (the group bot cannot write there), its reason and Fix: given" 4 PENDING "" "member of the athena-ai-harness group only"; neither_bot M11c "cjpoll/ is never handed the group bot"
+R="$(ATHENA_FORGE_IDENTITIES_FILE= fid fid_resolve_url https://gitlab.com/Athena-AI-Harness/gen_saas.git)"
+expect M11d "the tracked map: a case variant of athena-ai-harness -> NO ENTRY naming the canonical path, not the bot" 1 "NO ENTRY" "" "canonical path 'athena-ai-harness'"
 
 echo
 echo "--- glab's own arguments: -R, the api endpoint, origin ---"

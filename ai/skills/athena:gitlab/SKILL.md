@@ -1,6 +1,6 @@
 ---
 name: athena:gitlab
-description: Act on GitLab as Athena's own bot for the project's namespace (athena-amby in the work group; the personal bot in cjpoll/) via the glab-athena wrapper — MR create/comment/approve/resolve, merge-train boarding, merges, label and pipeline/job control — so writes are attributed to Athena, not Cody. Use whenever a GitLab WRITE should be authored by the agent; reads stay on plain glab.
+description: Act on GitLab as Athena's own bot for the project's namespace (athena-amby in the work group; athena-ai-harness-bot in athena-ai-harness/) via the glab-athena wrapper — MR create/comment/approve/resolve, merge-train boarding, merges, label and pipeline/job control — so writes are attributed to Athena, not Cody. Use whenever a GitLab WRITE should be authored by the agent; reads stay on plain glab.
 ---
 
 # athena:gitlab
@@ -14,7 +14,7 @@ token at call time and execs `glab`.
 | | Acts as | Use it for |
 |---|---|---|
 | **plain `glab`** (Cody's OAuth, `~/.config/glab-cli/config.yml`) | Cody Poll | **reads** — `mr view`, `ci status`, `api` GETs, issue/pipeline queries |
-| **`glab-athena` wrapper** (the bot of the project's namespace: `athena-amby` in the work GitLab group, the personal bot in `cjpoll/`) | the Athena bot | **writes** — MR create, comment, approve, thread replies/resolves, label PUTs, pipeline triggers, job retries/cancels, merge-train boarding, merges |
+| **`glab-athena` wrapper** (the bot of the project's namespace: `athena-amby` in the work GitLab group, `athena-ai-harness-bot` in `athena-ai-harness/`) | the Athena bot | **writes** — MR create, comment, approve, thread replies/resolves, label PUTs, pipeline triggers, job retries/cancels, merge-train boarding, merges |
 
 Writing through plain `glab` puts **Cody's name** on actions Athena took. That
 is the one thing this wrapper exists to prevent, so: **every GitLab write that
@@ -66,13 +66,14 @@ reasons are in
 
 - Token: the `token_file` the namespace's identity entry names (*Which bot*):
   `~/.claude/gitlab-athena-token` for the work group's bot,
-  `~/.claude/gitlab-personal-athena-token` for the personal bot. Mode `600`,
+  `~/.claude/gitlab-personal-athena-token` for `athena-ai-harness-bot`. Mode `600`,
   one token line. `$GITLAB_ATHENA_TOKEN_FILE` overrides the path (a test seam;
   the identity is still resolved). The wrapper reads it at call
   time and exports it as `GITLAB_TOKEN`; it **never** puts the token in argv, a
   URL, or a config file. If the file is missing, unreadable, empty or
   whitespace-only, the wrapper refuses with a `Fix:` and does nothing (DND-725:
-  an empty token used to make glab answer as the owner).
+  an empty token used to make glab answer as the owner). A file that does not
+  exist gets its own refusal, its `Fix:` naming the path the owner creates.
 - glab runs with a fresh, empty config dir (`GLAB_CONFIG_DIR`) and with every
   inherited `GITLAB_*`/`GLAB_*`/`GL_*`, `OAUTH_TOKEN` and `CI_JOB_TOKEN`
   removed, so the owner's glab login and keyring entry are unreachable. The

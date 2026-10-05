@@ -52,7 +52,9 @@ cat > "${ATHENA_FORGE_IDENTITIES_FILE}" <<EOF
  {"host":"gitlab.com","namespace":"example-group","bot":"${WORK_BOT}","token_file":"${TMP}/token","refresh":"group_service_account"},
  {"host":"gitlab.com","namespace":"g","bot":"${WORK_BOT}","token_file":"${TMP}/token","refresh":"group_service_account"},
  {"host":"gitlab.com","namespace":"cjpoll","bot":"${PERS_BOT}","token_file":"${TMP}/personal-token","refresh":"self_rotate"},
- {"host":"gitlab.com","namespace":"pending-ns","bot":null,"pending":"synthetic: username not chosen","token_file":"${TMP}/pending-token","refresh":"self_rotate"}]}
+ {"host":"gitlab.com","namespace":"pending-ns","bot":null,"pending":"synthetic: username not chosen","token_file":"${TMP}/pending-token","refresh":"self_rotate"},
+ {"host":"gitlab.com","namespace":"absent-ns","bot":"synthetic-absent-bot","token_file":"${TMP}/absent-token","refresh":"group_service_account"},
+ {"host":"gitlab.com","namespace":"synthetic-public-group","bot":"synthetic-public-sa","token_file":"${TMP}/public-sa-token","refresh":"group_service_account"}]}
 EOF
 export ATHENA_PRIVATE_ROOT="${TMP}/empty-overlay"; mkdir -p "${ATHENA_PRIVATE_ROOT}/overlay"; chmod 700 "${ATHENA_PRIVATE_ROOT}"
 printf '{"kind":"athena-private-overlay","schema":1}\n' > "${ATHENA_PRIVATE_ROOT}/athena-overlay.json"
@@ -557,6 +559,31 @@ OUT="$(cd "${NR}" && PATH="${RB2}:${PATH}" "${WRAPPER}" refresh 2>"${TMP}/err")"
 if [ "${RC}" = 1 ] && [[ "${ERR}" == *"PENDING"* ]] && [ ! -e "${TMP}/glab2.args" ]; then
   ok "N14. refresh for a namespace whose bot is not named -> refused, glab never called"
 else bad "N14. pending refresh" "rc=${RC} err='${ERR}'"; fi
+
+# A token file that does not exist on this machine (the personal group bot's,
+# on a machine the owner has not set up yet) is refused with a Fix: naming the
+# path, on the normal path and for `git`; glab and git never run.
+AR="$(new_repo absent-1936 'https://gitlab.com/absent-ns/app.git')"
+rm -f "${TMP}/absent-token"
+glai "${AR}" mr list
+if [ "${RC}" = 1 ] && [[ "${ERR}" == *"REFUSING"* ]] && [[ "${ERR}" == *"${TMP}/absent-token"*"does not exist"* ]] \
+  && [[ "${ERR}" == *"Fix: the owner creates ${TMP}/absent-token"* ]] && [[ "${ERR}" == *"escalate to your admiral"* ]] \
+  && [[ "${OUT}" != *STUB-ID* ]] && [ ! -e "${TMP}/absent-token" ]; then
+  ok "N15. a token file that does not exist -> refused, the Fix: names the path, glab never runs, nothing is created"
+else bad "N15. missing token file (glab)" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+glai "${AR}" git push origin HEAD
+if [ "${RC}" = 3 ] && [[ "${ERR}" == *"does not exist"* ]] && [[ "${ERR}" == *"Fix: the owner creates ${TMP}/absent-token"* ]] \
+  && [[ "${OUT}" != *"cred: granted"* ]] && [ ! -e "${TMP}/absent-token" ]; then
+  ok "N15b. the same for \`git\` -> refused (exit 3), the Fix: names the path, no credential granted"
+else bad "N15b. missing token file (git)" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+
+# refresh, a PUBLIC group service account (athena-ai-harness-bot's shape): its
+# group is the entry's own namespace; the overlay's work .group is not read.
+run_refresh "" -R synthetic-public-group/app
+if [ "${RC}" = 1 ] && [ "$(head -n1 "${TMP}/glab.args" 2>/dev/null)" = "api groups/synthetic-public-group" ] \
+  && [[ "${ERR}" == *"synthetic-public-group"* ]] && [[ "${ERR}" != *"private overlay"* ]]; then
+  ok "N16. refresh for a public group_service_account entry looks up the entry's namespace as the group, no overlay read"
+else bad "N16. public group refresh" "rc=${RC} err='${ERR}' args='$(cat "${TMP}/glab.args" 2>/dev/null)'"; fi
 
 # DND-1647: no gh/glab call may have fallen through past its stub.
 if fsg_verify; then ok "no gh/glab call fell through past its stub (DND-1647)"

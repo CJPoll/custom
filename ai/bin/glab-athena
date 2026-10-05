@@ -7,24 +7,28 @@
 # (DND-742, "The merge guard" below).
 #
 # Which bot (DND-1936): gitlab.com hosts a work group with its own bot and the
-# personal cjpoll/ namespace with another, so the bot follows the project's
-# (host, top-level namespace), never a default. The key comes from -R/--repo,
+# personal athena-ai-harness group with another (athena-ai-harness-bot, a group
+# service account), so the bot follows the project's (host, top-level
+# namespace), never a default. The key comes from -R/--repo,
 # else an `api projects/<g>%2F<p>/…` endpoint, else the cwd checkout's origin;
 # for `git`, from the one forge URL the command reaches. The map is
-# ai/config/forge-identities.json (public: the personal entry) plus the private
+# ai/config/forge-identities.json (public: the personal entries) plus the private
 # overlay's gitlab .identities (work entries); ai/lib/forge-identity.sh reads
 # it. A namespace with no entry, a malformed key, an unreadable map half or a
-# bot not named yet is REFUSED with a Fix:, exit 3 (1 for `refresh`); nothing
-# falls back to the owner's login or to the other bot.
+# bot not named yet is REFUSED with a Fix:, exit 3 (1 for `refresh`); so is a
+# token file that does not exist on this machine, its Fix: naming the path
+# (exit 1, 3 for `git`). Nothing falls back to the owner's login or to the
+# other bot.
 #
 # Owner-run repair: `glab-athena refresh [-R <namespace>/<project>]` renews the
 # token of the bot for that project's namespace, by the entry's `refresh`:
-#   * group_service_account (a work group bot): mints a fresh PAT for the
-#     group service account with the OWNER's plain `glab` (Cody's OAuth
-#     session, group owner), so it works even when the current bot token is
-#     expired/revoked (chicken-and-egg);
-#   * self_rotate (the personal bot, an ordinary user; gitlab.com Free has no
-#     service accounts): rotates the bot's own live PAT
+#   * group_service_account (a group bot: the work group's, or
+#     athena-ai-harness-bot): rotates a live token, else mints a fresh PAT
+#     for the group service account with the OWNER's plain `glab` (Cody's
+#     OAuth session, group owner), so it works even when the current bot
+#     token is expired/revoked (chicken-and-egg). The group is the entry's
+#     namespace for a public entry, the overlay's gitlab .group for a work one;
+#   * self_rotate (a bot that is an ordinary user): rotates the bot's own live PAT
 #     (personal_access_tokens/self/rotate). A dead token cannot rotate itself:
 #     the owner then creates a new one in the browser, as the bot.
 # `refresh` is OWNER-GATED. Agents never run it: the `glab-athena refresh` deny
@@ -85,6 +89,16 @@ ga_refuse_identity() {
 	exit "$1"
 }
 
+# ga_refuse_missing_token_file <rc> <what> <token file> : a token file that
+# does not exist is its own refusal, its Fix: naming the path. The owner
+# creates it once per machine; nothing here creates, guesses or replaces it.
+ga_refuse_missing_token_file() {
+	[ -e "$3" ] && return 0
+	echo "glab-athena: REFUSING $2: the $FID_BOT token file $3 (for $FID_HOST/$FID_NS) does not exist on this machine, so nothing can run as $FID_BOT." >&2
+	echo "  Fix: the owner creates $3 on this machine (mode 600, one line: $FID_BOT's token; ai/secrets/registry.json says how). Agents never create it and never run \`glab-athena refresh\` or \`glab auth\`. $FID_ESCALATE" >&2
+	exit "$1"
+}
+
 # --- refresh subcommand: intercepted before exec so it never reaches glab ----
 if [ "${1:-}" = refresh ]; then
 	shift
@@ -115,7 +129,7 @@ if [ "${1:-}" = refresh ]; then
 
 	case "$FID_REFRESH" in
 	self_rotate)
-		# The personal bot is an ordinary user: only its own live token can
+		# A self_rotate bot is an ordinary user: only its own live token can
 		# rotate it. No owner session can mint for it.
 		CUR_TOKEN=""
 		[ -r "$TOKEN_FILE" ] && CUR_TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE" 2>/dev/null || true)"
@@ -155,8 +169,13 @@ if [ "${1:-}" = refresh ]; then
 	# (overlay/gitlab.json .group), never written here (DND-1668, contract
 	# athena-private-overlay.md -> Consumer obligation). A failed read is
 	# reported with the resolver's own Fix: and nothing is guessed.
+	# A public entry's group (the personal athena-ai-harness group) is no work
+	# value: it is the entry's own top-level namespace, and the overlay is not
+	# read for it.
 	PO_BIN="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/private-overlay"
-	GROUP_NAME="$("$PO_BIN" get gitlab .group)" || {
+	if [ "$FID_SOURCE" = public ]; then
+		GROUP_NAME="$FID_NS"
+	else GROUP_NAME="$("$PO_BIN" get gitlab .group)"; fi || {
 		echo "glab-athena refresh: the work GitLab group name is not readable from the private overlay (gitlab .group); nothing was minted." >&2
 		echo "Fix: follow the resolver's Fix: above; if the key is simply missing, add {\"group\": \"<work GitLab group path>\"} to overlay/gitlab.json in the private overlay. Then run refresh again." >&2
 		exit 1
@@ -291,6 +310,7 @@ if [ "${1:-}" = git ]; then
 		fid_resolve_url "$1" || ga_refuse_identity 3 "\`git\` to $1"
 		FG_BOT="$FID_BOT"
 		tf="${GITLAB_ATHENA_TOKEN_FILE:-$FID_TOKEN_FILE}"
+		ga_refuse_missing_token_file 3 "\`git\` to $1" "$tf"
 		if [ -r "$tf" ]; then t="$(tr -d '[:space:]' < "$tf" 2>/dev/null)" || t=""; fi
 		[ -n "$t" ] || {
 			echo "glab-athena: REFUSING \`git\`: the $FID_BOT token file $tf (for $FID_HOST/$FID_NS) is missing, unreadable or empty, so the push cannot run as Athena." >&2
@@ -308,6 +328,7 @@ fi
 fid_resolve_glab_args "$@" || ga_refuse_identity 3 "this glab command; nothing ran"
 GA_BOT="$FID_BOT" GA_HOST="$FID_HOST"
 TOKEN_FILE="${GITLAB_ATHENA_TOKEN_FILE:-$FID_TOKEN_FILE}"
+ga_refuse_missing_token_file 1 "this glab command; nothing ran" "$TOKEN_FILE"
 # DND-725: a readable file is not enough. An empty or whitespace-only token file
 # (or GITLAB_ATHENA_TOKEN_FILE pointing at one) used to export GITLAB_TOKEN="",
 # and glab then answered as the OWNER from its own config and keyring. Now the

@@ -5,11 +5,18 @@
   "identities": [
     {
       "host": "gitlab.com",
+      "namespace": "athena-ai-harness",
+      "bot": "athena-ai-harness-bot",
+      "token_file": "~/.claude/gitlab-personal-athena-token",
+      "refresh": "group_service_account"
+    },
+    {
+      "host": "gitlab.com",
       "namespace": "cjpoll",
       "bot": null,
-      "pending": "the personal bot's GitLab username is not chosen yet (DND-1944, the owner's gitlab.com setup); set `bot` to it here and drop `pending`",
+      "pending": "no bot can write here: athena-ai-harness-bot is a member of the athena-ai-harness group only, so a cjpoll/ write as it would be refused by GitLab; move the project into gitlab.com/athena-ai-harness, then remove this entry",
       "token_file": "~/.claude/gitlab-personal-athena-token",
-      "refresh": "self_rotate"
+      "refresh": "group_service_account"
     }
   ]
 }
