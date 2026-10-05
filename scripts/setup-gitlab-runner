@@ -51,10 +51,12 @@
 #            builds_dir.
 #
 # security_opt in [runners.docker], per role (DND-1999):
-#   ci       ["seccomp:unconfined", "apparmor:unconfined", "systempaths=unconfined"]
+#   ci       ["seccomp:unconfined", "apparmor:unconfined"]
 #            bwrap (tool-sandbox) needs a user namespace, which Docker's default
-#            seccomp refuses, and a fresh /proc mount, which masked /proc paths
-#            refuse.
+#            seccomp refuses. Every value must be one the Docker Engine API
+#            accepts (seccomp, apparmor, label, no-new-privileges): the CLI-only
+#            systempaths=unconfined is refused and no job starts (DND-2039).
+#            /proc stays masked; unmasking it for ci is DND-1998.
 #   deploy   none: Docker's default seccomp and masked /proc. Its jobs only
 #            drive the mounted docker socket.
 #   untagged (-) ["seccomp:unconfined", "apparmor:unconfined"], for rootless

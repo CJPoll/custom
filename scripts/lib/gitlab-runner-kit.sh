@@ -130,11 +130,14 @@ grk_role_gets_db_tmpfs() { [ "${1-}" = "ci" ]; }
 # grk_role_security_opt ROLE -> the [runners.docker] security_opt value of
 # ROLE, or nothing for "write no security_opt" (DND-1999). Deny by default:
 # only a role named here is loosened from Docker's defaults.
-#   ci          seccomp and AppArmor unconfined, and systempaths=unconfined.
-#               tool-sandbox runs bwrap --unshare-all ... --proc /proc in ci
-#               jobs: Docker's default seccomp refuses the user namespace, and
-#               the masked /proc paths make the kernel refuse a fresh proc
-#               mount. Residual: seccomp:unconfined lifts Docker's whole
+#   ci          seccomp and AppArmor unconfined (the live runner's pair).
+#               tool-sandbox runs bwrap --unshare-all ... in ci jobs: Docker's
+#               default seccomp refuses the user namespace. /proc stays masked,
+#               so a fresh proc mount is still refused (DND-1998 is reopened
+#               for it). Every value must be API-valid: systempaths=unconfined
+#               is a docker CLI flag the Engine API rejects ("invalid
+#               --security-opt 2"), and it stopped every ci job (DND-2039).
+#               Residual: seccomp:unconfined lifts Docker's whole
 #               default filter for ci job code (user namespaces and /proc
 #               mounts inside the job container, and also keyctl, bpf,
 #               perf_event_open, userfaultfd, ...). Accepted because the ci
@@ -150,7 +153,7 @@ grk_role_gets_db_tmpfs() { [ "${1-}" = "ci" ]; }
 #               image (moby/buildkit:rootless) nests a user namespace
 #               (system-files/gitlab-runner-runbook.md). /proc stays masked.
 #   any other   none: the kit knows no need for it.
-GRK_SECURITY_OPT_CI='["seccomp:unconfined", "apparmor:unconfined", "systempaths=unconfined"]'
+GRK_SECURITY_OPT_CI='["seccomp:unconfined", "apparmor:unconfined"]'
 GRK_SECURITY_OPT_UNTAGGED='["seccomp:unconfined", "apparmor:unconfined"]'
 grk_role_security_opt() {
   case "${1-}" in

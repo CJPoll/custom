@@ -188,12 +188,14 @@ for tag in - other; do
 done
 # Per-role security_opt (DND-1999). The rendered line of each role is matched
 # exactly, and each entry has at most one security_opt line.
-SO_CI='    security_opt = ["seccomp:unconfined", "apparmor:unconfined", "systempaths=unconfined"]'
+SO_CI='    security_opt = ["seccomp:unconfined", "apparmor:unconfined"]'
 SO_UNTAGGED='    security_opt = ["seccomp:unconfined", "apparmor:unconfined"]'
 so_lines() { grep -c 'security_opt' <<<"$1"; }
 eq "lib: a ci entry has exactly one security_opt line" "$(so_lines "${ci_render}")" "1"
-if grep -qxF -- "${SO_CI}" <<<"${ci_render}"; then ok "lib: a ci entry's security_opt is seccomp + apparmor + systempaths unconfined"
-else bad "lib: a ci entry's security_opt is seccomp + apparmor + systempaths unconfined" "${ci_render}"; fi
+if grep -qxF -- "${SO_CI}" <<<"${ci_render}"; then ok "lib: a ci entry's security_opt is seccomp + apparmor unconfined (the live pair, no systempaths)"
+else bad "lib: a ci entry's security_opt is seccomp + apparmor unconfined (the live pair, no systempaths)" "${ci_render}"; fi
+case "${ci_render}" in *systempaths*) bad "lib: a ci entry renders no systempaths (the Engine API refuses it)" "${ci_render}" ;;
+  *) ok "lib: a ci entry renders no systempaths (the Engine API refuses it)" ;; esac
 eq "lib: a deploy entry has no security_opt (Docker's default seccomp and masked /proc)" "$(so_lines "${dp_render}")" "0"
 case "${dp_render}" in *unconfined*) bad "lib: a deploy entry names nothing unconfined" "${dp_render}" ;;
   *) ok "lib: a deploy entry names nothing unconfined" ;; esac
@@ -212,14 +214,41 @@ done
 so_line="$(grep -n '^    security_opt' <<<"${ci_render}" | cut -d: -f1)"
 if [ -n "${so_line}" ] && [ -n "${dk_line}" ] && [ "${so_line}" -gt "${dk_line}" ]; then ok "lib: security_opt sits in [runners.docker]"
 else bad "lib: security_opt sits in [runners.docker]" "${ci_render}"; fi
+# Engine-API grammar (DND-2039). The runner sends security_opt as HostConfig.SecurityOpt,
+# and the daemon (moby daemon/daemon_unix.go parseSecurityOpt) accepts only these
+# keys, as key=value or the deprecated key:value: label, apparmor, seccomp, and
+# no-new-privileges (bare, or =true|false). Any other key is refused at container
+# create: "invalid --security-opt 2". `systempaths=unconfined` is a docker CLI flag
+# the CLI rewrites to MaskedPaths/ReadonlyPaths; the API refuses it, so every
+# ci job failed to start (2026-10-04). Each rendered value must match.
+so_value_ok() {
+  case "$1" in
+    seccomp[:=]?*|apparmor[:=]?*|label[:=]?*) return 0 ;;
+    no-new-privileges|no-new-privileges[:=]true|no-new-privileges[:=]false) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+so_values_ok() { # ROLE -> 0 when every value of the role's security_opt is API-valid
+  local v rest; rest="$(grk_role_security_opt "$1")"; rest="${rest//[\[\]\" ]/}"
+  [ -n "${rest}" ] || return 0
+  local IFS=,; for v in ${rest}; do so_value_ok "${v}" || { printf 'invalid: %s\n' "${v}" >&2; return 1; }; done
+}
+for role in ci deploy - other; do
+  check "lib: every security_opt value of role '${role}' is a form the Docker Engine API accepts" so_values_ok "${role}"
+done
+if so_value_ok "systempaths=unconfined"; then bad "lib: the grammar check rejects systempaths=unconfined (CLI-only)"
+else ok "lib: the grammar check rejects systempaths=unconfined (CLI-only)"; fi
+for good in seccomp:unconfined apparmor=unconfined label=disable no-new-privileges; do
+  check "lib: the grammar check accepts ${good}" so_value_ok "${good}"
+done
 # Reading a kept entry's security_opt back (the re-run drift warning).
-eq "lib: role_security_opt ci" "$(grk_role_security_opt ci)" '["seccomp:unconfined", "apparmor:unconfined", "systempaths=unconfined"]'
+eq "lib: role_security_opt ci" "$(grk_role_security_opt ci)" '["seccomp:unconfined", "apparmor:unconfined"]'
 eq "lib: role_security_opt untagged" "$(grk_role_security_opt -)" '["seccomp:unconfined", "apparmor:unconfined"]'
 eq "lib: role_security_opt deploy is empty" "$(grk_role_security_opt deploy)" ""
 eq "lib: role_security_opt of an unknown role is empty" "$(grk_role_security_opt other)" ""
 two="$(printf '%s\n%s\n' "${ci_render}" "${dp_render}")"
 eq "lib: entry_security_opt reads the ci entry's value, spaces removed" \
-  "$(grk_config_entry_security_opt alpha-ci <<<"${two}")" '["seccomp:unconfined","apparmor:unconfined","systempaths=unconfined"]'
+  "$(grk_config_entry_security_opt alpha-ci <<<"${two}")" '["seccomp:unconfined","apparmor:unconfined"]'
 eq "lib: entry_security_opt reads the deploy entry as none" "$(grk_config_entry_security_opt charlie-deploy <<<"${two}")" ""
 if grk_config_entry_security_opt no-such-runner <<<"${two}" >/dev/null; then bad "lib: entry_security_opt of a missing entry fails, never reads as none"
 else ok "lib: entry_security_opt of a missing entry fails, never reads as none"; fi
@@ -232,10 +261,10 @@ check "lib: security_opt_matches: the rendered deploy entry matches its role" \
 old_dp="$(sed 's/^  \[runners.docker\]$/&\n    security_opt = ["seccomp:unconfined", "apparmor:unconfined"]/' <<<"${dp_render}")"
 if grk_security_opt_matches deploy charlie-deploy <<<"${old_dp}"; then bad "lib: a deploy entry with the old unconfined pair does not match its role" "${old_dp}"
 else ok "lib: a deploy entry with the old unconfined pair does not match its role"; fi
-old_ci="$(sed 's/^    security_opt = .*$/    security_opt = [ "seccomp:unconfined" , "apparmor:unconfined" ]/' <<<"${ci_render}")"
-if grk_security_opt_matches ci alpha-ci <<<"${old_ci}"; then bad "lib: a ci entry without systempaths does not match its role" "${old_ci}"
-else ok "lib: a ci entry without systempaths does not match its role"; fi
-spaced_ci="$(sed 's/^    security_opt = .*$/  security_opt=[ "seccomp:unconfined","apparmor:unconfined",  "systempaths=unconfined" ]/' <<<"${ci_render}")"
+old_ci="$(sed 's/^    security_opt = .*$/    security_opt = [ "seccomp:unconfined" , "apparmor:unconfined", "systempaths=unconfined" ]/' <<<"${ci_render}")"
+if grk_security_opt_matches ci alpha-ci <<<"${old_ci}"; then bad "lib: a ci entry with the CLI-only systempaths value does not match its role" "${old_ci}"
+else ok "lib: a ci entry with the CLI-only systempaths value does not match its role"; fi
+spaced_ci="$(sed 's/^    security_opt = .*$/  security_opt=[ "seccomp:unconfined","apparmor:unconfined" ]/' <<<"${ci_render}")"
 check "lib: security_opt_matches ignores whitespace inside the array" grk_security_opt_matches ci alpha-ci <<<"${spaced_ci}"
 commented_dp="$(sed 's/^  \[runners.docker\]$/&\n    # security_opt = ["seccomp:unconfined"]/' <<<"${dp_render}")"
 trailing_ci="$(sed 's/^    security_opt = .*$/& # set by hand/' <<<"${ci_render}")"
@@ -341,7 +370,7 @@ done
 
 kit setup-gitlab-runner --help "${NOIN}"
 for want in "builds_dir" "/var/run/docker.sock" "services_tmpfs" "runner token" "DND-1942" \
-            "security_opt" "systempaths=unconfined" "Docker's default seccomp" "user namespaces" "mount /proc"; do
+            "security_opt" "seccomp:unconfined" "Docker's default seccomp" "user namespaces" "mount /proc"; do
   case "${OUT}" in *"${want}"*) ok "setup-gitlab-runner --help states the role contract and its residual (${want})" ;;
     *) bad "setup-gitlab-runner --help states the role contract and its residual (${want})" ;; esac
 done
@@ -527,7 +556,7 @@ expect_rc "runner foxtrot: a re-run over a pre-contract entry still succeeds (it
 case "${ERR}" in *foxtrot-ci*"predates the runner contract"*Fix:*) ok "runner foxtrot: the pre-contract entry is named, with Fix:" ;;
   *) bad "runner foxtrot: the pre-contract entry is named, with Fix:" "${ERR}" ;; esac
 eq "runner foxtrot: the kept entry is left as is" "$(cat "${F_CFG_DIR}/config.toml")" "${legacy_before}"
-case "${ERR}" in *foxtrot-ci*security_opt*"systempaths=unconfined"*Fix:*) ok "runner foxtrot: a kept ci entry with no security_opt is named, with the role's value and Fix:" ;;
+case "${ERR}" in *foxtrot-ci*security_opt*"seccomp:unconfined"*Fix:*) ok "runner foxtrot: a kept ci entry with no security_opt is named, with the role's value and Fix:" ;;
   *) bad "runner foxtrot: a kept ci entry with no security_opt is named, with the role's value and Fix:" "${ERR}" ;; esac
 
 printf '%s\n' "${TOK_C}" > "${TMP}/tokens-c"

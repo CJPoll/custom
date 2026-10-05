@@ -64,10 +64,20 @@ no longer holds for `security_opt`: an unknown tag gets Docker's defaults.
 
 | Role | `[runners.docker] security_opt` | Why |
 |---|---|---|
-| `ci` | `["seccomp:unconfined", "apparmor:unconfined", "systempaths=unconfined"]` | tool-sandbox runs `bwrap --unshare-all ... --proc /proc`. Docker's default seccomp refuses the user namespace, and the masked `/proc` paths make the kernel refuse the proc mount (DND-1998). |
+| `ci` | `["seccomp:unconfined", "apparmor:unconfined"]` | tool-sandbox runs `bwrap --unshare-all ... --proc /proc`. Docker's default seccomp refuses the user namespace, and `/proc` stays masked, so the proc mount is still refused (DND-1998, reopened). |
 | `deploy` | none: Docker's default seccomp, masked `/proc` | Its jobs only drive the mounted socket (`docker build`; buildx's buildkitd is a sibling container the daemon starts). |
 | untagged (`-`) | `["seccomp:unconfined", "apparmor:unconfined"]` | Rootless BuildKit as a job image nests a user namespace (the invariants above). `/proc` stays masked. |
 | other | none: Docker's defaults | The kit knows no need for it. Deny by default. |
+
+**Later (2026-10-05, DND-2039):** the `ci` row read `["seccomp:unconfined",
+"apparmor:unconfined", "systempaths=unconfined"]`. The Docker Engine API
+refuses `systempaths=unconfined` (it is a docker CLI flag; the API accepts only
+`seccomp`, `apparmor`, `label` and `no-new-privileges` keys, "invalid
+--security-opt 2"), so every `ci` job failed to start from 2026-10-04 10:52Z
+until the live runner was set back to the pair. The kit matches the live
+runner again, and its self-test rejects any value outside that grammar. The
+masked `/proc` stays: unmasking it for `ci` is DND-1998, reopened for a new
+approach, and is not decided here.
 
 Where AppArmor is not loaded, `apparmor:unconfined` changes nothing; it keeps
 bwrap's and BuildKit's mounts working on a host where AppArmor is loaded. The

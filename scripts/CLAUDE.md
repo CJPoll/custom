@@ -520,7 +520,9 @@ A `ci` or `deploy` entry carries the runner contract (DND-1973): its own user's
 docker socket and same-path `builds_dir` (`/srv/ci/<user>/builds`, `0711`), and
 for `ci` a database `services_tmpfs`. `setup-gitlab-runner --help` and
 `system-files/gitlab-runner-runbook.md` have the table and the named residual.
-`security_opt` is per role (DND-1999, `grk_role_security_opt`): `ci` adds
-`systempaths=unconfined` to the unconfined pair, untagged (`-`) keeps the pair,
-`deploy` and any other tag get none. A re-run names a kept entry whose
+`security_opt` is per role (DND-1999, `grk_role_security_opt`): `ci` and
+untagged (`-`) get the unconfined pair, `deploy` and any other tag get none.
+Every value must be one the Docker Engine API accepts; the self-test checks
+the grammar (DND-2039: the CLI-only `systempaths=unconfined` stopped every ci
+job). A re-run names a kept entry whose
 `security_opt` differs, with `Fix:`.
