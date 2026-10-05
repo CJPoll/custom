@@ -495,11 +495,14 @@ Changing one needs a new question-set version there.
 - **File it with `ticket-file`, never a hand-built page** (DND-1669). Write
   the properties you decided to a JSON file of Notion property values
   (`Kind`, `Severity`, `Security`, `Path`, `Area`, `Control`, plus `Found while`,
-  `Epic`, `Status` as they apply; DND has no `Backlog`, so `Todo`), then run
+  `Epic`, `Status` as they apply; DND has no `Backlog`, so `Todo`). A
+  `Blocking` Path carries its edge in the same file, `"Blocks": {"relation":
+  [{"id": "<page id>"}]}`: `ticket-file` refuses a `Blocking` ticket without
+  one (exit 2). Then run
   `~/dev/custom/ai/skills/athena:ticket-management/scripts/ticket-file --title "<TITLE>" --body-file <FILE> --properties-file <PROPS> --lines-file <LINES> [--triage-file <TRIAGE>]`.
   It creates the page, writes the body, the advisory and the Jev lines,
-  reads the page back and compares. Wire `Depends On`↔`Blocks` once it
-  prints the id.
+  reads the page back and compares. The `Blocks` edge is filed with the
+  page; Notion fills the blocked ticket's `Depends On`.
   - **Exit 0** prints `filed: DND-N` and `verified:`. Nothing to check by hand.
   - **Exit 2** wrote nothing. Fix what it names (a Jev line typed into the
     body, an edited `<LINES>`, a missing property) and rerun.

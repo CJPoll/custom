@@ -147,6 +147,11 @@ end
 no_area = file("no-area.json", JSON.generate(PROPS.reject { |k, _| k == "Area" }))
 rc, _out, err = run("--title", "T", "--body-file", BODY, "--properties-file", no_area, "--lines-file", LINES)
 check("a missing property is refused, exit 2") { rc == 2 && err.include?("has no Area") && requests.empty? }
+no_edge = file("blocking-no-edge.json", JSON.generate(PROPS.merge("Path" => { "select" => { "name" => "Blocking" } })))
+rc, _out, err = run("--title", "T", "--body-file", BODY, "--properties-file", no_edge, "--lines-file", LINES)
+check("[regression] Path Blocking with no Blocks edge is refused, exit 2, with Fix:, nothing sent", "rc #{rc} err #{err}") do
+  rc == 2 && err.include?("no Blocks edge") && err.include?("Fix:") && requests.empty?
+end
 rc, _out, err = run("--title", "T", "--body-file", BODY, "--properties-file", PROPS_F)
 check("--lines-file is required") { rc == 2 && err.include?("--lines-file is required") }
 empty = file("empty-lines.txt", "")
