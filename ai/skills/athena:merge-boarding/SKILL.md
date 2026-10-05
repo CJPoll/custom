@@ -575,8 +575,14 @@ unanswerable** — every cheap liveness claim is indistinguishable from a corpse
 fact that changes what you do. It also covers the cron and the human, not just
 another fleet.
 
-`scripts/wt-preflight` already asserts your branch is not behind `origin/main`
-when it is **created**. This is the same assertion when it **lands**.
+`scripts/wt-preflight` asserts your branch is not behind `origin/main` when it
+is **created**. When it **lands**, `integration-gate` asserts only that it
+merges into `origin/main` with no textual conflict; a branch behind it is gated
+on its own base (DND-2076).
+
+**Later (2026-10-05, DND-2076):** this said the gate makes wt-preflight's
+not-behind assertion again at landing. Superseded by the owner decision quoted
+at *Exit 0 means* below.
 
 **Before boarding or merging any MR, with the Mission's worktree as the cwd,
 run the main checkout's copy:**

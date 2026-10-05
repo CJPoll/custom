@@ -49,7 +49,7 @@
       }
     },
     "integration_gate.run": {
-      "description": "Exactly one per integration-gate invocation, on every exit path after its argv parse (the outer run emits; the run it re-executes inside test-slot reports facts to it). at = start, duration_s = wall (slot wait included), head = the head it judged (after --rebase, the rebased head). outcome = ok|red|refused|no_critic_pass|held|receipt_error|not_run|tree_busy|interrupted|other, keyed on exit_code. base = the target sha it contained, absent when the target never resolved. Emitter: DND-1475.",
+      "description": "Exactly one per integration-gate invocation, on every exit path after its argv parse (the outer run emits; the run it re-executes inside test-slot reports facts to it). at = start, duration_s = wall (slot wait included), head = the head it judged (after --rebase, the rebased head). outcome = ok|red|refused|no_critic_pass|held|receipt_error|not_run|tree_busy|interrupted|other, keyed on exit_code. base = the base it gated on: the target sha when HEAD contains it, else merge-base(HEAD, target) (DND-2076); absent when the target never resolved or has no merge base with HEAD. Emitter: DND-1475.",
       "attrs": {
         "exit_code": "int",
         "outcome": "label",

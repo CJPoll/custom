@@ -23,9 +23,11 @@
 # contain the target is no longer refused. It is gated on its own base, and its
 # receipt records merge-base(head, target). Only a textual conflict with the
 # target refuses. That narrows the paragraph above for a head behind the
-# target: the merged tree is read by the landing's conflict check and by
-# main-health after the landing, not by this gate. It is an owner-approved
-# lowering of the bar (item 5), not a speed-up.
+# target: this gate no longer tests the merged tree. The landing's own
+# conflict check (merge-tree in locked-merge and the push guard) reads it for
+# conflicts only; in ~/dev/custom, main-health gates it after it lands; in a
+# repo with no post-merge gate, nothing gates that tree before or after it
+# lands. It is an owner-approved lowering of the bar (item 5), not a speed-up.
 #
 # This script is an ASSERTION: without --rebase it never rebases, commits,
 # pushes, or touches the working tree or any ref. A conflicting rebase is a
@@ -139,8 +141,9 @@ rebased: the gate runs on HEAD, and the receipt's base is merge-base(HEAD,
 target), an ancestor of the tip that every receipt reader accepts. A head
 that conflicts textually with the target (git merge-tree) is refused, exit
 2, naming each path. What this narrows: the gate tests HEAD on its own base,
-not the merged tree; the landing's conflict check and main-health after the
-landing read that tree.
+not the merged tree. The landing's conflict check reads that tree for
+conflicts only; in ~/dev/custom main-health gates it after it lands; a repo
+with no post-merge gate runs nothing on it.
 
 It takes its machine test slot FIRST (DND-1064), then fetches and judges
 HEAD against the target inside the slot, so the conflict check reads the
@@ -691,12 +694,13 @@ join_critic() {
 }
 
 # --- 1b. take the slot FIRST (DND-1064) --------------------------------------
-# The containment bar is "the gated head contains <target> when the gate
-# starts". It used to be read before the test-slot wait, and waits of 5-26 min
+# The target is read "when the gate starts": the conflict check (DND-2076;
+# before it, the containment check) runs against it. It used to be read
+# before the test-slot wait, and waits of 5-26 min
 # now exceed the gap between landings (2026-09-28: DND-907, DND-896+945 and
 # DND-902 each refused twice; the admiral lost three landing windows). So this
 # run re-executes itself inside test-slot and does everything from the fetch on
-# there: the fetch, the containment check, --rebase, the gate, the verdict.
+# there: the fetch, the conflict check, --rebase, the gate, the verdict.
 # Called under test-slot already, test-slot re-enters the held slot at once.
 #
 # The cheap refusals (dirty tree, --with-critic tools) run before the wait so
@@ -706,7 +710,7 @@ join_critic() {
 # it stops it and judges the new head. The inner run is recognised only while
 # the slot ATHENA_TEST_SLOT_HELD names is really held (its flock is taken, the
 # same test test-slot makes before it re-enters), so neither the marker nor a
-# stale slot variable can move the containment check back before a wait.
+# stale slot variable can move the conflict check back before a wait.
 CRITIC_PGID=""; CRITIC_LOG=""; CRITIC_ADOPTED=0; CRITIC_ACTIVE=0; SLOT_TMP=""
 # gate_slot_weight -- appends --weight to SLOT_ARGS so the outer slot holds
 # what test-slot would weigh the gate itself at (DND-1326): a harness-gate its
@@ -829,7 +833,7 @@ if [ "$IN_SLOT" -eq 0 ]; then
   OUTCOME_LINE="$(cat "$OUTCOME" 2>/dev/null)"
   if [[ "$OUTCOME_LINE" =~ ^ran\ exit=([0-9]+)$ ]]; then
     # The run inside the slot joined or stopped the judge on every path that
-    # reaches the gate step; on an earlier exit (a containment refusal, say)
+    # reaches the gate step; on an earlier exit (a conflict refusal, say)
     # outer_cleanup stops it here.
     exit "${BASH_REMATCH[1]}"
   fi
@@ -1252,10 +1256,10 @@ if [ -n "$GATE_FILE" ]; then
   if [ -n "${landed_blob}${base_blob}${head_blob}" ]; then
     if [ "$base_blob" != "$head_blob" ] || ! git diff --quiet HEAD -- "$GATE_FILE" 2>/dev/null; then
       GATE_EDITED=1
-      echo "${PROG}: WARN gate '${GATE_FILE}' differs from ${TARGET} ($(short "$TARGET_SHA")) -- this branch (or its working tree) edits the gate that judges it. The copy that runs is the branch's, not the landed one: review that diff (git diff ${BASE_SHA:0:12} HEAD -- ${GATE_FILE}) before merging." >&2
+      echo "${PROG}: WARN gate '${GATE_FILE}' differs from this head's base $(short "$BASE_SHA") on ${TARGET} -- this branch (or its working tree) edits the gate that judges it. The copy that runs is the branch's, not the landed one: review that diff (git diff ${BASE_SHA:0:12} HEAD -- ${GATE_FILE}) before merging." >&2
     elif [ "$landed_blob" != "$head_blob" ]; then
       GATE_OLDER=1
-      echo "${PROG}: WARN gate '${GATE_FILE}' on this head is its base's copy ($(short "$BASE_SHA")), older than ${TARGET} ($(short "$TARGET_SHA")); the branch does not edit it. A head behind the target is gated as it stands (D7, DND-2076), so the landed gate first judges this change after it lands (main-health)." >&2
+      echo "${PROG}: WARN gate '${GATE_FILE}' on this head is its base's copy ($(short "$BASE_SHA")), older than ${TARGET} ($(short "$TARGET_SHA")); the branch does not edit it. A head behind the target is gated as it stands (D7, DND-2076), so the landed gate first runs on this change after it lands, and only where a post-merge gate runs (main-health in ~/dev/custom)." >&2
     fi
   fi
 fi
@@ -1384,9 +1388,11 @@ fi
 # DND-1463). The one refusal left here is a TEXTUAL conflict with the target,
 # read by git merge-tree exactly as the landing merge would meet it; it names
 # every conflicting path. What this gate no longer tests is the merged tree
-# merge(target, head): the landing's own conflict check and main-health after
-# the landing are what read it (design ai/docs/parallel-merge-deploy-latest.md
-# -> D7, which names this as an owner-approved lowering of the bar).
+# merge(target, head). The landing's own conflict check reads it for conflicts
+# only; in ~/dev/custom main-health gates it after the landing; a repo with no
+# post-merge gate runs nothing on it (design
+# ai/docs/parallel-merge-deploy-latest.md -> D7, which names this as an
+# owner-approved lowering of the bar).
 OWN_BASE=0
 git merge-base --is-ancestor "$TARGET_SHA" HEAD 2>/dev/null; ANC_RC=$?
 case "$ANC_RC" in
@@ -1398,7 +1404,7 @@ case "$ANC_RC" in
 esac
 if [ "$OWN_BASE" -eq 1 ]; then
   MT_ERR="$(mktemp 2>/dev/null)" || { echo "${PROG}: mktemp failed; cannot check HEAD for a conflict with ${TARGET}." >&2; echo "Fix: ensure \$TMPDIR (or /tmp) is writable and re-run. Nothing was gated." >&2; exit 2; }
-  MT_OUT="$(git merge-tree --write-tree --name-only --no-messages "$TARGET_SHA" "$HEAD_SHA" 2>"$MT_ERR")"; MT_RC=$?
+  MT_OUT="$(git -c core.quotePath=false merge-tree --write-tree --name-only --no-messages "$TARGET_SHA" "$HEAD_SHA" 2>"$MT_ERR")"; MT_RC=$?
   MT_ERRTEXT="$(cat "$MT_ERR" 2>/dev/null)"; rm -f "$MT_ERR"
   case "$MT_RC" in
     0) ;;

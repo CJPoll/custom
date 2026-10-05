@@ -638,7 +638,7 @@ record_pass "$R"
 # edit is COLD and needs no owner record. A weakened gate is item 5, judged by the critic from the diff.
 out="$( cd "$R" && "$GATE" --target main --no-fetch 2>&1 )"; rc=$?
 [ "$rc" -eq 0 ] && ok "c19 an edited declared gate still runs" || bad "c19 expected exit 0, got $rc" "$out"
-grep -q 'WARN gate .*ai/bin/harness-gate.* differs from main' <<<"$out" && ok "c19 warns that this branch edits its own gate" || bad "c19 no edited-gate warning" "$out"
+grep -q 'WARN gate .*ai/bin/harness-gate.* differs from this head.s base [0-9a-f]* on main' <<<"$out" && ok "c19 warns that this branch edits its own gate" || bad "c19 no edited-gate warning" "$out"
 grep -q 'INTEGRATION OK [0-9a-f]* (GATE: ai/bin/harness-gate -- declared on main; EDITED BY THIS BRANCH)' <<<"$out" && ok "c19 OK line marks the gate as edited by the branch" || bad "c19 OK line does not mark the edit" "$out"
 R="${TMP}/c19b"; new_repo "$R"
 ( cd "$R" && printf '#!/bin/sh\nexit 0\n' > check.sh && chmod +x check.sh && git add check.sh && git commit -qm check \

@@ -4305,10 +4305,21 @@ consumer is the server's reopen (consumer 4 below).
      ancestor of `HEAD_SHA`, the answer under the flag is exit 4, `NOT ELIGIBLE
      base_not_ancestor`, with `Fix: rebase onto <remote>/<base_ref>, re-run the
      gate, and request a new grant (the head SHA changes)`, and nothing is
-     redeemed. Two shipped steps refuse that state today with exit 2, and the
-     flag maps both: `integration-gate`'s HEAD-must-contain-the-target step,
-     which runs first, and `blast-radius`'s ancestor check (*Eligibility for
-     `merge.pr_only_workflow`*).
+     redeemed. One shipped step refuses that state today with exit 2, and the
+     flag maps it: `blast-radius`'s ancestor check (*Eligibility for
+     `merge.pr_only_workflow`*). `integration-gate` itself gates a head behind
+     the target on its own base (DND-2076), so under the flag this check is the
+     flag's own, made over the fetched tip before any redeem.
+
+     **Later (2026-10-05, DND-2076):** this named two shipped steps, the first
+     `integration-gate`'s HEAD-must-contain-the-target step. Superseded by
+     owner decision (Cody, 2026-10-05T08:26:29Z, session
+     `0cc59a5e-6c65-495e-a216-83c6a0bf2d56`, message
+     `2b344496-478d-4b7f-a4cf-635a2273ab94`): "I do NOT want to require a
+     rebase on each merge; that's the point of the parallel merges." That
+     step is gone. Whether a grant should still require the head to contain
+     the tip is open for the parallel-merge design
+     (`ai/docs/parallel-merge-deploy-latest.md` → *D7*).
    - When `blast-radius` answers 0, the gate is OK as today and says the grant
      was not used.
    - On `blast-radius` exit 4 it runs the eligibility check over the fetched
