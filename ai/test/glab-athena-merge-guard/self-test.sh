@@ -568,6 +568,9 @@ reset_fx; expect_ran N11 "api PUT MR labels" none api -X PUT "projects/:id/merge
 reset_fx; expect_ran N12 "mr list" none mr list
 # The fork MR pipeline refusal (DND-1942) reads the MR: a same-project MR runs.
 reset_fx; mr_json success > "${FX}/mrapi.out"; expect_ran N13 "api POST a pipeline for the MR" any api -X POST "projects/:id/merge_requests/4242/pipelines"
+# Its one read is the fork guard's MR read; the merge guard reads nothing.
+if [ "$(reads)" = "mrapi api projects/:id/merge_requests/4242" ]; then ok "N13b. the only read is the fork guard's MR read"
+else bad "N13b. the only read is the fork guard's MR read" "$(detail)"; fi
 reset_fx; expect_ran N14 "mr create whose title says merge" none mr create --title merge --description "merge accept api" --yes
 reset_fx; expect_ran N15 "help mr merge" none help mr merge
 
@@ -631,7 +634,11 @@ reset_fx; expect_ran R5d "criterion 2: mr approve" none mr approve 4242 -R "${P_
 reset_fx; expect_ran R5e "criterion 2: api POST approve" none api -X POST "projects/${P_ENC}/merge_requests/4242/approve"
 # The fork MR pipeline refusal (DND-1942) reads the job: a branch job runs.
 reset_fx; echo '{"id":9000000002,"ref":"main"}' > "${FX}/job.out"; expect_ran R5f "criterion 2: api POST play a manual job (release deploy)" any api -X POST "projects/${P_ENC}/jobs/9000000002/play"
+if [ "$(reads)" = "job api projects/${P_ENC}/jobs/9000000002" ]; then ok "R5f2. the only read is the fork guard's job read"
+else bad "R5f2. the only read is the fork guard's job read" "$(detail)"; fi
 reset_fx; echo '{"id":9000000003,"ref":"main"}' > "${FX}/job.out"; expect_ran R5g "criterion 2: ci trigger a manual job" any ci trigger 9000000003 -R "${P_R}"
+if [ "$(reads)" = "job api projects/${P_ENC}/jobs/9000000003" ]; then ok "R5g2. the only read is the fork guard's job read"
+else bad "R5g2. the only read is the fork guard's job read" "$(detail)"; fi
 cd "${REPO_FX}" || exit 2
 
 # Criterion 3: an exit-4 head leaves NO receipt (integration-gate writes one

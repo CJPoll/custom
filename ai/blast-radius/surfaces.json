@@ -80,6 +80,7 @@
         "ai/bin/main-health",
         "ai/lib/forge-api-scan.sh",
         "ai/lib/glab-fork-pipeline-guard.sh",
+        "ai/lib/glab-flag-table.sh",
         "ai/lib/forge-cli-isolation.sh",
         "ai/config/forge-identities.json",
         "ai/lib/forge-identity.sh",
