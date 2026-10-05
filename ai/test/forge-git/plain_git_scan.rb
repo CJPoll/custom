@@ -9,7 +9,9 @@
 # ls-remote with plain git rather than ai/bin/forge-git:
 #   - shell: a `git` command word followed by one of them, read with every
 #     quoted string ('…', "…", `…`) blanked out, so message text never
-#     matches and `git … || die "…"` still does;
+#     matches and `git … || die "…"` still does; a `git ls-remote --get-url`
+#     command is blanked first, because it prints the configured URL and
+#     opens no transport (a real read later on the same line still matches);
 #   - Ruby: an argv array that names "git" and then "fetch" / "ls-remote" /
 #     "pull" within three joined lines (a call split over lines), or a git
 #     helper call (call, Git.call, git_ok, git_status) naming one. A window
@@ -40,6 +42,9 @@ NET = "(?:fetch|pull|ls-remote)"
 # A command word position: line start, after ; & | ( ! { $( or a keyword, or
 # after a `timeout N` / `env` / VAR=value prefix.
 SH = /(?:^|[;&|(!{]|\$\(|\bthen\s|\bdo\s|\belse\s)\s*(?:(?:timeout(?:\s+-\S+)*\s+\d+\S*|env|[A-Za-z_][A-Za-z0-9_]*=\S*)\s+)*git(?:\s+(?:-C\s+\S+|-c\s+\S+|-q|--\S+))*\s+#{NET}\b/
+# `ls-remote --get-url` prints the configured URL (insteadOf applied) and
+# exits; it opens no transport, so it is a local config read, not a remote one.
+SH_LOCAL = /\bgit(?:\s+(?:-C\s+[^\s;&|()]+|-c\s+[^\s;&|()]+|-q|--[^\s;&|()]+))*\s+ls-remote(?:\s+-[^\s;&|()]+)*\s+--get-url(?=\s|$|\))/
 RB_ARGV = /"git"\s*,[^\]]*?"#{NET}"/m
 RB_CALL = /\b(?:Git\.call|call|git_ok|git_status)\(\s*[^)]*"#{NET}"/
 ROUTED = /FORGE_GIT|forge_git/
@@ -77,7 +82,7 @@ files.split("\n").each do |rel|
     next if line.lstrip.start_with?("#")
 
     window = lines[i, 3].join("\n")
-    found = dequote(line).match?(SH) ||
+    found = dequote(line).gsub(SH_LOCAL, "Q").match?(SH) ||
             (line.include?('"git"') && argv_starts_here?(window, line.length) && !window.match?(ROUTED)) ||
             (line.match?(RB_CALL) && !line.match?(ROUTED))
     next unless found

@@ -101,8 +101,8 @@ i=0
 for case in \
   "git@github.com:CJPoll/custom.git|gh-athena" \
   "https://github.com/CJPoll/custom.git|gh-athena" \
-  "git@gitlab.com:cjpoll/custom.git|glab-athena" \
-  "https://gitlab.com/cjpoll/custom.git|glab-athena"; do
+  "git@gitlab.com:athena-ai-harness/custom.git|glab-athena" \
+  "https://gitlab.com/athena-ai-harness/custom.git|glab-athena"; do
   i=$((i + 1)); url="${case%%|*}"; want="${case##*|}"
   r="${TMP}/route-${i}"; mkrepo "${r}" "${url}"; reset_logs
   STUB_RC=0 "${FG}" -C "${r}" fetch --quiet origin main >/dev/null 2>&1; rc=$?
@@ -127,7 +127,7 @@ STUB_RC=0 "${FG}" -C "${r}" fetch origin >/dev/null 2>&1
   || bad "uppercase host" "routed=[$(cat "${TMP}/routed.log")]"
 
 j=0
-for url in "ssh://git@github.com/CJPoll/custom.git" "ssh://git@gitlab.com/cjpoll/custom.git" "git@github.com-work:CJPoll/custom.git" \
+for url in "ssh://git@github.com/CJPoll/custom.git" "ssh://git@gitlab.com/athena-ai-harness/custom.git" "git@github.com-work:CJPoll/custom.git" \
            "gh:CJPoll/custom.git" "git@example.com:o/r.git" "https://example.com/o/r.git"; do
   j=$((j + 1)); r="${TMP}/refuse-${j}"; mkrepo "${r}" "${url}"; reset_logs
   err="$(PATH="${TRIP}:${FSG_DIR}:${PATH}" "${FG}" -C "${r}" fetch origin 2>&1 >/dev/null)"; rc=$?
@@ -154,7 +154,7 @@ reset_logs
 
 # ---------------------------------------------------------------------------
 echo "B. refusals and unresolvable keys (exit 64, never plain git)"
-r="${TMP}/keys"; mkrepo "${r}" "git@gitlab.com:cjpoll/custom.git"
+r="${TMP}/keys"; mkrepo "${r}" "git@gitlab.com:athena-ai-harness/custom.git"
 expect64() { # expect64 <label> <args...>
   local label="$1"; shift; reset_logs
   err="$(PATH="${TRIP}:${FSG_DIR}:${PATH}" "${FG}" "$@" 2>&1 >/dev/null)"; rc=$?
@@ -178,7 +178,7 @@ expect64 "a repo with no origin and no named remote is refused" -C "${nr}" fetch
 
 # ---------------------------------------------------------------------------
 echo "C. the route follows the repository git reaches"
-r="${TMP}/two"; mkrepo "${r}" "git@gitlab.com:cjpoll/custom.git"
+r="${TMP}/two"; mkrepo "${r}" "git@gitlab.com:athena-ai-harness/custom.git"
 git -C "${r}" remote add github "git@github.com:CJPoll/custom.git"
 reset_logs; STUB_RC=0 "${FG}" -C "${r}" fetch -q github >/dev/null 2>&1
 [ "$(cat "${TMP}/routed.log")" = "gh-athena git -C ${r} fetch -q github" ] \
@@ -267,6 +267,8 @@ scripts/mr-review	git fetch origin || {	the owner's interactive review tool; no 
 scripts/pr-review	if ! git fetch origin; then	the owner's interactive review tool; no agent runs it
 scripts/refresh-walt-dev	git pull --ff-only -q	the owner's walt_ui dev-stack refresh; no harness caller (its header says so)
 scripts/wt-lib/push.sh	git pull "$@"	wt_git_pull's owner path (no WT_AGENT_PUSH); the agent path uses forge-git
+ai/lib/glab-seed-mirror.sh	git ls-remote "$GSM_SRC_SEAM" refs/heads/main	a suite seam (GLAB_ATHENA_SEED_SOURCE_READ, honored only under GLAB_ATHENA_GIT_DRY_RUN=1) reading a fixture repo; the real source read runs gh-athena git ls-remote
+ai/lib/glab-seed-mirror.sh	git ls-remote "$seam" refs/heads/main	a suite seam (GLAB_ATHENA_SEED_TARGET_READ, honored only under GLAB_ATHENA_GIT_DRY_RUN=1) reading a fixture repo; the real target read runs glab-athena git ls-remote
 EOF
 scan="$(/usr/bin/ruby "${HERE}/plain_git_scan.rb" "${ROOT}" "${ALLOW}" 2>&1)"; rc=$?
 if [ "${rc}" -eq 0 ]; then
@@ -285,6 +287,9 @@ timeout 120 git -C "${REPO}" fetch -q origin || die 3 "git fetch failed" "Fix: r
 out="$(GIT_TERMINAL_PROMPT=0 git -c credential.helper= ls-remote origin)"
 echo "Fix: run \`git fetch origin\` by hand"
 "${FORGE_GIT}" -C "${REPO}" fetch -q origin
+resolved="$(git ls-remote --get-url origin 2>/dev/null)"
+u="$(git ls-remote --get-url origin)"; git fetch origin
+git ls-remote --exit-code;printf -- --get-url
 EOF
 cat > "${SCAN_FX}/ai/lib/rubyish.rb" <<'EOF'
 out, st = Open3.capture3("timeout", "120", "git", "-C", repo,
@@ -297,10 +302,10 @@ EOF
 git -C "${SCAN_FX}" add -A
 : > "${TMP}/empty-allow.tsv"
 scan="$(/usr/bin/ruby "${HERE}/plain_git_scan.rb" "${SCAN_FX}" "${TMP}/empty-allow.tsv" 2>&1)"; rc=$?
-want="ai/bin/shellish:2: ai/bin/shellish:3: ai/lib/rubyish.rb:1: ai/lib/rubyish.rb:3:"
+want="ai/bin/shellish:2: ai/bin/shellish:3: ai/bin/shellish:7: ai/bin/shellish:8: ai/lib/rubyish.rb:1: ai/lib/rubyish.rb:3:"
 got="$(grep '^PLAIN' <<<"${scan}" | sed -E 's/^PLAIN ([^:]+:[0-9]+:).*/\1/' | tr '\n' ' ' | sed 's/ $//')"
 [ "${rc}" -eq 1 ] && [ "${got}" = "${want}" ] \
-  && ok "the scanner finds plain reads (one-liner with || die, env prefix and -c, a split Ruby argv, a helper call) and skips messages and forge-git" \
+  && ok "the scanner finds plain reads (one-liner with || die, env prefix and -c, a split Ruby argv, a helper call) and skips messages, forge-git and a local ls-remote --get-url" \
   || bad "scanner fixture" "rc=${rc} want=[${want}] got=[${got}] scan=${scan}"
 if fsg_verify; then ok "no git call fell through past the tripwire (DND-1667)"
 else bad "no git call fell through past the tripwire (DND-1667)" "see the forge-stub-guard FAIL above"; fi
