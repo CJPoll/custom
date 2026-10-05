@@ -74,6 +74,10 @@ refuse() {
 # not a readable regular file counts as unreadable (2). The residual (a hook
 # installed only under a core.hooksPath that the caller's GIT_CONFIG_GLOBAL
 # or GIT_CONFIG_SYSTEM replaces) is in ai/lib/forge-push-scan's header.
+# OutboundScan::Sources.transport_scans? (ai/lib/outbound_scan_sources.rb)
+# reads the same three paths with the same marker: the pre-push hook leaves a
+# new ref to this transport only when this function would scan it
+# (DND-2086). Change both together.
 fg_outbound_marked() {
   local common hook rc=1
   FG_OUTBOUND_COMMON=""

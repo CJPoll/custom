@@ -427,6 +427,25 @@ if [ "${RC}" = 1 ] && [[ "${OUT}" == *"DEFERRED refs/heads/x"* ]] && [[ "${OUT}"
 else
   bad "N7 route deferral" "rc=${RC} ${OUT}"
 fi
+NOHOOK="$(mk_public nohook2086)"
+OUT="$(cd "${NOHOOK}" && printf 'refs/heads/x %s refs/heads/x 0000000000000000000000000000000000000000\n' "$(git rev-parse HEAD)" | "${SCAN}" --pre-push --remote https://github.com/o/r.git --url athena-forge::https://github.com/o/r.git 2>&1)"; RC=$?
+if [ "${RC}" = 3 ] && [[ "${OUT}" == *"transport does not scan"*"COULD NOT LOOK"* ]] && [[ "${OUT}" == *"Fix:"* ]] && [[ "${OUT}" != *"DEFERRED"* ]]; then
+  ok "N8 the route's hook never defers to a transport that would not scan (no outbound hook it reads): COULD NOT LOOK"
+else
+  bad "N8 deferral without a scanning transport" "rc=${RC} ${OUT}"
+fi
+# A mirror that already holds every local commit: read in place of DEST, it
+# would bound the range to nothing and the token commit would pass unscanned.
+git init -q --bare "${TMP}/mirror2086.git"
+git -C "${NB}" push -q --no-verify "${TMP}/mirror2086.git" HEAD:refs/heads/all
+OUT="$(cd "${NB}" && printf 'refs/heads/x %s refs/heads/x 0000000000000000000000000000000000000000\n' "${NBH}" \
+  | GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="url.${TMP}/mirror2086.git.insteadOf" GIT_CONFIG_VALUE_0="${DEST}" \
+    "${SCAN}" --pre-push --remote r --url "${DEST}" 2>&1)"; RC=$?
+if [ "${RC}" = 3 ] && [[ "${OUT}" == *"insteadOf"*"COULD NOT LOOK"* ]] && [[ "${OUT}" == *"Fix:"* ]]; then
+  ok "N9 an insteadOf rule that would point ls-remote at another repository: COULD NOT LOOK, never that repository's refs"
+else
+  bad "N9 insteadOf re-rewrite" "rc=${RC} ${OUT}"
+fi
 
 echo "--- merges: only what differs from every parent is new ---"
 MG="$(mk_public merges)"

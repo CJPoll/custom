@@ -157,6 +157,23 @@ module OutboundScan
     "Fix: #{reason_fix(reason)} Until then this scan cannot call anything clean."
   end
 
+  def look_fix(reason)
+    case reason
+    when /insteadOf/
+      "git ls-remote would read another URL than the one pushed to: push to the URL your insteadOf rules " \
+        "produce (`git ls-remote --get-url <url>`), or drop the rule that rewrites it again, then push again."
+    when /transport does not scan/
+      "this route push has no transport scan to leave it to: install the outbound hook in the main checkout " \
+        "(scripts/setup-private-overlay --install) or push through ~/dev/custom/ai/bin/gh-athena / glab-athena, then push again."
+    when /ls-remote/
+      "`git ls-remote <url>` could not list it: check that the push URL is reachable and readable with your " \
+        "credentials, then push again."
+    else
+      "the listing the route's transport handed the scan was missing or malformed: push again through " \
+        "~/dev/custom/ai/bin/gh-athena git / glab-athena git, and report it if it recurs."
+    end
+  end
+
   def reason_fix(reason)
     case reason
     when /overlay is ABSENT/
@@ -167,10 +184,8 @@ module OutboundScan
     when /not a git repository|has no commits|not committed|no committed/
       "commit outbound/patterns.tsv in the overlay's local git history (the committed copy is the floor)."
     when /COULD NOT LOOK/
-      "the range of a new ref is everything the destination does not already have, read from the " \
-        "destination's own ref listing, and that listing could not be read: check that the push URL is " \
-        "reachable and that `git ls-remote <url>` lists its refs, then push again. A route push " \
-        "(gh-athena git / glab-athena git) hands the scan the listing it read itself."
+      "a new ref's range is everything the destination does not already have, read from the destination's " \
+        "own ref listing, and #{look_fix(reason)}"
     when /zero patterns/
       "add at least one `label<TAB>regex` line to outbound/patterns.tsv in the overlay and commit it."
     else
