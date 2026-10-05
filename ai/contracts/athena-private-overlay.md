@@ -283,8 +283,9 @@ the error's class, never its message, which could quote a pattern.
   `<local sha>` that no tip of the **destination** reaches. The tips come from
   the destination's own ref listing, never from local remote-tracking refs:
   FILE (the listing the route's transport read on its connection; see *The
-  transport's push-range scan*) or `git ls-remote URL`. `ls-remote` is used
-  only when `git ls-remote --get-url URL` is URL itself: an `insteadOf` rule
+  transport's push-range scan*) or `ls-remote URL` read through
+  `ai/bin/forge-git` (Athena's route for a github.com or gitlab.com URL, plain
+  git for a local path, any other URL refused). `ls-remote` is used only when `git ls-remote --get-url URL` is URL itself: an `insteadOf` rule
   that rewrites the pushed URL again would list another repository. A listing
   that cannot be read is COULD NOT MEASURE, with the reason `COULD NOT LOOK`;
   an empty destination bounds nothing. The hook as git runs it inside a route

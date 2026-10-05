@@ -166,8 +166,9 @@ module OutboundScan
       "this route push has no transport scan to leave it to: install the outbound hook in the main checkout " \
         "(scripts/setup-private-overlay --install) or push through ~/dev/custom/ai/bin/gh-athena / glab-athena, then push again."
     when /ls-remote/
-      "`git ls-remote <url>` could not list it: check that the push URL is reachable and readable with your " \
-        "credentials, then push again."
+      "`ai/bin/forge-git -C <repo> ls-remote <url>` could not list it: forge-git reads a github.com or gitlab.com " \
+        "URL as Athena and a local path with plain git, and refuses any other URL. Push to such a URL, check that " \
+        "it is reachable (and that gh-athena / glab-athena authenticate), then push again."
     else
       "the listing the route's transport handed the scan was missing or malformed: push again through " \
         "~/dev/custom/ai/bin/gh-athena git / glab-athena git, and report it if it recurs."

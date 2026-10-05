@@ -446,6 +446,22 @@ if [ "${RC}" = 3 ] && [[ "${OUT}" == *"insteadOf"*"COULD NOT LOOK"* ]] && [[ "${
 else
   bad "N9 insteadOf re-rewrite" "rc=${RC} ${OUT}"
 fi
+# A forge URL is read through ai/bin/forge-git (Athena's route), never plain
+# git. Its gh-athena seam is a stub that logs its argv and lists DEST.
+cat > "${TMP}/gh-athena-stub" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "${TMP}/gh-athena-stub.log"
+printf '%s\trefs/heads/main\n' "$(git --git-dir="${DEST}" rev-parse main)"
+EOF
+chmod +x "${TMP}/gh-athena-stub"
+OUT="$(cd "${NB}" && printf 'refs/heads/x %s refs/heads/x 0000000000000000000000000000000000000000\n' "${NBH}" \
+  | FORGE_GIT_GH_ATHENA="${TMP}/gh-athena-stub" "${SCAN}" --pre-push --remote git@github.com:o/r.git --url git@github.com:o/r.git 2>&1)"; RC=$?
+if [ "${RC}" = 1 ] && [[ "${OUT}" == *"SCANNED commits=2 "* ]] && [[ "${OUT}" != *"hist.md"* ]] \
+   && grep -q "^git -C ${NB} ls-remote git@github.com:o/r.git\$" "${TMP}/gh-athena-stub.log" 2>/dev/null; then
+  ok "N10 a forge URL's refs are read through ai/bin/forge-git (gh-athena git ls-remote), and bound the range"
+else
+  bad "N10 forge URL through forge-git" "rc=${RC} log=$(cat "${TMP}/gh-athena-stub.log" 2>/dev/null) ${OUT}"
+fi
 
 echo "--- merges: only what differs from every parent is new ---"
 MG="$(mk_public merges)"

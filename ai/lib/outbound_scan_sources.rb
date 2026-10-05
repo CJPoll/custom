@@ -123,7 +123,7 @@ module OutboundScan
     #               hook cannot read the destination; the transport sending
     #               this very push holds the listing and scans these refs
     #               with it, so the hook leaves them to it;
-    #   :ls_remote  any other push: `git ls-remote <url>` (:ls_remote_name for
+    #   :ls_remote  any other push: `git ls-remote <url>` through ai/bin/forge-git (:ls_remote_name for
     #               a remote NAME given without --url, by hand).
     Destination = Struct.new(:kind, :source, keyword_init: true)
 
@@ -158,6 +158,7 @@ module OutboundScan
     end
 
     LS_REMOTE_ENV = { "GIT_TERMINAL_PROMPT" => "0" }.freeze
+    FORGE_GIT = File.expand_path("../bin/forge-git", __dir__)
 
     # `git ls-remote <url>` -> tips. git hands the hook a URL its insteadOf and
     # pushInsteadOf rules already rewrote; ls-remote would apply insteadOf to
@@ -173,9 +174,15 @@ module OutboundScan
         raise Unmeasurable, "git ls-remote would read a different URL than the one pushed to " \
                             "(an insteadOf rule rewrites it again), so the destination's refs cannot be read (COULD NOT LOOK)"
       end
-      out, _err, st = Open3.capture3(LS_REMOTE_ENV, "git", "ls-remote", "--", url, binmode: true)
+      if url.start_with?("-")
+        raise Unmeasurable, "the destination #{url[0, 40].inspect} reads as an option, so git ls-remote cannot be pointed at it (COULD NOT LOOK)"
+      end
+      # The read goes through Athena's forge route (ai/bin/forge-git, DND-1977):
+      # a forge URL is read as Athena, never with the owner's SSH key; a local
+      # path stays plain git; any other URL is refused (exit 3).
+      out, _err, st = Open3.capture3(LS_REMOTE_ENV, FORGE_GIT, "-C", Dir.pwd, "ls-remote", url, binmode: true)
       unless st.success?
-        raise Unmeasurable, "git ls-remote could not read the destination's refs " \
+        raise Unmeasurable, "git ls-remote (through ai/bin/forge-git) could not read the destination's refs " \
                             "(exit #{st.exitstatus.inspect}), so the range of a new ref is unknown (COULD NOT LOOK)"
       end
       OutboundScan.parse_advertisement(out, "git ls-remote's listing of the destination")

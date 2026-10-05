@@ -13,7 +13,7 @@
 #
 # A new ref's range is everything the destination does not already have,
 # from the destination's own ref listing (DND-2086): the file the route's
-# transport passes as a third argument, else `git ls-remote <url>` in the
+# transport passes as a third argument, else `ai/bin/forge-git ... ls-remote <url>` in the
 # scanner. Inside a route push (URL athena-forge::...) the scanner leaves a
 # new ref to the transport, which holds the listing.
 #

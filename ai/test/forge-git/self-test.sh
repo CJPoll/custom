@@ -529,6 +529,7 @@ _o, code = Git.call(dir, "fetch", "--quiet", "origin")
 warn "Fix: `git fetch origin` then retry"
 out, st = Open3.capture3(FORGE_GIT, "-C", repo,
                          "ls-remote", "origin")
+got, _e, st = Open3.capture3(ENV_X, "git", "ls-remote", "--get-url", url)
 EOF
 git -C "${SCAN_FX}" add -A
 : > "${TMP}/empty-allow.tsv"
@@ -536,7 +537,7 @@ scan="$(/usr/bin/ruby "${HERE}/plain_git_scan.rb" "${SCAN_FX}" "${TMP}/empty-all
 want="ai/bin/shellish:2: ai/bin/shellish:3: ai/bin/shellish:7: ai/bin/shellish:8: ai/lib/rubyish.rb:1: ai/lib/rubyish.rb:3:"
 got="$(grep '^PLAIN' <<<"${scan}" | sed -E 's/^PLAIN ([^:]+:[0-9]+:).*/\1/' | tr '\n' ' ' | sed 's/ $//')"
 [ "${rc}" -eq 1 ] && [ "${got}" = "${want}" ] \
-  && ok "the scanner finds plain reads (one-liner with || die, env prefix and -c, a split Ruby argv, a helper call) and skips messages, forge-git and a local ls-remote --get-url" \
+  && ok "the scanner finds plain reads (one-liner with || die, env prefix and -c, a split Ruby argv, a helper call) and skips messages, forge-git and a local ls-remote --get-url (shell or a Ruby argv, DND-2086)" \
   || bad "scanner fixture" "rc=${rc} want=[${want}] got=[${got}] scan=${scan}"
 cat > "${SCAN_FX}/ai/bin/pushish" <<'EOF'
 #!/usr/bin/env bash

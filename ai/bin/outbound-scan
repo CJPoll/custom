@@ -15,7 +15,7 @@
 #       pushed commit introduces (a merge: only what differs from every
 #       parent), and its message. A new ref's range is everything the
 #       DESTINATION does not already have, from its own ref listing: FILE (the
-#       route's transport passes the listing it read) or `git ls-remote URL`
+#       route's transport passes the listing it read) or `ls-remote URL` through ai/bin/forge-git
 #       (DND-2086). Installed as ai/git-hooks/outbound-pre-push.sh.
 #   --tree                                 every tracked file of the current repo.
 #   --text FILE [--label NAME]             one file's lines (gh-athena and glab-athena
@@ -57,7 +57,8 @@ HELP = <<~HELP
   Pre-push range: <remote sha>..<local sha> for a tip this repository has; for a
   new ref, every commit no destination tip reaches. The tips come from the
   destination: FILE ("<oid> <ref>" lines, the route's transport's listing) or
-  `git ls-remote URL`. A listing that cannot be read is COULD NOT LOOK (exit 3).
+  `ls-remote URL` through ai/bin/forge-git (Athena's route for a forge URL). A
+  listing that cannot be read is COULD NOT LOOK (exit 3).
   The hook as git runs it inside a route push (URL athena-forge::...) cannot
   read the destination (the route's grant is one-shot), so it prints DEFERRED
   for those refs: the route's transport scans them with its own listing.
