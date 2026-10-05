@@ -299,9 +299,9 @@ fires for exactly these, and nothing else:
   `ai/contracts/athena-events.md`;
 - the owner approval grant allowlist (`action_class.ex` and its test);
 - `blast-radius` and its manifest, `ai/blast-radius/surfaces.json`;
-- the owner verifiers (`ai/lib/owner_turn.rb`, `ai/lib/owner_click.rb`) and
-  what they load to tell Cody's identity (`ai/lib/private_overlay_resolver.rb`,
-  `ai/lib/private_overlay.rb`).
+- the owner verifiers (`ai/lib/owner_turn.rb`, `ai/lib/owner_click.rb`,
+  `ai/lib/owner_message.rb`) and what they load to tell Cody's identity
+  (`ai/lib/private_overlay_resolver.rb`, `ai/lib/private_overlay.rb`).
 
 Terraform that merging applies holds, whatever the plan, until DND-998 can
 tell a destroy or a cost change from a harmless update.

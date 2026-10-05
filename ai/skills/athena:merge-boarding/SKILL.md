@@ -616,9 +616,10 @@ class, hold `always`, is exactly: the *Owner approval policy* section of
 `ai/contracts/athena-events.md` (by section, not file); the grant allowlist
 module (`**/athena/owner_approvals/action_class.ex` and its test);
 `ai/bin/blast-radius` and its manifest `ai/blast-radius/surfaces.json`; and
-the owner verifiers `ai/lib/owner_turn.rb` and `ai/lib/owner_click.rb`, with
-the private overlay resolver and rules the click verifier reads the owner's
-id through (`ai/lib/private_overlay_resolver.rb`, `ai/lib/private_overlay.rb`).
+the owner verifiers `ai/lib/owner_turn.rb`, `ai/lib/owner_click.rb` and
+`ai/lib/owner_message.rb`, with the private overlay resolver and rules they
+read the owner's id through (`ai/lib/private_overlay_resolver.rb`,
+`ai/lib/private_overlay.rb`).
 A hit there is exit 4, cleared by the owner's verified decision (*Owner
 approval policy* -> *Asking, and what counts as approval*). The gate judges
 with the manifest as landed on the target, so a manifest change binds after
