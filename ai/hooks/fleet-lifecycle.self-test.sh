@@ -200,6 +200,10 @@ has "unmapped: the log line names the spawn" "$(tail -n 1 "${LOG}")" "toolu_015v
 hook "$(spawn "DND-541 and DND-542 captains" "Mission: DND-9")"
 fleet_wait_pids "${PIDS}" 1
 eq "two refs in the description are ambiguous: unmapped, never a guess" "$(fleet_last_request | jq -r .body.mapping)" "unmapped"
+# A batch dispatch names every ticket, so the notice must say a second ref is
+# what unmapped it; "names no ticket" sent two admirals hunting for a missing ref.
+has "two refs: the notice names the two-ref case" "$(printf '%s' "${OUT}" | jq -r .hookSpecificOutput.additionalContext)" "two or more"
+has "two refs: the notice's Fix says a batch names only its first ticket's ref" "$(printf '%s' "${OUT}" | jq -r .hookSpecificOutput.additionalContext)" "a batch names only its first ticket's ref"
 
 echo "== a fleet event with an unusable id is logged, never silently dropped"
 n0="$(logn)"; c0="$(fleet_log_count)"

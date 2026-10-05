@@ -57,7 +57,7 @@ PostToolUseFailure on Agent|Task; SubagentStart; SubagentStop; StopFailure).
 Reads the hook JSON on stdin and reports athena-admiral / athena-captain
 spawns, starts and ends to the fleet registry via ai/bin/fleet-report,
 detached. Always exits 0 and never denies. Writes stdout only for a captain
-spawn that names no ticket (additionalContext, no permissionDecision).
+spawn that names no single ticket ref (additionalContext, no permissionDecision).
   --self-test   run ai/hooks/fleet-lifecycle.self-test.sh
 EOF
     exit 0 ;;
@@ -161,7 +161,7 @@ case "${event}" in
         "mapped "*) set -- "$@" --mapping mapped --ticket-ref "${parsed#mapped }" ;;
         *)
           set -- "$@" --mapping unmapped
-          fleet_log_failure "${sid}" agent_spawn "fleet-lifecycle: athena-captain spawn ${tool_use_id} (caller ${agent_id:-top level}) names no ticket and was reported as an unmapped captain. $(fleet_unmapped_notice | sed 's/^.*\(Fix: \)/\1/')" 2>/dev/null
+          fleet_log_failure "${sid}" agent_spawn "fleet-lifecycle: athena-captain spawn ${tool_use_id} (caller ${agent_id:-top level}) names no single ticket ref and was reported as an unmapped captain. $(fleet_unmapped_notice | sed 's/^.*\(Fix: \)/\1/')" 2>/dev/null
           jq -n -c --arg c "$(fleet_unmapped_notice)" \
             '{hookSpecificOutput: {hookEventName: "PreToolUse", additionalContext: $c}}' ;;
       esac
