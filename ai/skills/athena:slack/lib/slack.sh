@@ -303,7 +303,9 @@ slack_refresh_users() {
   # Not a pipeline, for the reason spelled out in inbox.sh: `a | b` exits with
   # b's status, so a failed listing would be written up as an empty cache.
   slack_paginate users.list "limit=200" '.members' > "$_us_file.raw"
-  jq -s 'map({key: .id, value: (.profile.display_name // "" | select(. != "")) // .name // .id}) | from_entries' \
+  # The value is parenthesized whole: jq 1.7 (Debian 13's) rejects a bare `//`
+  # in an object value, and only jq 1.8 accepts it (DND-2084).
+  jq -s 'map({key: .id, value: ((.profile.display_name // "" | select(. != "")) // .name // .id)}) | from_entries' \
     "$_us_file.raw" > "$_us_file.tmp"
   mv "$_us_file.tmp" "$_us_file"
   rm -f "$_us_file.raw"
