@@ -12,6 +12,7 @@
 #     matches and `git … || die "…"` still does; a `git ls-remote --get-url`
 #     command is blanked first, because it prints the configured URL and
 #     opens no transport (a real read later on the same line still matches);
+#     a Ruby argv whose "ls-remote" is followed by "--get-url" likewise;
 #   - Ruby: an argv array that names "git" and then "fetch" / "ls-remote" /
 #     "pull" within three joined lines (a call split over lines), or a git
 #     helper call (call, Git.call, git_ok, git_status) naming one. A window
@@ -61,6 +62,9 @@ SH = /#{POS}\s*#{PREFIX}git(?:\s+(?:-C\s+\S+|-c\s+\S+|-q|--\S+))*\s+#{NET}\b/
 # exits; it opens no transport, so it is a local config read, not a remote one.
 SH_LOCAL = /\bgit(?:\s+(?:-C\s+[^\s;&|()]+|-c\s+[^\s;&|()]+|-q|--[^\s;&|()]+))*\s+ls-remote(?:\s+-[^\s;&|()]+)*\s+--get-url(?=\s|$|\))/
 RB_ARGV = /"git"\s*,[^\]]*?"#{NET}"/m
+# The Ruby form of SH_LOCAL (DND-2086): an argv whose "ls-remote" is followed
+# directly by "--get-url" reads config only.
+RB_LOCAL_TAIL = /\A\s*,\s*"--get-url"/
 RB_CALL = /\b(?:Git\.call|call|git_ok|git_status)\(\s*[^)]*"#{NET}"/
 ROUTED = PUSH ? /FORGE_PUSH|forge_push/ : /FORGE_GIT|forge_git/
 # A forge wrapper named by hand for a push: in shell, the wrapper in command
@@ -77,7 +81,7 @@ RB_WRAP = /(?:gh_athena|glab_athena|"[^"\s]*#{WRAP}")\s*,\s*"git"\s*,[^\]]*?"pus
 # reported once, at its own line)?
 def argv_starts_here?(window, first_len)
   m = RB_ARGV.match(window)
-  !m.nil? && m.begin(0) < first_len
+  !m.nil? && m.begin(0) < first_len && !window[m.end(0)..].match?(RB_LOCAL_TAIL)
 end
 
 # A command substitution inside double quotes ("$(git … fetch)") is code, not
