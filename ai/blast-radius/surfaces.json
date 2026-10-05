@@ -352,7 +352,7 @@
       "ai/hooks/fleet-drain-guard.sh": "pauses agent spawns while the fleet drains; it decides nothing about a merge or push",
       "ai/hooks/fleet-lifecycle.sh": "records agent lifecycle telemetry; no merge or push decision",
       "ai/hooks/fleet-report.sh": "reports to the fleet registry; no merge or push decision",
-      "ai/hooks/git-stash-guard.sh": "refuses stash-list writes (DND-670); it decides nothing about a merge or push",
+    "ai/hooks/slack-plugin-write-guard.sh": "denies Slack plugin write tools (the owner's Slack user token) to agent sessions (DND-2043); it decides which Slack writes run, never which forge merge or push is accepted or as whom",      "ai/hooks/git-stash-guard.sh": "refuses stash-list writes (DND-670); it decides nothing about a merge or push",
       "ai/hooks/inbox-untrusted-guard.sh": "keeps inbox bodies untrusted; no merge or push decision",
       "ai/hooks/main-session-policy.sh": "SessionStart policy text for the top-level session; no deny path",
       "ai/hooks/notify-idle.sh": "Stop-hook desktop notification; no deny path",
