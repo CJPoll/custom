@@ -58,6 +58,14 @@ mutate "origin/main fetch removed fails" "fetch origin/main" 's/git fetch --no-t
 mutate "gate echoed not run fails"       "harness-gate"    's#env HOME=/home/ci ai/bin/harness-gate$#echo ai/bin/harness-gate#'
 mutate "credential-named variable fails" "credential"      's/GIT_DEPTH: "0"/GIT_DEPTH: "0"\n    DEPLOY_TOKEN: "x"/'
 
+# Goal 4 (DND-2067): no pipeline on the default branch.
+mutate "default-branch rule removed fails" "default branch" '/CI_DEFAULT_BRANCH/,+1d'
+mutate "default-branch rule not never fails" "must be" '/CI_DEFAULT_BRANCH/{n;s/never/always/;}'
+# Order: move the never-rule behind the branch rule; the checker must refuse.
+/usr/bin/ruby -ryaml -e 'd = YAML.safe_load_file(ARGV[0], aliases: true); r = d["workflow"]["rules"]; i = r.index { |x| x["if"].to_s.include?("CI_DEFAULT_BRANCH") }; r.push(r.delete_at(i)); File.write(ARGV[1], YAML.dump(d))' "${CI_FILE}" "${TMP}/order.yml"
+out="$(/usr/bin/ruby "${CHECK}" "${TMP}/order.yml" 2>&1)"
+if [ $? -ne 0 ] && [[ "${out}" == *"must come before"* ]]; then ok "default-branch rule after the branch rule fails"; else bad "default-branch rule after the branch rule fails" "${out}"; fi
+
 # A missing file is an error, not a pass.
 out="$(/usr/bin/ruby "${CHECK}" "${TMP}/absent.yml" 2>&1)"
 if [ $? -ne 0 ] && [[ "${out}" == *"Fix:"* ]]; then ok "missing file fails with Fix:"; else bad "missing file fails with Fix:" "${out}"; fi

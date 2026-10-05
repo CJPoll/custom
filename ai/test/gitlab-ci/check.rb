@@ -42,6 +42,16 @@ if mr_i && dup_i && br_i
   errors << "workflow: the MR rule and the branch rule must not be `when: never`" if rules[mr_i]["when"] == "never" || rules[br_i]["when"] == "never"
 end
 
+# Goal 4 (DND-2067): no pipeline on the default branch. The never-rule must
+# exist, be `when: never`, and come before the branch rule that would run it.
+def_i = ifs.index { |i| i.include?("$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH") }
+if def_i.nil?
+  errors << "default branch: workflow:rules needs `$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH`, `when: never` (no pipeline on main)"
+else
+  errors << "default branch: the $CI_DEFAULT_BRANCH rule must be `when: never`" unless rules[def_i]["when"] == "never"
+  errors << "default branch: the $CI_DEFAULT_BRANCH never-rule must come before the branch rule" if br_i && def_i > br_i
+end
+
 # No credentials or remote code anywhere, hidden jobs and default included.
 walk = lambda do |node, where|
   case node

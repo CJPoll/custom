@@ -3,6 +3,7 @@
 # local gate, the integration receipt or the push refusals.
 #
 # Rules this file holds (ai/test/gitlab-ci/self-test.sh asserts them):
+#   - No pipeline runs on the default branch (DND-2067).
 #   - A fork MR never runs: the runner is the owner's own machine, and a fork
 #     MR is arbitrary code from outside the project.
 #   - No credentials: no CI/CD variables, no secrets, no id_tokens.
@@ -28,7 +29,11 @@ workflow:
     # A branch with an open MR runs the MR pipeline only (no duplicates).
     - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
       when: never
-    # Branch pipelines for branches with no open MR, main included.
+    # No pipeline on the default branch (DND-2067, goal 4): a landing is
+    # already gated before it merges, and CI does not run again after.
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      when: never
+    # Branch pipelines for branches with no open MR.
     - if: '$CI_COMMIT_BRANCH'
 
 default:
