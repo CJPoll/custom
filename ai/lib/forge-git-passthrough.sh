@@ -1323,11 +1323,13 @@ fg_refuse_non_https() {
 }
 
 # ---- Landing telemetry (DND-1475) -------------------------------------------
-# With FG_LANDING_TELEMETRY=1 (gh-athena and glab-athena set it; glab-athena
-# since DND-1939), a `push` runs git as a CHILD instead of exec'ing it, so
-# that after a push that
-# exits 0 the wrapper can tell whether the remote's default branch moved, and
-# record that as one `merge.landed` event (via=push, before, after). That is
+# With FG_LANDING_TELEMETRY=1 (gh-athena sets it; glab-athena too, since
+# DND-1939), a `push` runs git as a CHILD instead of exec'ing it, so that
+# after a push that exits 0 the wrapper can tell whether the remote's default
+# branch moved, and record that as one `merge.landed` event (via=push, before,
+# after). A push to another forge never gets here: each wrapper pins
+# FG_ROUTE_ONLY=1, which refuses it before git runs (DND-2000), so no landing
+# probe ever reaches the other forge (agent-forge-identity R3/R3b). That is
 # how ~/dev/custom lands (athena:merge-boarding, the no-CI ff push). The event
 # is timed (DND-1501): at = when this push began, duration_s = its wall
 # through the AFTER read. The lead-time ledger reads its start as the landing

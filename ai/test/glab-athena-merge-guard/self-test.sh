@@ -80,9 +80,14 @@ answer() {
   # stage shows up as an exec and fails the case loudly.
   [ -f "${STUB_FX}/$k.out" ] || [ -f "${STUB_FX}/$k.rc" ] || return 0
   printf '%s\n' "$*" >> "${STUB_READS}"
-  # DND-1939: once something ran (the merge), a staged <kind>.after.out is
-  # the forge's answer: the MR as merged.
-  if [ -s "${STUB_EXECS}" ] && [ -f "${STUB_FX}/$k.after.out" ]; then cat "${STUB_FX}/$k.after.out"; exit 0; fi
+  # DND-1939: once something ran (the merge), a staged <kind>.after.out /
+  # .after.rc / .after.err is the forge's answer: the MR as merged, or a
+  # read that fails.
+  if [ -s "${STUB_EXECS}" ] && { [ -f "${STUB_FX}/$k.after.out" ] || [ -f "${STUB_FX}/$k.after.rc" ]; }; then
+    [ -f "${STUB_FX}/$k.after.err" ] && cat "${STUB_FX}/$k.after.err" >&2
+    [ -f "${STUB_FX}/$k.after.out" ] && cat "${STUB_FX}/$k.after.out"
+    exit "$(cat "${STUB_FX}/$k.after.rc" 2>/dev/null || echo 0)"
+  fi
   [ -f "${STUB_FX}/$k.rc" ] && rc="$(cat "${STUB_FX}/$k.rc")"
   [ -f "${STUB_FX}/$k.err" ] && cat "${STUB_FX}/$k.err" >&2
   [ -f "${STUB_FX}/$k.out" ] && cat "${STUB_FX}/$k.out"
@@ -100,6 +105,10 @@ if [[ "$all" =~ ^api\ (--hostname\ [^\ ]+\ )?projects/[0-9]+/merge_requests/[0-9
 # tip and the head (asked only when the head is not in the local store).
 if [[ "$all" =~ ^api\ (--hostname\ [^\ ]+\ )?projects/[0-9]+/pipelines\?sha=[0-9a-f]+\&ref=[^\ ]+\&per_page=100$ ]]; then answer pipes "$all"; fi
 if [[ "$all" =~ ^api\ (--hostname\ [^\ ]+\ )?projects/[0-9]+/repository/merge_base\?refs%5B%5D=[0-9a-f]+\&refs%5B%5D=[0-9a-f]+$ ]]; then answer mergebase "$all"; fi
+# DND-1939: the landing record's project read (its default branch). Before the
+# visibility catch-all, which matches the same path; with no project fixture
+# staged it falls through to that catch-all.
+if [[ "$all" =~ ^api\ (--hostname\ [^\ ]+\ )?projects/[0-9]+$ ]]; then answer project "$all"; fi
 # The outbound scan's visibility read (DND-1938), run on an api write that
 # carries a field (a train car's `-f sha=`) once the merge guard has passed it.
 # Answered "private": the project the merge guard judges is the work-shaped
@@ -1038,6 +1047,8 @@ merged_fx() {
       '.state = "merged" | .merged_at = "2026-10-03T12:00:00Z" | .merge_commit_sha = $m | .squash_commit_sha = $q | .source_branch = "dnd-1-synthetic-unit"' \
       "${FX}/${f}.out" > "${FX}/${f}.after.out"
   done
+  # The project, for its default branch (read only once the MR is merged).
+  printf '{"id":7000001,"default_branch":"%s","visibility":"private"}\n' "${3:-main}" > "${FX}/project.out"
 }
 # land_run <store> <args…> : the wrapper with its own telemetry store.
 land_run() { local s="$1"; shift; OUT="$(ATHENA_TELEMETRY_DIR="${s}" "${WRAPPER}" "$@" 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"; }
@@ -1048,8 +1059,10 @@ EV="$(landed "${S}")"
 if ran_once "${MERGE_ARGS[@]}" && [ "$(landed_n "${S}")" = 1 ] \
   && [ "$(jq -cS .attrs <<<"${EV}")" = "$(jq -cnS --arg b "${TIP_FX}" --arg a "${LANDED_SHA}" '{via:"mr",mr:4242,before:$b,after:$a}')" ] \
   && [ "$(jq -r .head <<<"${EV}")" = "${HEAD_SHA}" ] && [ "$(jq -r .repo <<<"${EV}")" = example-app ] \
-  && [[ "$(reads)" == *"mr view 4242 -F json"* ]] && [ ! -e "${S}/write-failures" ]; then
-  ok "ML1. a merge glab ran and confirm-merged then sees: one merge.landed via=mr (mr, before = the target tip the guard read, after = the merge commit, head = the MR head), repo = the checkout's key"
+  && [ "$(jq -r '[.unit, .unit_source] | join(" ")' <<<"${EV}")" = "DND-1 branch" ] \
+  && [[ "$(reads)" == *"mr view 4242 -F json"* ]] && [[ "$(reads)" == *"api --hostname gitlab.com projects/7000001"* ]] \
+  && [ ! -e "${S}/write-failures" ] && ! grep -rqF "${FAKE_TOKEN}" "${S}" && [[ "${ERR}" != *"merge.landed"* ]]; then
+  ok "ML1. a merge glab ran and confirm-merged then sees: one merge.landed via=mr (mr, before = the target tip the guard read, after = the merge commit, head = the MR head, unit from the source branch), repo = the checkout's key, no token in the store"
 else bad "ML1. merge.landed on a confirmed MR merge" "$(detail) ev='${EV}' failures='$(cat "${S}/write-failures" 2>/dev/null)'"; fi
 
 reset_fx; green_fx; merged_fx null "${LANDED_SHA}"; S="${TMP}/m2-store"
@@ -1064,17 +1077,20 @@ land_run "${S}" "${MERGE_ARGS[@]}"
   && ok "ML3. a fast-forward merge (no merge or squash commit): after = the MR head itself" \
   || bad "ML3. ff merge after" "$(detail) ev='$(landed "${S}")'"
 
-reset_fx; green_fx; S="${TMP}/m4-store"
+# open_fx : the forge's answer after the merge ran: the MR still open.
+open_fx() { jq -c '.state = "opened" | .merged_at = null' "${FX}/mrview.out" > "${FX}/mrview.after.out"; }
+reset_fx; green_fx; open_fx; S="${TMP}/m4-store"
 land_run "${S}" "${MERGE_ARGS[@]}"
-if ran_once "${MERGE_ARGS[@]}" && [ "$(landed_n "${S}")" = 0 ] && [ "$(grep -c 'mr view 4242 -F json' "${STUB_READS}")" -ge 3 ] \
-  && [[ "${ERR}" == *"no merge.landed"* ]] && [[ "${ERR}" == *"Fix:"* ]] && [[ "${ERR}" == *"confirm-merged --mr 4242"* ]]; then
+if ran_once "${MERGE_ARGS[@]}" && [ "$(landed_n "${S}")" = 0 ] && [ "$(grep -c 'mr view 4242 -F json' "${STUB_READS}")" = 3 ] \
+  && [[ "${ERR}" == *"no merge.landed recorded for !4242: glab exited 0, but confirm-merged did not see it merged in 2 read(s)"* ]] \
+  && [[ "${ERR}" == *"Fix:"* ]] && [[ "${ERR}" == *"confirm-merged --mr 4242"* ]]; then
   ok "ML4. glab returned 0 but confirm-merged never sees the merge (bounded tries): no event, exit 0 kept, the miss is said with a Fix:"
 else bad "ML4. unconfirmed merge" "$(detail)"; fi
 
-reset_fx; green_fx; printf '1' > "${FX}/exec.rc"; S="${TMP}/m5-store"
+reset_fx; green_fx; open_fx; printf '1' > "${FX}/exec.rc"; S="${TMP}/m5-store"
 land_run "${S}" "${MERGE_ARGS[@]}"
-[ "${RC}" = 1 ] && [ "$(landed_n "${S}")" = 0 ] && [ "$(execs)" = "${MERGE_ARGS[*]}" ] \
-  && ok "ML5. a merge glab refused (exit 1), not merged: exit 1 passed through, no event" \
+[ "${RC}" = 1 ] && [ "$(landed_n "${S}")" = 0 ] && [ "$(execs)" = "${MERGE_ARGS[*]}" ] && [[ "${ERR}" != *"merge.landed"* ]] \
+  && ok "ML5. a merge glab refused (exit 1), cleanly not merged: exit 1 passed through, no event, no miss line" \
   || bad "ML5. refused merge" "$(detail)"
 
 reset_fx; green_fx; printf '1' > "${FX}/exec.rc"; merged_fx "${LANDED_SHA}"; S="${TMP}/m6-store"
@@ -1094,6 +1110,58 @@ land_run "${S}" mr list
 [ "${RC}" = 0 ] && [ "$(landed_n "${S}")" = 0 ] && [ ! -s "${STUB_READS}" ] \
   && ok "ML8. a command that is not a merge: no confirm read, no event" \
   || bad "ML8. non-merge command" "$(detail)"
+
+# could_not_look : the miss names COULD NOT LOOK, carries a Fix: whose hand
+# record matches the automatic one (before, unit branch), and no event.
+could_not_look() { [ "$(landed_n "${S}")" = 0 ] && [[ "${ERR}" == *"no merge.landed recorded for !4242: COULD NOT LOOK"* ]] \
+  && [[ "${ERR}" == *"Fix:"* ]] && [[ "${ERR}" == *"--attr before=${TIP_FX}"* ]] && [[ "${ERR}" == *"--unit-branch"* ]]; }
+reset_fx; green_fx; printf '1' > "${FX}/mrview.after.rc"; printf 'glab: 502 Bad Gateway\n' > "${FX}/mrview.after.err"; S="${TMP}/m9-store"
+land_run "${S}" "${MERGE_ARGS[@]}"
+[ "${RC}" = 0 ] && could_not_look && [ "$(grep -c 'mr view 4242 -F json' "${STUB_READS}")" = 3 ] \
+  && ok "ML9. glab exited 0 but the confirm read errors (confirm-merged exit 3): COULD NOT LOOK, not \"not merged\", with a Fix:" \
+  || bad "ML9. confirm read errors after a 0 exit" "$(detail)"
+
+reset_fx; green_fx; printf '1' > "${FX}/exec.rc"; printf '1' > "${FX}/mrview.after.rc"; S="${TMP}/m10-store"
+land_run "${S}" "${MERGE_ARGS[@]}"
+[ "${RC}" = 1 ] && could_not_look && [ "$(grep -c 'mr view 4242 -F json' "${STUB_READS}")" = 2 ] \
+  && ok "ML10. glab exited 1 and the one confirm read errors: whether it landed is unknown, so it is said (COULD NOT LOOK), exit 1 kept" \
+  || bad "ML10. confirm read errors after a failed call" "$(detail)"
+
+reset_fx; green_fx; merged_fx "${LANDED_SHA}" null develop; S="${TMP}/m11-store"
+land_run "${S}" "${MERGE_ARGS[@]}"
+[ "${RC}" = 0 ] && [ "$(landed_n "${S}")" = 0 ] && [[ "${ERR}" == *"!4242 merged into main, not the default branch develop: no merge.landed"* ]] \
+  && ok "ML11. an MR merged into a branch that is not the project's default: no event, the skip is said" \
+  || bad "ML11. non-default target" "$(detail)"
+
+reset_fx; green_fx; merged_fx "${LANDED_SHA}"; rm -f "${FX}/project.out"; printf '1' > "${FX}/project.rc"; S="${TMP}/m12-store"
+land_run "${S}" "${MERGE_ARGS[@]}"
+[ "${RC}" = 0 ] && could_not_look && [[ "${ERR}" == *"default branch"* ]] \
+  && ok "ML12. the project's default branch cannot be read: COULD NOT LOOK, no event" \
+  || bad "ML12. project unreadable" "$(detail)"
+
+# ML13. Fail-open: a telemetry store that cannot be written changes nothing
+# the caller sees (exit code, stdout).
+reset_fx; green_fx; merged_fx "${LANDED_SHA}"; printf 'x' > "${TMP}/not-a-dir"; S="${TMP}/not-a-dir"
+land_run "${S}" "${MERGE_ARGS[@]}"
+ran_once "${MERGE_ARGS[@]}" && [ "${OUT}" = "stub: ran ${MERGE_ARGS[*]}" ] \
+  && ok "ML13. an unwritable telemetry store: the merge's exit 0 and stdout are unchanged (fail-open)" \
+  || bad "ML13. fail-open on an unwritable store" "$(detail)"
+
+# ML14. A checkout missing ai/lib/glab-landing.sh: the merge still runs, its
+# exit code and stdout unchanged, and the miss is said with a Fix:.
+# The copy is a real file (the wrapper resolves its own dir with readlink -f);
+# every other file is a link to this tree, glab-landing.sh left out.
+FB="${TMP}/fallback/ai"; mkdir -p "${FB}/bin" "${FB}/lib"
+for f in "${AI_DIR}"/*; do case "${f##*/}" in bin|lib) ;; *) ln -s "${f}" "${FB}/${f##*/}" ;; esac; done
+for f in "${AI_DIR}"/bin/*; do ln -s "${f}" "${FB}/bin/${f##*/}"; done
+for f in "${AI_DIR}"/lib/*; do [ "${f##*/}" = glab-landing.sh ] || ln -s "${f}" "${FB}/lib/${f##*/}"; done
+rm -f "${FB}/bin/glab-athena"; cp "${AI_DIR}/bin/glab-athena" "${FB}/bin/glab-athena"
+reset_fx; green_fx; merged_fx "${LANDED_SHA}"; S="${TMP}/m14-store"
+OUT="$(ATHENA_TELEMETRY_DIR="${S}" "${FB}/bin/glab-athena" "${MERGE_ARGS[@]}" 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"
+ran_once "${MERGE_ARGS[@]}" && [ "${OUT}" = "stub: ran ${MERGE_ARGS[*]}" ] && [ "$(landed_n "${S}")" = 0 ] \
+  && [[ "${ERR}" == *"no merge.landed recorded for !4242: cannot load"* ]] && [[ "${ERR}" == *"Fix:"* ]] \
+  && ok "ML14. glab-landing.sh missing: the merge runs unchanged, the miss is said with a Fix:" \
+  || bad "ML14. missing landing lib" "$(detail)"
 
 echo
 echo "--- the dry-run seam ---"

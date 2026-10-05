@@ -336,7 +336,8 @@ module LeadTimePhases
     module_function
 
     # The pre-push main: the `before` of a merge.landed push of the landed
-    # commit, or nil (a push gh-athena did not make, or before DND-1475).
+    # commit, or nil (a push neither gh-athena nor glab-athena made, or before
+    # DND-1475).
     # Two pushes of one commit with different befores is no answer.
     def before_of(landing, events)
       befores = events.items.select do |e|
@@ -668,10 +669,11 @@ module LeadTimePhases
 
     # When the admiral began landing the gated head (DND-1501): the earliest
     # of the first merge.lock_wait (locked-merge) and the start of a timed
-    # merge.landed push (gh-athena: at = the push start, duration_s = its
-    # wall), at or after the integration run ended (integ_end: an Anchor). A
-    # point merge.landed (a locked-merge confirmation, or a push from before
-    # DND-1501) marks only the end, so it is never a start.
+    # merge.landed push (gh-athena or glab-athena: at = the push start,
+    # duration_s = its wall), at or after the integration run ended
+    # (integ_end: an Anchor). A point merge.landed (a locked-merge
+    # confirmation, a glab-athena MR merge, or a push from before DND-1501)
+    # marks only the end, so it is never a start.
     def land_start(landing, events, integ_end)
       locks = landing_events(landing, events, "merge.lock_wait")
                    .map { |e| [Match.at(e), "telemetry merge.lock_wait"] }
@@ -682,8 +684,8 @@ module LeadTimePhases
       return found(*cands.min_by(&:first)) unless cands.empty?
 
       missing(telemetry_miss(events, "no landing start for #{Landing.gated_desc(landing)}: no merge.lock_wait " \
-                                     "and no timed merge.landed push after integration ended (a gh-athena push " \
-                                     "to main records its start from DND-1501 on; the custom ff landing's " \
+                                     "and no timed merge.landed push after integration ended (a gh-athena or " \
+                                     "glab-athena push to main records its start from DND-1501 on; the custom ff landing's " \
                                      "hand-held lock writes no merge.lock_wait until DND-1370)"))
     end
 

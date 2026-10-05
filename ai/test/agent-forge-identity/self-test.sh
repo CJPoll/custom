@@ -522,6 +522,15 @@ if [ "${RC}" = 3 ] && [[ "${OUT}" == *"glab-athena: REFUSING"* ]] && [[ "${OUT}"
   && [[ "${OUT}" == *"gh-athena git"* ]] && [[ "${CALLS}" != *"REAL-GIT"* ]]; then
   ok "R3. glab-athena git push to a github.com remote (wrong bot for the host): glab-athena refuses it (DND-2000)"
 else bad "R3. glab-athena git push to a github.com remote" "rc=${RC} calls=[${CALLS}] out=$(printf '%s' "${OUT}" | head -c 400)"; fi
+# DND-1939: both routes record landings, so a push to the OTHER forge must be
+# refused before any landing probe (ls-remote) reaches that forge. Since
+# DND-2000 gh-athena refuses the gitlab.com host itself (exit 3), before git.
+repo 'https://gitlab.com/synth-group/synth-repo.git'
+run "${R}" "${GHA}" git push origin HEAD:refs/heads/feat
+if [ "${RC}" = 3 ] && [[ "${OUT}" == *"gh-athena: REFUSING"* ]] && [[ "${OUT}" == *"Fix:"* ]] \
+  && [[ "${OUT}" == *"glab-athena git"* ]] && [[ "${CALLS}" != *"REAL-GIT"* ]]; then
+  ok "R3b. gh-athena git push to a gitlab.com remote (wrong bot for the host): refused before git, so no landing probe of it (DND-2000, DND-1939)"
+else bad "R3b. gh-athena git push to a gitlab.com remote" "rc=${RC} calls=[${CALLS}] out=$(printf '%s' "${OUT}" | head -c 400)"; fi
 run "${R}" "${GHA}" pr create --title t --body b -R synth-owner/synth-repo
 passed "R4. gh-athena pr create reaches gh as the App (token, isolated config)" 'REAL-GH pr create --title t --body b -R synth-owner/synth-repo|token=set|cfg=gh-athena-cfg.'
 repo 'https://gitlab.com/synth-group/synth-repo.git'
