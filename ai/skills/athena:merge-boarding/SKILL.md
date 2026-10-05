@@ -581,8 +581,10 @@ merges into `origin/main` with no textual conflict; a branch behind it is gated
 on its own base (DND-2076).
 
 **Later (2026-10-05, DND-2076):** this said the gate makes wt-preflight's
-not-behind assertion again at landing. Superseded by the owner decision quoted
-at *Exit 0 means* below.
+not-behind assertion again at landing. Superseded by owner decision (Cody,
+2026-10-05T08:26:29Z, session `0cc59a5e-6c65-495e-a216-83c6a0bf2d56`, message
+`2b344496-478d-4b7f-a4cf-635a2273ab94`): "I do NOT want to require a rebase on
+each merge; that's the point of the parallel merges."
 
 **Before boarding or merging any MR, with the Mission's worktree as the cwd,
 run the main checkout's copy:**

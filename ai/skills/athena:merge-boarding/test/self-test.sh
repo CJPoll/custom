@@ -192,6 +192,47 @@ grep -q 'INTEGRATION OK' <<<"$out" && bad "c2b printed INTEGRATION OK" "$out" ||
 [ "$(git -C "$R" rev-parse HEAD)" = "$before" ] && [ -z "$(git -C "$R" status --porcelain)" ] \
   && ok "c2b the branch and tree are untouched" || bad "c2b the refusal changed the branch or tree"
 
+# ---------------------------------------------------------------- case 2e
+# DND-2076: the conflict check that admits a head behind the target must never
+# read a FAILED lookup as "no conflict". A git merge-tree that fails (old git,
+# a bad object store), or an --is-ancestor that fails, is exit 2 with Fix:,
+# the gate does not run, and a stale pass for the head is removed. A PATH
+# stub fails only that one call and execs the real git for every other one.
+C2E_REAL_GIT="$(command -v git)"
+c2e_stub() { # <dir> <the argv word to fail: merge-tree | --is-ancestor>
+  mkdir -p "$1"
+  cat > "$1/git" <<EOF
+#!/bin/sh
+case "\$*" in
+  *"$2"*) echo "fatal: stubbed $2 failure" >&2; exit 128 ;;
+esac
+exec "$C2E_REAL_GIT" "\$@"
+EOF
+  chmod +x "$1/git"
+}
+c2e_n=0
+for c2e in merge-tree "--is-ancestor"; do
+  # Paths are numbered, never named for the stubbed word: the stub matches
+  # its whole argv, and a path naming it would fail an unrelated call.
+  c2e_n=$((c2e_n + 1)); R="${TMP}/c2e-${c2e_n}"; new_repo "$R"
+  ( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f \
+    && git checkout -q main && echo m > m.txt && git add m.txt && git commit -qm m \
+    && git checkout -q feature )
+  stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
+  record_pass "$R"
+  head_sha="$( cd "$R" && git rev-parse HEAD )"
+  rf="$(git -C "$R" rev-parse --path-format=absolute --git-common-dir)/integration-receipts/${head_sha}.json"
+  mkdir -p "$(dirname "$rf")"; printf '{"schema":"integration-receipt/1","verdict":"pass","head":"%s"}\n' "$head_sha" > "$rf"
+  c2e_stub "${TMP}/c2e-bin-${c2e_n}" "$c2e"
+  out="$( cd "$R" && PATH="${TMP}/c2e-bin-${c2e_n}:${PATH}" "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+  [ "$rc" -eq 2 ] && grep -q 'is unknown' <<<"$out" && grep -q '^Fix:' <<<"$out" \
+    && ok "c2e a failed ${c2e} is exit 2, 'unknown' with Fix:, never 'no conflict'" \
+    || bad "c2e expected exit 2 'is unknown' for a failed ${c2e}, got $rc" "$out"
+  grep -q 'INTEGRATION OK' <<<"$out" && bad "c2e printed INTEGRATION OK past a failed ${c2e}" "$out" || ok "c2e no INTEGRATION OK past a failed ${c2e}"
+  [ ! -f "${R}/GATE_RAN" ] && ok "c2e the gate did not run past a failed ${c2e}" || bad "c2e the gate ran past a failed ${c2e}"
+  [ ! -e "$rf" ] && ok "c2e a stale pass is removed after a failed ${c2e}" || bad "c2e a stale pass survived a failed ${c2e}"
+done
+
 # ---------------------------------------------------------------- case 2c
 # DND-2076: on a head behind the target, the gate-file check blames the branch
 # only for a gate it edits against its OWN base. A gate the target changed
