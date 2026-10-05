@@ -106,6 +106,10 @@ tools:
   # the installed gh's or glab's help; its probes carry no token and run no
   # command.
   cli-flag-table:          { class: idempotent, reason: render }
+  # forge-wire-capture (DND-2025) rewrites ai/lib/test/forge-wire/fixtures/
+  # from gh and glab run against a local fake upstream with a synthetic token;
+  # nothing reaches a forge, and a re-run writes the same bytes.
+  forge-wire-capture:      { class: idempotent, reason: render }
   # outbound-scan (DND-699) reads the overlay and git. Its one write is a
   # waiver line appended to a LOCAL log (never the repo, a forge or a remote);
   # nothing stricter than local mutation, so idempotent by the class order.
