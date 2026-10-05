@@ -36,7 +36,7 @@ REAL_RUBY=/usr/bin/ruby
 REPO="${TMP}/repo"
 mkdir -p "${REPO}/ai/bin" "${REPO}/ai/lib" "${REPO}/ai/git-hooks" "${REPO}/ai/private-overlay" "${REPO}/scripts"
 cp "${SRC}/scripts/setup-private-overlay" "${REPO}/scripts/"
-cp "${SRC}/ai/bin/outbound-scan" "${SRC}/ai/bin/private-overlay" "${REPO}/ai/bin/"
+cp "${SRC}/ai/bin/outbound-scan" "${SRC}/ai/bin/private-overlay" "${SRC}/ai/bin/forge-git" "${REPO}/ai/bin/"
 cp "${SRC}"/ai/lib/*.rb "${REPO}/ai/lib/"
 cp "${SRC}/ai/git-hooks/outbound-pre-push.sh" "${REPO}/ai/git-hooks/"
 cp -R "${SRC}/ai/private-overlay/skeleton" "${REPO}/ai/private-overlay/"

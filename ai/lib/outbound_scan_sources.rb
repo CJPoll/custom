@@ -180,7 +180,12 @@ module OutboundScan
       # The read goes through Athena's forge route (ai/bin/forge-git, DND-1977):
       # a forge URL is read as Athena, never with the owner's SSH key; a local
       # path stays plain git; any other URL is refused (exit 3).
-      out, _err, st = Open3.capture3(LS_REMOTE_ENV, FORGE_GIT, "-C", Dir.pwd, "ls-remote", url, binmode: true)
+      out, _err, st = begin
+        Open3.capture3(LS_REMOTE_ENV, FORGE_GIT, "-C", Dir.pwd, "ls-remote", url, binmode: true)
+      rescue SystemCallError => e
+        raise Unmeasurable, "ai/bin/forge-git could not be run beside this scanner (#{FORGE_GIT}: " \
+                            "#{e.class.name.split('::').last}), so git ls-remote cannot read the destination (COULD NOT LOOK)"
+      end
       unless st.success?
         raise Unmeasurable, "git ls-remote (through ai/bin/forge-git) could not read the destination's refs " \
                             "(exit #{st.exitstatus.inspect}), so the range of a new ref is unknown (COULD NOT LOOK)"
