@@ -58,7 +58,8 @@ unset ATHENA_UNIT
 export ATHENA_FORGE_IDENTITIES_FILE="${TMP}/forge-identities.json"
 jq -n --arg t "${TMP}/token" '{kind:"athena-forge-identities", schema:1, identities:
   [["gitlab.com","example-group"], ["gitlab.com","x"], ["gitlab.com","someone"], ["evil-gitlab.com","example-group"],
-   ["gitlabxcom","example-group"], ["other.example.com","example-group"], ["gitlab.com","cjpoll"]]
+   ["gitlabxcom","example-group"], ["other.example.com","example-group"], ["gitlab.com","cjpoll"],
+   ["gitlab.com","athena-ai-harness"], ["gitlab.com","example-moved"]]
   | map({host:.[0], namespace:.[1], bot:"synthetic-merge-bot", token_file:$t, refresh:"group_service_account"})}' \
   > "${ATHENA_FORGE_IDENTITIES_FILE}"
 export ATHENA_PRIVATE_ROOT="${TMP}/empty-overlay"; mkdir -p "${ATHENA_PRIVATE_ROOT}/overlay"; chmod 700 "${ATHENA_PRIVATE_ROOT}"
@@ -972,13 +973,13 @@ receipt_ran P22 "the lock tool's argv onto a green tip -> runs" "${LOCK_ARGS[@]}
 
 echo
 echo "--- DND-1941: the tip's CONTENT (ai/config/main-content-checks.json) ---"
-# The declaration is keyed by project path; the GitLab project cjpoll/gen_saas
-# must resolve the same entry as the GitHub repo CJPoll/gen_saas. A fixture
+# The declaration lists each product's project paths; the GitLab project
+# athena-ai-harness/gen_saas resolves the gen_saas entry (DND-2034). A fixture
 # checkout of it, its tip holding two migrations with one version.
 GS="${TMP}/gen_saas"; MIG="apps/athena/priv/repo/migrations"
 git init -q -b main "${GS}"
 gs() { git -C "${GS}" -c user.name=t -c user.email=t@t -c commit.gpgsign=false "$@"; }
-gs remote add origin git@gitlab.com:cjpoll/gen_saas.git
+gs remote add origin git@gitlab.com:athena-ai-harness/gen_saas.git
 mkdir -p "${GS}/${MIG}"; : > "${GS}/${MIG}/20250101000000_init.exs"; gs add -A; gs commit -q -m base
 GS_BASE="$(gs rev-parse HEAD)"
 : > "${GS}/${MIG}/20250101000000_other.exs"; gs add -A; gs commit -q -m dup
@@ -991,12 +992,13 @@ gs checkout -q -b feat "${GS_BASE}"; : > "${GS}/${MIG}/20250104000000_feat.exs";
 GS_FEAT="$(gs rev-parse HEAD)"
 gs checkout -q main
 GS_STORE="$(git -C "${GS}" rev-parse --path-format=absolute --git-common-dir)/integration-receipts"
-# gs_fx <head> <tip> : MR !77 of cjpoll/gen_saas, head <head> with a passed
-# branch pipeline on it, the target tip <tip> with a passed main pipeline, and
-# a sealed receipt for <head> on <tip>.
+# gs_fx <head> <tip> [project] : MR !77 of <project> (default
+# athena-ai-harness/gen_saas),
+# head <head> with a passed branch pipeline on it, the target tip <tip> with a
+# passed main pipeline, and a sealed receipt for <head> on <tip>.
 gs_fx() {
   local m
-  m="$(printf '{"iid":77,"project_id":7000002,"sha":"%s","target_branch":"main","web_url":"https://gitlab.com/cjpoll/gen_saas/-/merge_requests/77","head_pipeline":{"id":9000000077,"sha":"%s","ref":"feat","status":"success"}}' "$1" "$1")"
+  m="$(printf '{"iid":77,"project_id":7000002,"sha":"%s","target_branch":"main","web_url":"https://gitlab.com/%s/-/merge_requests/77","head_pipeline":{"id":9000000077,"sha":"%s","ref":"feat","status":"success"}}' "$1" "${3:-athena-ai-harness/gen_saas}" "$1")"
   printf '%s\n' "$m" > "${FX}/mrview.out"; printf '%s\n' "$m" > "${FX}/mrapi.out"
   printf '{"name":"main","commit":{"id":"%s"}}\n' "$2" > "${FX}/branch.out"
   printf '[%s]\n' "$(pipe 8000000077 success push "$2")" > "${FX}/pipes.out"
@@ -1013,26 +1015,71 @@ tip_ran GS2 "a red-main fix (contains the tip, removes the duplicate) -> runs" "
 reset_fx; gs_fx "${GS_STILL}" "${GS_DUP}"
 tip_refused GS3 "a head that contains the tip but keeps the duplicate -> refused" "still holds" mr merge 77 --sha "${GS_STILL}" --auto-merge=false --yes
 reset_fx; gs_fx "${GS_FEAT}" "${GS_BASE}"
-tip_ran GS4 "the GitLab project cjpoll/gen_saas resolves the gen_saas declaration: a clean tip is read and runs" "no duplicated migration version (1 director(ies), 1 migration(s) read)" mr merge 77 --sha "${GS_FEAT}" --auto-merge=false --yes
+tip_ran GS4 "the GitLab project athena-ai-harness/gen_saas resolves the gen_saas declaration: a clean tip is read and runs" "no duplicated migration version (1 director(ies), 1 migration(s) read)" mr merge 77 --sha "${GS_FEAT}" --auto-merge=false --yes
 reset_fx; gs_fx "${GS_FEAT}" "${GS_DUP}"
 tip_refused GS5 "the same refusal on the train" "Duplicated migration version" api -X POST "projects/:id/merge_trains/merge_requests/77" -f "sha=${GS_FEAT}"
 reset_fx; gs_fx "0123456789abcdef0123456789abcdef01234567" "${GS_DUP}"
 tip_refused GS6 "a duplicated tip and a head not in the local store -> COULD NOT LOOK (whether it is a fix cannot be read)" "COULD NOT LOOK:" mr merge 77 --sha 0123456789abcdef0123456789abcdef01234567 --auto-merge=false --yes
 [[ "${ERR}" == *"fetch the PR branch"* ]] && [[ "${ERR}" == *"holds a duplicated migration version"* ]] \
   && ok "GS6b. it says to fetch the head, and still names the duplicate" || bad "GS6b. fetch named" "$(detail)"
+
+# DND-2034: gen_saas moved to the athena-ai-harness group (the same GitLab
+# project). The declaration was keyed on cjpoll/gen_saas alone, so an MR on
+# the new path found no entry and merged onto a duplicated tip, exit 0.
+reset_fx; gs_fx "${GS_FEAT}" "${GS_DUP}" athena-ai-harness/gen_saas
+tip_refused GM1 "THE MOVE: an MR on athena-ai-harness/gen_saas onto a duplicated tip -> refused" "Duplicated migration version" mr merge 77 --sha "${GS_FEAT}" --auto-merge=false --yes
+reset_fx; gs_fx "${GS_FEAT}" "${GS_BASE}" athena-ai-harness/gen_saas
+tip_ran GM2 "athena-ai-harness/gen_saas resolves the gen_saas declaration: a clean tip is read and runs" "no duplicated migration version (1 director(ies), 1 migration(s) read)" mr merge 77 --sha "${GS_FEAT}" --auto-merge=false --yes
+# The class: a declared product under a path the declaration does not list
+# (the stale pre-move path, the next move) is refused by name, never read as
+# "no check".
+for gm in "GM3 cjpoll" "GM4 example-moved"; do
+  set -- ${gm}
+  gs remote set-url origin "git@gitlab.com:$2/gen_saas.git"
+  reset_fx; gs_fx "${GS_FEAT}" "${GS_BASE}" "$2/gen_saas"
+  tip_refused "$1" "a declared product's name under the undeclared path $2/gen_saas -> COULD NOT LOOK, never 'no check declared'" "COULD NOT LOOK:" mr merge 77 --sha "${GS_FEAT}" --auto-merge=false --yes
+  [[ "${ERR}" == *"$2/gen_saas"* ]] && [[ "${ERR}" == *"main-content-checks.json"* ]] && [[ "${ERR}" != *"no check declared"* ]] \
+    && ok "$1b. it names the path it looked up and the declaration to add it to" || bad "$1b. undeclared path named" "$(detail)"
+done
+gs remote set-url origin git@gitlab.com:athena-ai-harness/gen_saas.git
 cd "${REPO_FX}" || exit 2
 
 echo
 echo "--- DND-1941: the shared content key is never computed wrong silently ---"
 # gmg_content_re (ai/lib/gh-merge-guard.sh, shared by both guards): a key that
 # is malformed for its type is an error, never "no check declared".
-key_rc() { ( . "${AI_DIR}/lib/gh-merge-guard.sh" >/dev/null 2>&1; gmg_content_re "$1" "$2"; echo "rc=$? re=${GMG_CONTENT_RE} key=${GMG_CONTENT_KEY:-} why=${GMG_CONTENT_WHY:-}" ); }
+key_rc() { ( . "${AI_DIR}/lib/gh-merge-guard.sh" >/dev/null 2>&1; gmg_content_re "$1" "$2"; echo "rc=$? re=${GMG_CONTENT_RE} key=${GMG_CONTENT_KEY:-} why=${GMG_CONTENT_WHY:-} entry=${GMG_CONTENT_ENTRY:-}" ); }
 out="$(key_rc "" gen_saas)"; [[ "${out}" == rc=2* ]] && [[ "${out}" == *"malformed"* ]] && ok "K1. an empty owner is an error, not 'no check'" || bad "K1. empty owner" "${out}"
 out="$(key_rc cjpoll "")"; [[ "${out}" == rc=2* ]] && ok "K2. an empty repo is an error" || bad "K2. empty repo" "${out}"
 out="$(key_rc "cj poll" gen_saas)"; [[ "${out}" == rc=2* ]] && ok "K3. whitespace in a key is an error" || bad "K3. whitespace" "${out}"
-out="$(key_rc CJPoll gen_saas)"; [[ "${out}" == rc=0*"apps/"* ]] && ok "K4. GitHub's CJPoll/gen_saas resolves the entry (case-folded)" || bad "K4. github key" "${out}"
-out="$(key_rc cjpoll gen_saas)"; [[ "${out}" == rc=0*"apps/"* ]] && ok "K5. GitLab's cjpoll/gen_saas resolves the same entry" || bad "K5. gitlab key" "${out}"
+out="$(key_rc CJPoll gen_saas)"; [[ "${out}" == rc=2* ]] && [[ "${out}" == *"key=cjpoll/gen_saas "* ]] && [[ "${out}" == *"athena-ai-harness/gen_saas"* ]] \
+  && ok "K4. the pre-move path CJPoll/gen_saas is not declared: an error naming the declared path (case-folded)" || bad "K4. stale path" "${out}"
+out="$(key_rc cjpoll gen_saas_v2)"; [[ "${out}" == "rc=0 re= key=cjpoll/gen_saas_v2"* ]] && ok "K5. a different project name is not a near miss: no check declared" || bad "K5. other name" "${out}"
 out="$(key_rc example-group/sub example-app)"; [[ "${out}" == "rc=0 re= key=example-group/sub/example-app"* ]] && ok "K6. a nested GitLab group is one key, and an undeclared one is named" || bad "K6. nested key" "${out}"
+out="$(key_rc athena-ai-harness gen_saas)"; [[ "${out}" == rc=0*"apps/"* ]] && ok "K7. the moved path athena-ai-harness/gen_saas resolves the gen_saas entry (DND-2034)" || bad "K7. moved path" "${out}"
+out="$(key_rc Athena-AI-Harness gen_saas)"; [[ "${out}" == rc=0*"apps/"* ]] && ok "K8. the moved path resolves case-folded" || bad "K8. moved path case" "${out}"
+# A wrongly computed key: the right project name under a namespace the
+# declaration does not list. It must say so, never read as "no check".
+out="$(key_rc athena-ai-harness/sub gen_saas)"; [[ "${out}" == rc=2* ]] && [[ "${out}" == *"athena-ai-harness/sub/gen_saas"* ]] && [[ "${out}" == *"athena-ai-harness/gen_saas"* ]] \
+  && ok "K9. a declared product's name under an undeclared path is an error naming the key and the declared paths" || bad "K9. undeclared path of a declared product" "${out}"
+# custom declares no content check (it has no migration directory). Its
+# path is declared, and its NONE note says it is a declared product.
+out="$(key_rc athena-ai-harness custom)"; [[ "${out}" == "rc=0 re= key=athena-ai-harness/custom "*"entry=custom" ]] \
+  && ok "K10. athena-ai-harness/custom resolves custom's entry, which declares no content check" || bad "K10. custom path" "${out}"
+out="$( . "${AI_DIR}/lib/gh-merge-guard.sh" >/dev/null 2>&1; gmg_content_re athena-ai-harness custom; gmg_content_none_note )"
+[[ "${out}" == "the declared product custom (athena-ai-harness/custom) declares no content check" ]] \
+  && ok "K11. its note names the declared product, not 'no check declared'" || bad "K11. declared-product note" "${out}"
+out="$(key_rc cjpoll custom)"; [[ "${out}" == rc=2* ]] && [[ "${out}" == *"athena-ai-harness/custom"* ]] \
+  && ok "K12. custom's pre-move path is an error too, even with no check to run" || bad "K12. custom near miss" "${out}"
+# The near-miss rule's two halves, each alone: the key's project name equals
+# an entry's NAME (whose paths end otherwise), or a declared PATH's last
+# segment (whose entry is named otherwise).
+NM_CFG="${TMP}/near-miss.json"
+printf '%s' '{"schema":"main-content-checks/2","repos":{"foo":{"paths":["a/bar"],"unique_migration_dirs":"^m$"}}}' > "${NM_CFG}"
+nm_rc() { ( . "${AI_DIR}/lib/gh-merge-guard.sh" >/dev/null 2>&1; GMG_CONTENT_CONFIG="${NM_CFG}"; gmg_content_re "$1" "$2"; echo "rc=$? why=${GMG_CONTENT_WHY:-}" ); }
+out="$(nm_rc x foo)"; [[ "${out}" == rc=2*"declared product 'foo'"* ]] && ok "K13. a key named like an entry (not like its paths) is a near miss" || bad "K13. entry-name half" "${out}"
+out="$(nm_rc x bar)"; [[ "${out}" == rc=2*"declared product 'foo'"* ]] && ok "K14. a key named like a declared path's last segment is a near miss" || bad "K14. path-segment half" "${out}"
+out="$(nm_rc a bar)"; [[ "${out}" == "rc=0 why=" ]] && ok "K15. the declared path itself is a hit" || bad "K15. hit" "${out}"
 
 echo "--- DND-1939: a merge glab-athena ran is merge.landed once confirm-merged sees it ---"
 LANDED_SHA="5b3a7d0c9e8f6a4b2c1d0e9f8a7b6c5d4e3f2a1b"

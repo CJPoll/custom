@@ -278,8 +278,11 @@ What the wrapper refuses, exit 3 with a `Fix:`:
 - Either merge path while the target branch's tip is RED: the latest pipeline
   of some source on the tip failed or was canceled, or the tip's tree breaks
   what `ai/config/main-content-checks.json` declares for the project
-  (gen_saas: a duplicated migration version). The one exception is a red-main
-  fix, a head that contains the tip and removes every duplicate. A newer
+  (gen_saas: a duplicated migration version). A project path the
+  declaration does not list, whose project name is a declared product's (a
+  moved project or a stale path), is `COULD NOT LOOK` and refused
+  (DND-2034). The one exception is a red-main fix, a head that contains the
+  tip and removes every duplicate. A newer
   pipeline of another source (a web run, a schedule) does not clear a red
   one; retrying the red pipeline does. A tip with no pipeline, or one the
   wrapper cannot read, is `COULD NOT LOOK` and refused, so a project merged

@@ -555,8 +555,12 @@ glmg_receipt_gate() {
 #     push`, not by an MR merge) cannot merge here: every such merge is refused
 #     COULD NOT LOOK, closed, by design.
 #   * CONTENT: gmg_content_health, the same code and the same declaration
-#     (ai/config/main-content-checks.json) as on GitHub, keyed by the MR's full
-#     project path, so gitlab.com/cjpoll/gen_saas reads the gen_saas entry.
+#     (ai/config/main-content-checks.json) as on GitHub, looked up by the MR's
+#     full project path in each product's paths, so
+#     gitlab.com/athena-ai-harness/gen_saas reads the gen_saas entry. A path
+#     no entry lists whose project name is a declared product's (the pre-move
+#     gitlab.com/cjpoll/gen_saas) is COULD NOT LOOK, never "no check"
+#     (DND-2034).
 #   * The red-main fix and the composition are gmg_line_check's: a head that
 #     contains the tip (from the local object store, else the forge's merge
 #     base) and removes every duplicate passes; any other MR is refused. What
@@ -692,7 +696,7 @@ glmg_tip_gate() {
     1) fix="land only a red-main fix: a head that contains $GLMG_TIP, removes every duplicate named above, and carries its own INTEGRATION OK receipt (merge origin/$GLMG_BRANCH into it, fix it, push as Athena, re-gate with \`$GLMG_IG\`). Every other MR waits until the tip is green again: a red pipeline clears when it is retried and passes (\`~/dev/custom/ai/bin/$GLMG_TOOL api -X POST \"projects/$GLMG_PID/pipelines/<id>/retry\"\`), or when a later push pipeline of the same source passes; a new pipeline of another source (a web run, a schedule) does not clear it. Read the tip's pipelines with \`glab api \"projects/$GLMG_PID/pipelines?ref=$enc&per_page=5\"\`. Then $GLMG_BOARD"
        glmg_refuse "$shown" "$GMG_LINE_WHY" "$fix" ;;
     *) glmg_refuse "$shown" "$GMG_LINE_WHY" \
-         "make the tip readable (network up, the right -R <group>/<project>, glab-athena's token, \`git fetch origin\` in this checkout). A tip with no pipeline needs one: \`~/dev/custom/ai/bin/$GLMG_TOOL api -X POST \"projects/$GLMG_PID/pipeline?ref=$enc\"\`, then wait for it to finish. A malformed repo key or an unloadable runs judge is a defect in the guard: escalate it to your admiral with this output. Then $GLMG_BOARD" ;;
+         "make the tip readable (network up, the right -R <group>/<project>, glab-athena's token, \`git fetch origin\` in this checkout). A tip with no pipeline needs one: \`~/dev/custom/ai/bin/$GLMG_TOOL api -X POST \"projects/$GLMG_PID/pipeline?ref=$enc\"\`, then wait for it to finish. An undeclared path of a declared product (DND-2034) is fixed by adding that path to the product's paths in ~/dev/custom/ai/config/main-content-checks.json, landed on custom main. A malformed repo key or an unloadable runs judge is a defect in the guard: escalate it to your admiral with this output. Then $GLMG_BOARD" ;;
   esac
 }
 

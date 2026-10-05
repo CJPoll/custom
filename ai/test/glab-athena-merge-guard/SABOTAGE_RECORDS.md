@@ -250,3 +250,34 @@ code: `RESULT: 287 passed, 0 failed`.
 |----|----------|-----|
 | S34 | `canceling` is not red | P13b |
 | S35 | `groups/…` paths are not scanned for ref routes | W24 W24b |
+
+## DND-2034: a moved project skips its content check
+
+gen_saas moved from `cjpoll/gen_saas` to `athena-ai-harness/gen_saas` (one
+GitLab project). `ai/config/main-content-checks.json` was keyed on the old
+path alone, so `gmg_content_re` returned "no check declared" for the new one
+and every merge there skipped the migration-version check, exit 0.
+
+Red before the fix. The first cut of the new cases (GM1-GM3b, K7-K9), run on
+the unfixed lib and declaration: `RESULT: 303 passed, 7 failed`, all seven of
+them. GM1's failure output: `rc=0 out=stub: ran ... --sha 75796a21…
+--auto-merge=false --yes`, so the guard let the call through onto a tip
+holding two migrations with one version. K9's: `rc=0 re=
+key=athena-ai-harness/sub/gen_saas why=`. Cases added after that run (GM4,
+K10-K15, and K4/K5 rewritten for the dropped `cjpoll/` keys) were not run on
+the unfixed code; K4, K12, K13 and K14 assert a near miss, which the unfixed
+code had no notion of.
+
+After the fix (schema 2: each product lists its live `paths`, only
+`athena-ai-harness/…`; an undeclared path of a declared product's name is
+COULD NOT LOOK): `RESULT: 317 passed, 0 failed`.
+
+| id | mutation | red |
+|----|----------|-----|
+| S36 | an undeclared path of a declared product reads as NONE | GM3 GM3b GM4 GM4b K4 K9 K12 K13 K14 |
+| S37 | gen_saas's `paths` is the pre-move `cjpoll/gen_saas` again (the original bug) | GS1-GS6b GM1-GM3b K4 K7 K8 K9 (15 cases) |
+
+Under S37 the athena-ai-harness/gen_saas MRs are refused COULD NOT LOOK
+("the project athena-ai-harness/gen_saas is not declared …") instead of
+running: the near-miss rule stops the merge even with the path missing. That
+closes the class, not only the site.
