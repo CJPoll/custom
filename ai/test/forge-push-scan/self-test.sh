@@ -327,8 +327,14 @@ else bad "U4. unresolved common dir" "rc=${RC} out=${OUT}"; fi
 
 echo "--- glab-athena shares the transport ---"
 printf 'glpat-SELFTESTFAKETOKEN0000\n' > "${TMP}/glab-token"; chmod 600 "${TMP}/glab-token"
+# DND-1936: glab-athena resolves its bot by (host, top-level namespace). A
+# fixture identity map keys the synthetic namespace `o` to a synthetic bot
+# and this token, so the suite never reads the tracked map or a real token.
+printf '{"kind":"athena-forge-identities","schema":1,"identities":[{"host":"gitlab.com","namespace":"o","bot":"synthetic-fps-bot","token_file":"%s","refresh":"group_service_account"}]}\n' \
+  "${TMP}/glab-token" > "${TMP}/forge-identities.json"
 RG="$(mk_repo rg hook)"; git -C "${RG}" remote set-url origin git@gitlab.com:o/rg.git; plant "${RG}" g.md
-OUT="$(cd "${RG}" && env PATH="${XPATH}" GITLAB_ATHENA_TOKEN_FILE="${TMP}/glab-token" "${GLAB_WRAPPER}" git push --no-verify origin HEAD:refs/heads/g1 2>&1)"; RC=$?
+OUT="$(cd "${RG}" && env PATH="${XPATH}" GITLAB_ATHENA_TOKEN_FILE="${TMP}/glab-token" \
+  ATHENA_FORGE_IDENTITIES_FILE="${TMP}/forge-identities.json" "${GLAB_WRAPPER}" git push --no-verify origin HEAD:refs/heads/g1 2>&1)"; RC=$?
 if [ "${RC}" != 0 ] && [ -z "$(landed rg refs/heads/g1)" ] && [[ "${OUT}" == *"outbound-scan: HITS mode=pre-push"* ]] && no_literal; then
   ok "G1. glab-athena git push --no-verify of the token: refused by the transport's scan"
 else bad "G1. glab-athena route" "rc=${RC} out=${OUT}"; fi
