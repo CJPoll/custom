@@ -576,6 +576,18 @@ if [ "${RC}" = 3 ] && [[ "${ERR}" == *"does not exist"* ]] && [[ "${ERR}" == *"F
   && [[ "${OUT}" != *"cred: granted"* ]] && [ ! -e "${TMP}/absent-token" ]; then
   ok "N15b. the same for \`git\` -> refused (exit 3), the Fix: names the path, no credential granted"
 else bad "N15b. missing token file (git)" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+# A token file behind a directory this user cannot search may exist: that is
+# "could not look", never "does not exist" with a Fix: to create it.
+SR="$(new_repo sealed-1936 'https://gitlab.com/sealed-ns/app.git')"
+mkdir -p "${TMP}/sealed"; printf '%s\n' "glpat-SELFTESTSEALED00001" > "${TMP}/sealed/token"; chmod 000 "${TMP}/sealed"
+jq '.identities += [{host:"gitlab.com", namespace:"sealed-ns", bot:"synthetic-sealed-bot", token_file:($t + "/sealed/token"), refresh:"group_service_account"}]' \
+  --arg t "${TMP}" "${ATHENA_FORGE_IDENTITIES_FILE}" > "${TMP}/fid-sealed.json"
+OUT="$(cd "${SR}" && env -u GITLAB_ATHENA_TOKEN_FILE ATHENA_FORGE_IDENTITIES_FILE="${TMP}/fid-sealed.json" PATH="${IDBIN}:${PATH}" "${WRAPPER}" mr list 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"
+chmod 700 "${TMP}/sealed"
+if [ "${RC}" = 1 ] && [[ "${ERR}" == *"REFUSING"* ]] && [[ "${ERR}" == *"missing, unreadable or empty"* ]] \
+  && [[ "${ERR}" != *"does not exist"* ]] && [[ "${OUT}" != *STUB-ID* ]]; then
+  ok "N15c. a token file behind an unsearchable directory -> the unreadable-token refusal, not \"does not exist\""
+else bad "N15c. unsearchable parent" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
 
 # refresh, a PUBLIC group service account (athena-ai-harness-bot's shape): its
 # group is the entry's own namespace; the overlay's work .group is not read.

@@ -3,9 +3,10 @@
 # a GitLab project, keyed on (host, top-level namespace).
 #
 # The defect this pins: glab-athena, forge-preflight and push-actor-check
-# hard-coded ONE bot for every gitlab.com project. With a work group and the
-# personal cjpoll/ namespace on the same host, a push to cjpoll/custom would
-# have gone out as the work bot. Each identity must resolve for its own
+# hard-coded ONE bot for every gitlab.com project. With a work group and a
+# personal namespace (cjpoll/ in these fixtures; athena-ai-harness/ in the
+# tracked map) on the same host, a push to a personal project would have gone
+# out as the work bot. Each identity must resolve for its own
 # namespace, and every wrongly computed key (an SSH remote form, a different
 # case, a subgroup path, no namespace, an unknown host) and every missing map
 # half must be a NAMED refusal, never the other identity.

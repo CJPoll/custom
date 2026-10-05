@@ -28,7 +28,8 @@
 #     OAuth session, group owner), so it works even when the current bot
 #     token is expired/revoked (chicken-and-egg). The group is the entry's
 #     namespace for a public entry, the overlay's gitlab .group for a work one;
-#   * self_rotate (a bot that is an ordinary user): rotates the bot's own live PAT
+#   * self_rotate (a bot that is an ordinary user; no tracked entry uses it,
+#     kept for one that does): rotates the bot's own live PAT
 #     (personal_access_tokens/self/rotate). A dead token cannot rotate itself:
 #     the owner then creates a new one in the browser, as the bot.
 # `refresh` is OWNER-GATED. Agents never run it: the `glab-athena refresh` deny
@@ -94,6 +95,11 @@ ga_refuse_identity() {
 # creates it once per machine; nothing here creates, guesses or replaces it.
 ga_refuse_missing_token_file() {
 	[ -e "$3" ] && return 0
+	# A parent this user cannot search hides an existing file from -e too:
+	# that is "could not look", left to the unreadable-token refusal.
+	local parent
+	parent="$(dirname -- "$3")"
+	[ -e "$parent" ] && ! { [ -d "$parent" ] && [ -x "$parent" ]; } && return 0
 	echo "glab-athena: REFUSING $2: the $FID_BOT token file $3 (for $FID_HOST/$FID_NS) does not exist on this machine, so nothing can run as $FID_BOT." >&2
 	echo "  Fix: the owner creates $3 on this machine (mode 600, one line: $FID_BOT's token; ai/secrets/registry.json says how). Agents never create it and never run \`glab-athena refresh\` or \`glab auth\`. $FID_ESCALATE" >&2
 	exit "$1"

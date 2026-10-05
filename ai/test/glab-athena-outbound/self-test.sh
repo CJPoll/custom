@@ -267,23 +267,27 @@ for argv in "mr update 5 -l -- -t x${TOKEN}" "mr update 5 -l -- --title=x${TOKEN
   gla ${argv}
   if refused_hit; then ok "scanned: ${argv%%x${TOKEN}}"; else bad "scanned: ${argv%%x${TOKEN}}" "rc=${RC} ${OUT}"; fi
 done
-for argv in "mr update 5 -l -R -t x${TOKEN}" "mr update 5 -l --repo -t x${TOKEN}" "mr create -l --target-project -t x${TOKEN}" \
-  "release create v1 --ref -R -n x${TOKEN}" "release create v1 --ref -F x${TOKEN}"; do
+# <path>|<argv>: which layer of the wrapper refuses it. An -R/--repo/
+# --target-project that may be a flag's value is a key the identity map refuses
+# first (DND-1936, "id"); the rest reach the scan ("scan"). The library half
+# pins the scan's own reading for every case.
+for item in "id|mr update 5 -l -R -t x${TOKEN}" "id|mr update 5 -l --repo -t x${TOKEN}" "id|mr create -l --target-project -t x${TOKEN}" \
+  "id|release create v1 --ref -R -n x${TOKEN}" "scan|release create v1 --ref -F x${TOKEN}"; do
+  path="${item%%|*}" argv="${item#*|}"
   # shellcheck disable=SC2086
   gla ${argv}
-  # An -R/--repo/--target-project that may be a flag's value is a key the
-  # identity map refuses first (DND-1936); the library keeps the scan's reading.
-  if id_refused || { [ "${RC}" = 3 ] && ! sent && [[ "${OUT}" == *"looks like a flag"* ]] && [[ "${OUT}" == *"Fix:"* ]] && no_literal; }; then ok "a value naming a repo or file flag refused: ${argv%%x${TOKEN}}"; else bad "value names repo/file: ${argv%%x${TOKEN}}" "rc=${RC} ${OUT}"; fi
+  if { [ "${path}" = id ] && id_refused; } || { [ "${path}" = scan ] && [ "${RC}" = 3 ] && ! sent && [[ "${OUT}" == *"looks like a flag"* ]] && [[ "${OUT}" == *"Fix:"* ]] && no_literal; }; then ok "a value naming a repo or file flag refused (${path}): ${argv%%x${TOKEN}}"; else bad "value names repo/file (${path}): ${argv%%x${TOKEN}}" "rc=${RC} ${OUT}"; fi
   # shellcheck disable=SC2086
   lib_guard ${argv}
   if [ "${RC}" = 3 ] && ! sent && [[ "${OUT}" == *"looks like a flag"* ]] && [[ "${OUT}" == *"Fix:"* ]] && no_literal; then ok "a value naming a repo or file flag refused (library): ${argv%%x${TOKEN}}"; else bad "value names repo/file (library): ${argv%%x${TOKEN}}" "rc=${RC} ${OUT}"; fi
 done
 echo "--- DND-1976: a flag the pinned table lacks, before a word that reads as a flag, is refused ---"
-for argv in "mr note 5 --frobnicate -m x${TOKEN}" "mr update 5 --frobnicate -- -t x${TOKEN}" \
-  "mr create --frobnicate --target-project -t x${TOKEN}" "mr create -Zd x${TOKEN}" "mr create -Z -d x${TOKEN}"; do
+for item in "scan|mr note 5 --frobnicate -m x${TOKEN}" "scan|mr update 5 --frobnicate -- -t x${TOKEN}" \
+  "id|mr create --frobnicate --target-project -t x${TOKEN}" "scan|mr create -Zd x${TOKEN}" "scan|mr create -Z -d x${TOKEN}"; do
+  path="${item%%|*}" argv="${item#*|}"
   # shellcheck disable=SC2086
   gla ${argv}
-  if id_refused || { [ "${RC}" = 3 ] && ! sent && [[ "${OUT}" == *"not a flag of"* ]] && [[ "${OUT}" == *"Fix:"* ]] && no_literal; }; then ok "ambiguous refused: ${argv%%x${TOKEN}}"; else bad "ambiguous: ${argv%%x${TOKEN}}" "rc=${RC} ${OUT}"; fi
+  if { [ "${path}" = id ] && id_refused; } || { [ "${path}" = scan ] && [ "${RC}" = 3 ] && ! sent && [[ "${OUT}" == *"not a flag of"* ]] && [[ "${OUT}" == *"Fix:"* ]] && no_literal; }; then ok "ambiguous refused (${path}): ${argv%%x${TOKEN}}"; else bad "ambiguous (${path}): ${argv%%x${TOKEN}}" "rc=${RC} ${OUT}"; fi
   # shellcheck disable=SC2086
   lib_guard ${argv}
   if [ "${RC}" = 3 ] && ! sent && [[ "${OUT}" == *"not a flag of"* ]] && [[ "${OUT}" == *"Fix:"* ]] && no_literal; then ok "ambiguous refused (library): ${argv%%x${TOKEN}}"; else bad "ambiguous (library): ${argv%%x${TOKEN}}" "rc=${RC} ${OUT}"; fi
