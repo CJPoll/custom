@@ -1002,6 +1002,12 @@ tip_ran P23 "the deploy-red tip, the fix MR cut from an earlier main -> runs" "i
 [[ "${ERR}" == *"pipelines/8000000012"* ]] && ok "P23b. the note names the failed deploy pipeline" || bad "P23b. deploy pipeline named" "$(detail)"
 reset_fx; green_fx; pipes_are "$(pipe 8000000012 failed push)" "$(pipe 8000000011 success schedule)"
 tip_ran P24 "the same deploy-red tip, an unrelated green MR -> runs" "does not contain it" "${MERGE_ARGS[@]}"
+# The verbatim 2026-10-05 refusal: the receipt on an older base (BASE MOVED,
+# DND-1463), the tip red only on its push pipeline, the head behind it, the
+# lock tool's exact argv. It was refused MAIN RED; now it runs, both lines said.
+reset_fx; green_fx; plant "${HEAD_SHA}" "${OLD_TIP}"; pipes_are "$(pipe 8000000012 failed push)"
+tip_ran P25 "receipt on an older base + a deploy-red tip the head does not contain -> runs" "BASE MOVED" "${LOCK_ARGS[@]}"
+[[ "${ERR}" == *"is RED"* ]] && [[ "${ERR}" != *"MAIN RED:"* ]] && ok "P25b. the red tip is a note, never MAIN RED" || bad "P25b. note, not refusal" "$(detail)"
 
 echo
 echo "--- DND-1941: the tip's CONTENT (ai/config/main-content-checks.json) ---"
