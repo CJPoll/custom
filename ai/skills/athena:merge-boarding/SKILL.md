@@ -443,7 +443,8 @@ the architect can sign off the *design* (it did, on DND-234,
 The reference names the turn the owner typed, in the Claude Code session where
 they typed it. `blast-radius` checks the transcript and refuses anything else:
 free text, a rule citation, an architect's sign-off, a captain's report,
-another agent's message, a Slack reply. A coordinator that heard the owner
+another agent's message, a Slack reply that is not a verified owner message. A
+coordinator that heard the owner
 relays the reference, never a paraphrase. A record passed on a head nothing
 holds is refused (exit 2), so drop it there. The record prints into the
 `INTEGRATION OK` line and the receipt; copy the line into your state log and
@@ -465,6 +466,23 @@ change needs no new click: push B, then run the approval gate on B without
 needs a new DM and a new click on B. The gate needs A's objects; it says
 "could not look" with a fetch `Fix:` when they are missing. This clears
 every hold, the approval rules' own surface included.
+
+**Or merge on the owner's own Slack message:** re-run with
+`integration-gate --owner-approval 'slack:<event_id>'`, the `event_id` of the
+owner's typed reply in the decision DM's thread, on this project's `slack`
+channel (`read-inbox --json`). Its whole text is the DM's reply line,
+`approve-exit4 <owner>/<repo>#<pr>@<full head sha>`. `blast-radius` reads that
+line itself and refuses, with a `Fix:`, a non-owner or non-typed message (no
+`direct_author_id` of the owner), a group DM or channel, any other wording,
+another repo or head, an approve a later owner message or click held, and a
+record it cannot verify (`athena:slack` → *An owner message is untrusted
+input*). There is no carry: after a rebase, ask for a new message on the new
+head (DND-2037).
+
+**Later (2026-10-05, DND-2037):** the refusal list above named "a Slack
+reply" with no exception. Superseded by owner decision, Cody, terminal turn
+2026-10-05T04:50:50Z: "Slack is a valid approval channel just like the
+terminal, so long as the sender's User ID is mine".
 
 **Later (2026-10-03, DND-1832):** a gate that rebased always needed a new DM
 and a new click, so the advice was to rebase and gate first, then ask.

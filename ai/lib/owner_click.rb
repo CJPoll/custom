@@ -41,6 +41,13 @@ require_relative "private_overlay_resolver"
 #      reject after the approve is the owner's last word, and it wins. A
 #      rival click that cannot be ordered refuses. The check is per
 #      message: a hold on a different DM does not reverse this one.
+#      No later owner MESSAGE holds it either (DND-2037,
+#      OwnerMessage.later_message_hold, read from the project's `slack`
+#      channel): a reply in the decision post's thread that is not the same
+#      approve, a message anywhere that mentions the PR and is not the same
+#      approve, or a message starting with a hold word that names no PR (could
+#      not tell). This applies on the carry path too. A project that declares
+#      no `slack` channel has no message to read, and the where text says so.
 #   6. The carry (DND-1832), cited by name as *The carry*. The owner approved this rule by click, relayed
 #      by the laptop and the coordinator on 2026-10-03. A click that passes
 #      1-5 for head A of PR X also clears a later head B when ALL of these
@@ -110,9 +117,11 @@ module OwnerClick
         "project, a click on another message, a click for another PR, a click for an " \
         "earlier head whose PR diff (git diff --binary <merge-base> <head>) is not " \
         "byte-identical to this head's, and an approve the owner later reversed or held " \
-        "never count. A click that rotated out of the inbox needs a " \
-        "new ask. Or pass the owner's terminal-turn record instead: " \
-        "--owner-approval 'session:<session-uuid>/<message-uuid> quote:<words>'."
+        "never count, nor does a click the owner later held by a message. A click that rotated " \
+        "out of the inbox needs a new ask. Or pass the owner's own typed DM reply of that " \
+        "string in the decision DM's thread, --owner-approval 'slack:<event_id>', or the " \
+        "owner's terminal-turn record: --owner-approval 'session:<session-uuid>/<message-uuid> " \
+        "quote:<words>'."
 
   module_function
 
